@@ -62,6 +62,7 @@ ORDER_SURFACE = frozenset(
     {
         "place_entry",
         "place_algo_protective",
+        "place_market_close",
         "cancel_normal_order",
         "cancel_algo_order",
         "query_order_by_client",
@@ -637,6 +638,8 @@ def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_a
         "funding_rate",
         "server_time",
         "exchange_info",
+        "get_mark_price",
+        "symbol_lot_filters",
     }
     public_async = {
         name

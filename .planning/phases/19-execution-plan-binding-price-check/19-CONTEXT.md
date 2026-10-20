@@ -140,4 +140,4 @@ None matched.
 - Do not extend `OrderRole`, `RejectionReason` (pinned at 20 members) or `ExecutionIntentStatus`; use plain reason strings and document them in GLOSSARY 9.3/9.4.
 - D-22 only removes `NO_RISK_VALUE`; live R stays INCOMPLETE (`UNVERIFIED_EXCHANGE_SEMANTICS`).
 - New OWNER-OPEN: Q3 (exchangeInfo read fails during emergency close: stale snapshot or refuse), Q4 (rate-limit pause blocks stop/cancel/close, Phase 18 WR-12), Q5 (second `place_entry` attempt, `_ENTRY_MAX_ATTEMPTS = 2`).
-- Network gaps: user-data WS event pages (ORDER_TRADE_UPDATE, ALGO_UPDATE) and the New Order MARKET reduce-only section were not retrievable; marked UNVERIFIED in the research. Owner follow-up.
+- Network gaps: re-checked 2026-10-19 (see 19-RESEARCH.md "Gap pass results"). The WS value lists are now [DOC]; still UNVERIFIED: `t` on every partial fill, the full `rm` list, and the New Order page has no reduce-only flat-position text at all (it is silent, not truncated). Owner follow-up in 19-GAP-RESEARCH-CHECKLIST.md.

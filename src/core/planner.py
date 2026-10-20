@@ -56,7 +56,7 @@ from .types import AccountState, Candle, PlanResult
 # --------------------------------------------------------------------------- #
 
 
-def _plan_hash(
+def plan_hash_from_fields(
     *,
     signal_id: str,
     entry_min_price: Decimal,
@@ -74,6 +74,10 @@ def _plan_hash(
     50000, 50000.0 and the scale-18 spelling a PostgreSQL NUMERIC read-back
     returns all hash identically, which is what lets an approval re-verify
     the plan hash from the stored row (F-410).
+
+    Public since Phase 19 (plan 19-02): the execution binding re-derives the hash
+    from a stored TradePlan with this exact algorithm (D051 item c: the hashed
+    field set and key names are frozen; symbol and direction are NOT in the hash).
     """
     return sha256_hex(
         {
@@ -85,6 +89,28 @@ def _plan_hash(
             "invalidation_rule_json": invalidation_rule_json,
             "expiry_utc": expiry_utc,
         }
+    )
+
+
+def _plan_hash(
+    *,
+    signal_id: str,
+    entry_min_price: Decimal,
+    entry_max_price: Decimal,
+    stop_loss_price: Decimal,
+    take_profit_json: str,
+    invalidation_rule_json: str,
+    expiry_utc: datetime,
+) -> str:
+    """Planner-internal name for `plan_hash_from_fields` (behavior-identical)."""
+    return plan_hash_from_fields(
+        signal_id=signal_id,
+        entry_min_price=entry_min_price,
+        entry_max_price=entry_max_price,
+        stop_loss_price=stop_loss_price,
+        take_profit_json=take_profit_json,
+        invalidation_rule_json=invalidation_rule_json,
+        expiry_utc=expiry_utc,
     )
 
 
@@ -734,4 +760,4 @@ def plan(
     )
 
 
-__all__ = ["plan"]
+__all__ = ["plan", "plan_hash_from_fields"]

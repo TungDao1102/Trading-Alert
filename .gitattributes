@@ -19,3 +19,5 @@ docs/research/preregistration/evidence/** -text
 tests/fixtures/phase18/synthetic/*.json text eol=lf
 # The ratified Binance limits file is pinned by sha256 in docs/DECISIONS.md (plan 18-09).
 config/binance/*.toml -text
+# The execution limits file (Phase 19, plan 19-01) is pinned to LF like the ratified file.
+config/execution/*.toml -text

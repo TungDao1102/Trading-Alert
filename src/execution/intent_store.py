@@ -67,6 +67,9 @@ class IntentRecord:
     sent_at_utc: datetime | None
     resolved_at_utc: datetime | None
     updated_at_utc: datetime
+    # The sizing-time realized risk (SizedResult.realized_risk), stored once on the ENTRY row at
+    # approval consumption (Phase 19, D-22, migration 0005). None = unknown or not an ENTRY row.
+    sized_realized_risk: Decimal | None = None
 
 
 @runtime_checkable
@@ -95,7 +98,14 @@ class ExecutionIntentStore(Protocol):
         intended_quantity: Decimal,
         intended_price: Decimal,
         now_utc: datetime,
-    ) -> bool: ...
+        sized_realized_risk: Decimal | None = None,
+    ) -> bool:
+        """Insert the ENTRY intent and consume the approval in one transaction.
+
+        `sized_realized_risk` (D-22) is written on the ENTRY row by this same INSERT and never
+        updated later; None means "unknown" (the nullable evidence column stays NULL).
+        """
+        ...
 
     def record_protective_intent(
         self,
@@ -109,8 +119,13 @@ class ExecutionIntentStore(Protocol):
         side: str,
         intended_price: Decimal,
         now_utc: datetime,
+        intended_quantity: Decimal | None = None,
     ) -> bool:
-        """Insert a protective-leg intent (INTENDED, no quantity: close-position leg).
+        """Insert a protective-leg intent (INTENDED).
+
+        `intended_quantity` None = a closePosition leg (stop loss, TP2: NULL quantity);
+        a positive Decimal = an explicit-quantity leg such as TP1, written ahead with its
+        size (D-20).
 
         `True` = this caller created the row; `False` = the (approval_id, role) row
         already existed.

@@ -309,6 +309,7 @@ ALLOWED_REST_CALLS = frozenset(
         "get_funding_rate_history",
         "check_server_time",
         "exchange_information",
+        "mark_price",
     }
 )
 ENV_NAMES = frozenset({"environ", "getenv", "getenvb"})

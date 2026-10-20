@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 from scripts import demo_rehearsal as dr
+from src.adapters.binance_public import MarkPriceReading
 from src.adapters.binance_usdm import (
     AlgoOrderProbe,
     AlgoPlacementResult,
@@ -42,7 +43,10 @@ from src.approval.mapping import derive_short_id
 from src.backtest.semantics import TP1_QUANTITY_FRACTION
 from src.domain.enums import ApprovalResult
 from src.execution.enablement import LiveEnablementController
+from src.execution.execution_limits import ExecutionLimits
 from src.ops.health import ALL_CHECK_NAMES
+
+from tests.support import execution_limits as test_limits
 
 SERVER_NOW = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
 FAKE_KEY = "FAKEKEY0123456789ABCDEF"
@@ -137,6 +141,10 @@ class FakeDemoAdapter:
         self.raise_when_symbol_none: BaseException | None = None
         self.info_calls = 0
         self.drift_after_info_calls: int | None = None
+        # Plan 19-13: the mark price `get_mark_price` reports. The rehearsal zone is the single
+        # far entry price and gate 5e needs the live mark inside the zone, so a flow test that
+        # reaches the manager sets this to the derived entry price (see run_flow).
+        self.gate_mark_price: Decimal | None = None
         self._next_id = 1
 
     @staticmethod
@@ -219,6 +227,11 @@ class FakeDemoAdapter:
         return CommissionRates(
             symbol=symbol, maker_rate=Decimal("0.0002"), taker_rate=Decimal("0.0004")
         )
+
+    async def get_mark_price(self, *, symbol: str) -> MarkPriceReading:
+        self._enter("get_mark_price", symbol=symbol)
+        price = self.gate_mark_price if self.gate_mark_price is not None else MARK
+        return MarkPriceReading(symbol=symbol, mark_price=price, exchange_time_utc=SERVER_NOW)
 
     async def get_position_mode(self) -> PositionModeResult:
         self._enter("get_position_mode")
@@ -606,8 +619,23 @@ def run_flow(
     channel: FakeApprovalChannel | None = None,
     execute: bool = False,
     dry_script: bool = True,
+    execution_limits: ExecutionLimits | None = None,
+    committed_limits: bool = False,
 ) -> tuple[int, dict[str, Any], FakeDemoAdapter, FakeApprovalChannel]:
     exchange = adapter if adapter is not None else FakeDemoAdapter()
+    if exchange.gate_mark_price is None and scenario in ("far", "fill"):
+        exchange.gate_mark_price = _derive(scenario).entry_price
+    # TEST_ONLY limits by default; `committed_limits=True` loads config/execution instead,
+    # where every value is NOT_CONFIGURED (plan 19-13).
+    limits = (
+        None
+        if committed_limits
+        else (
+            execution_limits
+            if execution_limits is not None
+            else test_limits.test_only_execution_limits()
+        )
+    )
     chan = (
         channel
         if channel is not None
@@ -632,6 +660,7 @@ def run_flow(
         channel_factory=lambda creds: chan,
         sleep=no_sleep,
         token_factory=counter_tokens(),
+        execution_limits=limits,
     )
     files = sorted(tmp_path.glob("*.json"))
     data: dict[str, Any] = json.loads(files[-1].read_text(encoding="utf-8")) if files else {}
@@ -650,6 +679,7 @@ def make_ctx(
     *,
     mode: dr.RunMode = dr.RunMode.DRY_RUN,
     scenario: str = "far",
+    execution_limits: ExecutionLimits | None = None,
 ) -> dr.RunContext:
     recorder = dr.EvidenceRecorder(
         mode=mode,
@@ -678,6 +708,11 @@ def make_ctx(
         approval_timeout_seconds=300,
         discovery_timeout_seconds=120,
         token_factory=counter_tokens(),
+        execution_limits=(
+            execution_limits
+            if execution_limits is not None
+            else test_limits.test_only_execution_limits()
+        ),
     )
 
 
@@ -1068,6 +1103,7 @@ def test_sdk_error_code_and_text_are_recorded_but_other_errors_stay_type_only(
 async def test_enablement_is_in_process_only() -> None:
     adapter = FakeDemoAdapter()
     adapter.raise_when_symbol_none = RuntimeError("account-wide read failed")
+    adapter.gate_mark_price = _derive("far").entry_price
     channel = FakeApprovalChannel(script=approve_script())
     ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE)
     with pytest.raises(RuntimeError):
@@ -1121,3 +1157,213 @@ def test_evidence_is_deterministic(tmp_path: Path) -> None:
         "place_algo_protective",
     ]
     assert step(data, "place_entry_and_stop")["status"] == "SKIPPED_DRY_RUN"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 19-13: the live placement context and the NOT_CONFIGURED abort.
+# --------------------------------------------------------------------------- #
+
+
+def test_derived_plan_hash_is_the_planners_hash_and_the_quantity_fields_agree() -> None:
+    from src.core.planner import plan_hash_from_fields
+    from src.execution.binding import recompute_plan_hash
+
+    for scenario in ("far", "fill"):
+        plan = _derive(scenario)
+        trade_plan = plan.trade_plan
+        assert trade_plan.plan_hash == recompute_plan_hash(trade_plan)
+        assert trade_plan.plan_hash == plan_hash_from_fields(
+            signal_id=trade_plan.signal_id,
+            entry_min_price=trade_plan.entry_min_price,
+            entry_max_price=trade_plan.entry_max_price,
+            stop_loss_price=trade_plan.stop_loss_price,
+            take_profit_json=trade_plan.take_profit_json,
+            invalidation_rule_json=trade_plan.invalidation_rule_json,
+            expiry_utc=trade_plan.expiry_utc,
+        )
+        assert (
+            trade_plan.suggested_quantity
+            == trade_plan.quantity_before_rounding
+            == trade_plan.quantity_after_rounding
+            == plan.quantity
+        )
+        assert json.loads(trade_plan.invalidation_rule_json) == {
+            "basis": "CANDLE_CLOSE",
+            "level": str(plan.stop_loss),
+        }
+
+
+async def test_build_live_context_binds_to_the_derived_plan() -> None:
+    from src.execution.binding import bind_plan
+    from src.execution.live_context import LivePlacementContext
+    from src.execution.protection import ProtectionCoordinator
+    from src.reconcile.safe_mode import SafeModeController
+    from src.risk.types import ConstraintSnapshot
+
+    from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
+
+    adapter = FakeDemoAdapter()
+    ctx = make_ctx(adapter, FakeApprovalChannel())
+    plan = _derive("far")
+    filters = btc_filters()
+    constraints = ConstraintSnapshot(
+        symbol="BTCUSDT",
+        price_tick_size=filters.price_tick_size,
+        quantity_step_size=filters.quantity_step_size,
+        min_quantity=filters.min_quantity,
+        min_notional=filters.min_notional,
+        metadata_observed_at_utc=SERVER_NOW,
+    )
+    live = await dr.build_live_context(
+        ctx,
+        plan,
+        filters,
+        constraints,
+        SERVER_NOW,
+        safe_mode=SafeModeController(adapter=ctx.guarded, journal=ctx.journal),
+        intent_store=InMemoryExecutionIntentStore(),
+    )
+    assert isinstance(live, LivePlacementContext)
+    assert live.signal.signal_id == plan.signal_id
+    assert (live.signal.symbol, live.signal.direction) == ("BTCUSDT", "LONG")
+    assert live.signal.strategy_version == plan.parameter_set.strategy_version
+    assert live.signal.parameter_set_hash == plan.parameter_set.parameter_set_hash
+    assert live.plan_constraint_snapshot.working_type == "MARK_PRICE"
+    assert live.plan_constraint_snapshot.trade_plan_id == plan.trade_plan.trade_plan_id
+    assert live.execution_limits == test_limits.test_only_execution_limits()
+    assert isinstance(live.protection_registry, ProtectionCoordinator)
+    assert live.protection_registry.blocks_new_entries() is False
+    assert live.tp1_quantity_fraction == TP1_QUANTITY_FRACTION
+    # the latest CLOSED 1h bar (the forming one is skipped), read through the guarded adapter
+    assert live.latest_closed_bar_close == MARK
+    assert "klines" in adapter.calls
+    # the margin is the larger of the ratified drift limits
+    drift = dr.load_drift_limits(dr.DEFAULT_LIMITS_FILE)
+    assert live.gtd_clock_margin == timedelta(
+        milliseconds=max(drift.ahead_limit_ms, drift.behind_limit_ms)
+    )
+    # the plan is bound: hash, signal, symbol and side all agree
+    params = plan.parameter_set
+    verdict = bind_plan(
+        trade_plan=plan.trade_plan,
+        signal=live.signal,
+        callback_plan_hash=plan.trade_plan.plan_hash,
+        approval_request_hash=plan.trade_plan.plan_hash,
+        approval_strategy_version=params.strategy_version,
+        approval_parameter_set_id=params.parameter_set_id,
+        approval_parameter_set_hash=params.parameter_set_hash,
+        plan_snapshot_symbol=live.plan_constraint_snapshot.symbol,
+        plan_snapshot_trade_plan_id=live.plan_constraint_snapshot.trade_plan_id,
+        caller_symbol="BTCUSDT",
+        caller_side="LONG",
+    )
+    assert verdict.ok is True
+    assert adapter.mutating_calls() == []
+
+
+async def test_a_bar_close_that_cannot_be_read_is_none_not_a_guess() -> None:
+    adapter = FakeDemoAdapter()
+    ctx = make_ctx(adapter, FakeApprovalChannel())
+    adapter.raise_on["klines"] = RuntimeError("boom")
+    assert await dr._latest_closed_bar_close(ctx, SERVER_NOW) is None
+
+
+def test_the_alert_sink_records_the_alert_and_an_operator_instruction() -> None:
+    ctx = make_ctx(FakeDemoAdapter(), FakeApprovalChannel())
+    dr.RehearsalAlertSink(ctx).critical(
+        event="UNPROTECTED_POSITION",
+        plan_hash="h" * 64,
+        symbol="BTCUSDT",
+        reason="STOP_NOT_CONFIRMED",
+        now_utc=SERVER_NOW,
+    )
+    alerts = ctx.recorder.details["critical_alerts"]
+    assert alerts[0]["event"] == "UNPROTECTED_POSITION"
+    assert alerts[0]["symbol"] == "BTCUSDT"
+    assert any("UNPROTECTED_POSITION" in t for t in ctx.recorder.details["operator_instructions"])
+
+
+def test_the_read_passthroughs_are_allowed_in_dry_run_and_bind_the_real_signature() -> None:
+    adapter = FakeDemoAdapter()
+    ctx = make_ctx(adapter, FakeApprovalChannel(), mode=dr.RunMode.DRY_RUN)
+    import asyncio
+
+    reading = asyncio.run(ctx.guarded.get_mark_price(symbol="BTCUSDT"))
+    assert reading.mark_price == MARK
+    assert adapter.calls == ["get_mark_price"]
+    assert ctx.guarded.mutating_attempts == 0
+
+
+async def test_committed_not_configured_limits_abort_before_any_mutation() -> None:
+    """D-07 / D-13 / T-19-34: the committed file has no value, so the run stops honestly."""
+    adapter = FakeDemoAdapter()
+    channel = FakeApprovalChannel(script=approve_script())
+    ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE, scenario="far")
+    ctx.execution_limits = None  # the default: load the committed config/execution file
+    with pytest.raises(dr.RehearsalAbort, match="LIMITS_NOT_CONFIGURED"):
+        await dr.run_rehearsal(ctx)
+    assert ctx.guarded.mutating_attempts == 0
+    assert adapter.mutating_calls() == []
+    failed = [s for s in ctx.recorder.steps if s["name"] == "execution_limits"]
+    assert failed and failed[-1]["status"] == dr.STEP_FAILED
+    assert "LIMITS_NOT_CONFIGURED" in failed[-1]["detail"]
+    for key in (
+        "protection.max_unprotected_ms",
+        "protection.entry_terminal_timeout_ms",
+        "pre_placement.min_remaining_validity_seconds",
+        "pre_placement.max_mark_price_age_ms",
+    ):
+        assert key in failed[-1]["detail"]
+    # nothing else ran: no approval was requested, no channel opened
+    assert channel.opened is False
+    assert channel.sent == []
+
+
+@pytest.mark.parametrize("scenario", ["far", "fill"])
+def test_committed_limits_end_the_main_run_as_aborted_no_order(
+    tmp_path: Path, scenario: str
+) -> None:
+    code, data, adapter, chan = run_flow(
+        tmp_path, scenario=scenario, execute=True, committed_limits=True
+    )
+    assert code == dr.EXIT_ABORTED
+    assert data["outcome"] == "ABORTED_NO_ORDER"
+    assert adapter.mutating_calls() == []
+    assert data["exchange_orders"] == []
+    assert chan.sent == []
+    status = step(data, "execution_limits")
+    assert status["status"] == "FAILED"
+    assert "LIMITS_NOT_CONFIGURED" in status["detail"]
+
+
+def test_one_unset_limit_names_only_that_key(tmp_path: Path) -> None:
+    code, data, adapter, _ = run_flow(
+        tmp_path,
+        scenario="far",
+        execute=True,
+        execution_limits=test_limits.test_only_execution_limits(max_mark_price_age_ms=None),
+    )
+    assert code == dr.EXIT_ABORTED
+    detail = step(data, "execution_limits")["detail"]
+    assert "pre_placement.max_mark_price_age_ms" in detail
+    assert "protection.max_unprotected_ms" not in detail
+    assert adapter.mutating_calls() == []
+
+
+def test_the_taps_scenario_needs_no_execution_limits(tmp_path: Path) -> None:
+    code, data, adapter, _ = run_flow(tmp_path, scenario="taps", committed_limits=True)
+    assert code == dr.EXIT_OK
+    assert adapter.mutating_calls() == []
+    assert not [s for s in data["steps"] if s["name"] == "execution_limits"]
+
+
+def test_the_dry_run_far_scenario_reads_the_mark_price_and_still_sends_nothing(
+    tmp_path: Path,
+) -> None:
+    code, data, adapter, _ = run_flow(tmp_path, scenario="far")
+    assert code == dr.EXIT_OK
+    assert "get_mark_price" in adapter.calls
+    assert adapter.mutating_calls() == []
+    assert data["exchange_orders"] == []
+    assert step(data, "execution_limits")["status"] == "PASSED"
+    assert data["details"]["live_context"]["working_type"] == "MARK_PRICE"

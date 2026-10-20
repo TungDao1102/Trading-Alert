@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from src.adapters.binance_limits import CANONICAL_KEYS, NULLABLE_KEYS, PROVENANCE_LABELS
+from src.execution.execution_limits import EXECUTION_LIMIT_KEYS
 
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "scripts")
@@ -30,8 +31,12 @@ RATE_LIMIT_FIELD_NAMES = frozenset(
         "retry_after_cap_seconds",
     }
 )
+# Phase 19 adds the four execution-limit keys of D-07/D-13 (plan 19-01).
+EXECUTION_LIMIT_NAMES = frozenset(key for keys in EXECUTION_LIMIT_KEYS.values() for key in keys)
 GUARDED_NAMES = (
-    frozenset(key for keys in CANONICAL_KEYS.values() for key in keys) | RATE_LIMIT_FIELD_NAMES
+    frozenset(key for keys in CANONICAL_KEYS.values() for key in keys)
+    | RATE_LIMIT_FIELD_NAMES
+    | EXECUTION_LIMIT_NAMES
 )
 
 # The dataclasses that carry the loaded limits: no number may be given to them positionally.
@@ -43,6 +48,7 @@ LIMIT_CLASS_NAMES = frozenset(
         "SignedCallPolicy",
         "DriftLimits",
         "ClientLimits",
+        "ExecutionLimits",
     }
 )
 
@@ -155,17 +161,21 @@ def find_numeric_defaults(source: str, filename: str = "<source>") -> list[tuple
     return sorted(found)
 
 
+TEST_ONLY_MODULES = ("limits", "execution_limits")
+
+
 def imports_test_only_limits(source: str, filename: str = "<source>") -> list[int]:
-    """Line numbers of imports of `tests.support.limits` (by any import form)."""
+    """Line numbers of imports of `tests.support.limits` or `tests.support.execution_limits`."""
+    prefixes = tuple(f"tests.support.{name}" for name in TEST_ONLY_MODULES)
     lines: list[int] = []
     for node in ast.walk(ast.parse(source, filename=filename)):
         if isinstance(node, ast.Import):
-            if any(alias.name.startswith("tests.support.limits") for alias in node.names):
+            if any(alias.name.startswith(prefixes) for alias in node.names):
                 lines.append(node.lineno)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            if node.module.startswith("tests.support.limits") or (
+            if node.module.startswith(prefixes) or (
                 node.module == "tests.support"
-                and any(alias.name == "limits" for alias in node.names)
+                and any(alias.name in TEST_ONLY_MODULES for alias in node.names)
             ):
                 lines.append(node.lineno)
     return lines
@@ -186,7 +196,8 @@ def test_the_scan_covers_src_and_scripts() -> None:
     assert "src/adapters/binance_limits.py" in relative
     assert "src/adapters/binance_clock.py" in relative
     assert any(name.startswith("scripts/") for name in relative)
-    assert len(GUARDED_NAMES) == 30
+    assert len(GUARDED_NAMES) == 34
+    assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
 
 
 def test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts() -> None:
@@ -245,6 +256,11 @@ _FORBIDDEN_FORMS = {
     "upper-case constant": "KEEPALIVE_INTERVAL_SECONDS = 1800\n",
     "upper-case annotated constant": "RECV_WINDOW_MS: int = 5000\n",
     "class attribute": "class C:\n    RECV_WINDOW_MS = 5\n",
+    "execution limit assignment": "max_unprotected_ms = 5000\n",
+    "execution limit keyword": "build(entry_terminal_timeout_ms=9000)\n",
+    "execution limit parameter default": "def f(max_mark_price_age_ms=800):\n    pass\n",
+    "execution limit upper-case constant": "MIN_REMAINING_VALIDITY_SECONDS = 600\n",
+    "positional execution limits argument": "ExecutionLimits(1, 2, 3, 4)\n",
     "positional limits argument": "StreamLimits(1800, 3)\n",
     "positional limits argument through a module": "limits_mod.RateLimitPolicy(10, 20, 30)\n",
 }
@@ -265,6 +281,8 @@ _ALLOWED_FORMS = {
     "required parameter": "def f(*, retry_after_cap_seconds: int) -> None:\n    pass\n",
     "upper-case unguarded name": "TIMEOUT_MS = 5\n",
     "limits object built from loaded values": "StreamLimits(**loaded)\n",
+    "execution limit unset": "max_unprotected_ms = None\n",
+    "execution limits built from loaded values": "ExecutionLimits(**loaded)\n",
     "field without a default": (
         "from dataclasses import field\nclass C:\n    sdk_retries: int = field(repr=False)\n"
     ),
@@ -283,6 +301,9 @@ def test_the_scanner_allows_reads_and_required_fields(form: str) -> None:
         "from tests.support.limits import test_only_binance_limits\n",
         "from tests.support import limits\n",
         "from tests.support import ast_guards, limits as tl\n",
+        "import tests.support.execution_limits\n",
+        "from tests.support.execution_limits import test_only_execution_limits\n",
+        "from tests.support import execution_limits\n",
     ],
 )
 def test_the_import_scan_finds_every_import_form(source: str) -> None:

@@ -41,6 +41,7 @@ from src.persistence.engine import make_sync_engine
 from src.persistence.execution_state import PgExecutionStateStore
 from src.persistence.uow import OperationalDatabase
 
+from tests.pg_support import alembic_head_revision
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.support.intent_store_fakes import (
     AlwaysWinsIntentStore,
@@ -202,7 +203,7 @@ def test_pg_db_is_a_generated_migrated_database(pg_db: str, pg_server_url: str) 
     engine = make_sync_engine(pg_db)
     try:
         assert _scalar(engine, "SELECT version_num FROM alembic_version") == (
-            "0004_persistence_integrity"
+            alembic_head_revision()
         )
     finally:
         engine.dispose()

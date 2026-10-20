@@ -31,6 +31,7 @@ from src.domain.exchange_errors import (
     retry_eligible,
     safe_mode_eligible,
 )
+from src.execution.order_ids import derive_client_order_id
 
 from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 from tests.test_binance_usdm_signed_calls import (
@@ -44,6 +45,7 @@ from tests.test_execution_attach import FakeExecutionAdapter as AttachAdapter
 from tests.test_execution_attach import _attach, _load_expected
 from tests.test_execution_attach import _RecordingSafeModeController as AttachSafeMode
 from tests.test_execution_manager import (
+    PRE_PLACEMENT_READS,
     FakeExecutionAdapter,
     FakeJournal,
     RecordingSafeModeController,
@@ -157,9 +159,8 @@ async def test_tracer_1106_on_the_protective_stop_is_entry_without_protective(
     assert len(protective) == 1
     assert protective[0]["kwargs"]["close_position"] is True  # the stop; no take profit exists
     assert methods[-1] == "cancel_normal_order"
-    assert (
-        adapter.calls[-1]["kwargs"]["orig_client_order_id"]
-        == "x-33333333333333333333333333333333EN"
+    assert adapter.calls[-1]["kwargs"]["orig_client_order_id"] == derive_client_order_id(
+        plan_hash=_load_input()["plan_hash"], role="ENTRY"
     )
     assert [json_phase(event) for event in journal.events] == ["pre_cancel", "post_cancel"]
     case_input = _load_input()
@@ -310,8 +311,9 @@ async def test_entry_rejection_sequence_is_unchanged_by_the_table(code: int, tex
 
     The manager does not consult the taxonomy, so a rejected ENTRY follows its own bounded
     query-first sequence: the same prices are sent once more after a probe that finds the
-    order absent, and the table adds no call (no mark price, filter or snapshot refresh, no
-    new method). Refreshing them is the consumer's job (open items (a) and (c) of
+    order absent, and the table adds no call (after the plan 19-13 pre-placement reads, which
+    run once before the entry, there is no mark price, filter or snapshot refresh and no new
+    method on the retry). Refreshing them is the consumer's job (open items (a) and (c) of
     decisions/18-DEC-TAXONOMY-CODES.md).
     """
     adapter = FakeExecutionAdapter()
@@ -324,6 +326,7 @@ async def test_entry_rejection_sequence_is_unchanged_by_the_table(code: int, tex
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "EXCHANGE_CONSTRAINT")
     methods = [call["method"] for call in adapter.calls]
     assert methods == [
+        *PRE_PLACEMENT_READS,
         "get_position_mode",
         "place_entry",
         "query_order_by_client",

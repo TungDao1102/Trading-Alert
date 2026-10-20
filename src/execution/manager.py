@@ -8,9 +8,17 @@ fixed order. First-failure-wins reason codes are preserved byte-identically.
 
 The module is dependency-free: stdlib + `src/approval/*` + `src/risk/*` +
 `src/execution/order_ids.py` + `src/execution/placement.py` +
-`src/execution/intent_store.py` (a Protocol) + `src/persistence/errors.py` (pure
-exception classes) only. No Binance SDK, no SQLAlchemy, no Pydantic, no Polars,
-no structlog.
+`src/execution/intent_store.py` (a Protocol) + `src/execution/binding.py`,
+`src/execution/pre_placement.py`, `src/execution/live_context.py` (Phase 19 pure cores) +
+`src/persistence/errors.py` (pure exception classes) only. No Binance SDK, no SQLAlchemy,
+no Pydantic, no Polars, no structlog.
+
+Phase 19 (plan 19-13): what the human approved is what the exchange receives. One required
+keyword, `live_context` (`LivePlacementContext`), carries the persisted Signal, the plan
+constraint snapshot, the execution limits, the protection registry and the injected live
+values. The new gates all run BEFORE the approval is consumed, so a refusal leaves no ENTRY
+intent row and a later call with corrected inputs can still place; the stored-outcome replay
+stays first and never sees them (APRV-02).
 
 Phase 17 (D-13/D-14/D-15): the approval is consumed durably by writing the ENTRY
 execution intent BEFORE `place_entry` runs, through the `ExecutionIntentStore`
@@ -27,9 +35,9 @@ guard; the deterministic ids only let a probe find an order whose response was l
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -42,10 +50,21 @@ from src.domain.enums import (
     ExecutionIntentStatus,
     OrderRole,
     RejectionReason,
+    TradePlanStatus,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id
+from src.execution.binding import (
+    QUANTITY_ABOVE_APPROVED,
+    STALE_SETUP,
+    bind_plan,
+    check_quantity_bound,
+    check_snapped_geometry,
+    check_working_type,
+    take_profit_levels,
+)
 from src.execution.fill_monitor import CurrentPositionView, fold_fills
 from src.execution.intent_store import ExecutionIntentStore, IntentRecord
+from src.execution.live_context import LivePlacementContext
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.placement import (
     ProtectiveSizing,
@@ -57,6 +76,12 @@ from src.execution.placement import (
     quantize_price,
     size_protectives_to_filled_qty,
     sl_trigger_rounding,
+)
+from src.execution.pre_placement import (
+    LIMITS_NOT_CONFIGURED,
+    PrePlacementInputs,
+    check_position_mode,
+    evaluate_pre_placement,
 )
 from src.persistence.errors import IntentStateConflict, PersistenceError
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
@@ -89,11 +114,12 @@ def _require_live5_symbol(symbol: str) -> None:
 
 
 class ExecutionAdapter(Protocol):
-    """The four-method surface the manager calls on the adapter.
+    """The surface the manager calls on the adapter.
 
     The real `BinanceUsdmAdapter` implements this protocol; tests inject
     a `FakeExecutionAdapter` that records every call. The manager never
-    imports the Binance SDK — only the adapter does.
+    imports the Binance SDK — only the adapter does. Phase 19 (plan 19-13) adds the three
+    pre-placement reads: the live mark price and the open normal and algo orders of the symbol.
     """
 
     async def place_entry(self, **kwargs: Any) -> Any: ...
@@ -109,6 +135,12 @@ class ExecutionAdapter(Protocol):
     async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> Any: ...
 
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> Any: ...
+
+    async def get_mark_price(self, *, symbol: str) -> Any: ...
+
+    async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> Any: ...
+
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -356,6 +388,7 @@ async def execute_approved_plan(
     enablement: Any,
     gate_kwargs: dict[str, Any],
     intent_store: ExecutionIntentStore,
+    live_context: LivePlacementContext,
 ) -> ExecutionOutcome:
     """Run the fixed-order pipeline: binding → enablement → SAFE_MODE → gates → risk → place.
 
@@ -371,7 +404,15 @@ async def execute_approved_plan(
          outcome with zero adapter calls, even after the plan expiry, and a
          caller that fails identity never learns the stored state (D-15, D-16).
       1. Approval binding (`check_binding_full`; adds the expiry gate).
+      1b. Approval authorizes this plan (decision APPROVE, plan hash and id, own expiry).
+      1c. Plan binding (Phase 19, D-01..D-04, APRV-01): `bind_plan` re-derives the plan hash,
+          ties the plan to its Signal and the approval's strategy version and parameter set,
+          and compares the caller's symbol and side with the Signal; then the plan constraint
+          snapshot's working type must be MARK_PRICE. Symbol and side used below come from the
+          bound plan, never from a caller value.
       2. Enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
+      2b. Execution limits ready (D-07, D-13): any NOT_CONFIGURED limit is NO_TRADE
+          LIMITS_NOT_CONFIGURED, before SAFE_MODE, risk and every adapter call.
       3. SAFE_MODE guard (`guard_new_entries` → RECONCILIATION_REQUIRED).
       4. Live cost-rate gate (D-11, D-12): `cost_rates.fee_source` must be
          ACCOUNT_MAX, and the commission it was resolved from must be for
@@ -381,7 +422,25 @@ async def execute_approved_plan(
       5. Risk pipeline (evaluate_risk with the identical Phase-5 inputs).
       6. Placement-time gates (headroom, stale, uncertain, portfolio),
          evaluated on the risk verdict's own `sized` (WR-05).
-      7. Adapter placement (place_entry then place_algo_protective).
+      Phase 19 pre-placement gates, all BEFORE the approval is consumed (a refusal leaves no
+      ENTRY intent row, so a later call with corrected inputs can still place). The pure
+      refusals come first (no adapter call), then the three reads, then the position mode:
+      5b. Quantity bound (D-02, RISK-04): the sized quantity may not exceed the approved plan
+          quantity; it is refused as QUANTITY_ABOVE_APPROVED, never clipped.
+      5c. Snapped geometry (D-03): after the tick snap the stop must still sit outside the
+          zone (GEOMETRY_INVALID_AFTER_SNAP).
+      5d. TP1 sizeable at the sized quantity (O-03 auto default, backtest D-27): the frozen
+          protective sizing must accept it, else NO_TRADE with its MIN_QTY_REJECT or
+          NOTIONAL_REJECT; there is no single-take-profit fallback.
+      5e. Live reads (mark price, open normal orders and open algo orders of the symbol; a
+          failed read is "not available") and `evaluate_pre_placement`: plan status,
+          invalidation, remaining validity, same-symbol and account-wide unprotected checks,
+          mark price (D-05, D-06, D-08, D-09, D-11).
+      5f. Position mode (D-02, D-14): an unreadable mode is UNCERTAIN_ACCOUNT_STATE and a
+          Hedge account is HEDGE_MODE_UNSUPPORTED, both before anything is consumed.
+      7. Consume the approval (ENTRY intent), then adapter placement (place_entry then
+         place_algo_protective). The placement itself is unchanged in plan 19-13; plan 19-15
+         replaces it with the fill-driven model.
 
     This function exists ONLY to place real orders, so every live-safety
     gate is REQUIRED (09-REVIEW CR-07): there is no `None` default that
@@ -450,6 +509,10 @@ async def execute_approved_plan(
     _require_safe_mode_controller(safe_mode_controller, "execute_approved_plan")
     if intent_store is None:
         raise ValueError("execute_approved_plan: intent_store is required (fail closed)")
+    if live_context is None:
+        raise ValueError("execute_approved_plan: live_context is required (fail closed)")
+    if not isinstance(live_context, LivePlacementContext):
+        raise TypeError("execute_approved_plan: live_context must be a LivePlacementContext")
     if enablement is None:
         raise ValueError("execute_approved_plan: enablement is required (fail closed)")
     if gate_kwargs is None:
@@ -528,6 +591,30 @@ async def execute_approved_plan(
     if approval_verdict is not None:
         return approval_verdict
 
+    # Gate 1c (Phase 19, D-01..D-04, APRV-01, F-302): bind the approved plan to the symbol and
+    # side that reach the exchange. The TradePlan has neither field, so the persisted Signal
+    # supplies them; the plan hash is re-derived, and the caller's symbol and side are only
+    # COMPARED with the Signal's, never used. Pure: no adapter call, nothing consumed.
+    binding_verdict = bind_plan(
+        trade_plan=risk_kwargs["trade_plan"],
+        signal=live_context.signal,
+        callback_plan_hash=callback.plan_hash,
+        approval_request_hash=approval.request_hash,
+        approval_strategy_version=approval_strategy_version,
+        approval_parameter_set_id=approval_parameter_set_id,
+        approval_parameter_set_hash=approval_parameter_set_hash,
+        plan_snapshot_symbol=live_context.plan_constraint_snapshot.symbol,
+        plan_snapshot_trade_plan_id=live_context.plan_constraint_snapshot.trade_plan_id,
+        caller_symbol=risk_kwargs["constraint_snapshot"].symbol,
+        caller_side=risk_kwargs["candidate_position_side"],
+    )
+    if not binding_verdict.ok or binding_verdict.bound is None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=binding_verdict.reason_code)
+    bound = binding_verdict.bound
+    working_type_reason = check_working_type(live_context.plan_constraint_snapshot.working_type)
+    if working_type_reason is not None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=working_type_reason)
+
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
     enablement_verdict = enablement.guard_placement(
         plan_hash=approval.trade_plan_id,
@@ -537,6 +624,12 @@ async def execute_approved_plan(
             is_no_trade=True,
             reason_code=enablement_verdict.reason_code or "DISABLED",
         )
+
+    # Gate 2b (D-07, D-13, T-19-34): the owner's execution limits must all be set. No default
+    # exists anywhere in src, so an unset file refuses every live and Demo placement here,
+    # before SAFE_MODE, risk and any adapter call.
+    if live_context.execution_limits.unset_keys():
+        return ExecutionOutcome(is_no_trade=True, reason_code=LIMITS_NOT_CONFIGURED)
 
     # Gate 3: SAFE_MODE guard (09-REVIEW CR-07) — SAFE_MODE blocks new
     # entries even when live orders are still enabled (e.g. right after
@@ -611,10 +704,11 @@ async def execute_approved_plan(
             reason_code=gate_verdict.reason_code,
         )
 
-    # Gate 6: adapter placement (place_entry then place_algo_protective).
+    # Gate 6 setup: the plan, the snapshot and the bound symbol. A symbol outside the live-5
+    # universe is a programming error and raises before any adapter call.
     trade_plan = risk_kwargs["trade_plan"]
     constraint_snapshot = risk_kwargs["constraint_snapshot"]
-    _require_live5_symbol(constraint_snapshot.symbol)
+    _require_live5_symbol(bound.symbol)
 
     # Derive the deterministic entry ID from the plan hash (the SL's `xa-`
     # id is derived inside `_place_protective_leg`).
@@ -627,7 +721,7 @@ async def execute_approved_plan(
     # Binance rejects off-grid prices. BUY limits floor / SELL limits ceil
     # (never pay up); the SL trigger rounds toward the entry (tighter stop,
     # realized risk never exceeds the sized risk).
-    candidate_side = risk_kwargs["candidate_position_side"]
+    candidate_side = bound.side
     limit_price = quantize_price(
         price=derive_limit_price(
             entry_min_price=trade_plan.entry_min_price,
@@ -645,21 +739,113 @@ async def execute_approved_plan(
     # The quantized quantity from the risk verdict.
     quantity: Decimal = sized.quantity
 
-    # Determine side from the candidate position side.
-    entry_side = "BUY" if candidate_side == "LONG" else "SELL"
-    sl_side = "SELL" if candidate_side == "LONG" else "BUY"
+    # The order sides come from the bound plan (Gate 1c), never from a caller value.
+    entry_side = bound.entry_side
+    sl_side = bound.exit_side
 
-    # 09-REVIEW WR-02: position mode is re-detected at placement time
-    # (D-02) — never assumed. One-way sends positionSide=BOTH; hedge mode
-    # requires LONG/SHORT on the entry AND every protective leg. An
-    # undeterminable mode fails closed before any order.
+    # Gate 5b (D-02, RISK-04, T-19-32): never place more than the human approved. The sized
+    # quantity above the plan quantity is refused whole; there is no clipping. An approved
+    # quantity that is not positive can approve nothing, so it is refused the same way.
+    if (
+        bound.approved_quantity <= Decimal("0")
+        or check_quantity_bound(
+            placement_quantity=quantity, approved_quantity=bound.approved_quantity
+        )
+        == QUANTITY_ABOVE_APPROVED
+    ):
+        return ExecutionOutcome(is_no_trade=True, reason_code=QUANTITY_ABOVE_APPROVED)
+
+    # Gate 5c (D-03, G4-020): the planner knows no tick size, so check the geometry AFTER the
+    # snap: the limit stays in the zone and the stop stays strictly outside it.
+    geometry_reason = check_snapped_geometry(
+        side=bound.side,
+        limit_price=limit_price,
+        sl_trigger_price=sl_trigger_price,
+        entry_min_price=trade_plan.entry_min_price,
+        entry_max_price=trade_plan.entry_max_price,
+    )
+    if geometry_reason is not None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=geometry_reason)
+
+    # Gate 5d (O-03 auto default, backtest D-27): the plan needs a sizeable TP1 at the quantity
+    # it places. The FROZEN protective sizing is called as is (One-way, the only supported
+    # mode); a rejection is the plan's NO_TRADE, with no single-take-profit fallback. A plan
+    # whose take-profit levels cannot be read is unusable (fail closed).
+    try:
+        tp1_trigger_price, tp2_trigger_price = take_profit_levels(trade_plan)
+    except ValueError:
+        return ExecutionOutcome(is_no_trade=True, reason_code=STALE_SETUP)
+    tp_sizing = size_protectives_to_filled_qty(
+        filled_quantity=quantity,
+        protective_template=ProtectiveTemplate(
+            stop_loss_trigger_price=sl_trigger_price,
+            tp1_trigger_price=tp1_trigger_price,
+            tp2_trigger_price=tp2_trigger_price,
+            tp1_quantity_fraction=live_context.tp1_quantity_fraction,
+        ),
+        constraint_snapshot=constraint_snapshot,
+        position_mode=POSITION_MODE_ONE_WAY,
+        candidate_position_side=bound.side,
+    )
+    if tp_sizing.is_no_trade:
+        return ExecutionOutcome(is_no_trade=True, reason_code=tp_sizing.reason_code)
+
+    # Gate 5e (D-05, D-06, D-08, D-09, D-11, RISK-04): the three live reads, then the pure
+    # pre-placement evaluation. A read that fails is "not available" and refuses (fail
+    # closed); nothing here consumes the approval.
+    mark_reading = await _read_or_none(lambda: adapter.get_mark_price(symbol=bound.symbol))
+    normal_orders = await _read_or_none(
+        lambda: adapter.snapshot_open_normal_orders(symbol=bound.symbol)
+    )
+    algo_orders = await _read_or_none(
+        lambda: adapter.snapshot_open_algo_orders(symbol=bound.symbol)
+    )
+    try:
+        any_unprotected = bool(live_context.protection_registry.blocks_new_entries())
+    except Exception:  # noqa: BLE001 — an unreadable registry blocks (fail closed)
+        any_unprotected = True
+    pre_placement_reason = evaluate_pre_placement(
+        PrePlacementInputs(
+            side=bound.side,
+            plan_status=_plan_status(trade_plan),
+            signal_invalidated=live_context.signal.invalidated_at_utc is not None,
+            trade_plan=trade_plan,
+            latest_closed_bar_close=live_context.latest_closed_bar_close,
+            expiry_utc=trade_plan.expiry_utc,
+            now_utc=now_utc,
+            min_remaining_validity_seconds=(
+                live_context.execution_limits.min_remaining_validity_seconds
+            ),
+            gtd_clock_margin=live_context.gtd_clock_margin,
+            position_symbols=frozenset(p.symbol for p in risk_kwargs["open_positions"]),
+            open_order_symbols=_open_order_symbols(bound.symbol, (normal_orders, algo_orders)),
+            any_unprotected=any_unprotected,
+            symbol=bound.symbol,
+            mark_price=_mark_price_of(mark_reading),
+            mark_time_utc=_mark_time_of(mark_reading),
+            max_mark_price_age_ms=live_context.execution_limits.max_mark_price_age_ms,
+            sl_trigger_price=sl_trigger_price,
+            entry_min_price=trade_plan.entry_min_price,
+            entry_max_price=trade_plan.entry_max_price,
+        )
+    )
+    if pre_placement_reason is not None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=pre_placement_reason)
+
+    # Gate 5f (09-REVIEW WR-02, D-02, D-14): position mode is re-detected at placement time,
+    # never assumed. An undeterminable mode fails closed before any order. A Hedge account is
+    # refused: Hedge is unverified and not enabled in V1 (the hedge payload builders stay
+    # proven offline in tests/test_execution_modes.py).
     try:
         position_mode = resolve_position_mode(await adapter.get_position_mode())
     except Exception:  # noqa: BLE001 — unknown account mode → no order
         return ExecutionOutcome(
             is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
         )
-    order_position_side = "BOTH" if position_mode == POSITION_MODE_ONE_WAY else candidate_side
+    position_mode_reason = check_position_mode(position_mode)
+    if position_mode_reason is not None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=position_mode_reason)
+    order_position_side = "BOTH"  # One-way is the only supported mode past gate 5f.
 
     # Write-ahead (D-13, D-14 steps 1-2): consume the approval by committing the
     # ENTRY intent (INTENDED) BEFORE any order leaves. Pre-placement NO_TRADE
@@ -672,11 +858,12 @@ async def execute_approved_plan(
             trade_plan_id=trade_plan.trade_plan_id,
             plan_hash=trade_plan.plan_hash,
             client_order_id=entry_client_order_id,
-            symbol=constraint_snapshot.symbol,
+            symbol=bound.symbol,
             side=entry_side,
             intended_quantity=quantity,
             intended_price=limit_price,
             now_utc=now_utc,
+            sized_realized_risk=sized.realized_risk,
         )
     except IntentStateConflict:
         # A second approval for the same plan (or another unique arbiter): the plan
@@ -760,7 +947,7 @@ async def execute_approved_plan(
     entry_placement = await _place_entry_no_blind_retry(
         adapter=adapter,
         entry_kwargs={
-            "symbol": constraint_snapshot.symbol,
+            "symbol": bound.symbol,
             "side": entry_side,
             "position_side": order_position_side,
             "time_in_force": "GTC",
@@ -829,10 +1016,11 @@ async def execute_approved_plan(
             trade_plan_id=trade_plan.trade_plan_id,
             plan_hash=trade_plan.plan_hash,
             algo_client_id=sl_algo_client_id,
-            symbol=constraint_snapshot.symbol,
+            symbol=bound.symbol,
             side=sl_side,
             intended_price=sl_trigger_price,
             now_utc=now_utc,
+            intended_quantity=None,  # closePosition leg: no quantity (D-10)
         )
         if not created:
             raise IntentStateConflict("STOP_LOSS intent already exists for a first placement")
@@ -857,7 +1045,7 @@ async def execute_approved_plan(
     # both the entry identity and the SL are confirmed.
     sl_confirmed, _sl_failure = await _place_protective_leg(
         adapter=adapter,
-        symbol=constraint_snapshot.symbol,
+        symbol=bound.symbol,
         plan_hash=trade_plan.plan_hash,
         role=OrderRole.STOP_LOSS.value,
         leg={
@@ -894,7 +1082,7 @@ async def execute_approved_plan(
         try:
             await expire_pending_entry(
                 plan_hash=trade_plan.plan_hash,
-                symbol=constraint_snapshot.symbol,
+                symbol=bound.symbol,
                 adapter=adapter,
                 journal=journal,
                 now_utc=now_utc,
@@ -905,6 +1093,61 @@ async def execute_approved_plan(
         return _finish(ExecutionOutcome(is_no_trade=True, reason_code=_ENTRY_WITHOUT_PROTECTIVE))
 
     return _finish(ExecutionOutcome(is_no_trade=False, reason_code="OK"))
+
+
+async def _read_or_none(read: Callable[[], Awaitable[Any]]) -> Any:
+    """Await one live read; a failed read is `None`, which every consumer treats as unavailable."""
+    try:
+        return await read()
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable value refuses the placement
+        return None
+
+
+def _plan_status(trade_plan: Any) -> TradePlanStatus:
+    """The plan lifecycle status; anything else is a programming error (loud, before orders)."""
+    status = trade_plan.status
+    if not isinstance(status, TradePlanStatus):
+        raise TypeError("execute_approved_plan: trade_plan.status must be a TradePlanStatus")
+    return status
+
+
+def _utc_or_none(value: Any) -> datetime | None:
+    """A UTC-aware datetime as UTC, or `None` for anything else (naive, wrong type)."""
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        return None
+    return value.astimezone(UTC)
+
+
+def _mark_price_of(reading: Any) -> Decimal | None:
+    """The mark price of an adapter reading; a missing, non-Decimal or non-positive one is None."""
+    price = _get_attr_or_key(reading, "mark_price") if reading is not None else None
+    if not isinstance(price, Decimal) or not price.is_finite() or price <= Decimal("0"):
+        return None
+    return price
+
+
+def _mark_time_of(reading: Any) -> datetime | None:
+    """The exchange time of an adapter reading as UTC, or `None` when it is unusable."""
+    if reading is None:
+        return None
+    return _utc_or_none(_get_attr_or_key(reading, "exchange_time_utc"))
+
+
+def _open_order_symbols(symbol: str, row_sets: tuple[Any, ...]) -> frozenset[str] | None:
+    """The symbols that have an open order, or `None` when any snapshot could not be read.
+
+    A snapshot is unusable unless it is a list or tuple (an empty one is a valid "no orders").
+    A row that carries no symbol cannot be told apart from the requested one, so it counts as
+    on `symbol` (fail closed).
+    """
+    symbols: set[str] = set()
+    for rows in row_sets:
+        if not isinstance(rows, list | tuple):
+            return None
+        for row in rows:
+            row_symbol = _get_attr_or_key(row, "symbol")
+            symbols.add(row_symbol if isinstance(row_symbol, str) and row_symbol else symbol)
+    return frozenset(symbols)
 
 
 def _reconciliation_required() -> ExecutionOutcome:

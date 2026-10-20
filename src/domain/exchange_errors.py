@@ -94,6 +94,16 @@ def _is_strict_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+class PreSendRefusal(Exception):  # noqa: N818 - a refusal, not an error of the caller
+    """Raised before anything was sent: the exchange never received the request (D-21).
+
+    A subclass means "nothing reached the exchange" (a REST gate pause or ban, a clock-drift
+    entry block, a missing signed-call policy). It is never an ambiguous send, so the
+    execution core can retry or fall back without treating it as a possible placement. An
+    exception that is not a `PreSendRefusal` carries no such guarantee.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ErrorFacts:
     """The only facts classification may use: class, int body code, Retry-After seconds."""
@@ -701,6 +711,7 @@ __all__ = [
     "ErrorFacts",
     "ExchangeErrorCategory",
     "HttpClass",
+    "PreSendRefusal",
     "RateLimitDecision",
     "classify",
     "rate_limit_decision",
