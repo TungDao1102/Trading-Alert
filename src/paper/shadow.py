@@ -348,7 +348,11 @@ def format_shadow_alert(
 
     `format_approve` still validates and renders the fields fail-closed; its two ISO time lines
     and its display note are replaced by `render_shadow_message` lines that show the detected
-    and expiry times in UTC and Asia/Ho_Chi_Minh.
+    and expiry times in UTC and Asia/Ho_Chi_Minh. The alert also shows the plan's
+    `quantity_after_rounding` on a `Quantity:` line (D078 item (6)): the value
+    `ShadowApprovalBook.issue` stores as `approved_quantity` on both rows. A plan whose
+    quantity is not above zero is refused here (ValueError), before anything is stored
+    or sent.
     """
     require_shadow(mode)
     take_profit = _json_object(plan.take_profit_json, "take_profit_json")
@@ -373,6 +377,7 @@ def format_shadow_alert(
         reason_codes=list(reason_codes),
         signal_id=signal.signal_id,
         detected_at_utc=signal.detected_at_utc,
+        approved_quantity=plan.quantity_after_rounding,
     )
     all_lines = approve_text.split("\n")
     body_lines = [
@@ -467,8 +472,9 @@ class ShadowApprovalBook:
         """Build the PENDING APPROVE and SKIP approvals and the short-id mapping.
 
         Both rows carry `approved_quantity` = the plan's `quantity_after_rounding` (D078,
-        19-REVIEW WR-01), the figure `render_confirm_card` shows. The SKIP row's value is
-        never read; the two rows of one request stay identical.
+        19-REVIEW WR-01), the figure the SHADOW alert and
+        `render_confirm_card` show. The SKIP row's value is never read; the two rows of one
+        request stay identical.
         """
         approve_token = issue_one_time_token()
         skip_token = issue_one_time_token()

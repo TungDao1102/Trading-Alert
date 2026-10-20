@@ -430,8 +430,9 @@ def format_approve(
     reason_codes: list[str],
     signal_id: str,
     detected_at_utc: datetime,
+    approved_quantity: Decimal,
 ) -> str:
-    """Render the APPROVE notification text with all 12 APRV-01 fields.
+    """Render the APPROVE notification text with all 12 APRV-01 fields and the quantity.
 
     Per D-02 + TELEGRAM.md §4: the message carries exactly the 12
     fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
@@ -445,6 +446,12 @@ def format_approve(
     field per line for operator readability. The text starts with
     "APPROVE " so the operator can identify the message type at a
     glance.
+
+    The message also carries the approved quantity (D078 item (6)) on a `Quantity:`
+    line directly after the `Entry:` line: the value stored as `approved_quantity` on the
+    approval row, written in fixed-point notation with every digit of the Decimal and
+    never rounded. `approved_quantity` is a required keyword; a value that is not a finite
+    Decimal above zero raises ValueError, so no APPROVE message renders without it.
 
     The renderer is PTB-free: it does NOT import python-telegram-bot
     and is safe to call from `src/paper/notify.py` (adapter-boundary
@@ -482,6 +489,15 @@ def format_approve(
             raise ValueError(
                 f"take_profits[{idx}].fraction must be a Decimal in (0, 1], got {fraction!r}"
             )
+    if (
+        not isinstance(approved_quantity, Decimal)
+        or not approved_quantity.is_finite()
+        or not approved_quantity > 0
+    ):
+        raise ValueError(
+            "approved_quantity must be a finite Decimal greater than zero, "
+            f"got {approved_quantity!r}"
+        )
     if not isinstance(invalidation, str) or invalidation == "":
         raise ValueError("invalidation must be a non-empty string")
     if not isinstance(reason_codes, list) or not all(isinstance(r, str) for r in reason_codes):
@@ -506,6 +522,7 @@ def format_approve(
         f"Signal: {signal_id}\n"
         f"Detected: {detected_at_utc.astimezone(UTC).isoformat()}\n"
         f"Entry: {entry_min}–{entry_max}\n"
+        f"Quantity: {format(approved_quantity, 'f')}\n"
         f"SL: {stop_loss}\n"
         f"TPs:\n{tp_lines}\n"
         f"R:R: {rr}\n"

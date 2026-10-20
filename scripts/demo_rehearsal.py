@@ -2069,7 +2069,14 @@ def issue_approval(
     return IssuedApproval(approval=approval, raw_token=raw_token, signal_id=signal_id)
 
 
-def render_approval_text(ctx: RunContext, plan: DerivedPlan, *, title: str, signal_id: str) -> str:
+def render_approval_text(
+    ctx: RunContext,
+    plan: DerivedPlan,
+    *,
+    title: str,
+    signal_id: str,
+    approved_quantity: Decimal,
+) -> str:
     body = format_approve(
         symbol=SYMBOL,
         direction="LONG",
@@ -2089,6 +2096,7 @@ def render_approval_text(ctx: RunContext, plan: DerivedPlan, *, title: str, sign
         reason_codes=["DEMO_ONLY", ctx.mode.value],
         signal_id=signal_id,
         detected_at_utc=plan.observed_at,
+        approved_quantity=approved_quantity,
     )
     return f"{title} ({ctx.mode.value}, Binance Demo Trading)\n{body}"
 
@@ -2110,7 +2118,13 @@ async def issue_and_send(
     try:
         await channel.send_approval(
             chat_id=chat_id,
-            text=render_approval_text(ctx, plan, title=title, signal_id=issued.signal_id),
+            text=render_approval_text(
+                ctx,
+                plan,
+                title=title,
+                signal_id=issued.signal_id,
+                approved_quantity=issued.approval.approved_quantity,
+            ),
             signal_id=issued.signal_id,
             kind=kind,
         )
