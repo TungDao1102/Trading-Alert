@@ -15,24 +15,29 @@ redelivered callback replays to the stored outcome exactly as before.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+from src.db.mappers import approval_to_row
+from src.domain.enums import ApprovalAction, ApprovalResult
 from src.execution.manager import APPROVED_QUANTITY_NOT_CONFIRMED, ExecutionOutcome
 from src.persistence.errors import ApprovedQuantityRefused, IntentStateConflict
 
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.test_execution_exactly_once_pg import (
     APPROVAL_ID,
+    CASE,
     _consume_args,
     _scalar,
     _seed_parent_chain,
     _store_on,
 )
-from tests.test_execution_manager import _run_plan
+from tests.test_execution_manager import _build_approval, _run_plan
 
 # The fixture's approved quantity (the plan's quantity_after_rounding, D078).
 STORED = Decimal("2.415")
@@ -122,9 +127,7 @@ def test_consume_refuses_a_stored_quantity_that_differs_from_the_bound_one(
         _seed_parent_chain(engine)
         _set_stored_quantity(engine, stored)
         with pytest.raises(ApprovedQuantityRefused):
-            store.consume_and_record_entry_intent(
-                **_args(intended_quantity=Decimal("2.000"))
-            )
+            store.consume_and_record_entry_intent(**_args(intended_quantity=Decimal("2.000")))
         _assert_nothing_consumed(engine)
 
 
@@ -150,16 +153,24 @@ def test_the_refusal_is_an_intent_state_conflict_for_every_other_caller(pg_db: s
 
 def test_a_row_that_is_not_approved_keeps_the_plain_conflict(pg_db: str) -> None:
     """The existing state checks come first; only an APPROVED, unconsumed row is judged on size."""
+    # A terminal approval status cannot move back (DB trigger), so a second, PENDING approval of
+    # the same plan, storing no quantity, is the row that is not approved.
+    pending = replace(
+        _build_approval(CASE),
+        approval_id="apprv_pending_same_plan",
+        action=ApprovalAction.SIMULATE,
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        approval_token_hash="f" * 64,
+        acted_at_utc=None,
+        approved_quantity=None,
+    )
     with _store_on(pg_db) as (engine, store):
         _seed_parent_chain(engine)
-        with engine.begin() as conn:
-            conn.execute(
-                text("UPDATE approvals SET status = 'PENDING' WHERE approval_id = :a"),
-                {"a": APPROVAL_ID},
-            )
-        _set_stored_quantity(engine, None)
+        with Session(engine) as session, session.begin():
+            session.add(approval_to_row(pending))
         with pytest.raises(IntentStateConflict) as caught:
-            store.consume_and_record_entry_intent(**_args())
+            store.consume_and_record_entry_intent(**_args(approval_id=pending.approval_id))
         assert not isinstance(caught.value, ApprovedQuantityRefused)
         _assert_nothing_consumed(engine)
 
@@ -172,8 +183,7 @@ def test_a_replay_answers_false_before_any_quantity_is_read(pg_db: str) -> None:
         _set_stored_quantity(engine, None)
         assert store.consume_and_record_entry_intent(**_args()) is False
         assert (
-            store.consume_and_record_entry_intent(**_args(approved_quantity=Decimal("99")))
-            is False
+            store.consume_and_record_entry_intent(**_args(approved_quantity=Decimal("99"))) is False
         )
         assert _scalar(engine, "SELECT count(*) FROM execution_intents") == 1
 

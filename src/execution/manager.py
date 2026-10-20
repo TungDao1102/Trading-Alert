@@ -107,7 +107,7 @@ from src.execution.pre_placement import (
 )
 from src.execution.protection import RestingEntry
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
-from src.persistence.errors import IntentStateConflict, PersistenceError
+from src.persistence.errors import ApprovedQuantityRefused, IntentStateConflict, PersistenceError
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
 
@@ -245,6 +245,11 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Plain NO_TRADE reason: a request the gate, the drift guard or a missing signed-call policy
 # refused before anything reached the exchange (src/WR-02).
 ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
+
+# Plain NO_TRADE reason (D078 (5), quick task 261020-q2d): the approval row read inside the
+# consume transaction stores no approved quantity, one that differs from the quantity bound at
+# gate 1c, or one below the quantity about to be placed. Nothing is consumed or sent.
+APPROVED_QUANTITY_NOT_CONFIRMED: str = "APPROVED_QUANTITY_NOT_CONFIRMED"
 
 
 @dataclass(frozen=True)
@@ -563,7 +568,9 @@ async def execute_approved_plan(
             placement: before the entry is sent a `PersistenceError` returns
             NO_TRADE (`RECONCILIATION_REQUIRED`, or `INVALIDATED` for an
             `IntentStateConflict` at consume, i.e. a second approval of the same
-            plan) and nothing is placed; after the entry may exist the manager
+            plan, or `APPROVED_QUANTITY_NOT_CONFIRMED` when the approval row read
+            inside the consume transaction does not confirm the bound quantity,
+            D078 (5)) and nothing is placed; after the entry may exist the manager
             enters SAFE_MODE (`DB_FAILURE`), still hands the entry to the
             protection coordinator (protection outranks the audit row, D034)
             and returns `RECONCILIATION_REQUIRED`. Only `PersistenceError` is
@@ -974,9 +981,14 @@ async def execute_approved_plan(
             side=entry_side,
             intended_quantity=quantity,
             intended_price=limit_price,
+            approved_quantity=bound.approved_quantity,
             now_utc=now_utc,
             sized_realized_risk=sized.realized_risk,
         )
+    except ApprovedQuantityRefused:
+        # D078 (5): the stored approval row, read inside the consume transaction, does not
+        # confirm the quantity the caller-supplied Approval carried. Rolled back, nothing sent.
+        return ExecutionOutcome(is_no_trade=True, reason_code=APPROVED_QUANTITY_NOT_CONFIRMED)
     except IntentStateConflict:
         # A second approval for the same plan (or another unique arbiter): the plan
         # is already spoken for, so this approval cannot authorize an order.
@@ -2184,6 +2196,7 @@ async def emergency_manual_close(
 
 
 __all__ = [
+    "APPROVED_QUANTITY_NOT_CONFIRMED",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
     "resolve_position_mode",

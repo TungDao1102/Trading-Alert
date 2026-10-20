@@ -97,6 +97,7 @@ class ExecutionIntentStore(Protocol):
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
@@ -104,6 +105,12 @@ class ExecutionIntentStore(Protocol):
 
         `sized_realized_risk` (D-22) is written on the ENTRY row by this same INSERT and never
         updated later; None means "unknown" (the nullable evidence column stays NULL).
+
+        `approved_quantity` is the quantity the caller bound from its `Approval` object
+        (D078). The store re-reads the approval row in the same transaction: its stored
+        quantity must be present, equal to `approved_quantity` and at least
+        `intended_quantity`, otherwise `ApprovedQuantityRefused` (an `IntentStateConflict`)
+        is raised and nothing is written. A replay (`False`) is answered before that check.
         """
         ...
 

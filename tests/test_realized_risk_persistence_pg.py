@@ -66,6 +66,7 @@ def _consume_kwargs(**overrides: Any) -> dict[str, Any]:
         "side": "BUY",
         "intended_quantity": Decimal("2.415"),
         "intended_price": Decimal(str(CASE["expected_limit_price"])),
+        "approved_quantity": Decimal("2.415"),
         "now_utc": NOW_UTC,
     }
     kwargs.update(overrides)

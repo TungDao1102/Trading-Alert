@@ -306,6 +306,7 @@ def test_protective_intent_insert_is_idempotent_and_transitions_are_enforced(pg_
             side="BUY",
             intended_quantity=Decimal("2.415"),
             intended_price=Decimal(str(CASE["expected_limit_price"])),
+            approved_quantity=Decimal("2.415"),
             now_utc=NOW_UTC,
         )
         leg: dict[str, Any] = {

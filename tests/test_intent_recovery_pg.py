@@ -122,6 +122,7 @@ def test_list_unresolved_intents_returns_open_legs_only(pg_db: str) -> None:
             side="BUY",
             intended_quantity=Decimal("2.415"),
             intended_price=Decimal(str(CASE["expected_limit_price"])),
+            approved_quantity=Decimal("2.415"),
             now_utc=NOW_UTC,
         )
         assert store.record_protective_intent(

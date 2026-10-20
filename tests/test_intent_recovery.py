@@ -87,6 +87,7 @@ def _seed_entry(
         side="BUY",
         intended_quantity=Decimal("1"),
         intended_price=Decimal("100"),
+        approved_quantity=Decimal("1"),
         now_utc=at,
     )
     if status != INTENDED:

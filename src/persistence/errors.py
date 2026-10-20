@@ -72,3 +72,14 @@ class IntentStateConflict(PersistenceError):
     `(approval_id, role)` (for example a second approval for the same plan).
     The surrounding transaction rolls back, so no half-written intent survives.
     """
+
+
+class ApprovedQuantityRefused(IntentStateConflict):
+    """The approval row read at consume time does not confirm the quantity (D078 (5)).
+
+    Raised by the consume transaction when the stored `approvals.approved_quantity` is NULL,
+    differs from the quantity the caller bound, or is below the quantity about to be placed
+    (19-REVIEW WR-01 follow-up, quick task 261020-q2d). It subclasses `IntentStateConflict`
+    so a caller that does not know it still fails closed; the transaction rolls back, so the
+    intent row is not written and the approval stays unconsumed.
+    """

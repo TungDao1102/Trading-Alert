@@ -428,6 +428,8 @@ def _consume_args() -> dict[str, Any]:
         "side": "BUY",
         "intended_quantity": Decimal("2.415"),
         "intended_price": Decimal(str(CASE["expected_limit_price"])),
+        # D078 (5): the quantity bound from the approval (the fixture row stores 2.415).
+        "approved_quantity": Decimal("2.415"),
         "now_utc": NOW_UTC,
     }
 

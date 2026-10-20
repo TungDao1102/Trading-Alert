@@ -85,9 +85,14 @@ class InMemoryExecutionIntentStore:
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
+        # The approvals table is not modelled here: the stored-quantity re-check of the consume
+        # transaction (D078 (5)) is proven against PostgreSQL in
+        # tests/test_consume_approved_quantity_pg.py. The argument is still required.
+        del approved_quantity
         key = (approval_id, OrderRole.ENTRY.value)
         with self._lock:
             if key in self._rows:
@@ -249,6 +254,7 @@ class AlwaysWinsIntentStore:
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
@@ -346,6 +352,7 @@ class CrashAfter:
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
@@ -358,6 +365,7 @@ class CrashAfter:
             side=side,
             intended_quantity=intended_quantity,
             intended_price=intended_price,
+            approved_quantity=approved_quantity,
             now_utc=now_utc,
             sized_realized_risk=sized_realized_risk,
         )
@@ -464,6 +472,7 @@ class BarrierBeforeConsume:
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
@@ -477,6 +486,7 @@ class BarrierBeforeConsume:
             side=side,
             intended_quantity=intended_quantity,
             intended_price=intended_price,
+            approved_quantity=approved_quantity,
             now_utc=now_utc,
             sized_realized_risk=sized_realized_risk,
         )
@@ -544,6 +554,7 @@ class FailingIntentStore:
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
@@ -557,6 +568,7 @@ class FailingIntentStore:
             side=side,
             intended_quantity=intended_quantity,
             intended_price=intended_price,
+            approved_quantity=approved_quantity,
             now_utc=now_utc,
             sized_realized_risk=sized_realized_risk,
         )

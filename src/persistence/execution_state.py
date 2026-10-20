@@ -5,7 +5,9 @@ Each method is ONE explicit transaction (D-03), written with SQLAlchemy Core
 statements against the ORM tables:
 
   - consume: `INSERT ... ON CONFLICT (approval_id, role) DO NOTHING RETURNING` plus a
-    conditional `UPDATE approvals` in the SAME transaction. The conflict target is
+    conditional `UPDATE approvals` in the SAME transaction; between them the approval row is
+    read `FOR UPDATE` and its stored `approved_quantity` must confirm the quantity (D078 (5),
+    `ApprovedQuantityRefused`). The conflict target is
     named; an untargeted `ON CONFLICT DO NOTHING` would also swallow a uniqueness
     violation on a DIFFERENT arbiter (a second approval for the same plan, a reused
     client id), hiding a second-entry attempt, so those surface as
@@ -35,6 +37,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from src.db.models import ApprovalRow, ExecutionIntentRow
 from src.domain.enums import (
@@ -45,7 +48,7 @@ from src.domain.enums import (
 )
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
 from src.execution.intent_store import IntentRecord, RecordedOutcome
-from src.persistence.errors import IntentStateConflict, ParentRowMissing
+from src.persistence.errors import ApprovedQuantityRefused, IntentStateConflict, ParentRowMissing
 from src.persistence.uow import OperationalDatabase
 
 _SQLSTATE_UNIQUE_VIOLATION = "23505"
@@ -98,6 +101,44 @@ def _to_record(row: ExecutionIntentRow) -> IntentRecord:
     )
 
 
+def _require_stored_quantity(
+    session: Session,
+    *,
+    approval_id: str,
+    approved_quantity: Decimal,
+    intended_quantity: Decimal,
+) -> None:
+    """Refuse the consume unless the stored approval row confirms the quantity (D078 (5)).
+
+    Reads the row `FOR UPDATE`, so the consuming UPDATE that follows judges the same row.
+    A missing, non-APPROVED or already consumed row is left to that UPDATE (the plain
+    `IntentStateConflict` keeps precedence); only an APPROVED, unconsumed row is judged on its
+    quantity. Raised inside the transaction, so the intent INSERT rolls back too.
+    """
+    row = session.execute(
+        select(
+            ApprovalRow.status,
+            ApprovalRow.consumption_status,
+            ApprovalRow.approved_quantity,
+        )
+        .where(ApprovalRow.approval_id == approval_id)
+        .with_for_update()
+    ).first()
+    if (
+        row is None
+        or row.status != ApprovalResult.APPROVED.value
+        or row.consumption_status != ApprovalConsumptionStatus.UNCONSUMED.value
+    ):
+        return
+    stored: Decimal | None = row.approved_quantity
+    if stored is None:
+        raise ApprovedQuantityRefused("approval row stores no approved quantity")
+    if stored != approved_quantity:
+        raise ApprovedQuantityRefused("stored approved quantity differs from the bound quantity")
+    if intended_quantity > stored:
+        raise ApprovedQuantityRefused("quantity to place is above the stored approved quantity")
+
+
 class PgExecutionStateStore:
     """Durable approval consumption and write-ahead execution intents."""
 
@@ -144,6 +185,7 @@ class PgExecutionStateStore:
         side: str,
         intended_quantity: Decimal,
         intended_price: Decimal,
+        approved_quantity: Decimal,
         now_utc: datetime,
         sized_realized_risk: Decimal | None = None,
     ) -> bool:
@@ -154,7 +196,16 @@ class PgExecutionStateStore:
         INSERT; no later statement touches it. Raises `IntentStateConflict` when the approval row
         cannot be consumed (missing, not APPROVED, already consumed) or another unique
         arbiter is violated, and `ParentRowMissing` when a parent row is absent.
+
+        D078 (5), quick task 261020-q2d: after the INSERT the approval row is read `FOR UPDATE`
+        in the same transaction, and its stored `approved_quantity` must be NOT NULL, equal to
+        the caller's bound `approved_quantity` and at least `intended_quantity`; otherwise
+        `ApprovedQuantityRefused` is raised and the INSERT rolls back. The consuming UPDATE
+        carries the same conditions. The state checks above keep precedence, and a replay
+        (False) is answered before any quantity is read.
         """
+        if not isinstance(approved_quantity, Decimal) or not approved_quantity.is_finite():
+            raise TypeError("approved_quantity must be a finite Decimal (fail closed)")
         values: dict[str, Any] = {
             "approval_id": approval_id,
             "role": OrderRole.ENTRY.value,
@@ -182,6 +233,12 @@ class PgExecutionStateStore:
                 ).first()
                 if inserted is None:
                     return False
+                _require_stored_quantity(
+                    session,
+                    approval_id=approval_id,
+                    approved_quantity=approved_quantity,
+                    intended_quantity=intended_quantity,
+                )
                 stamped = session.execute(
                     update(ApprovalRow)
                     .where(
@@ -189,6 +246,9 @@ class PgExecutionStateStore:
                         ApprovalRow.consumption_status
                         == ApprovalConsumptionStatus.UNCONSUMED.value,
                         ApprovalRow.status == ApprovalResult.APPROVED.value,
+                        ApprovalRow.approved_quantity.is_not(None),
+                        ApprovalRow.approved_quantity == approved_quantity,
+                        ApprovalRow.approved_quantity >= intended_quantity,
                     )
                     .values(
                         consumption_status=ApprovalConsumptionStatus.CONSUMED.value,

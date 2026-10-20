@@ -760,6 +760,9 @@ def test_seeded_round_trip_for_approvals_and_mappings_including_consumed(engine:
             telegram_message_id=rng.choice([None, str(rng.randrange(1, 10**9))]),
             requested_at_utc=T0 + timedelta(seconds=rng.randrange(0, 3600)),
             request_hash=hexid(rng.randrange(1, 10**12)),
+            # D078: the consume below re-reads this stored quantity (D078 (5)); every random
+            # intended quantity (at most 0.999) stays at or below it. No rng draw is added.
+            approved_quantity=Decimal("1"),
         )
         store.insert_pending(pending)
         assert store.get(pending.approval_id) == pending
@@ -800,6 +803,7 @@ def test_seeded_round_trip_for_approvals_and_mappings_including_consumed(engine:
                     side="BUY",
                     intended_quantity=Decimal(rng.randrange(1, 1000)) / Decimal(1000),
                     intended_price=Decimal(rng.randrange(40000, 60000)) / Decimal(10),
+                    approved_quantity=Decimal("1"),
                     now_utc=consumed_at,
                 )
                 expected = replace(
