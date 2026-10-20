@@ -57,7 +57,7 @@ DEV_START = STORE_START
 @pytest.fixture(scope="module")
 def store(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("manifest_build_store") / "raw"
-    build_store(root, start=STORE_START, end=STORE_END, symbols=(SYMBOL,))
+    build_store(root, start=STORE_START, end=STORE_END, symbols=(SYMBOL,), oi=False)
     return root
 
 

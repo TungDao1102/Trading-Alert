@@ -78,7 +78,7 @@ def _publish_terminal_symbol(root: Path, symbol: str, start: datetime, cut: date
 def store(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A long-history symbol over the research window and a REEFUSDT-shaped symbol."""
     root = tmp_path_factory.mktemp("known_gap_reason_store") / "raw"
-    tb.build_store(root, start=STORE_START, end=VAL_END, symbols=(LONG,))
+    tb.build_store(root, start=STORE_START, end=VAL_END, symbols=(LONG,), oi=False)
     _publish_terminal_symbol(root, TERM, STORE_START, CUT)
     return root
 
@@ -318,7 +318,9 @@ def _interior_gap() -> GapRange:
 def small_store(tmp_path: Path) -> Path:
     """Two days: a long-history symbol with an interior 1m hole, and a term symbol cut on day 2."""
     root = tmp_path / "raw"
-    tb.build_store(root, start=DAY1, end=DAY3, skip_1m_hour=INTERIOR_HOUR, symbols=(LONG,))
+    tb.build_store(
+        root, start=DAY1, end=DAY3, skip_1m_hour=INTERIOR_HOUR, symbols=(LONG,), oi=False
+    )
     _publish_terminal_symbol(root, TERM, DAY1, SMALL_CUT)
     return root
 
@@ -379,7 +381,9 @@ def test_an_observation_at_or_after_the_terminal_timestamp_is_refused(small_stor
 
 def test_a_window_without_a_file_follows_the_terminal_timestamp(tmp_path: Path) -> None:
     root = tmp_path / "raw"
-    tb.build_store(root, start=DAY1, end=datetime(2026, 3, 5, tzinfo=UTC), symbols=(LONG,))
+    tb.build_store(
+        root, start=DAY1, end=datetime(2026, 3, 5, tzinfo=UTC), symbols=(LONG,), oi=False
+    )
     declaration = _decl(terminal_at_utc=DAY2)
     window_end = datetime(2026, 3, 4, tzinfo=UTC)
     # The term symbol has no file at all: each series is ONE hole covering the window.
@@ -454,7 +458,9 @@ def test_the_six_builder_calls_each_acknowledge_exactly_five_gaps(
 
 def test_a_data_loss_entry_needs_the_exact_six_field_match(tmp_path: Path) -> None:
     root = tmp_path / "raw"
-    tb.build_store(root, start=DAY1, end=DAY3, skip_1m_hour=INTERIOR_HOUR, symbols=(LONG,))
+    tb.build_store(
+        root, start=DAY1, end=DAY3, skip_1m_hour=INTERIOR_HOUR, symbols=(LONG,), oi=False
+    )
     exact = _interior_gap()
     for field, value in (
         ("series", "mark_1m"),
@@ -680,7 +686,7 @@ def test_the_declaration_stays_out_of_the_case_input_and_the_build_is_determinis
 
 def test_reordering_the_declarations_does_not_change_the_result(tmp_path: Path) -> None:
     root = tmp_path / "raw"
-    tb.build_store(root, start=DAY1, end=DAY3, symbols=(LONG,))
+    tb.build_store(root, start=DAY1, end=DAY3, symbols=(LONG,), oi=False)
     _publish_terminal_symbol(root, TERM, DAY1, SMALL_CUT)
     _publish_terminal_symbol(root, OTHER_TERM, DAY1, DAY2 + 5 * HOUR)
     first = _decl(terminal_at_utc=SMALL_CUT)

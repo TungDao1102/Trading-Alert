@@ -174,7 +174,7 @@ def world(tmp_path_factory: pytest.TempPathFactory) -> World:
     """A long-history symbol and a REEFUSDT-shaped symbol whose data stops at T in Development."""
     base_dir = tmp_path_factory.mktemp("settlement_integration")
     store = base_dir / "raw"
-    build_store(store, start=STORE_START, end=VAL_END, symbols=(LONG,))
+    build_store(store, start=STORE_START, end=VAL_END, symbols=(LONG,), oi=False)
     _publish_terminal_symbol(store, TERM, STORE_START, CUT)
     observed = STORE_START - timedelta(days=30)
     constraints = base_dir / "constraints.json"

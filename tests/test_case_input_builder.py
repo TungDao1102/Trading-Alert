@@ -108,10 +108,13 @@ def build_store(
     end: datetime = END,
     skip_1m_hour: datetime | None = None,
     symbols: tuple[str, ...] = (SYMBOL,),
+    oi: bool = True,
 ) -> None:
     """Publish whole UTC days for `symbols` through the real writers.
 
     `skip_1m_hour` leaves the sixty 1m trade bars of that hour unpublished (every symbol).
+    `oi=False` publishes no open-interest snapshots: one file per 5 minutes is most of the
+    store's write time, and a module that only builds `ENGINE_SERIES` never reads them.
     """
     skipped: set[int] = set()
     if skip_1m_hour is not None:
@@ -145,6 +148,8 @@ def build_store(
                 ),
                 raw_root,
             )
+        if not oi:
+            continue
         for ms in range(_ms(start), _ms(end), 300_000):
             _write_oi_snapshot(
                 OiSnapshot(

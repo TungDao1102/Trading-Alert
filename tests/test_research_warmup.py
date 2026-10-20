@@ -532,7 +532,7 @@ def test_a_terminal_instant_inside_the_warmup_builds_without_a_settlement_row(
     from tests.test_case_input_builder import build_store
 
     root = tmp_path / "raw"
-    build_store(root, start=kg.STORE_START, end=kg.VAL_END, symbols=(kg.LONG,))
+    build_store(root, start=kg.STORE_START, end=kg.VAL_END, symbols=(kg.LONG,), oi=False)
     kg._publish_terminal_symbol(root, kg.TERM, kg.STORE_START, kg.CUT)
     observed = kg.STORE_START - timedelta(days=30)
     constraints = tmp_path / "constraints.json"

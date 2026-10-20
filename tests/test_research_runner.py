@@ -61,7 +61,7 @@ VERDICT_WORDS = re.compile(r"\b(pass|fail|verdict|rank|best|winner)\w*", re.IGNO
 @pytest.fixture(scope="module")
 def store(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("research_store") / "raw"
-    build_store(root, start=STORE_START, end=STORE_END, symbols=(SYMBOL,))
+    build_store(root, start=STORE_START, end=STORE_END, symbols=(SYMBOL,), oi=False)
     return root
 
 
