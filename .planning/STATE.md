@@ -595,6 +595,7 @@ Recent decisions affecting current work:
 | 261016-pre | Close 16-41, ROADMAP/REQUIREMENTS bookkeeping (BKTS-03 complete), 16-42 Task 1 preflight | 2026-10-16 | (this commit) | [261016-pre-close-16-41-roadmap-state-and-16-42-pre](./quick/261016-pre-close-16-41-roadmap-state-and-16-42-pre/) |
 | 261016-alw | 16-42 Tasks 2 and 3: G4-021 exact-entry-pin, allowlist entry research-run-1-a01, tests and D054 item (i) | 2026-10-16 | (this commit) | [261016-alw-allowlist-entry-research-run-1-a01-g4-021](./quick/261016-alw-allowlist-entry-research-run-1-a01-g4-021/) |
 | 261020-xd4 | pytest-xdist opt-in parallel run (`-n 4`, about 9-10 min vs 24); default, CI and recorded gates stay sequential | 2026-10-20 | (this commit) | [261020-xd4-pytest-xdist-opt-in-parallel-test-run](./quick/261020-xd4-pytest-xdist-opt-in-parallel-test-run/) |
+| 261020-bkp | backup.sh review fixes, explicit local-only mode (BACKUP_REMOTE=none), D064 real-S3 gate script (result pending until the owner runs it), 16-43 plan and checklist fixes | 2026-10-20 | (this commit) | [261020-bkp-backup-local-only-and-d064-gate](./quick/261020-bkp-backup-local-only-and-d064-gate/) |
 
 ### Roadmap Evolution
 
