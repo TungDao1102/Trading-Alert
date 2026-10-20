@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from src.paper import held_marker, liveness, runtime
 from src.paper.runtime_config import ExitCode
+from src.paper.runtime_state import INSTANCE_LEASE_SCOPE
 
 from tests.test_paper_runtime_admission import CONFIG_TEXT
 from tests.test_paper_runtime_loop import NOW, FixedClock, Live, live, wait_until
@@ -288,8 +289,8 @@ def _healthy_looking_stamp(directory: Path) -> Path:
     return liveness.write_liveness(directory, loop_alive_utc=NOW, last_frame_utc=NOW)
 
 
-def test_a_stamp_of_a_previous_process_is_removed_before_any_start_step(live: Live) -> None:
-    """(a) at the start: the stamp is gone before the loop begins."""
+def test_a_stamp_of_a_previous_process_is_removed_once_the_lease_is_taken(live: Live) -> None:
+    """(a) at the start: the lease holder removes the stamp before the loop begins."""
     directory = live.rig.pinned_path.parent
     path = _healthy_looking_stamp(directory)
     seen: list[bool] = []
@@ -302,21 +303,44 @@ def test_a_stamp_of_a_previous_process_is_removed_before_any_start_step(live: Li
     assert not path.exists()
 
 
-def test_a_held_refusal_holds_with_no_stamp_of_a_previous_process(live: Live) -> None:
+def test_a_held_refusal_before_the_lease_touches_no_stamp_and_is_not_live(live: Live) -> None:
+    """Only the lease holder owns the stamp (16-65 follow-up): a start refused before the lease
+    leaves any stamp as it is; while it holds, its held marker makes the probe fail anyway."""
     directory = live.rig.pinned_path.parent
     path = _healthy_looking_stamp(directory)
-    seen: list[bool] = []
+    before = path.read_bytes()
+    seen: list[tuple[bool, int]] = []
     code = runtime.main(
         ["--hold-on-refusal", "--pinned-state", str(live.rig.pinned_path)],
         environ={**live.rig.environ(), "PAPER_PARAMETER_SET_ID": ""},
-        wait_for_stop=lambda: seen.append(path.exists()),
+        wait_for_stop=lambda: seen.append((path.exists(), _probe(live.rig))),
         state=live.rig.state,
         registry_root=live.rig.root,
         clock=FixedClock(),
         run_loop=lambda _context: None,
     )
     assert code == int(ExitCode.CONFIG_NOT_RATIFIED)
-    assert seen == [False]
+    assert seen == [(True, 1)], "the stamp stays; the held marker makes the probe fail"
+    assert path.read_bytes() == before
+
+
+def test_a_start_refused_by_the_lease_leaves_the_holders_stamp_untouched(live: Live) -> None:
+    """Only the lease holder owns the stamp (16-65 follow-up): a second start in this container
+    that the instance lease refuses (exit 8), with or without the hold, neither removes nor
+    writes the stamp of the running holder."""
+    directory = live.rig.pinned_path.parent
+    path = _healthy_looking_stamp(directory)  # the stamp of the running lease holder
+    before = path.read_bytes()
+    held = live.rig.state.acquire_instance_lease(INSTANCE_LEASE_SCOPE)
+    assert held is not None
+    try:
+        for flags in ((), ("--hold-on-refusal",)):
+            code = live.rig.run(*flags, run_loop=lambda _c: pytest.fail("must not run"))
+            assert code == int(ExitCode.INSTANCE_LEASE_HELD), flags
+            assert path.read_bytes() == before, flags
+    finally:
+        held.release()
+    assert _probe(live.rig) == 0, "the holder is still live after the refused starts"
 
 
 def test_the_stamp_is_removed_on_a_fail_closed_exit(live: Live) -> None:

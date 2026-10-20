@@ -1475,17 +1475,12 @@ def main(
             registry_root=registry_root,
             now=now,
         )
-    # The liveness stamp belongs to this process (plan 16-65, 16-DEC-LIVENESS-FIRST-FRAME): one
-    # left by an earlier process of this container goes before any start step, so a restart loop
-    # never inherits its health. The probes above and the one-shot pin never touch it.
-    owns_stamp = not args.pin_epoch
-    if owns_stamp:
-        try:
-            liveness.remove_liveness(marker_dir)
-        except OSError as exc:
-            return _failed_closed(
-                f"the liveness stamp of an earlier process cannot be removed ({type(exc).__name__})"
-            )
+    # The liveness stamp belongs to the lease holder only (plan 16-65,
+    # 16-DEC-LIVENESS-FIRST-FRAME): it is removed right after the instance lease is taken and in
+    # the finally below. A start refused before or by the lease touches no stamp, so a second
+    # start in this container never deletes the running holder's stamp. The probes above and the
+    # one-shot pin never touch it.
+    owns_stamp = False
     if args.pin_epoch and hold:
         return _usage_error(
             "--pin-epoch is a one-shot operator command that never holds "
@@ -1552,6 +1547,18 @@ def main(
             "runtime per epoch (B1-WR-07); stop the other process first",
         )
     try:
+        if not args.pin_epoch:
+            # This process holds the lease and now owns the stamp: one left by an earlier process
+            # of this container goes before any further start step, so a restart loop never
+            # inherits its health (a failed removal fails closed; the finally releases the lease).
+            owns_stamp = True
+            try:
+                liveness.remove_liveness(marker_dir)
+            except OSError as exc:
+                return _failed_closed(
+                    "the liveness stamp of an earlier process cannot be removed "
+                    f"({type(exc).__name__})"
+                )
         if args.pin_epoch:
             if pinned_path.exists():
                 return refuse(
@@ -1697,9 +1704,10 @@ def main(
         if lease is not None:
             lease.release()
         if owns_stamp:
-            # Every exit after the lease, fail-closed ones included: the stamp of this process
-            # never outlives it (best effort; a kill -9 leaves one that ages out within the
-            # bound or goes at the next start). Nothing before the lease writes a stamp.
+            # Every exit of the lease holder, fail-closed ones included: the stamp of this
+            # process never outlives it (best effort; a kill -9 leaves one that ages out within
+            # the bound or goes at the next start that takes the lease). Nothing before the
+            # lease writes or removes a stamp.
             _remove_own_stamp(marker_dir)
 
 

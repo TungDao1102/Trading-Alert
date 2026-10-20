@@ -12,11 +12,12 @@ The separate paper heartbeat (owner decision 16-DEC-HUNG-RUNTIME, 16-55 Q2 = B, 
   connection of this process (`last_frame_utc`; null until the first message arrived, plan
   16-65). A hung event loop stops refreshing it; a silent feed stops moving `last_frame_utc`.
 - The stamp belongs to one process (plan 16-65, decisions/16-DEC-LIVENESS-FIRST-FRAME.md): the
-  runtime removes this container's stamp at its start, before any other start step, and again on
-  its way out, so a stamp of an earlier process never counts as health of a restarted one. Only a
-  process killed without a chance to clean up (kill -9, power loss) leaves a stamp behind; that
-  stamp is no longer refreshed and fails the probe once its loop-alive time is older than the
-  bound (at most `health.feed_silence_timeout_seconds`), or is removed by the next start.
+  process holding the instance lease removes this container's stamp right after taking the lease
+  and again on its way out (a start refused before or by the lease touches no stamp), so a stamp
+  of an earlier process never counts as health of a restarted one. Only a process killed without
+  a chance to clean up (kill -9, power loss) leaves a stamp behind; that stamp is no longer
+  refreshed and fails the probe once its loop-alive time is older than the
+  bound (at most `health.feed_silence_timeout_seconds`), or is removed by the next lease holder.
 - `python -m src.paper.runtime --liveness` passes only when no held marker of this container
   exists (`src/paper/held_marker.py`), the liveness file of this container exists, it records a
   message of this process, and both of its times are within `health.feed_silence_timeout_seconds`
