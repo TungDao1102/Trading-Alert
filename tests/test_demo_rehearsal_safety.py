@@ -32,6 +32,7 @@ from src.adapters.binance_usdm import (
     AlgoPlacementResult,
     BinanceUsdmAdapter,
     EntryPlacementResult,
+    MarketCloseResult,
     OrderProbe,
     PositionModeResult,
     SymbolFilters,
@@ -52,6 +53,7 @@ MUTATING_METHODS = (
     "place_algo_protective",
     "cancel_normal_order",
     "cancel_algo_order",
+    "place_market_close",
 )
 
 
@@ -169,6 +171,14 @@ class RecordingInner:
     async def cancel_algo_order(self, **kwargs: Any) -> None:
         self.calls.append("cancel_algo_order")
         raise AssertionError("a mutating method reached the inner adapter")
+
+    async def place_market_close(self, **kwargs: Any) -> Any:
+        self.calls.append("place_market_close")
+        raise AssertionError("a mutating method reached the inner adapter")
+
+    async def symbol_lot_filters(self, **kwargs: Any) -> Any:
+        self.calls.append("symbol_lot_filters")
+        return "LOT-FILTERS-SENTINEL"
 
 
 class CountingFactory:
@@ -472,7 +482,18 @@ async def test_dry_run_never_reaches_mutating_methods() -> None:
     )
     await guarded.cancel_normal_order(symbol="BTCUSDT", orig_client_order_id="e" * 36)
     await guarded.cancel_algo_order(symbol="BTCUSDT", client_algo_id="a" * 36)
+    # Plan 19-16: the emergency close is a mutating method too; in a dry run it is only planned.
+    close = await guarded.place_market_close(
+        symbol="BTCUSDT",
+        side="SELL",
+        position_side="BOTH",
+        quantity=Decimal("0.002"),
+        new_client_order_id="c" * 36,
+    )
     assert inner.calls == []
+    assert guarded.mutating_attempts == len(MUTATING_METHODS)
+    assert isinstance(close, MarketCloseResult) and close.status == "NEW"
+    assert close.executed_quantity is None and close.average_price is None
     assert isinstance(entry, EntryPlacementResult) and entry.status == "NEW"
     assert isinstance(algo, AlgoPlacementResult) and algo.algo_status == "NEW"
     assert [p["method"] for p in recorder.planned_requests] == list(MUTATING_METHODS)
@@ -481,6 +502,10 @@ async def test_dry_run_never_reaches_mutating_methods() -> None:
     await guarded.server_time()
     await guarded.snapshot_positions(symbol="BTCUSDT")
     assert inner.calls == ["server_time", "snapshot_positions"]
+    # symbol_lot_filters is a read passthrough: allowed in a dry run, never counted as mutating.
+    assert await guarded.symbol_lot_filters(symbol="BTCUSDT") == "LOT-FILTERS-SENTINEL"
+    assert inner.calls[-1] == "symbol_lot_filters"
+    assert guarded.mutating_attempts == len(MUTATING_METHODS)
 
     with pytest.raises(AttributeError):
         guarded.open_interest  # noqa: B018 - there is no passthrough to the inner adapter
