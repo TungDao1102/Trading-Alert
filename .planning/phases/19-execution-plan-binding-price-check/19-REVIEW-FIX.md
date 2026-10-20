@@ -762,3 +762,253 @@ The last six are consumers of the changed fake and closer. None is a `_pg.py` fi
 
 _Batch 2 fixed: 2026-10-20T10:40:00Z_
 _Fixer: Claude (gsd-code-fixer)_
+
+---
+
+## Batch 3 (owner decision WR-04, DECISIONS D077)
+
+**Fixed at:** 2026-10-20T11:10:00Z, on top of `c7254259` (branch `develop`). The CR-01, CR-02,
+CR-03, WR-02, WR-06, WR-05 and WR-03 commits above were kept as they are.
+**Scope:** WR-04 and the DECISIONS row that records its policy, as the owner decided them. The
+"Skipped Issues" entry for WR-04 above is superseded by this section. WR-01, WR-07 and
+IN-01..IN-06 stay skipped.
+
+| Finding / item | Status | Commit |
+|---|---|---|
+| WR-04 | fixed: requires human verification (protection safety logic) | `06445e6f` |
+| D077 row and renumbering of the provisional D-10 / Q5 ids | done | `e4b10e09` |
+
+### WR-04: a once-confirmed stop that is lost left the plan non-blocking and unescalated
+
+**Owner decision:** for a stop that REST confirmed ACTIVE and that later reads ABSENT or
+NOT_ACTIVE, the stop is never re-placed. Confirmed exposure is CLOSE_REQUIRED with a MARKET close
+(P6/B4). An unreadable position, or a zero position while the entry is not terminal, is
+UNPROTECTED (blocking) with `stop_lost_at` recorded once. `max_unprotected_ms` from
+`stop_lost_at` without a safe state (position zero AND entry terminal) escalates to
+CLOSE_REQUIRED. No MARKET close is ever sent with a guessed quantity.
+
+**Files modified:**
+- `src/execution/protection.py`
+- `tests/test_protection_branches.py`
+- `tests/test_protection_stop_lost.py` (new)
+- `19-OWNER-GAPS.md`: a new WR-04 row and the status sentence
+- `20-NOTES.md`: one bullet on the restart gap and the criterion 2 wording
+
+**Applied fix (coordinator):**
+- `_Tracked.stop_lost_at` is set once, at the first detection, and never reset. It is exposed as
+  `PlanProtection.stop_lost_at_utc`, a new field with default `None`.
+  `stop_confirmed_at_utc` keeps the earlier confirmation.
+- `_confirm` was restructured:
+  - A stop is lost when it was seen lost before, or when a stop confirmed on an earlier step reads
+    ABSENT or NOT_ACTIVE now.
+  - A lost stop is never queried again and never re-placed. The "absent, place the same id again"
+    branch now runs only for a stop that was never confirmed.
+  - One unprotected-deadline branch covers both a stop that was never confirmed (B2/B3, unchanged)
+    and a lost stop. `_unprotected_deadline_reached` measures from `stop_lost_at` when it is set,
+    otherwise from the first fill, using the same helper. `_elapsed_ms` now takes the start time.
+  - The new branch code `B4_STOP_LOST_UNRESOLVED` is chosen by `_unprotected_branch`.
+  - A lost stop never reaches `_settle_state`. `_settle_state` also refuses a plan with
+    `stop_lost_at` set, as a second guard.
+- `_on_stop_lost` now runs on the detection step and on every later step. It decides as follows:
+  - exposure: B4 (`B4_FILL_AFTER_STOP`, unchanged);
+  - flat with a terminal entry and a confirming second zero read (CR-03): FLAT
+    (`STOP_CONSUMED_FLAT`, unchanged);
+  - anything else: a transition to UNPROTECTED with the new reason `STOP_LOST`, once.
+- On the deadline, `_enter_close_required` runs as before: SAFE_MODE `CLOSE_REQUIRED`, one
+  `CLOSE_REQUIRED` alert per plan (the state is entered once), then the closer. The closer reads
+  the position itself. If it cannot read it, it fails closed without sending (`POSITION_READ_FAILED`)
+  and the plan is CLOSE_FAILED, which keeps blocking and retries every step.
+- **Unchanged:**
+  - the B1, B2, B3, B5 and -4509 branches;
+  - B4 with confirmed exposure, which is still immediate;
+  - the CR-03 two-read rule;
+  - the closer;
+  - every limit key. `max_unprotected_ms` stays `NOT_CONFIGURED`; the tests use the TEST_ONLY 7777
+    on virtual time.
+
+**The CR-03 interaction (the note under CR-03 above):**
+- **Old behavior:** in the stop-lost gap case with a terminal entry, the plan stayed
+  PROTECTED_ENTRY_OPEN. The next step did not read the stop (the entry was terminal and the stop
+  had been confirmed once), so `_settle_state` moved the plan to PROTECTED. The step after that
+  attached TP1/TP2 while the stop was not active.
+- **The fix covers it two ways:**
+  1. The gap case now moves to UNPROTECTED (blocking) and never returns to `_settle_state`.
+  2. `_settle_state` itself refuses any plan with `stop_lost_at`.
+- **What happens now:** each following step reads the position. Confirmed exposure is B4. Two
+  zero reads with a terminal entry are FLAT. Nothing else leaves UNPROTECTED before the deadline.
+- **Tests:** `test_branch_stop_lost_one_empty_position_read_never_sweeps_an_open_position` and
+  `test_wr04_stop_lost_entry_terminal_unreadable_then_exposed_is_b4_not_protected` assert that
+  PROTECTED / COMPLETE never appear and that `place_algo_protective` is called once in total (no
+  TP, no second stop).
+
+**Choices for the owner to confirm:**
+1. **A lost stop is never trusted again,** even if a later read would show ACTIVE. The coordinator
+   stops querying it after the loss. The only exits from the stop-lost UNPROTECTED are B4,
+   FLAT (position zero AND entry terminal, two reads) or the deadline. The owner's text names
+   only those exits.
+2. **No SAFE_MODE and no alert when the plan enters the stop-lost UNPROTECTED.** It only blocks
+   through `blocks_new_entries()`, the same as an UNPROTECTED plan after a first fill. SAFE_MODE
+   and the one CLOSE_REQUIRED alert come at the escalation (or at once on B4). The owner's text
+   asked for the blocking state, not for an alert at entry.
+3. **The deadline branch code is the new `B4_STOP_LOST_UNRESOLVED`.** It is not B2 or B3, so the
+   journal shows why the plan was closed. Exposure found later in this state keeps the existing
+   B4 code `B4_FILL_AFTER_STOP`.
+4. **A zero read that the second read contradicts (a non-zero second read) is treated as "not
+   proven".** The plan stays in UNPROTECTED and the next step reads again, which gives B4 if the
+   exposure is still there. The alternative was immediate B4 on the second read. I kept the
+   CR-03 gap handling.
+5. **B1 (entry_terminal_timeout_ms) does not apply once the stop is lost.** The lost-stop deadline
+   from `stop_lost_at` governs. B1 still applies, unchanged, while the stop is confirmed.
+6. **Alert flood (IN-01, still open):** the coordinator's `CLOSE_REQUIRED` alert is sent once, but
+   while the position stays unreadable the closer's own `EMERGENCY_CLOSE_FAILED` /
+   `POSITION_READ_FAILED` alert repeats on every CLOSE_FAILED step. The owner said to let the
+   closer's existing rules decide, so the closer was not changed. The "alert once" part of the
+   decision therefore holds for the coordinator alert only.
+7. **`stop_lost_at` is in-process,** like the rest of the coordinator state. A restart loses it.
+   The rebuild belongs to Phase 20/24 (G4-029) and is noted in `20-NOTES.md`.
+
+**Existing tests changed, and why:**
+- `tests/test_protection_branches.py::test_branch_stop_consumed_with_a_flat_position_and_terminal_entry_ends_flat`:
+  - Old assertion: after the stop triggered with the entry still open, the plan was
+    PROTECTED_ENTRY_OPEN (non-blocking). That pinned exactly the WR-04 gap.
+  - New assertion: UNPROTECTED with reason `STOP_LOST` and `blocks_new_entries()` True.
+  - The rest is unchanged: FLAT on the next step, no close, no alert, one placement.
+- `tests/test_protection_branches.py::test_branch_stop_lost_one_empty_position_read_never_sweeps_the_legs`
+  was renamed to `..._never_sweeps_an_open_position`:
+  - It kept the CR-03 assertions: one empty read is not FLAT, there is no sweep, and one gap note
+    is journaled.
+  - It used to assert that FLAT never happens over three more steps. Under the old code that held
+    because the plan settled to PROTECTED and attached TPs (the CR-03 interaction).
+  - It now asserts UNPROTECTED (blocking), then B4 on the next real read, one MARKET close of
+    0.004, FLAT, and the sweep only after the close. It also asserts that PROTECTED / COMPLETE
+    never appear and there is no second placement.
+  - Its docstring said WR-04 was not changed. The docstring now describes the owner decision.
+- `test_branch_stop_consumed_flat_reads_the_position_twice_before_flat` was not edited. It still
+  passes, with exactly two position reads on the FLAT step.
+- No other test file changed. `tests/test_phase19_gate.py` pins no stop-lost test name or branch
+  code.
+
+**New regressions** (`tests/test_protection_stop_lost.py`, 7 tests):
+- `test_wr04_stop_lost_position_unreadable_throughout_escalates_from_stop_lost_at`:
+  - PROTECTED_ENTRY_OPEN -> UNPROTECTED -> CLOSE_REQUIRED (-> CLOSE_FAILED), with every position
+    read failing.
+  - The loss is detected 1000 ms after the first fill. It is still UNPROTECTED at
+    `stop_lost_at + 7776` ms and CLOSE_REQUIRED (`B4_STOP_LOST_UNRESOLVED`) at `+7777` ms.
+  - `stop_lost_at_utc` never changes across the failed polls.
+  - The stop is queried once after the loss and never again.
+  - No `place_market_close`, one CLOSE_REQUIRED alert, still blocking three steps later, and one
+    placement in total.
+- `test_wr04_stop_lost_position_zero_entry_open_is_not_safe_and_escalates`:
+  - PROTECTED_ENTRY_OPEN -> UNPROTECTED -> CLOSE_REQUIRED, with the position flat and the entry
+    open.
+  - At the deadline: SAFE_MODE `CLOSE_REQUIRED` and one alert. Nothing is sent, because two reads
+    are flat. The plan stays CLOSE_REQUIRED and blocking while the entry is open, and is FLAT
+    once the entry ends.
+- `test_wr04_stop_lost_with_exposure_closes_at_once_and_never_places_a_stop`: immediate B4, one
+  MARKET close of 0.004, `stop_lost_at_utc` set, no placement call after the loss, and FLAT.
+- `test_wr04_a_canceled_or_missing_stop_is_never_replaced[canceled|missing]`:
+  - CANCELED (NOT_ACTIVE) and absent (ABSENT, the reading that re-places a stop that was never
+    confirmed).
+  - Three unreadable steps stay UNPROTECTED with no placement, then B4 once the position is read.
+  - This is the D034 "missing or canceled SL" case that D077 overrides.
+- `test_wr04_stop_lost_entry_terminal_unreadable_then_exposed_is_b4_not_protected`: the CR-03
+  interaction (see above).
+- `test_wr04_stop_lost_settles_flat_only_after_two_consecutive_zero_reads`:
+  - An unreadable read is UNPROTECTED.
+  - One zero read followed by a failed confirming read is still UNPROTECTED, with no sweep.
+  - Two zero reads give FLAT (`STOP_CONSUMED_FLAT`) with exactly two `snapshot_positions` calls
+    on that step.
+  - PROTECTED never appears.
+
+**Pre-fix check:**
+- I restored only the HEAD `src/execution/protection.py` and kept the new and changed tests.
+- Every new test failed: all 7 in `test_protection_stop_lost.py`, both parameter cases included.
+  Both changed tests in `test_protection_branches.py` failed too.
+- Honest note on `test_wr04_stop_lost_with_exposure_closes_at_once_and_never_places_a_stop`: the
+  immediate B4 itself already existed. This test fails on the old code only through its
+  `stop_lost_at_utc` assertion (`AttributeError`), not through the close behavior. The other six
+  fail on a behavior assertion: the old code kept PROTECTED_ENTRY_OPEN.
+
+### D077 and the provisional ids
+
+- **`docs/DECISIONS.md`:** one new row, D077, in the file's existing style.
+  - Status: "Accepted (2026-10-20, owner decision typed in the Phase 19 review session)".
+  - The text states the stop-lost policy and the scope (this branch only).
+  - It overrides D034's automatic re-placement of a missing or canceled SL for this branch only.
+    D034 stays for a failed initial placement and for "SAFE_MODE blocks new ENTRIES only".
+  - It says P6 (Demo, assumption A3) is NOT observed, so the policy is a design choice, not a
+    measurement.
+  - It says `max_unprotected_ms` stays `NOT_CONFIGURED`.
+  - D034's own row text is byte-unchanged.
+- **Gates:** `verify_decision_alignment.py all` is ALL_PASS. DC-02 (contiguous D001..D077), DC-01
+  and the AU/PR checks need only the row. No gate requires a `docs/DOC_STATUS.md` line for a new
+  row: DC-05 checks only the 2026-09-30 D044 line, and PR-01 only protocol rows. So DOC_STATUS was
+  not edited. The row carries no "protocol vX frozen" text and not the Phase 18 title, so
+  `research-gate.yml` and `_phase18_row()` are unaffected.
+- **Renumbered provisional ids:** D-10 (the D055 closure) moved from D077 to **D078**, and Q5 from
+  D078 to **D079**. Changed files:
+  - `19-DEC-D055-DRAFT.md` and `19-DEC-Q5-DRAFT.md` (the status lines now say "`docs/DECISIONS.md`
+    has no row for it" instead of "was not edited")
+  - `19-OWNER-GAPS.md`: the hard-limits line now records the D077 edit, plus O-01, Q5 and
+    section 5
+  - `19-NOTES.md`, `19-17-SUMMARY.md`
+  - `.planning/STATE.md`, `.planning/codebase/CONCERNS.md`
+  - `.planning/quick/261020-jua-.../261020-jua-SUMMARY.md`
+
+  **Both rows remain drafts and are NOT written.** D055 stays OPEN.
+- **Left as they are on purpose:** the "D077" mentions in the Phase 18 files (`18-26-PLAN.md`,
+  `18-26-SUMMARY.md`, `18-DEC-TAXONOMY-CODES.md`) and in `261020-jua-PLAN.md`. They record the
+  "next free number" at the time they were written, are not D-10/Q5 provisional ids, and are
+  historical records. `19-CONTEXT.md` and the 2x-NOTES files carried no provisional id.
+  `tests/test_phase19_gate.py` pins no id text.
+
+### Batch 3 verification
+
+**Where the checks ran:** all checks ran in the main checkout (`C:\Users\admin\Music\Trading`,
+branch `develop`). `workflow.use_worktrees` is `false`, so no worktree was created.
+
+| Check | Result |
+|---|---|
+| `uv run ruff check` | All checks passed |
+| `uv run ruff format --check` | 666 files already formatted |
+| `uv run mypy src` | Success: no issues found in 213 source files |
+| `uv run python scripts/verify_decision_alignment.py all` | ALL_PASS |
+| Targeted pytest at `e4b10e09`, 11 files plus the `test_decision_alignment*.py` glob (listed below) | 771 passed, 0 skipped |
+
+The files in the targeted run:
+- `tests/test_protection_branches.py`
+- `tests/test_protection_coordinator.py`
+- `tests/test_protection_router_rig.py`
+- `tests/test_protection_take_profits.py`
+- `tests/test_protection_unknown_entry.py`
+- `tests/test_protection_stop_lost.py`
+- `tests/test_emergency_market_close.py`
+- `tests/test_phase19_gate.py`
+- `tests/test_execution_manager.py`
+- `tests/test_decision_alignment*.py`
+- `tests/test_demo_rehearsal_flow.py`
+
+**Also run, because they read `docs/DECISIONS.md`:**
+- `tests/test_phase18_gate.py`, `tests/test_binance_limits_ratified_file.py`,
+  `tests/test_research_protocol_v250.py`, `tests/test_research_protocol_v260.py`,
+  `tests/test_research_gate_negative.py`, `tests/test_kill_gate_docs.py` and
+  `tests/test_deploy_docs.py`.
+- Result: 559 passed, 1 failed.
+- **Pre-existing failure, not caused by this batch:**
+  `tests/test_phase18_gate.py::test_invariant_5_no_unratified_default_in_src_or_scripts` asserts
+  `len(GUARDED_NAMES) == 34`. Batches 1 and 2 raised it to 36 in
+  `tests/test_no_unratified_defaults.py` (`2e5812e1`, `0110b938`) and did not run this gate. This
+  batch changed neither file, and the failure is independent of DECISIONS.md. It is not fixed
+  here; it needs the pin moved to 36 with a comment, in a separate change.
+
+**Not run or not verified:**
+- The full suite (`-m "not docker"`) and the `-m docker` suite.
+- Any `--execute`, the Demo, or the network.
+- P6 / A3: whether Binance cancels a closePosition stop with its position, and what a lost stop
+  reads as (ABSENT or which NOT_ACTIVE status). D077 is a design choice.
+- A real step cadence: the coordinator is still stepped only by tests and the rehearsal
+  (Phase 24).
+- The restart rebuild of `stop_lost_at` (choice 7).
+
+_Batch 3 fixed: 2026-10-20T11:10:00Z_
+_Fixer: Claude (gsd-code-fixer)_
