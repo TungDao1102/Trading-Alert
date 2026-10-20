@@ -2115,6 +2115,10 @@ async def issue_and_send(
     """Issue a PENDING approval and post its keyboard. A send failure aborts: no approval."""
     channel = _require_channel(ctx)
     issued = issue_approval(ctx, plan, role=role, action=action)
+    if issued.approval.approved_quantity is None:
+        # D078 item (6): the message must show the stored quantity; without one nothing is sent.
+        ctx.recorder.add_step(step_name, STEP_FAILED, "approval carries no approved quantity")
+        raise RehearsalAbort("the approval carries no approved quantity")
     try:
         await channel.send_approval(
             chat_id=chat_id,
