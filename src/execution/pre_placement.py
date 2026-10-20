@@ -11,8 +11,10 @@ re-implemented here and pinned against the backtest in the tests).
 
 Recorded, not decided:
 
-- Q2: only the mark price is read; the stop triggers on MARK_PRICE (D037), so a last-price read is
-  deliberately not added.
+- Q2: only the mark price is read; the stop triggers on MARK_PRICE (D037). The owner's 19-REVIEW
+  WR-06 decision records a last-price read as an OPEN work item (adapter read, a
+  `check_mark_price` input, tests): see the `check_mark_price` docstring and 19-OWNER-GAPS.md.
+  It is not built yet, so the last price is not checked.
 - Q6: the latest closed strategy-bar close is a required injected value; its producer is Phase 24.
 - Q7: the exchange open-order snapshot is the authority for "another order on the symbol"; an
   intent-store cross-check needs a new store query and is not built here.
@@ -267,7 +269,7 @@ def check_mark_price(
     entry_min_price: Decimal,
     entry_max_price: Decimal,
 ) -> str | None:
-    """Refuse when the live mark price is unusable, crossed the stop, or left the zone.
+    """Refuse when the live mark price is unusable, crossed the stop, or left the zone adversely.
 
     `now_utc` is the instant the age is measured at: it must be a clock reading taken AFTER the
     mark-price read (19-REVIEW CR-01), so a fresh reading has a small non-negative age. Binance's
@@ -277,9 +279,24 @@ def check_mark_price(
     A missing price, time or check instant, an unset age bound, a reading stamped more than
     `max_clock_skew` in the future and an older-than-bound reading all give MARK_PRICE_UNAVAILABLE
     (D-06 fail closed). A LONG whose mark is at or below the stop trigger (SHORT: at or above)
-    gives MARK_PRICE_CROSSED_STOP; a mark outside the inclusive entry zone gives
-    MARK_PRICE_OUTSIDE_ZONE. The stop convention matches `src.backtest.exits.is_sl_touched`
+    gives MARK_PRICE_CROSSED_STOP. The stop convention matches `src.backtest.exits.is_sl_touched`
     (LONG low <= trigger, SHORT high >= trigger).
+
+    MARK_PRICE_OUTSIDE_ZONE ("the price left the entry zone", D-05) is the ADVERSE side only
+    (owner decision, 19-REVIEW WR-06): a LONG refuses when the mark is strictly below
+    `entry_min_price`, a SHORT when it is strictly above `entry_max_price`; the exact zone edge
+    passes. A LONG with the mark above `entry_max_price` (a SHORT below `entry_min_price`) is
+    allowed: the GTD LIMIT then rests until the price comes back into the zone, which is what the
+    D-05 GTD backstop exists for. The crossed-stop, age and missing-input refusals above are
+    independent of this side rule and unchanged.
+
+    OPEN WORK ITEM (owner, 19-REVIEW WR-06 batch 1): D-05 also names the LAST price, and this
+    check reads only the mark price. The adapter has no last-price read (only `get_mark_price`).
+    Still to build, each with tests: (1) a new adapter read of the last price
+    (`src/adapters/binance_usdm.py`, behind the `ExecutionAdapter` Protocol); (2) a last-price
+    input to `check_mark_price` / `PrePlacementInputs`, with its own age and fail-closed rules;
+    (3) manager gate 5e wiring and regression tests. Tracked in 19-OWNER-GAPS.md. Until then the
+    last price is NOT checked.
     """
     _require_side(side)
     if not isinstance(max_clock_skew, timedelta) or max_clock_skew < timedelta(0):
@@ -304,7 +321,12 @@ def check_mark_price(
         crossed = mark_price >= sl_trigger_price
     if crossed:
         return MARK_PRICE_CROSSED_STOP
-    if mark_price < entry_min_price or mark_price > entry_max_price:
+    # WR-06: only the adverse side refuses; the favorable side is a resting GTD LIMIT.
+    if side == _LONG:
+        outside = mark_price < entry_min_price
+    else:
+        outside = mark_price > entry_max_price
+    if outside:
         return MARK_PRICE_OUTSIDE_ZONE
     return None
 

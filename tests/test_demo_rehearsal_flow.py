@@ -1003,14 +1003,32 @@ def test_order_scenarios_reach_the_entry_against_the_fakes_own_mark(
     assert step(data, "place_entry")["status"] == "PASSED"
 
 
-def test_a_mark_past_the_zone_cushion_is_still_refused(tmp_path: Path) -> None:
-    """The production zone check is not weakened: a mark one tick above entry_max refuses."""
+@pytest.mark.parametrize("scenario", ["far", "fill"])
+def test_a_mark_past_the_zone_cushion_is_still_refused(tmp_path: Path, scenario: str) -> None:
+    """The production zone check is not weakened: a LONG mark one tick below entry_min refuses.
+
+    19-REVIEW WR-06 (owner): only the adverse side refuses, which for the rehearsal's LONG plan
+    is a mark below entry_min. (Before WR-06 this test moved the mark one tick ABOVE entry_max;
+    that is now the favorable resting-limit side and is allowed, see the next test.)
+    """
     adapter = FakeDemoAdapter()
-    adapter.gate_mark_price = _derive("far").trade_plan.entry_max_price + Decimal("0.1")
-    code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
+    adapter.gate_mark_price = _derive(scenario).trade_plan.entry_min_price - Decimal("0.1")
+    code, data, _, _ = run_flow(tmp_path, scenario=scenario, adapter=adapter, execute=True)
     assert code == dr.EXIT_ABORTED
     assert adapter.mutating_calls() == []
     assert "MARK_PRICE_OUTSIDE_ZONE" in json.dumps(data)
+
+
+def test_a_far_mark_above_the_zone_is_the_favorable_side_and_reaches_the_entry(
+    tmp_path: Path,
+) -> None:
+    """19-REVIEW WR-06: a LONG mark one tick above entry_max no longer refuses at gate 5e."""
+    adapter = FakeDemoAdapter()
+    adapter.gate_mark_price = _derive("far").trade_plan.entry_max_price + Decimal("0.1")
+    _, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
+    assert "MARK_PRICE_OUTSIDE_ZONE" not in json.dumps(data)
+    entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
+    assert entry_kwargs["price"] == _derive("far").entry_price
 
 
 def test_tp1_quantity_fraction_is_the_backtest_constant() -> None:

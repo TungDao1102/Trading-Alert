@@ -239,7 +239,8 @@ OPERATOR_ID = "demo-rehearsal-runner"
 FAR_BAND_FRACTION = Decimal("0.5")  # fraction of the PERCENT_PRICE band used for the entry
 # 19-REVIEW CR-02: the entry zone reaches this far past the derive-time mark on the near side,
 # so the live mark read at gate 5e (after the approval tap) can still sit inside the zone.
-# A rehearsal value, not a strategy parameter; the production zone check is unchanged.
+# A rehearsal value, not a strategy parameter; the production zone check (adverse side only,
+# 19-REVIEW WR-06) is not loosened for the rehearsal.
 MARK_ZONE_CUSHION_RATE = Decimal("0.005")
 SL_DISTANCE_RATE = Decimal("0.015")
 TP1_DISTANCE_RATE = Decimal("0.03")
@@ -1614,9 +1615,10 @@ def derive_plan(
     tick = filters.price_tick_size
     step = filters.quantity_step_size
     entry = quantize_price(price=raw_entry, price_tick_size=tick, direction=PRICE_ROUND_DOWN)
-    # 19-REVIEW CR-02: gate 5e refuses a live mark outside [entry_min, entry_max], so a one-price
-    # zone at the far/fill entry could never place. The zone reaches past the mark by the cushion
-    # on the near side and is mirrored on the far side, so its mid (the price the manager
+    # 19-REVIEW CR-02: gate 5e refuses a LONG whose live mark is below entry_min (the adverse
+    # side only, 19-REVIEW WR-06), so a one-price zone at the `fill` entry (above the mark) could
+    # never place. The zone contains the mark for both scenarios and reaches past it by the
+    # cushion on the near side and is mirrored on the far side, so its mid (the price the manager
     # places at) is still exactly `entry`. Both edges are on the tick grid.
     if scenario == "fill":
         entry_min = quantize_price(

@@ -228,7 +228,7 @@ Production code also emits the following plain strings as `reason_code` values o
 | `SYMBOL_STATE_UNAVAILABLE` | `src/execution/pre_placement.py` | The exchange open-order state could not be read (fail closed) | proposed canonical, promote in Phase 24 |
 | `MARK_PRICE_UNAVAILABLE` | `src/execution/pre_placement.py` | The mark price is missing, older than the owner maximum age or not valid for the check | proposed canonical, promote in Phase 24 |
 | `MARK_PRICE_CROSSED_STOP` | `src/execution/pre_placement.py` | The mark price is already at or beyond the stop trigger on the losing side | proposed canonical, promote in Phase 24 |
-| `MARK_PRICE_OUTSIDE_ZONE` | `src/execution/pre_placement.py` | The mark price has left the entry zone, so the approved entry is no longer valid | proposed canonical, promote in Phase 24 |
+| `MARK_PRICE_OUTSIDE_ZONE` | `src/execution/pre_placement.py` | The mark price has left the entry zone on the adverse side (LONG: strictly below the zone minimum; SHORT: strictly above the zone maximum), so the approved entry is no longer valid; a mark on the favorable side is allowed because the GTD LIMIT rests (owner decision, 19-REVIEW WR-06) | proposed canonical, promote in Phase 24 |
 | `HEDGE_MODE_UNSUPPORTED` | `src/execution/pre_placement.py` | The account is in Hedge position mode; V1 places only One-way orders | proposed canonical, promote in Phase 24 |
 | `ENTRY_REFUSED_BEFORE_SEND` | `src/execution/manager.py` | The entry was refused before anything reached the exchange (REST gate pause or ban, entries blocked by the clock-drift guard, missing signed-call policy); no probe, no SAFE_MODE | proposed canonical, promote in Phase 24 |
 

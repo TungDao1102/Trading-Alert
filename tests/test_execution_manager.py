@@ -3051,8 +3051,11 @@ def _mark_cases() -> list[tuple[str, dict[str, Any], str]]:
     return [
         ("mark at the stop trigger", {"mark": Decimal("98.00")}, "MARK_PRICE_CROSSED_STOP"),
         ("mark below the stop", {"mark": Decimal("97.50")}, "MARK_PRICE_CROSSED_STOP"),
-        ("mark above the zone", {"mark": Decimal("102.01")}, "MARK_PRICE_OUTSIDE_ZONE"),
+        # 19-REVIEW WR-06 (owner): only the ADVERSE side refuses. The golden plan is a LONG with
+        # zone 100.00-102.00 and tick 0.01, so the adverse side is below entry_min; a mark above
+        # entry_max is the favorable resting-limit case and places (see the test below).
         ("mark below the zone", {"mark": Decimal("99.50")}, "MARK_PRICE_OUTSIDE_ZONE"),
+        ("mark one tick below the zone", {"mark": Decimal("99.99")}, "MARK_PRICE_OUTSIDE_ZONE"),
         (
             "mark read raises",
             {"mark_exception": TimeoutError("read timeout")},
@@ -3077,6 +3080,33 @@ async def test_mark_price_refusals_make_only_the_reads_and_leave_the_approval_un
         await _assert_refused_then_placeable(
             label=label, reason=reason, adapter=adapter, expected_calls=PRE_PLACEMENT_READS
         )
+
+
+@pytest.mark.parametrize(
+    "mark",
+    [
+        Decimal("100.00"),  # exactly entry_min: the adverse boundary passes (strict <)
+        Decimal("102.00"),  # exactly entry_max
+        Decimal("102.01"),  # one tick above the zone: favorable, the GTD LIMIT rests
+        Decimal("150.00"),  # far above the zone: still favorable
+    ],
+)
+async def test_wr06_a_long_mark_at_the_edge_or_on_the_favorable_side_places(mark: Decimal) -> None:
+    """19-REVIEW WR-06 regression: the old gate refused a LONG whose mark was above the zone.
+
+    The owner's D-05 reading: "left the entry zone" is the adverse side only. A LONG with the
+    mark above entry_max places a resting GTD LIMIT at the zone mid, unchanged; the same reads
+    precede it and exactly one entry is sent.
+    """
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    adapter.mark_reading = _mark_reading_for(case_input, mark_price=mark)
+    outcome = await _run_plan(adapter)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK"), mark
+    assert _reads_only(adapter)[: len(PRE_PLACEMENT_READS)] == PRE_PLACEMENT_READS
+    entries = [c for c in adapter.calls if c["method"] == "place_entry"]
+    assert len(entries) == 1
+    assert entries[0]["kwargs"]["price"] == Decimal(case_input["expected_limit_price"])
 
 
 async def test_mark_age_a_fresh_mark_stamped_after_now_utc_places() -> None:

@@ -2,10 +2,11 @@
 
 Hand oracles (tick 0.10, LONG zone 99.50-100.60, stop 98.00; SHORT zone 99.50-100.60, stop 102.00):
 
-    LONG : mark 98.00 is AT the stop (crossed); mark 99.40 is one tick below the zone (outside);
-           99.50 and 100.60 are the inclusive zone edges (pass); 100.70 is above the zone.
-    SHORT: mark 102.00 is AT the stop (crossed); 100.70 is one tick above the zone (outside);
-           99.50 and 100.60 pass; 99.40 is below the zone.
+    LONG : mark 98.00 is AT the stop (crossed); mark 99.40 is one tick below the zone (outside,
+           adverse); 99.50 and 100.60 are the inclusive zone edges (pass); 100.70 is above the
+           zone, the favorable side (pass: the GTD LIMIT rests, 19-REVIEW WR-06).
+    SHORT: mark 102.00 is AT the stop (crossed); 100.70 is one tick above the zone (outside,
+           adverse); 99.50 and 100.60 pass; 99.40 is below the zone, the favorable side (pass).
     Mark age is measured against `max_mark_price_age_ms`; an equal age passes, a future reading
     (negative age) and an unset bound refuse as MARK_PRICE_UNAVAILABLE.
     19-REVIEW CR-01: the age is taken at `mark_checked_at_utc` (a clock read AFTER the mark read),
@@ -106,25 +107,56 @@ def _inputs(side: str = "LONG", **over: Any) -> PrePlacementInputs:
     ("side", "mark", "expected"),
     [
         ("LONG", "100.00", None),
-        ("LONG", "99.50", None),  # inclusive lower edge
+        ("LONG", "99.50", None),  # exact lower edge (the adverse boundary) passes
         ("LONG", "100.60", None),  # inclusive upper edge
         ("LONG", "98.00", pp.MARK_PRICE_CROSSED_STOP),  # AT the stop
         ("LONG", "97.50", pp.MARK_PRICE_CROSSED_STOP),
-        ("LONG", "98.10", pp.MARK_PRICE_OUTSIDE_ZONE),  # above stop, below zone
-        ("LONG", "99.40", pp.MARK_PRICE_OUTSIDE_ZONE),  # one tick below entry_min
-        ("LONG", "100.70", pp.MARK_PRICE_OUTSIDE_ZONE),  # one tick above entry_max
+        ("LONG", "98.10", pp.MARK_PRICE_OUTSIDE_ZONE),  # above stop, below zone (adverse)
+        ("LONG", "99.49", pp.MARK_PRICE_OUTSIDE_ZONE),  # strictly below entry_min (adverse)
+        ("LONG", "99.40", pp.MARK_PRICE_OUTSIDE_ZONE),  # one tick below entry_min (adverse)
+        ("LONG", "100.70", None),  # WR-06: one tick above entry_max is favorable, the LIMIT rests
+        ("LONG", "150.00", None),  # WR-06: far above the zone is still favorable
         ("SHORT", "100.00", None),
-        ("SHORT", "99.50", None),
-        ("SHORT", "100.60", None),
+        ("SHORT", "99.50", None),  # inclusive lower edge
+        ("SHORT", "100.60", None),  # exact upper edge (the adverse boundary) passes
         ("SHORT", "102.00", pp.MARK_PRICE_CROSSED_STOP),
         ("SHORT", "103.00", pp.MARK_PRICE_CROSSED_STOP),
-        ("SHORT", "101.90", pp.MARK_PRICE_OUTSIDE_ZONE),
-        ("SHORT", "100.70", pp.MARK_PRICE_OUTSIDE_ZONE),  # one tick above entry_max
-        ("SHORT", "99.40", pp.MARK_PRICE_OUTSIDE_ZONE),  # one tick below entry_min
+        ("SHORT", "101.90", pp.MARK_PRICE_OUTSIDE_ZONE),  # below stop, above zone (adverse)
+        ("SHORT", "100.61", pp.MARK_PRICE_OUTSIDE_ZONE),  # strictly above entry_max (adverse)
+        ("SHORT", "100.70", pp.MARK_PRICE_OUTSIDE_ZONE),  # one tick above entry_max (adverse)
+        ("SHORT", "99.40", None),  # WR-06: one tick below entry_min is favorable, the LIMIT rests
+        ("SHORT", "50.00", None),  # WR-06: far below the zone is still favorable
     ],
 )
 def test_check_mark_price_position(side: str, mark: str, expected: str | None) -> None:
+    """D-05 / owner decision 19-REVIEW WR-06: "left the zone" is the ADVERSE side only.
+
+    LONG refuses `mark < entry_min`, SHORT refuses `mark > entry_max` (strict: the edge passes).
+    """
     assert check_mark_price(**_mark_kwargs(side, mark_price=D(mark))) == expected
+
+
+@pytest.mark.parametrize(
+    ("side", "favorable", "adverse"),
+    [("LONG", "100.70", "99.40"), ("SHORT", "99.40", "100.70")],
+)
+def test_wr06_only_the_adverse_side_refuses(side: str, favorable: str, adverse: str) -> None:
+    """19-REVIEW WR-06 regression: the old code refused BOTH sides of the zone.
+
+    The favorable side (a resting GTD LIMIT) passes; the adverse side refuses; and the
+    favorable side never masks a stale reading or a crossed stop.
+    """
+    assert check_mark_price(**_mark_kwargs(side, mark_price=D(favorable))) is None
+    assert check_mark_price(**_mark_kwargs(side, mark_price=D(adverse))) == (
+        pp.MARK_PRICE_OUTSIDE_ZONE
+    )
+    stale = _mark_kwargs(
+        side,
+        mark_price=D(favorable),
+        mark_time_utc=NOW - timedelta(milliseconds=MAX_AGE_MS + 1),
+    )
+    assert check_mark_price(**stale) == pp.MARK_PRICE_UNAVAILABLE
+    assert check_mark_price(**_mark_kwargs(side, mark_price=None)) == pp.MARK_PRICE_UNAVAILABLE
 
 
 @pytest.mark.parametrize("side", ["LONG", "SHORT"])
