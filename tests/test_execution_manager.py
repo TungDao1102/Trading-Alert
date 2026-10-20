@@ -2446,6 +2446,74 @@ async def test_stored_quantity_refused_at_consume_places_nothing() -> None:
     assert _placement_calls(adapter) == []
 
 
+async def test_stored_quantity_missing_at_consume_is_no_trade_without_safe_mode() -> None:
+    """Owner decision 2026-10-20, case (1): a legacy NULL row is NO_TRADE, never SAFE_MODE."""
+    from src.execution.manager import APPROVED_QUANTITY_NOT_CONFIRMED
+    from src.persistence.errors import ApprovedQuantityMissing
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    safe_mode = RecordingSafeModeController()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=FailingIntentStore(
+            "consume_and_record_entry_intent", ApprovedQuantityMissing("stored NULL")
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, APPROVED_QUANTITY_NOT_CONFIRMED)
+    assert safe_mode.entered_reasons == []
+    assert _placement_calls(adapter) == []
+
+
+async def test_stored_quantity_inconsistent_at_consume_enters_safe_mode() -> None:
+    """Owner decision 2026-10-20, cases (2) and (3): NO_TRADE plus SAFE_MODE, nothing placed."""
+    from src.execution.manager import APPROVED_QUANTITY_NOT_CONFIRMED
+    from src.persistence.errors import ApprovedQuantityInconsistent
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    safe_mode = RecordingSafeModeController()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=FailingIntentStore(
+            "consume_and_record_entry_intent", ApprovedQuantityInconsistent("differs")
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, APPROVED_QUANTITY_NOT_CONFIRMED)
+    assert safe_mode.entered_reasons == ["APPROVED_QUANTITY_INCONSISTENT"]
+    assert _placement_calls(adapter) == []
+
+
+async def test_inconsistent_quantity_still_no_trade_when_safe_mode_journal_fails() -> None:
+    """Non-raising SAFE_MODE entry: a failing controller never turns the refusal into a crash."""
+    from src.execution.manager import APPROVED_QUANTITY_NOT_CONFIRMED
+    from src.persistence.errors import ApprovedQuantityInconsistent
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    class _JournalFails(RecordingSafeModeController):
+        def enter_safe_mode(self, *, reason: str, now_utc: Any = None) -> None:
+            super().enter_safe_mode(reason=reason, now_utc=now_utc)
+            raise RuntimeError("journal down")
+
+    adapter = FakeExecutionAdapter()
+    safe_mode = _JournalFails()
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=FailingIntentStore(
+            "consume_and_record_entry_intent", ApprovedQuantityInconsistent("below")
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, APPROVED_QUANTITY_NOT_CONFIRMED)
+    assert safe_mode.entered_reasons == ["APPROVED_QUANTITY_INCONSISTENT"]
+    assert _placement_calls(adapter) == []
+
+
 async def test_consume_receives_the_bound_approved_quantity() -> None:
     """The store is handed the quantity gate 1c bound, next to the quantity it will place."""
     from tests.support.intent_store_fakes import InMemoryExecutionIntentStore

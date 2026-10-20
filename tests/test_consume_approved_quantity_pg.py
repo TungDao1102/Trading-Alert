@@ -1,6 +1,6 @@
 """The consume transaction re-checks the stored approved quantity (19-REVIEW WR-01 follow-up).
 
-Quick task 261020-q2d, DECISIONS D078 (5). `bind_plan` compares the plan quantity with the
+Quick task 261020-q2d, DECISIONS D078 (6). `bind_plan` compares the plan quantity with the
 `Approval` object's `approved_quantity`, and that object is supplied by the caller. The consume
 transaction (`PgExecutionStateStore.consume_and_record_entry_intent`) therefore reads the stored
 `approvals.approved_quantity` itself, under `FOR UPDATE`, after the intent INSERT and before the
@@ -8,6 +8,11 @@ consuming UPDATE: it must be NOT NULL, equal to the quantity the manager bound a
 quantity about to be placed. Otherwise `ApprovedQuantityRefused` is raised inside the
 transaction, the intent INSERT rolls back, the approval stays UNCONSUMED, and the manager
 answers `APPROVED_QUANTITY_NOT_CONFIRMED` with no exchange call.
+
+Owner decision (2026-10-20): a NULL (a legacy row from before revision 0006) is
+`ApprovedQuantityMissing` and stays NO_TRADE without SAFE_MODE; a stored value that differs from
+the bound quantity or is below the quantity to place is `ApprovedQuantityInconsistent`, and the
+manager also enters SAFE_MODE (`APPROVED_QUANTITY_INCONSISTENT`).
 
 A replay (the ENTRY row already exists) still answers False before any quantity is read, so a
 redelivered callback replays to the stored outcome exactly as before.
@@ -26,7 +31,12 @@ from sqlalchemy.orm import Session
 from src.db.mappers import approval_to_row
 from src.domain.enums import ApprovalAction, ApprovalResult
 from src.execution.manager import APPROVED_QUANTITY_NOT_CONFIRMED, ExecutionOutcome
-from src.persistence.errors import ApprovedQuantityRefused, IntentStateConflict
+from src.persistence.errors import (
+    ApprovedQuantityInconsistent,
+    ApprovedQuantityMissing,
+    ApprovedQuantityRefused,
+    IntentStateConflict,
+)
 
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.test_execution_exactly_once_pg import (
@@ -37,10 +47,17 @@ from tests.test_execution_exactly_once_pg import (
     _seed_parent_chain,
     _store_on,
 )
-from tests.test_execution_manager import _build_approval, _run_plan
+from tests.test_execution_manager import (
+    RecordingSafeModeController,
+    _build_approval,
+    _run_plan,
+)
 
 # The fixture's approved quantity (the plan's quantity_after_rounding, D078).
 STORED = Decimal("2.415")
+# SAFE_MODE reason of the inconsistent cases (owner decision 2026-10-20, D078 (6)); a literal,
+# so the test pins the journaled string.
+APPROVED_QUANTITY_INCONSISTENT = "APPROVED_QUANTITY_INCONSISTENT"
 
 
 def _set_stored_quantity(engine: Engine, value: Decimal | None) -> None:
@@ -114,8 +131,9 @@ def test_consume_refuses_a_row_that_stores_no_quantity(pg_db: str) -> None:
     with _store_on(pg_db) as (engine, store):
         _seed_parent_chain(engine)
         _set_stored_quantity(engine, None)
-        with pytest.raises(ApprovedQuantityRefused):
+        with pytest.raises(ApprovedQuantityMissing) as caught:
             store.consume_and_record_entry_intent(**_args())
+        assert not isinstance(caught.value, ApprovedQuantityInconsistent)
         _assert_nothing_consumed(engine)
 
 
@@ -126,7 +144,7 @@ def test_consume_refuses_a_stored_quantity_that_differs_from_the_bound_one(
     with _store_on(pg_db) as (engine, store):
         _seed_parent_chain(engine)
         _set_stored_quantity(engine, stored)
-        with pytest.raises(ApprovedQuantityRefused):
+        with pytest.raises(ApprovedQuantityInconsistent):
             store.consume_and_record_entry_intent(**_args(intended_quantity=Decimal("2.000")))
         _assert_nothing_consumed(engine)
 
@@ -135,11 +153,19 @@ def test_consume_refuses_a_placed_quantity_above_the_stored_one(pg_db: str) -> N
     """The caller's bound and the stored value agree, yet the order would exceed them."""
     with _store_on(pg_db) as (engine, store):
         _seed_parent_chain(engine)
-        with pytest.raises(ApprovedQuantityRefused):
+        with pytest.raises(ApprovedQuantityInconsistent):
             store.consume_and_record_entry_intent(
                 **_args(intended_quantity=STORED + Decimal("1e-18"))
             )
         _assert_nothing_consumed(engine)
+
+
+def test_both_refusals_are_approved_quantity_refusals(pg_db: str) -> None:
+    """Callers that only know the base class (or `IntentStateConflict`) still fail closed."""
+    assert issubclass(ApprovedQuantityMissing, ApprovedQuantityRefused)
+    assert issubclass(ApprovedQuantityInconsistent, ApprovedQuantityRefused)
+    assert not issubclass(ApprovedQuantityMissing, ApprovedQuantityInconsistent)
+    assert not issubclass(ApprovedQuantityInconsistent, ApprovedQuantityMissing)
 
 
 def test_the_refusal_is_an_intent_state_conflict_for_every_other_caller(pg_db: str) -> None:
@@ -204,18 +230,30 @@ def test_a_refused_consume_can_be_retried_once_the_row_confirms(pg_db: str) -> N
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("stored", [None, Decimal("2.000"), Decimal("2.416")])
+@pytest.mark.parametrize(
+    ("stored", "safe_mode_reasons"),
+    [
+        # Case (1), a legacy row from before revision 0006: NO_TRADE, no SAFE_MODE (owner).
+        (None, []),
+        # Case (3), stored below the quantity to place (the caller's 2.415 is bound and sized).
+        (Decimal("2.000"), [APPROVED_QUANTITY_INCONSISTENT]),
+        # Case (2), stored differs from the bound quantity.
+        (Decimal("2.416"), [APPROVED_QUANTITY_INCONSISTENT]),
+    ],
+)
 async def test_manager_refuses_when_the_database_does_not_confirm_the_quantity(
-    pg_db: str, stored: Decimal | None
+    pg_db: str, stored: Decimal | None, safe_mode_reasons: list[str]
 ) -> None:
     adapter = BinanceSemanticsFakeAdapter()
+    safe_mode = RecordingSafeModeController()
     with _store_on(pg_db) as (engine, store):
         _seed_parent_chain(engine)
         _set_stored_quantity(engine, stored)
-        outcome = await _run_plan(adapter, intent_store=store)
+        outcome = await _run_plan(adapter, intent_store=store, safe_mode_controller=safe_mode)
         assert outcome == ExecutionOutcome(
             is_no_trade=True, reason_code=APPROVED_QUANTITY_NOT_CONFIRMED
         )
+        assert safe_mode.entered_reasons == safe_mode_reasons
         assert adapter.calls_to("place_entry") == []
         assert adapter.calls_to("place_algo_protective") == []
         _assert_nothing_consumed(engine)
@@ -237,7 +275,11 @@ async def test_manager_replay_is_unchanged_by_the_quantity_check(pg_db: str) -> 
         _seed_parent_chain(engine)
         first = await _run_plan(adapter, intent_store=store)
         calls_after_first = len(adapter.calls)
-        _set_stored_quantity(engine, None)
-        second = await _run_plan(adapter, intent_store=store)
-        assert second == first
-        assert len(adapter.calls) == calls_after_first
+        for stored in (None, Decimal("2.000")):
+            _set_stored_quantity(engine, stored)
+            safe_mode = RecordingSafeModeController()
+            second = await _run_plan(adapter, intent_store=store, safe_mode_controller=safe_mode)
+            assert second == first
+            assert len(adapter.calls) == calls_after_first
+            # The replay is answered before the consume, so no quantity refusal and no SAFE_MODE.
+            assert safe_mode.entered_reasons == []
