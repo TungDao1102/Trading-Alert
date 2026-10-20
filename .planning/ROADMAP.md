@@ -969,7 +969,7 @@ This absorbs former Phase 15 (live-price check).
 - [G4-020] The planner has no tick size, so a stop within one tick of the zone edge could be snapped by the risk layer; assert SL and entry geometry after tick snap (source: .planning/phases/15-strategy-geometry-correction/15-13-SUMMARY.md:90; decision: D054, accepted limitation)
 - [G4-036] An executed TradePlan stays APPROVED and `expiry_utc` governs only an unfilled entry; nothing may move an executed plan to EXPIRED, so the criterion 2 plan-status check must not contradict this (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:19-20, docs/DECISIONS.md D051 item (i); decision: D051)
 
-**Plans:** 10/17 plans executed
+**Plans:** 16/17 plans executed
 
 Plans:
 - [x] 19-01-PLAN.md - Execution-limits file and loader: four NOT_CONFIGURED keys, live path refuses while unset (D-07, D-13)
@@ -982,12 +982,12 @@ Plans:
 - [x] 19-08-PLAN.md - Adapter MARKET reduce-only close, pre-send refusal marker, error facts, live lot filters (D-15, D-21)
 - [x] 19-09-PLAN.md - Store contract: sized realized risk and TP intent quantity; live-outcome read-back (D-20, D-22)
 - [x] 19-10-PLAN.md - Fake exchange v2: positions, partial fills, -4509, MARKET close, scripted race gates
-- [ ] 19-11-PLAN.md - Protection coordinator tracer: fill-driven closePosition stop, REST confirmation (D-10, D-11, D-12)
-- [ ] 19-12-PLAN.md - Automatic reduce-only MARKET emergency close with splitting and query-before-resend (D-15, D-16, D-17)
-- [ ] 19-13-PLAN.md - Manager pre-placement gates and the live context; rehearsal call site (criteria 1 and 2)
-- [ ] 19-14-PLAN.md - Coordinator failure branches B1-B5, deadlines, CLOSE_REQUIRED (D-12, D-13, criterion 3)
-- [ ] 19-15-PLAN.md - Manager fill-driven placement: GTD entry, hand-off, taxonomy on the entry path, legacy tests rewritten (D-10, D-21)
-- [ ] 19-16-PLAN.md - TP legs after the entry is terminal; attach rewritten; rehearsal fill flow (criterion 4, D-17..D-20)
+- [x] 19-11-PLAN.md - Protection coordinator tracer: fill-driven closePosition stop, REST confirmation (D-10, D-11, D-12)
+- [x] 19-12-PLAN.md - Automatic reduce-only MARKET emergency close with splitting and query-before-resend (D-15, D-16, D-17)
+- [x] 19-13-PLAN.md - Manager pre-placement gates and the live context; rehearsal call site (criteria 1 and 2)
+- [x] 19-14-PLAN.md - Coordinator failure branches B1-B5, deadlines, CLOSE_REQUIRED (D-12, D-13, criterion 3)
+- [x] 19-15-PLAN.md - Manager fill-driven placement: GTD entry, hand-off, taxonomy on the entry path, legacy tests rewritten (D-10, D-21)
+- [x] 19-16-PLAN.md - TP legs after the entry is terminal; attach rewritten; rehearsal fill flow (criterion 4, D-17..D-20)
 - [ ] 19-17-PLAN.md - Phase gate, GLOSSARY codes, owner-gap register, EXEC-07 note
 
 ### Phase 20: Reconcile + SAFE_MODE Hardening + Alerts
@@ -1313,7 +1313,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 59/63 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
-| 19. Execution Plan Binding + Pre-Placement Checks | 10/17 | In Progress | - |
+| 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |

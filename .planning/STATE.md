@@ -5,17 +5,17 @@ current_phase: 19
 current_phase_name: Execution Plan Binding + Pre-Placement Checks
 current_plan: 11
 status: executing
-stopped_at: Completed 19-10-PLAN.md (plans 01-10 merged; next 19-11)
-last_updated: "2026-10-19T14:14:16.160Z"
+stopped_at: Completed 19-16-PLAN.md (worktree p19-15; next 19-17)
+last_updated: "2026-10-20T07:15:17.456Z"
 last_activity: 2026-10-19
-state_head: 42898167766d132dcc10c882b133ff762819a85b
+state_head: e0be1935b45442cae13e63e0d51d39b291a5d9de
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 250
-  completed_plans: 239
-last_activity_desc: Phase 19 execution started
+  completed_plans: 245
 milestone_name: milestone
+last_activity_desc: Phase 19 execution started
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -232,6 +232,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P62 | not measured (two full suites of 15 min) | 3 tasks | 11 files |
 | Phase 16 P60 | 3h | 4 tasks | 33 files |
 | Phase 19 P01 | 28 min | 3 tasks | 8 files |
+| Phase 19 P16 | about 30 min (commit clock, 13:45 to 14:13) | 3 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -557,6 +558,7 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-60: research windows are built with RESEARCH_WARMUP_SPAN (50 days, STRUCTURAL) of price history before their start; simulator semantics 2.2.0; protocol v2.5.0 with D073 and D074 (B3-CR-01); the Development window starts cold (data begins 2024-10-03)
 - [Phase 16]: 16-60: the original 240 research records stay unchanged and are superseded by the rerun under 2.2.0 (D074, owner's wording); rerun directory research-run-1-v2-2-0 and a sixth authorization key are implemented by 16-61
 - [Phase 19]: 19-01: the D-13 entry terminal timeout key is named entry_terminal_timeout_ms (unit suffix added); the four execution limits live in config/execution/execution-limits-v1.toml, all NOT_CONFIGURED, O-04 stays open
+- [Phase 19]: 19-16: attach never places or cancels a stop; a TP leg counts only when the response confirms it and a REST query answers ACTIVE; an INCOMPLETE or stale-without-live-filters plan snapshot is refused into TP_UNAVAILABLE (stop kept, SAFE_MODE, alert, no flatten)
 
 ### Pending Todos
 
@@ -640,6 +642,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-19T13:00:57.014Z
-Stopped at: Completed 19-01-PLAN.md
+Last session: 2026-10-20T07:15:16.263Z
+Stopped at: Completed 19-16-PLAN.md (worktree p19-15; next 19-17)
 Resume file: None
