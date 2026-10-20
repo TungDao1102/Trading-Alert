@@ -47,6 +47,8 @@ STATE_NAMES = {
     "FLAT",
     "CLOSE_FAILED",
     "ENTRY_ENDED_NO_FILL",
+    # 19-REVIEW WR-05 (owner): an ENTRY_STATE_UNKNOWN entry never found by GTD + grace.
+    "ENTRY_UNRESOLVED",
 }
 
 
@@ -55,7 +57,7 @@ STATE_NAMES = {
 # --------------------------------------------------------------------------- #
 
 
-def test_protection_state_names_are_the_ten_stable_names() -> None:
+def test_protection_state_names_are_the_eleven_stable_names() -> None:
     assert {member.name for member in ProtectionState} == STATE_NAMES
     assert all(member.value == member.name for member in ProtectionState)
 
@@ -65,6 +67,7 @@ def test_protection_state_names_are_the_ten_stable_names() -> None:
     [
         "max_unprotected_ms",
         "entry_terminal_timeout_ms",
+        "entry_unknown_grace_ms",
         "min_remaining_validity_seconds",
         "max_mark_price_age_ms",
     ],

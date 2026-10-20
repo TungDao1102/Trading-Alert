@@ -208,8 +208,9 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-r
 # Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
 # signed request an explicit recvWindow; no number is chosen here.
 DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
-# Plan 19-13: the owner's four execution limits (plan 19-01). Every value is NOT_CONFIGURED in
-# the committed file, so a run that reaches the order path aborts before any mutation.
+# Plan 19-13: the owner's execution limits (plan 19-01; five keys since 19-REVIEW WR-05). Every
+# value is NOT_CONFIGURED in the committed file, so a run that reaches the order path aborts
+# before any mutation.
 DEFAULT_EXECUTION_LIMITS_FILE = REPO_ROOT / "config" / "execution" / "execution-limits-v1.toml"
 
 EXIT_OK = 0
@@ -1845,7 +1846,7 @@ def require_execution_limits_set(ctx: RunContext) -> ExecutionLimits:
         detail = f"{LIMITS_NOT_CONFIGURED}: {', '.join(unset)}"
         ctx.recorder.add_step("execution_limits", STEP_FAILED, detail)
         raise RehearsalAbort(detail)
-    ctx.recorder.add_step("execution_limits", STEP_PASSED, "all four execution limits are set")
+    ctx.recorder.add_step("execution_limits", STEP_PASSED, "all execution limits are set")
     return limits
 
 

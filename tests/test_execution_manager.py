@@ -1149,7 +1149,9 @@ async def test_q5_place_entry_is_sent_once_for_every_error_kind(failure: str, pr
         assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
         assert entry.intent_status == ExecutionIntentStatus.UNKNOWN
         assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
-        assert registry.register_attempts == 0
+        # 19-REVIEW WR-05 (owner): the UNKNOWN entry is still handed to the coordinator.
+        assert len(registry.entries) == 1
+        assert registry.entries[0].entry_state_unknown is True
 
 
 _ENTRY_PLACEMENT_FUNCTION = "_place_entry_no_blind_retry"
@@ -1351,7 +1353,9 @@ async def test_an_unknown_exchange_error_found_by_the_probe_is_handed_off() -> N
 
 async def test_an_unknown_exchange_error_absent_by_the_probe_is_unknown_and_never_resent() -> None:
     """UNKNOWN_EXCHANGE_ERROR with a `found=False` probe: NO second attempt (Q5), intent
-    UNKNOWN, SAFE_MODE(ENTRY_STATE_UNKNOWN), RECONCILIATION_REQUIRED, nothing handed off."""
+    UNKNOWN, SAFE_MODE(ENTRY_STATE_UNKNOWN), RECONCILIATION_REQUIRED. 19-REVIEW WR-05 (owner):
+    the entry is handed to the coordinator flagged `entry_state_unknown` (it was "nothing handed
+    off" before)."""
     from src.domain.enums import ExecutionIntentStatus
 
     case_input = _load_input()
@@ -1374,7 +1378,8 @@ async def test_an_unknown_exchange_error_absent_by_the_probe_is_unknown_and_neve
     assert methods.count("place_entry") == 1
     assert methods.count("query_order_by_client") == 1
     assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
-    assert registry.register_attempts == 0
+    assert len(registry.entries) == 1
+    assert registry.entries[0].entry_state_unknown is True
     entry = store.get_entry(approval_id=case_input["approval_id"])
     assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
 
@@ -1398,6 +1403,182 @@ async def test_a_failing_error_facts_is_treated_as_an_unknown_exchange_error() -
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert [c["method"] for c in adapter.calls].count("place_entry") == 1
     assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+
+
+# --------------------------------------------------------------------------- #
+# 19-REVIEW WR-05 (owner): an ENTRY_STATE_UNKNOWN entry is handed to the coordinator.
+# --------------------------------------------------------------------------- #
+
+
+async def test_wr05_an_unknown_entry_is_registered_with_the_coordinator_and_sent_once() -> None:
+    """The old code returned on the UNKNOWN path without `register_resting_entry`.
+
+    Now the entry is handed over flagged `entry_state_unknown`, with the `goodTillDate` it was
+    sent with, while everything Q5 requires stays: one `place_entry`, one probe, no stop from the
+    manager, the intent UNKNOWN (never ACKED), SAFE_MODE ENTRY_STATE_UNKNOWN and the outcome
+    RECONCILIATION_REQUIRED.
+    """
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(_status_unknown())
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert methods.count("query_order_by_client") == 1
+    assert "place_algo_protective" not in methods
+    assert "cancel_normal_order" not in methods
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
+    assert registry.register_attempts == 1
+    (handed,) = registry.entries
+    assert handed.entry_state_unknown is True
+    assert handed.entry_client_order_id == _load_expected()["entry_client_order_id"]
+    # The goodTillDate the entry carried, as a UTC instant (the plan expiry floored to 1 s).
+    sent = next(c["kwargs"] for c in adapter.calls if c["method"] == "place_entry")
+    good_till = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=sent["good_till_date"])
+    assert handed.entry_good_till_utc == good_till
+    assert good_till == _parse_utc(case_input["expiry_utc"]).replace(microsecond=0)
+
+
+async def test_wr05_the_acked_hand_off_carries_the_same_record_without_the_unknown_flag() -> None:
+    """Control: an acknowledged entry is handed over with `entry_state_unknown` False."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    (handed,) = registry.entries
+    assert handed.entry_state_unknown is False
+    assert handed.entry_good_till_utc == _parse_utc(case_input["expiry_utc"]).replace(microsecond=0)
+
+
+async def test_wr05_a_failed_unknown_hand_off_is_fail_closed_like_the_acked_one() -> None:
+    """The same try/except as the ACKED hand-off: SAFE_MODE PROTECTION_HANDOFF_FAILED and a
+    journal-first cancel of the entry by its deterministic id (a cancel, never a second entry).
+    The intent stays UNKNOWN and the ENTRY_STATE_UNKNOWN SAFE_MODE entry is kept first."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry(register_exception=RuntimeError("coordinator down"))
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(_status_unknown())
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert registry.register_attempts == 1
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    cancels = [c["kwargs"] for c in adapter.calls if c["method"] == "cancel_normal_order"]
+    assert cancels == [
+        {
+            "symbol": case_input["symbol"],
+            "orig_client_order_id": _load_expected()["entry_client_order_id"],
+        }
+    ]
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN", "PROTECTION_HANDOFF_FAILED"]
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
+
+
+async def test_wr05_e2e_an_unknown_entry_that_exists_is_protected_by_the_real_coordinator() -> None:
+    """Manager -> real `ProtectionCoordinator` over the stateful fake exchange.
+
+    The entry reaches the exchange but its answer is lost (a 5xx after the order was booked) and
+    the single probe fails, so the manager can only say ENTRY_STATE_UNKNOWN (Q5). The entry
+    rests; when it fills, the coordinator it was handed to places the closePosition stop and
+    cancels the remainder. Nothing ever sends a second entry and the intent stays UNKNOWN.
+    """
+    from src.domain.enums import ExecutionIntentStatus
+    from src.execution.protection import ProtectionCoordinator, ProtectionState
+
+    from tests.support import execution_limits as test_limits
+    from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
+    from tests.support.protection_doubles import RecordingAlerts, ScriptedEmergencyCloser
+    from tests.support.virtual_time import VirtualTime
+
+    case_input = _load_input()
+    clock = VirtualTime(_parse_utc(case_input["now_utc"]))
+    fake = BinanceSemanticsFakeAdapter(now_utc=clock.now(), enforce_flat_stop_rejection=True)
+    booked = fake.place_entry
+
+    async def answer_lost(**kwargs: Any) -> Any:
+        await booked(**kwargs)
+        raise _status_unknown()
+
+    fake.place_entry = answer_lost  # type: ignore[method-assign]
+    fake.fail_next("query_order_by_client", RuntimeError("probe failed"))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+    journal = FakeJournal()
+    coordinator = ProtectionCoordinator(
+        adapter=fake,
+        intent_store=store,
+        journal=journal,
+        safe_mode_controller=safe_mode,
+        alert_sink=RecordingAlerts(),
+        emergency_closer=ScriptedEmergencyCloser(),
+        limits=test_limits.test_only_execution_limits(),
+        clock=clock,
+    )
+
+    outcome = await _run_plan(
+        fake,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        journal=journal,
+        live_context=_build_live_context(case_input, protection_registry=coordinator),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    plan_hash = _plan_hash_of(case_input)
+    protection = coordinator.protection_of(plan_hash)
+    assert protection is not None and protection.state is ProtectionState.AWAITING_FILL
+
+    entry_id = _load_expected()["entry_client_order_id"]
+    await coordinator.step()  # found NEW on the exchange: still waiting for a fill
+    fake.fill(entry_id, quantity=Decimal("1.000"))
+    await coordinator.step()
+    protection = coordinator.protection_of(plan_hash)
+    assert protection is not None and protection.state is ProtectionState.UNPROTECTED
+    stops = fake.calls_to("place_algo_protective")
+    assert len(stops) == 1 and stops[0]["kwargs"]["close_position"] is True
+    assert [c["kwargs"]["orig_client_order_id"] for c in fake.calls_to("cancel_normal_order")] == [
+        entry_id
+    ]
+    await clock.advance(1)
+    await coordinator.step()
+    protection = coordinator.protection_of(plan_hash)
+    assert protection is not None and protection.state is ProtectionState.PROTECTED
+
+    assert len(fake.calls_to("place_entry")) == 1  # Q5: never a second entry
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
 
 
 async def test_real_adapter_place_entry_makes_a_single_attempt() -> None:
@@ -2900,6 +3081,7 @@ async def test_golden_case_reads_precede_the_position_mode_and_the_placement() -
     [
         "max_unprotected_ms",
         "entry_terminal_timeout_ms",
+        "entry_unknown_grace_ms",
         "min_remaining_validity_seconds",
         "max_mark_price_age_ms",
     ],

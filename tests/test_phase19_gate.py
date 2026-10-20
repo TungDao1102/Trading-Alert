@@ -264,7 +264,7 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("tests/test_execution_manager.py", "test_q5_place_entry_is_sent_once_for_every_error"),
     ),
     "EXEC-01": (
-        ("tests/test_execution_limits.py", "test_require_live_ready_refuses_naming_the_four"),
+        ("tests/test_execution_limits.py", "test_require_live_ready_refuses_naming_every_key"),
         ("tests/test_pre_placement.py", "test_evaluate_valid_case_passes"),
         ("tests/test_market_lot_split.py", "test_lot_filters_accepts_a_consistent_set"),
         ("tests/test_tp_sizing.py", "test_tracer_one_way_long_tp1_and_tp2_legs"),

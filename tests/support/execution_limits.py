@@ -25,6 +25,8 @@ from src.execution.execution_limits import (
 TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "protection.max_unprotected_ms": 7777,
     "protection.entry_terminal_timeout_ms": 13333,
+    # 19-REVIEW WR-05: a FAKE grace past the GTD time of an ENTRY_STATE_UNKNOWN entry.
+    "protection.entry_unknown_grace_ms": 9191,
     "pre_placement.min_remaining_validity_seconds": 777,
     "pre_placement.max_mark_price_age_ms": 4321,
 }

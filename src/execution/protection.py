@@ -72,6 +72,17 @@ REST position reads, the T-8-30 rule of ``src/reconcile/sweeper.py`` (19-REVIEW 
 read followed by a non-zero one is journaled as ``TransientPositionGap`` and the state is kept.
 The emergency closer applies the same rule before it answers flat.
 
+19-REVIEW WR-05 (owner decision): the manager also registers an entry its Q5 path left
+ENTRY_STATE_UNKNOWN (``RestingEntry.entry_state_unknown``). The coordinator never sends an entry.
+It polls the entry by client order id like any AWAITING_FILL entry: an answer that is not
+found=True keeps it waiting (never read as proof of absence), and the record is never dropped; a
+fill it finds follows the normal fill -> stop -> cancel-remainder flow, under the SAFE_MODE the
+manager entered (SAFE_MODE blocks entries only, D034). If the entry was never found by its GTD time
+plus the owner grace ``protection.entry_unknown_grace_ms``, the plan moves to ENTRY_UNRESOLVED
+(one journaled note): it stays tracked, still blocks nothing it did not block before, and is
+queried only on every ``UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS``-th step until it is found (a stream
+fill is acted on at once).
+
 Design rules:
 
 * Step-driven. There is no internal sleep and no running loop: the caller (Phase 24, research
@@ -157,6 +168,13 @@ EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
+EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
+
+# 19-REVIEW WR-05 (owner): an entry the manager left ENTRY_STATE_UNKNOWN (Q5) that the coordinator
+# has never found by the GTD time plus `protection.entry_unknown_grace_ms` is ENTRY_UNRESOLVED and
+# is queried only on every Nth step from then on (a stream fill is still acted on at once). A code
+# cadence, not an owner limit: it only thins out a REST query that keeps answering "not found".
+UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS = 10
 
 # The order statuses that end an entry (research P5): FILLED, and the three "ended without
 # (further) fills" statuses of the router (TERMINAL_NOT_FILLED_STATUSES).
@@ -172,6 +190,9 @@ _NO_STATE = "NONE"
 
 # Reasons journaled on a transition (fixed project text, never exchange text).
 REASON_REGISTERED = "REGISTERED"
+REASON_REGISTERED_ENTRY_STATE_UNKNOWN = "REGISTERED_ENTRY_STATE_UNKNOWN"
+REASON_ENTRY_UNRESOLVED = "ENTRY_NOT_FOUND_AFTER_GTD_GRACE"
+REASON_ENTRY_FOUND = "ENTRY_FOUND"
 REASON_FIRST_FILL_STREAM = "FIRST_FILL_STREAM"
 REASON_FIRST_FILL_REST = "FIRST_FILL_REST"
 REASON_STOP_CONFIRMED_ENTRY_TERMINAL = "STOP_CONFIRMED_ENTRY_TERMINAL"
@@ -202,7 +223,9 @@ class ProtectionState(str, Enum):
     AWAITING_FILL -> ENTRY_ENDED_NO_FILL (plan 19-11), from UNPROTECTED or
     PROTECTED_ENTRY_OPEN, CLOSE_REQUIRED <-> CLOSE_FAILED -> FLAT (plan 19-14), and PROTECTED ->
     COMPLETE / TP_UNAVAILABLE, with COMPLETE / TP_UNAVAILABLE (and PROTECTED, when REST is flat)
-    -> FLAT (plan 19-16).
+    -> FLAT (plan 19-16). 19-REVIEW WR-05 (owner) adds the eleventh name ENTRY_UNRESOLVED: an
+    ENTRY_STATE_UNKNOWN entry never found by its GTD time plus the grace; it leaves to
+    UNPROTECTED on a fill, ENTRY_ENDED_NO_FILL when found ended, or AWAITING_FILL when found open.
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -215,9 +238,12 @@ class ProtectionState(str, Enum):
     FLAT = "FLAT"
     CLOSE_FAILED = "CLOSE_FAILED"
     ENTRY_ENDED_NO_FILL = "ENTRY_ENDED_NO_FILL"
+    ENTRY_UNRESOLVED = "ENTRY_UNRESOLVED"
 
 
 # A position in one of these states is exposed without a confirmed stop (or being closed).
+# ENTRY_UNRESOLVED is deliberately absent: like AWAITING_FILL it holds no known exposure, and the
+# SAFE_MODE(ENTRY_STATE_UNKNOWN) the manager entered already blocks new entries (19-REVIEW WR-05).
 BLOCKING_STATES: frozenset[ProtectionState] = frozenset(
     {
         ProtectionState.UNPROTECTED,
@@ -256,6 +282,12 @@ class RestingEntry:
     Everything the protection flow needs comes from the bound plan: the coordinator invents no
     price, side or size. ``tp1_quantity_fraction`` is carried for plan 19-16 and comes from the
     caller, never from a constant in ``src/execution`` (EXEC-07 / O-02).
+
+    19-REVIEW WR-05 (owner): the manager also hands over an entry its Q5 path left
+    ENTRY_STATE_UNKNOWN, with ``entry_state_unknown=True``. Such an entry may or may not exist on
+    the exchange; ``entry_good_till_utc`` (the ``goodTillDate`` the entry was sent with, required
+    for it) is when the exchange ends it, from which the owner grace
+    ``protection.entry_unknown_grace_ms`` is measured.
     """
 
     approval_id: str
@@ -276,6 +308,8 @@ class RestingEntry:
     plan_constraint_snapshot: PlanConstraintSnapshot
     snapshot_ttl: timedelta
     registered_at_utc: datetime
+    entry_state_unknown: bool = False
+    entry_good_till_utc: datetime | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -311,6 +345,12 @@ class RestingEntry:
         if not isinstance(self.snapshot_ttl, timedelta) or self.snapshot_ttl <= timedelta(0):
             raise ValueError("snapshot_ttl must be a positive timedelta")
         _require_utc(self.registered_at_utc, "registered_at_utc")
+        if not isinstance(self.entry_state_unknown, bool):
+            raise TypeError("entry_state_unknown must be a bool")
+        if self.entry_good_till_utc is not None:
+            _require_utc(self.entry_good_till_utc, "entry_good_till_utc")
+        elif self.entry_state_unknown:
+            raise ValueError("an ENTRY_STATE_UNKNOWN entry needs entry_good_till_utc")
 
 
 @dataclass(frozen=True)
@@ -443,6 +483,10 @@ class _Tracked:
         self.stop_unknown_recorded = False
         self.close_branch: str | None = None
         self.sweep_done = False
+        # 19-REVIEW WR-05: whether any REST query has ever answered found=True for the entry, and
+        # the steps spent in ENTRY_UNRESOLVED (the low-frequency poll counter).
+        self.entry_found = False
+        self.unresolved_steps = 0
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -497,10 +541,18 @@ class ProtectionCoordinator:
         limits.require_live_ready()
         max_unprotected_ms = limits.max_unprotected_ms
         entry_terminal_timeout_ms = limits.entry_terminal_timeout_ms
-        if max_unprotected_ms is None or entry_terminal_timeout_ms is None:
-            raise ExecutionLimitsNotConfigured(("max_unprotected_ms", "entry_terminal_timeout_ms"))
+        entry_unknown_grace_ms = limits.entry_unknown_grace_ms
+        if (
+            max_unprotected_ms is None
+            or entry_terminal_timeout_ms is None
+            or entry_unknown_grace_ms is None
+        ):
+            raise ExecutionLimitsNotConfigured(
+                ("max_unprotected_ms", "entry_terminal_timeout_ms", "entry_unknown_grace_ms")
+            )
         self._max_unprotected_ms = max_unprotected_ms
         self._entry_terminal_timeout_ms = entry_terminal_timeout_ms
+        self._entry_unknown_grace = timedelta(milliseconds=entry_unknown_grace_ms)
         self._adapter = adapter
         self._store = intent_store
         self._journal = journal
@@ -524,6 +576,10 @@ class ProtectionCoordinator:
     def register_resting_entry(self, entry: RestingEntry) -> None:
         """Track a resting entry; the plan starts in AWAITING_FILL.
 
+        An ``entry_state_unknown`` entry (19-REVIEW WR-05) is tracked the same way: the
+        coordinator never sends an entry, waits while REST does not answer found=True (never
+        reading found=False as absence), protects a fill it finds, and never forgets the record.
+
         Raises:
             ValueError: Hedge mode (D-14 fail closed, Hedge is unverified and not enabled in
                 V1), an unknown position mode, or a plan hash that is already registered.
@@ -540,7 +596,11 @@ class ProtectionCoordinator:
             raise ValueError(f"plan {entry.plan_hash} is already registered")
         tracked = _Tracked(entry)
         self._tracked[entry.plan_hash] = tracked
-        self._transition(tracked, ProtectionState.AWAITING_FILL, REASON_REGISTERED, self._now())
+        if entry.entry_state_unknown:
+            reason = REASON_REGISTERED_ENTRY_STATE_UNKNOWN
+        else:
+            reason = REASON_REGISTERED
+        self._transition(tracked, ProtectionState.AWAITING_FILL, reason, self._now())
 
     def blocks_new_entries(self) -> bool:
         """True while any registered position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED."""
@@ -613,7 +673,7 @@ class ProtectionCoordinator:
             if owner is None:
                 self._journal_unknown_fill(fill)
                 continue
-            if owner.state is ProtectionState.AWAITING_FILL:
+            if owner.state in (ProtectionState.AWAITING_FILL, ProtectionState.ENTRY_UNRESOLVED):
                 evidence.setdefault(owner.entry.plan_hash, fill)
             # A fill for a plan that is past AWAITING_FILL is a duplicate or a later fill: it
             # never places a second stop (the late-fill branch is plan 19-14).
@@ -643,6 +703,12 @@ class ProtectionCoordinator:
                     await self._on_first_fill(tracked, REASON_FIRST_FILL_STREAM)
                 else:
                     await self._poll_entry(tracked)
+                    self._mark_unknown_entry_unresolved(tracked)
+            elif state is ProtectionState.ENTRY_UNRESOLVED:
+                if evidence is not None:
+                    await self._on_first_fill(tracked, REASON_FIRST_FILL_STREAM)
+                else:
+                    await self._poll_unresolved_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
                 await self._confirm(tracked)
             elif state is ProtectionState.PROTECTED:
@@ -753,7 +819,9 @@ class ProtectionCoordinator:
             )
             return
         if _attr(answer, "found") is not True:
+            # Not found is never proof of absence (Q5): keep waiting, keep the record.
             return
+        tracked.entry_found = True
         order_id = _optional_text(_attr(answer, "order_id"))
         if order_id is not None:
             tracked.entry_exchange_order_id = order_id
@@ -779,6 +847,58 @@ class ProtectionCoordinator:
             tracked.entry_terminal_at = now
             self._transition(
                 tracked, ProtectionState.ENTRY_ENDED_NO_FILL, REASON_ENTRY_ENDED_NO_FILL, now
+            )
+
+    def _mark_unknown_entry_unresolved(self, tracked: _Tracked) -> None:
+        """ENTRY_STATE_UNKNOWN entry never found by GTD + grace: ENTRY_UNRESOLVED (19-REVIEW WR-05).
+
+        Only an entry the manager left ENTRY_STATE_UNKNOWN qualifies, only while it is still
+        AWAITING_FILL and only if no REST query ever answered found=True. Reaching the GTD time
+        plus ``protection.entry_unknown_grace_ms`` (injected clock) switches it to the
+        low-frequency poll. The record is kept, nothing is sent and nothing new is blocked; the
+        manager's SAFE_MODE(ENTRY_STATE_UNKNOWN) stays in force (this module never leaves
+        SAFE_MODE). One note is journaled on the switch.
+        """
+        entry = tracked.entry
+        good_till = entry.entry_good_till_utc
+        if (
+            not entry.entry_state_unknown
+            or good_till is None
+            or tracked.entry_found
+            or tracked.state is not ProtectionState.AWAITING_FILL
+        ):
+            return
+        now = self._now()
+        if now < good_till + self._entry_unknown_grace:
+            return
+        tracked.unresolved_steps = 0
+        self._transition(tracked, ProtectionState.ENTRY_UNRESOLVED, REASON_ENTRY_UNRESOLVED, now)
+        self._journal_note(
+            tracked,
+            EVENT_ENTRY_UNRESOLVED,
+            {
+                "entry_client_order_id": entry.entry_client_order_id,
+                "entry_good_till_utc": good_till.isoformat(),
+                "poll_every_n_steps": str(UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS),
+                "reason": REASON_ENTRY_UNRESOLVED,
+            },
+            now,
+        )
+
+    async def _poll_unresolved_entry(self, tracked: _Tracked) -> None:
+        """ENTRY_UNRESOLVED: the REST query runs only on every Nth step (19-REVIEW WR-05).
+
+        A found entry follows the normal flow: a fill is protected (UNPROTECTED, then the stop),
+        an ended entry is ENTRY_ENDED_NO_FILL, and an entry found still open goes back to
+        AWAITING_FILL and the every-step poll. Not found keeps the record unresolved.
+        """
+        tracked.unresolved_steps += 1
+        if tracked.unresolved_steps % UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS != 0:
+            return
+        await self._poll_entry(tracked)
+        if tracked.state is ProtectionState.ENTRY_UNRESOLVED and tracked.entry_found:
+            self._transition(
+                tracked, ProtectionState.AWAITING_FILL, REASON_ENTRY_FOUND, self._now()
             )
 
     def _note_quantity_unknown(self, tracked: _Tracked, status: str | None) -> None:
@@ -1605,6 +1725,7 @@ __all__ = [
     "EVENT_CLOSE_REQUIRED",
     "EVENT_ENTRY_CANCEL_FAILED",
     "EVENT_ENTRY_CANCEL_NOT_SENT",
+    "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
     "EVENT_PROTECTION_TRANSITION",
     "EVENT_REST_FAILED",
@@ -1621,6 +1742,7 @@ __all__ = [
     "SAFE_MODE_DB_FAILURE",
     "SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE",
     "TERMINAL_ENTRY_STATUSES",
+    "UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS",
     "CriticalAlertSink",
     "EmergencyCloser",
     "PlanProtection",

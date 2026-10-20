@@ -27,7 +27,10 @@ and hands the acknowledged entry to the protection coordinator through
 after the FIRST FILL by `src/execution/protection.py` (Demo rejects it with -4509 while the
 position is flat), so there is no entry-time stop and no STOP_LOSS intent here. A hand-off that
 fails enters SAFE_MODE (PROTECTION_HANDOFF_FAILED), cancels the entry and returns
-RECONCILIATION_REQUIRED. O-01 stays open: this module does not enable live orders; LIVE stays
+RECONCILIATION_REQUIRED. An entry left ENTRY_STATE_UNKNOWN by Q5 is handed over too, flagged
+`entry_state_unknown` (19-REVIEW WR-05, owner): its intent stays UNKNOWN, SAFE_MODE stays in
+force and the entry is never re-sent; the coordinator protects a fill if the entry turns out to
+exist. O-01 stays open: this module does not enable live orders; LIVE stays
 blocked until the owner accepts the D055 closure draft and runs the Demo probes.
 
 Phase 17 (D-13/D-14): the approval is consumed durably by writing the ENTRY execution intent
@@ -46,8 +49,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -236,6 +239,8 @@ _ENTRY_STATE_UNKNOWN = "ENTRY_STATE_UNKNOWN"
 # Plan 19-15 (D-21): the two states the Phase 18 taxonomy adds on the entry path.
 _ENTRY_STATE_REFUSED = "ENTRY_REFUSED_BEFORE_SEND"
 _ENTRY_STATE_REJECTED = "ENTRY_REJECTED_DEFINITIVE"
+# The epoch of `goodTillDate` (epoch milliseconds), used to turn it back into a UTC instant.
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Plain NO_TRADE reason: a request the gate, the drift guard or a missing signed-call policy
 # refused before anything reached the exchange (src/WR-02).
@@ -306,7 +311,8 @@ async def _place_entry_no_blind_retry(
     immediate query visibility for a new order, and error -1007 reads "Send status unknown;
     execution status unknown". The entry is a GTD LIMIT and its stop is placed only after a
     fill (D-10), so a resting entry that nobody tracks could fill with no stop. Failing closed
-    costs at worst a missed trade.
+    costs at worst a missed trade. The caller therefore still hands an UNKNOWN entry to the
+    protection coordinator (19-REVIEW WR-05), which watches it without ever re-sending it.
     """
     try:
         response = await adapter.place_entry(**entry_kwargs)
@@ -922,6 +928,7 @@ async def execute_approved_plan(
     # the whole position) must not reach the exchange only to be cancelled afterwards. Pure: no
     # adapter call, nothing consumed.
     try:
+        good_till_ms = good_till_date_ms(trade_plan.expiry_utc)
         resting_entry = RestingEntry(
             approval_id=approval.approval_id,
             trade_plan_id=trade_plan.trade_plan_id,
@@ -941,6 +948,9 @@ async def execute_approved_plan(
             plan_constraint_snapshot=live_context.plan_constraint_snapshot,
             snapshot_ttl=risk_kwargs["ttl"],
             registered_at_utc=now_utc,
+            # The `goodTillDate` the entry is sent with (19-REVIEW WR-05: the coordinator measures
+            # the owner grace of an ENTRY_STATE_UNKNOWN entry from it).
+            entry_good_till_utc=_UNIX_EPOCH + timedelta(milliseconds=good_till_ms),
         )
     except (TypeError, ValueError):
         return ExecutionOutcome(is_no_trade=True, reason_code=PROTECTION_INPUTS_INVALID)
@@ -1052,7 +1062,7 @@ async def execute_approved_plan(
             "side": entry_side,
             "position_side": order_position_side,
             "time_in_force": "GTD",
-            "good_till_date": good_till_date_ms(trade_plan.expiry_utc),
+            "good_till_date": good_till_ms,
             "quantity": quantity,
             "price": limit_price,
             "new_client_order_id": entry_client_order_id,
@@ -1061,9 +1071,9 @@ async def execute_approved_plan(
     entry_state = entry_placement.state
     if entry_state == _ENTRY_STATE_UNKNOWN:
         # The probe could not tell, or did not find the order right after an ambiguous error,
-        # which is not proof of absence (Q5). The entry is never re-sent and nothing is handed
-        # off; SAFE_MODE ENTRY_STATE_UNKNOWN blocks new entries while reconciliation (Phase 20)
-        # resolves the truth.
+        # which is not proof of absence (Q5). The entry is never re-sent; SAFE_MODE
+        # ENTRY_STATE_UNKNOWN blocks new entries while reconciliation (Phase 20) resolves the
+        # truth, and the intent stays UNKNOWN (never rewritten to ACKED).
         _enter_safe_mode(_ENTRY_STATE_UNKNOWN)
         _store_write(
             lambda: intent_store.record_result(
@@ -1075,6 +1085,28 @@ async def execute_approved_plan(
                 now_utc=now_utc,
             )
         )
+        # 19-REVIEW WR-05 (owner): the GTD LIMIT may exist, so it is still handed to the
+        # protection coordinator, flagged ENTRY_STATE_UNKNOWN. The coordinator never sends an
+        # entry; if it finds the entry open or filled it protects the fill (stop, then cancel
+        # the remainder) under SAFE_MODE, and a not-found answer only keeps it waiting. A failed
+        # hand-off is handled exactly like the ACKED one below (SAFE_MODE, cancel by id).
+        try:
+            live_context.protection_registry.register_resting_entry(
+                replace(resting_entry, entry_state_unknown=True)
+            )
+        except Exception:  # noqa: BLE001 — any failure to hand the entry over is fail-closed
+            _enter_safe_mode(_PROTECTION_HANDOFF_FAILED)
+            try:
+                await expire_pending_entry(
+                    plan_hash=trade_plan.plan_hash,
+                    symbol=bound.symbol,
+                    adapter=adapter,
+                    journal=journal,
+                    now_utc=now_utc,
+                    trigger_reason="protection_handoff_failed",
+                )
+            except Exception:  # noqa: BLE001, S110 — journaled in expire_pending_entry
+                pass
         return _finish(_reconciliation_required())
     if entry_state == _ENTRY_STATE_REFUSED:
         # Nothing was sent (a PreSendRefusal): no probe, no SAFE_MODE, nothing to hand off.
