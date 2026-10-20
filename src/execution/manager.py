@@ -45,7 +45,7 @@ guard; the deterministic ids only let a probe find an order whose response was l
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -58,6 +58,7 @@ from src.domain.enums import (
     ApprovalAction,
     ApprovalResult,
     ExecutionIntentStatus,
+    LiveInputsStatus,
     OrderRole,
     RejectionReason,
     TradePlanStatus,
@@ -70,7 +71,9 @@ from src.domain.exchange_errors import (
     safe_mode_eligible,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id
+from src.domain.lot_filters import LotFilters
 from src.execution.binding import (
+    PLAN_SYMBOL_MISMATCH,
     QUANTITY_ABOVE_APPROVED,
     STALE_SETUP,
     bind_plan,
@@ -79,14 +82,13 @@ from src.execution.binding import (
     check_working_type,
     take_profit_levels,
 )
-from src.execution.fill_monitor import CurrentPositionView, fold_fills
+from src.execution.constraint_snapshot import snapshot_is_valid_for_live
 from src.execution.intent_store import ExecutionIntentStore, IntentRecord
 from src.execution.live_context import LivePlacementContext
+from src.execution.lot_split import lot_filters_from_plan_snapshot
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.placement import (
-    ProtectiveSizing,
     ProtectiveTemplate,
-    build_sl_leg,
     derive_limit_price,
     derive_sl_trigger_price,
     entry_limit_rounding,
@@ -102,10 +104,10 @@ from src.execution.pre_placement import (
     good_till_date_ms,
 )
 from src.execution.protection import RestingEntry
+from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
 from src.persistence.errors import IntentStateConflict, PersistenceError
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
-from src.risk.types import ConstraintSnapshot
 
 # --------------------------------------------------------------------------- #
 # Live-5 scope guard (09-04): every placement path is scoped to the
@@ -1246,7 +1248,8 @@ def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
 # expected protective stop exists and is active. If protection cannot
 # be confirmed, the reconciler forces SAFE_MODE and the position is
 # never assumed protected. The sweeper stays cancel-only and never
-# places rescue protection (D-02).
+# places rescue protection (D-02 for the sweeper). For the position itself D034
+# supersedes D-02: the automatic close is src/execution/emergency_close.py.
 # --------------------------------------------------------------------------- #
 
 _REQUIRED_PROTECTIVE_ROLES: frozenset[str] = frozenset(
@@ -1372,46 +1375,51 @@ def _is_leg_confirmed(response: Any) -> bool:
     return is_protection_confirmed(_get_attr_or_key(response, "algo_status"))
 
 
-async def _place_protective_leg(
+@dataclass(frozen=True)
+class _LegAttempt:
+    """How one query-first protective leg placement ended (`_attempt_protective_leg`)."""
+
+    confirmed: bool
+    detail: str | None
+    placement_error: Exception | None = None
+
+
+async def _attempt_protective_leg(
     *,
     adapter: ExecutionAdapter,
     symbol: str,
     plan_hash: str,
     role: str,
     leg: dict[str, Any],
-) -> tuple[bool, str | None]:
-    """Place one protective leg; return `(confirmed, failure_detail)`.
+) -> _LegAttempt:
+    """Place one protective leg query-first; report whether the response confirms it.
 
-    Fail closed (09-REVIEW CR-02): an adapter exception is NOT a
-    confirmation. It is treated exactly like an unconfirmed response so
-    the caller always enters SAFE_MODE and returns an `AttachOutcome`
-    instead of a bare exception. `failure_detail` records the role and
-    exception TYPE only (never the message, which may carry request
-    material).
+    Fail closed (09-REVIEW CR-02): an adapter exception is NOT a confirmation. It is treated
+    exactly like an unconfirmed response so the caller always enters SAFE_MODE and returns an
+    `AttachOutcome` instead of a bare exception. `detail` records the role and exception TYPE
+    only (never the message, which may carry request material); a placement exception is also
+    returned so the caller can read it through the error taxonomy (D-21).
     """
     client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
 
-    # 09-REVIEW CR-04: query-by-ID FIRST. The deterministic `xa-` id is
-    # shared with the entry-time SL placed by `execute_approved_plan` and
-    # with every later attach call for the same plan (partial fills
-    # arrive incrementally). Binance only dedups clientAlgoId among OPEN
-    # orders, so re-placing an existing leg is rejected as a duplicate.
-    # An existing ACTIVE leg is therefore adopted as confirmed (single
-    # owner, no duplicate); an existing NON-active leg (triggered /
-    # canceled / expired) is unconfirmed and never re-placed (no rescue
-    # placement, D-02); an unknown probe outcome fails closed.
+    # 09-REVIEW CR-04: query-by-ID FIRST. The deterministic `xa-` id is shared with every later
+    # attach call for the same plan. Binance only dedups clientAlgoId among OPEN orders, so
+    # re-placing an existing leg is rejected as a duplicate. An existing ACTIVE leg is therefore
+    # adopted (single owner, no duplicate); an existing NON-active leg (triggered / canceled /
+    # expired) is unconfirmed and is not re-placed by this function (the automatic reaction to a
+    # lost protective is the coordinator's, D034); an unknown probe outcome fails closed.
     try:
         probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
     except Exception as exc:  # noqa: BLE001 — unknown existence is unconfirmed
-        return (False, f"{role}: probe {type(exc).__name__}")
+        return _LegAttempt(confirmed=False, detail=f"{role}: probe {type(exc).__name__}")
     probe_found = _get_attr_or_key(probe, "found")
     if probe_found is True:
         status = _get_attr_or_key(probe, "algo_status")
         if is_protection_confirmed(status):
-            return (True, None)
-        return (False, f"{role}: existing leg status {status!r}")
+            return _LegAttempt(confirmed=True, detail=None)
+        return _LegAttempt(confirmed=False, detail=f"{role}: existing leg status {status!r}")
     if probe_found is not False:
-        return (False, f"{role}: probe outcome unknown")
+        return _LegAttempt(confirmed=False, detail=f"{role}: probe outcome unknown")
 
     try:
         response = await adapter.place_algo_protective(
@@ -1420,31 +1428,63 @@ async def _place_protective_leg(
             **leg,
         )
     except Exception as exc:  # noqa: BLE001 — any adapter failure is an unconfirmed leg
-        return (False, f"{role}: {type(exc).__name__}")
-    return (_is_leg_confirmed(response), None)
+        return _LegAttempt(
+            confirmed=False, detail=f"{role}: {type(exc).__name__}", placement_error=exc
+        )
+    return _LegAttempt(confirmed=_is_leg_confirmed(response), detail=None)
+
+
+async def _place_protective_leg(
+    *,
+    adapter: ExecutionAdapter,
+    symbol: str,
+    plan_hash: str,
+    role: str,
+    leg: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Place one protective leg; return `(confirmed, failure_detail)` (see `_attempt_...`)."""
+    attempt = await _attempt_protective_leg(
+        adapter=adapter, symbol=symbol, plan_hash=plan_hash, role=role, leg=leg
+    )
+    return (attempt.confirmed, attempt.detail)
+
+
+async def _confirm_leg_by_rest(
+    *, adapter: ExecutionAdapter, client_algo_id: str, role: str
+) -> tuple[str | None, str | None]:
+    """REST-confirm one leg (D-11): `(failure_detail, algo_status)`; ACTIVE class only.
+
+    A placement response, HTTP success or an ALGO_UPDATE alone never counts as protection.
+    """
+    try:
+        probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
+    except Exception as exc:  # noqa: BLE001 — an unreadable leg is unconfirmed
+        return (f"{role}: confirm probe {type(exc).__name__}", None)
+    status = _get_attr_or_key(probe, "algo_status")
+    if _get_attr_or_key(probe, "found") is True and is_protection_confirmed(status):
+        return (None, None if status is None else str(status))
+    return (f"{role}: not confirmed by REST", None)
 
 
 @dataclass(frozen=True)
 class AttachOutcome:
     """Result of `attach_protectives_to_fill(...)`.
 
-    `is_no_trade=True` carries `NO_FILL` or `ENTRY_WITHOUT_PROTECTIVE`
-    in `reason_code` — a fill that could not be fully protected is
-    ALWAYS reported as ENTRY_WITHOUT_PROTECTIVE (09-REVIEW CR-03), even
-    when the root cause is a TP sizing rejection.
-    `sized` is the `ProtectiveSizing` used to place the legs; when TP
-    sizing was rejected it is the rejected sizing (its `reason_code`
-    carries MIN_QTY_REJECT / NOTIONAL_REJECT / EXCHANGE_CONSTRAINT).
-    `placed_legs` lists the `OrderRole` values successfully confirmed on
-    the exchange, in the order they were placed. `failure_detail` names
-    the leg role and the exception type when a leg placement raised, or
-    the TP sizing rejection (audit trail — never the exception message,
-    which may carry request material).
+    `is_no_trade=True` carries `NO_FILL`, `PLAN_SYMBOL_MISMATCH` or `ENTRY_WITHOUT_PROTECTIVE`
+    in `reason_code` — a position whose take-profit legs could not be placed is ALWAYS
+    reported as ENTRY_WITHOUT_PROTECTIVE (09-REVIEW CR-03), even when the root cause is a TP
+    sizing rejection. Every no-trade outcome except `NO_FILL` has already entered SAFE_MODE.
+    `sized` is the `TakeProfitSizing` used to place the legs; when TP sizing was rejected it is
+    the rejected sizing (its `reason_code` carries MIN_QTY_REJECT / NOTIONAL_REJECT).
+    `placed_legs` lists the `OrderRole` values confirmed by REST, in the order they were
+    confirmed (the adopted STOP_LOSS first). `failure_detail` names the leg role and the
+    exception type when a leg placement raised, or the refusal text (audit trail — never the
+    exception message, which may carry request material).
     """
 
     is_no_trade: bool
     reason_code: str
-    sized: ProtectiveSizing | None
+    sized: TakeProfitSizing | None
     placed_legs: tuple[str, ...]
     failure_detail: str | None = None
 
@@ -1457,93 +1497,107 @@ class AttachOutcome:
             raise ValueError("AttachOutcome: is_no_trade=False requires reason_code='OK'")
 
 
+_ONE_WAY_MODE = "ONE_WAY"
+
+
+def _intent_result_status(
+    adapter: ExecutionAdapter, error: Exception | None
+) -> ExecutionIntentStatus:
+    """REJECTED when nothing was sent or the exchange definitively refused; UNKNOWN otherwise."""
+    if isinstance(error, PreSendRefusal):
+        return ExecutionIntentStatus.REJECTED
+    if error is not None:
+        try:
+            category = classify(adapter.error_facts(error), CallKind.PLACEMENT)
+        except Exception:  # noqa: BLE001 — an unclassifiable failure is ambiguous
+            return ExecutionIntentStatus.UNKNOWN
+        if category is ExchangeErrorCategory.REJECTED_DEFINITIVE:
+            return ExecutionIntentStatus.REJECTED
+    return ExecutionIntentStatus.UNKNOWN
+
+
 async def attach_protectives_to_fill(
     *,
-    fill_events: Sequence[Any],
-    current_position_view: CurrentPositionView,
-    protective_template: ProtectiveTemplate,
-    constraint_snapshot: ConstraintSnapshot,
-    position_mode: str,
-    candidate_position_side: str,
-    plan_hash: str,
+    entry: RestingEntry,
+    position_quantity: Decimal,
+    live_lot_filters: LotFilters | None,
     adapter: ExecutionAdapter,
+    intent_store: ExecutionIntentStore,
     now_utc: datetime,
     safe_mode_controller: Any,
 ) -> AttachOutcome:
-    """Fold entry fills, size protectives to filled qty, place + confirm.
+    """Place TP1 and TP2 on a REST-confirmed stop, sized from the real position (plan 19-16).
 
-    Per D-02 + EXECUTION_SPEC §5/§6: the Wave-3 successor path that
-    attaches all three protective legs (SL, TP1, TP2) once real fill
-    events arrive — sized against the actual FOLDED filled quantity,
-    never the planned quantity. Pipeline (fixed order, never
-    reordered):
+    The take-profit step of the single protection model (D-10): the protection coordinator calls
+    it once the entry is terminal and the closePosition stop is confirmed ACTIVE by REST. It is
+    bound to the `RestingEntry` built from the bound plan (D-01): symbol, side, plan hash, trigger
+    prices, TP1 fraction, working type and the plan constraint snapshot all come from `entry`;
+    an entry whose snapshot or the live filters disagree with it (symbol, trade plan id) is
+    refused with `PLAN_SYMBOL_MISMATCH` before any adapter call. Pipeline (fixed order):
 
-      1. `fold_fills` — idempotent fold of `fill_events` (replayed or
-         out-of-order events collapse to one filled quantity), filtered
-         to this symbol and the ENTRY side (an exit fill can never
-         inflate the entry quantity). A malformed / foreign fill stream
-         cannot be sized: the close-all SL is still placed and the
-         outcome holds ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE (WR-04).
-      2. `size_protectives_to_filled_qty` — mode-correct SL/TP1/TP2
-         leg parameters sized to the folded filled quantity.
-      3. Per-leg query-by-ID (`adapter.query_algo_order_by_client`),
-         then `adapter.place_algo_protective` only when the leg does not
-         exist yet, with a deterministic `xa-` algo client id (SL, then
-         TP1, then TP2 — never reordered). An existing ACTIVE leg (e.g.
-         the entry-time SL, or a leg from an earlier attach call for the
-         same plan) is adopted, never duplicated. NOTE: an existing TP1
-         keeps the size of the fill it was first attached to; resizing
-         TP1 on later partial fills (cancel-then-replace with a
-         versioned id) is a pending design decision (09-REVIEW CR-04).
-         Confirmation failure on any leg — including an
-         adapter EXCEPTION (timeout, rejection, duplicate id, identity-
-         less response) — holds `ENTRY_WITHOUT_PROTECTIVE` immediately
-         and forces SAFE_MODE; no further legs are attempted and no
-         rescue placement is ever issued (D-02).
+      1. Bind check, `position_quantity` check, position-mode check (One-way only, D-14).
+      2. The stop: `query_algo_order_by_client` must answer class ACTIVE (D-11). This function
+         NEVER places or cancels a stop (D-17, T-19-42); an absent, non-active or unreadable
+         stop holds `ENTRY_WITHOUT_PROTECTIVE` + SAFE_MODE and places no take profit.
+      3. The plan snapshot must be valid for live (`snapshot_is_valid_for_live`, D-20). A stale
+         but COMPLETE snapshot is re-sized with `live_lot_filters` (the live exchangeInfo read of
+         the caller); an INCOMPLETE one, or a stale one without live filters, is refused. With
+         real data margin type, leverage and equity stay unknown until Phases 21-22, so every
+         placement is refused into this hold until then (fail closed, recorded in 19-17).
+      4. `size_take_profits` from `position_quantity` (the reconciled REST position, D-18) with
+         `entry.tp1_quantity_fraction`; an un-sizeable TP1 (minQty / MIN_NOTIONAL) is the
+         CR-03 hold, there is no single-TP fallback (O-03).
+      5. Per leg, TP1 then TP2: the intent is written ahead (INTENDED then SENT, TP1 with its
+         quantity) BEFORE the placement; the leg is placed query-first by its deterministic
+         `xa-` id (an existing ACTIVE leg is adopted, never duplicated); the leg counts as
+         confirmed only when a REST query answers ACTIVE, and the intent then becomes ACKED.
+         A failed leg stops the sequence (TP2 is not attempted after TP1 fails) and holds
+         `ENTRY_WITHOUT_PROTECTIVE`; the confirmed stop and any confirmed leg are kept.
+
+    TP1 is never resized afterwards: the legs are placed only once the entry is terminal
+    (G2-032, 19-NOTES "TP legs"). A failing intent write before a placement places nothing for
+    that leg; a failing result write after it enters SAFE_MODE(DB_FAILURE) once and keeps the
+    confirmed leg (protection outranks the audit row, D034).
+
+    D-17: the earlier claim of this docstring, a blanket D-02 rule that nothing is ever placed
+    as a rescue, is corrected. D034 supersedes D-02: the automatic reaction to a lost or
+    unconfirmed stop is the separate emergency close (`src/execution/emergency_close.py`, driven
+    by the protection coordinator); `emergency_manual_close` keeps its operator role. Neither is
+    called from here, and this function itself only adds take-profit legs.
 
     Args:
-        fill_events: The fill events to fold (see `fold_fills`).
-        current_position_view: The current position view before this
-            fold (see `fold_fills`).
-        protective_template: The protective levels + TP1 split.
-        constraint_snapshot: The exchangeInfo-derived constraints.
-        position_mode: "ONE_WAY" or "HEDGE" — derive it from a fresh
-            `adapter.get_position_mode()` via `resolve_position_mode`
-            (the single PositionModeResult mapping point).
-        candidate_position_side: "LONG" or "SHORT".
-        plan_hash: The 64-char SHA-256 plan hash (deterministic ID
-            derivation).
+        entry: The resting entry built from the bound plan (`RestingEntry`).
+        position_quantity: The absolute REST position quantity, a positive Decimal.
+        live_lot_filters: The live `LotFilters` of `entry.symbol`, or None.
         adapter: The Protocol-typed adapter surface.
+        intent_store: The execution intent store (write-ahead rows of the TP legs).
         now_utc: The current UTC-aware datetime (injected).
-        safe_mode_controller: Required `SafeModeController`-like object
-            for the ENTRY_WITHOUT_PROTECTIVE composition (None raises
-            ValueError before any adapter call — fail closed).
+        safe_mode_controller: Required `SafeModeController`-like object for the
+            ENTRY_WITHOUT_PROTECTIVE composition (None raises ValueError before any adapter call).
 
     Returns:
-        An `AttachOutcome` with the fold+size+place+confirm result.
+        An `AttachOutcome`: OK with `placed_legs == (STOP_LOSS, TAKE_PROFIT_1, TAKE_PROFIT_2)`,
+        `NO_FILL` for a non-positive quantity, or a no-trade hold with SAFE_MODE entered.
+
+    Raises:
+        TypeError: `entry` is not a `RestingEntry` or `position_quantity` is not a Decimal.
+        ValueError: the symbol is not in the live-5 universe or `safe_mode_controller` is None.
     """
-    _require_live5_symbol(constraint_snapshot.symbol)
+    if not isinstance(entry, RestingEntry):
+        raise TypeError("attach_protectives_to_fill: entry must be a RestingEntry")
+    if not isinstance(position_quantity, Decimal) or not position_quantity.is_finite():
+        raise TypeError("attach_protectives_to_fill: position_quantity must be a finite Decimal")
+    _require_live5_symbol(entry.symbol)
     _require_safe_mode_controller(safe_mode_controller, "attach_protectives_to_fill")
 
-    async def _sl_only_then_hold(sized: ProtectiveSizing | None, detail: str) -> AttachOutcome:
-        # The close-all SL does not depend on quantity, so it is always
-        # placed (or adopted) first; the missing legs then hold
-        # ENTRY_WITHOUT_PROTECTIVE + SAFE_MODE — never a plain reason code
-        # while a live fill may have no stop.
-        sl_leg = build_sl_leg(
-            protective_template=protective_template,
-            position_mode=position_mode,
-            candidate_position_side=candidate_position_side,
-            price_tick_size=constraint_snapshot.price_tick_size,
-        )
-        sl_confirmed, sl_failure = await _place_protective_leg(
-            adapter=adapter,
-            symbol=constraint_snapshot.symbol,
-            plan_hash=plan_hash,
-            role=OrderRole.STOP_LOSS.value,
-            leg=sl_leg,
-        )
-        placed = (OrderRole.STOP_LOSS.value,) if sl_confirmed else ()
+    def hold(
+        detail: str,
+        *,
+        placed: tuple[str, ...] = (),
+        sized: TakeProfitSizing | None = None,
+        reason_code: str = _ENTRY_WITHOUT_PROTECTIVE,
+    ) -> AttachOutcome:
+        # Enters SAFE_MODE with ENTRY_WITHOUT_PROTECTIVE: not all three legs are confirmed.
         require_protective_confirmation(
             confirmed_roles=frozenset(placed),
             safe_mode_controller=safe_mode_controller,
@@ -1551,75 +1605,165 @@ async def attach_protectives_to_fill(
         )
         return AttachOutcome(
             is_no_trade=True,
-            reason_code=_ENTRY_WITHOUT_PROTECTIVE,
+            reason_code=reason_code,
             sized=sized,
             placed_legs=placed,
-            failure_detail=sl_failure if sl_failure is not None else detail,
+            failure_detail=detail,
         )
 
-    # 09-REVIEW WR-04: only this symbol's ENTRY-side fills are folded. The
-    # fold RAISES on malformed / foreign events instead of skipping them;
-    # that is surfaced as an unprotected fill, never as a bare exception.
-    entry_side = "BUY" if candidate_position_side == "LONG" else "SELL"
+    # 1. D-01: the entry must agree with its own snapshot and filters, before any adapter call.
+    snapshot = entry.plan_constraint_snapshot
+    if (
+        snapshot.symbol != entry.symbol
+        or snapshot.trade_plan_id != entry.trade_plan_id
+        or (live_lot_filters is not None and live_lot_filters.symbol != entry.symbol)
+    ):
+        return hold("entry, plan snapshot and filters disagree", reason_code=PLAN_SYMBOL_MISMATCH)
+    if position_quantity <= Decimal("0"):
+        return AttachOutcome(is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=())
+    if entry.position_mode != _ONE_WAY_MODE:
+        return hold(f"position mode {entry.position_mode} is not supported")
+
+    # 2. D-11 / D-17: the stop must be ACTIVE by REST; it is adopted, never placed here.
+    stop_id = derive_algo_client_id(plan_hash=entry.plan_hash, role=OrderRole.STOP_LOSS.value)
     try:
-        folded = fold_fills(
-            fill_events=fill_events,
-            current_position_view=current_position_view,
-            expected_symbol=constraint_snapshot.symbol,
-            expected_side=entry_side,
+        stop_probe = await adapter.query_algo_order_by_client(client_algo_id=stop_id)
+    except Exception as exc:  # noqa: BLE001 — an unreadable stop is not a confirmed stop
+        return hold(f"{OrderRole.STOP_LOSS.value}: probe {type(exc).__name__}")
+    stop_found = _get_attr_or_key(stop_probe, "found")
+    if stop_found is False:
+        return hold(f"{OrderRole.STOP_LOSS.value}: not found")
+    if stop_found is not True:
+        return hold(f"{OrderRole.STOP_LOSS.value}: probe outcome unknown")
+    stop_status = _get_attr_or_key(stop_probe, "algo_status")
+    if not is_protection_confirmed(stop_status):
+        return hold(f"{OrderRole.STOP_LOSS.value}: existing leg status {stop_status!r}")
+    confirmed_roles: list[str] = [OrderRole.STOP_LOSS.value]
+
+    # 3. D-20 / G4-038: snapshot validity, stale-but-complete re-size, incomplete refusal.
+    filters: LotFilters | None
+    if snapshot_is_valid_for_live(snapshot, now_utc=now_utc, ttl=entry.snapshot_ttl):
+        filters = lot_filters_from_plan_snapshot(snapshot)
+        if filters is None:  # unreachable for a COMPLETE snapshot; refused rather than guessed
+            return hold("plan snapshot filters are unknown", placed=tuple(confirmed_roles))
+    elif snapshot.live_inputs_status is not LiveInputsStatus.COMPLETE:
+        return hold(
+            "plan snapshot is INCOMPLETE and not valid for live", placed=tuple(confirmed_roles)
+        )
+    elif live_lot_filters is None:
+        return hold(
+            "plan snapshot is stale and no live filters were read", placed=tuple(confirmed_roles)
+        )
+    else:
+        filters = live_lot_filters
+
+    # 4. D-18 / D-19: TP legs from the reconciled position, floored onto the exchange filters.
+    try:
+        sizing = size_take_profits(
+            position_quantity=position_quantity,
+            tp1_trigger_price=entry.tp1_trigger_price,
+            tp2_trigger_price=entry.tp2_trigger_price,
+            tp1_quantity_fraction=entry.tp1_quantity_fraction,
+            filters=filters,
+            side=entry.side,
+            position_mode=entry.position_mode,
+            working_type=entry.working_type,
         )
     except (TypeError, ValueError) as exc:
-        return await _sl_only_then_hold(None, f"fill fold: {type(exc).__name__}")
-    if folded.filled_quantity <= Decimal("0"):
-        return AttachOutcome(is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=())
-
-    sizing = size_protectives_to_filled_qty(
-        filled_quantity=folded.filled_quantity,
-        protective_template=protective_template,
-        constraint_snapshot=constraint_snapshot,
-        position_mode=position_mode,
-        candidate_position_side=candidate_position_side,
-    )
+        return hold(
+            f"{OrderRole.TAKE_PROFIT_1.value} sizing: {type(exc).__name__}",
+            placed=tuple(confirmed_roles),
+        )
     if sizing.is_no_trade:
-        # 09-REVIEW CR-03: TP1 is un-sizeable (min-qty / min-notional),
-        # but a fill EXISTS — SL first, then hold. The rejected sizing is
-        # carried in `sized` so its reason code stays auditable.
-        return await _sl_only_then_hold(
-            sizing, f"{OrderRole.TAKE_PROFIT_1.value} sizing: {sizing.reason_code}"
+        # 09-REVIEW CR-03: TP1 is un-sizeable (min-qty / min-notional) but the position exists
+        # and its stop is confirmed: keep the stop, hold, carry the rejected sizing for audit.
+        return hold(
+            f"{OrderRole.TAKE_PROFIT_1.value} sizing: {sizing.reason_code}",
+            placed=tuple(confirmed_roles),
+            sized=sizing,
         )
+    assert sizing.tp1_leg is not None and sizing.tp2_leg is not None  # is_no_trade is False
 
-    confirmed_roles: list[str] = []
-    role_leg_pairs = (
-        (OrderRole.STOP_LOSS.value, sizing.sl_leg),
-        (OrderRole.TAKE_PROFIT_1.value, sizing.tp1_leg),
-        (OrderRole.TAKE_PROFIT_2.value, sizing.tp2_leg),
-    )
-    for role, leg in role_leg_pairs:
-        if leg is None:  # unreachable: sizing.is_no_trade is False
-            raise RuntimeError(f"attach_protectives_to_fill: {role} leg missing from sizing")
-        confirmed, failure_detail = await _place_protective_leg(
-            adapter=adapter,
-            symbol=constraint_snapshot.symbol,
-            plan_hash=plan_hash,
-            role=role,
-            leg=leg,
-        )
-        if not confirmed:
-            # Unconfirmed leg: hold ENTRY_WITHOUT_PROTECTIVE immediately.
-            # No further legs are attempted; no rescue placement is
-            # ever issued (D-02) — the sweeper stays cancel-only.
-            require_protective_confirmation(
-                confirmed_roles=frozenset(confirmed_roles),
-                safe_mode_controller=safe_mode_controller,
+    # 5. Write-ahead, query-first placement, REST confirmation: TP1, then TP2.
+    store_failed = False
+
+    def store_result_write(
+        role: str, status: ExecutionIntentStatus, exchange_status: str | None
+    ) -> None:
+        """A result write after a placement; its failure never undoes a confirmed leg (D034)."""
+        nonlocal store_failed
+        if store_failed:
+            return
+        try:
+            intent_store.record_result(
+                approval_id=entry.approval_id,
+                role=role,
+                status=status,
+                exchange_order_id=None,
+                exchange_status=exchange_status,
                 now_utc=now_utc,
             )
-            return AttachOutcome(
-                is_no_trade=True,
-                reason_code=_ENTRY_WITHOUT_PROTECTIVE,
-                sized=sizing,
-                placed_legs=tuple(confirmed_roles),
-                failure_detail=failure_detail,
+        except IntentStateConflict:
+            return  # the row is already past this state (an earlier attach call)
+        except PersistenceError:
+            store_failed = True
+            try:
+                safe_mode_controller.enter_safe_mode(reason=_DB_FAILURE, now_utc=now_utc)
+            except Exception:  # noqa: BLE001, S110 — the flag is set first; only its row is lost
+                pass
+
+    for role, leg, intended_quantity in (
+        (OrderRole.TAKE_PROFIT_1.value, sizing.tp1_leg, sizing.tp1_quantity),
+        (OrderRole.TAKE_PROFIT_2.value, sizing.tp2_leg, None),
+    ):
+        leg_id = derive_algo_client_id(plan_hash=entry.plan_hash, role=role)
+        try:
+            intent_store.record_protective_intent(
+                approval_id=entry.approval_id,
+                role=role,
+                trade_plan_id=entry.trade_plan_id,
+                plan_hash=entry.plan_hash,
+                algo_client_id=leg_id,
+                symbol=entry.symbol,
+                side=entry.exit_side,
+                intended_price=leg["trigger_price"],
+                now_utc=now_utc,
+                intended_quantity=intended_quantity,
             )
+            try:
+                intent_store.mark_sent(approval_id=entry.approval_id, role=role, now_utc=now_utc)
+            except IntentStateConflict:
+                pass  # already SENT or past it (an earlier attach call): not a store failure
+        except PersistenceError as exc:
+            # No durable intent, no order: the leg is not sent (write-ahead, D-20).
+            return hold(
+                f"{role}: intent store {type(exc).__name__}",
+                placed=tuple(confirmed_roles),
+                sized=sizing,
+            )
+        attempt = await _attempt_protective_leg(
+            adapter=adapter, symbol=entry.symbol, plan_hash=entry.plan_hash, role=role, leg=leg
+        )
+        failure = attempt.detail
+        exchange_status: str | None = None
+        if attempt.confirmed:
+            failure, exchange_status = await _confirm_leg_by_rest(
+                adapter=adapter, client_algo_id=leg_id, role=role
+            )
+        if failure is not None or not attempt.confirmed:
+            store_result_write(
+                role,
+                _intent_result_status(adapter, attempt.placement_error),
+                None,
+            )
+            # No further legs are attempted. The confirmed stop (and any confirmed leg) is
+            # kept; nothing is cancelled and no stop is placed from here (D-17).
+            return hold(
+                failure if failure is not None else f"{role}: not confirmed",
+                placed=tuple(confirmed_roles),
+                sized=sizing,
+            )
+        store_result_write(role, ExecutionIntentStatus.ACKED, exchange_status)
         confirmed_roles.append(role)
 
     confirmation = require_protective_confirmation(
