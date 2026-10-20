@@ -1,0 +1,43 @@
+261020-xd4 pytest-xdist measurements (2026-10-20, Windows 10, 16 logical cores, 15.8 GB RAM, local PostgreSQL 17, TEST_DATABASE_URL set)
+pytest-xdist 3.8.0, execnet 2.1.2. Command: .venv/Scripts/python -m pytest -m "not docker" -rs -p no:cacheprovider -n N
+Runs strictly one at a time.
+
+Selection: --collect-only -m "not docker" = 10443/10471 collected (28 deselected), collection 5.5 s.
+Every parallel run: 10424 passed + 19 skipped = 10443 (same selection), 0 failed, 0 errors, exit 0.
+Skip reasons identical to the 16-64 sequential baseline: 12 shellcheck not on PATH, 4 file modes (test_deploy_heartbeat),
+1 NTFS POSIX modes (test_bootstrap), 2 symlinks (test_analytics_files, test_user_data_smoke_dry_run).
+
+run   workers  wall      free RAM at start  min free RAM  peak sum python* working set  pages-in/s avg (max)
+seq   0        ~24 min   -                  -             -                              -   (plan 16-64 gate, 10412 tests then)
+n4a   4        606 s     3.1 GB             not measured past the first 25 s (sampler file locked by my own tail -f)
+n6a   6        529 s     5.5 GB             not measured (same sampler fault)
+n6b   6        487 s     6.8 GB             1.90 GB       2.31 GB (20 python procs max)   1636 (9515)
+n4b   4        566 s     3.9 GB             0.55 GB       1.69 GB (12 python procs max)   3902 (57224)
+
+Note on n4b: free RAM fell to 0.55 GB because other applications on the machine used memory at the same time
+(it started with 3.9 GB free, python peaked at 1.69 GB); page-ins were heavy for parts of that run. Python's own
+footprint is the column to plan with: about 1.7 GB at -n 4, about 2.3 GB at -n 6.
+
+Recommendation: -n 4 for daily work on this machine (needs about 1.7 GB; 2.4-2.6x faster than sequential).
+-n 6 is only 8-13% faster again and needs about 0.6 GB more; use it only with more than about 4 GB free.
+
+Slowest 30 (from run n4a, --durations=30; times are inflated by 4-way contention):
+the 30 entries sum to 607 s of 4 x 605 = 2420 worker-seconds (25%).
+  by file (seconds, entries):
+  101.2  6  tests/test_case_input_builder.py            Parquet partitions built and read per test
+   94.5  4  tests/test_research_warmup.py               full research engine replays
+   71.7  4  tests/test_research_checkpoint.py           full run_research runs, interrupted and resumed
+   62.6  1  tests/test_research_terminal_settlement_integration.py  module fixture running run_research (setup 62.6 s)
+   56.1  3  tests/test_research_known_gap_reason.py     module fixture setup 36.4 s
+   44.7  2  tests/test_backfill_cli.py                  29.6 s + 15.1 s calls
+   42.7  4  tests/test_bootstrap.py                     real bash with stub binaries (subprocesses), 9.5-13.4 s each
+   25.2  1  tests/test_research_runner_hardening.py     module fixture setup
+   23.3  1  tests/test_research_report.py               module fixture setup
+   22.8  1  tests/test_research_feasibility.py          module fixture setup
+   22.0  1  tests/test_research_runner.py              module fixture setup
+   21.5  1  tests/test_research_manifest_build.py      module fixture setup
+   18.4  1  tests/test_collector.py                    funding history pagination
+No PostgreSQL clone test (33 files use pg_db/pg_empty_db) is in the slowest 30.
+
+Timing plugin (scripts/dev/pytest_timing.py via test.ps1): runs under xdist but prints "collection: 0.00s" and
+puts all time under "execution", because the controller does not collect; the per-worker "[timing] collection" line is not shown.

@@ -7,7 +7,7 @@ Quick dev helpers (PowerShell). Run from anywhere:
 | Script | Purpose |
 |--------|---------|
 | `clean.ps1` | Remove `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.coverage`, `htmlcov`, `logs/` (`-WhatIf` to preview; never touches `.venv`, `data/`, `.env`) |
-| `test.ps1` | Run all tests (`uv run pytest`); extra args go to pytest |
+| `test.ps1` | Run all tests (`uv run pytest`); extra args go to pytest. Parallel opt-in: `uv run pytest -m "not docker" -n 4` (pytest-xdist; the `[timing]` collection line reads 0.00s under xdist because workers collect, not the controller) |
 | `migrate.ps1` | `alembic upgrade head` using `DATABASE_URL` from `.env` (`-Revision`, `-Current`) |
 | `journal-report.ps1` | Offline journal-depth + kill-gate report: Markdown + JSON sidecar under git-ignored `data/reports/` (`-AsOf`, `-OutDir`, `-Universe`, `-Evidence`, `-Decisions`, `-RawRoot`, `-NoDb`); read-only, `-Record` appends one idempotent `KILL_GATE_EVALUATION` |
 | `_common.ps1` | Shared helpers (dot-sourced; not a command) |

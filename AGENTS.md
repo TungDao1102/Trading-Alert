@@ -196,6 +196,7 @@ The tables above are the recommended stack; `pyproject.toml` and `uv.lock` are t
 ## Conventions
 
 - Commands (the same ones CI runs): `uv sync --frozen --extra dev`, `uv run pytest -m "not docker"`, `uv run ruff check`, `uv run ruff format --check`, `uv run mypy src`, `uv lock --check`. Live-PostgreSQL tests need `TEST_DATABASE_URL` and skip without it.
+- Parallel opt-in for daily work: `uv run pytest -m "not docker" -n 4` (pytest-xdist; about 9-10 min instead of about 24). The default run, CI and every recorded gate command stay sequential.
 - Ruff line length 100; mypy strict on `src`; pytest `asyncio_mode = "auto"`.
 - Money-sensitive values use `Decimal`; the pure core (`src/core`) imports only stdlib and `Decimal`.
 - Parameter sets are versioned TOML files that are hash-locked: an existing set is never edited in place; a behavior change ships as a new set plus a new `strategy_version`.
