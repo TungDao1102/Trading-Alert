@@ -8,7 +8,7 @@ updated: 2026-10-20T13:00:00Z
 
 ## Current Test
 
-[testing paused — 8 owner-only items outstanding]
+[testing paused — 7 owner-only items outstanding]
 
 Answers marked `source: automated` were answered by the agent from evidence it could run or read
 (2253 passed, 0 skipped, `TRADING_CI_STRICT=1`, 56 phase test files; `verify_decision_alignment.py all`
@@ -73,9 +73,9 @@ reason: 19-06-SUMMARY records option column-on-entry-intent as "answered by the 
 
 ### 10. WR-06 last-price read
 expected: A last-price read behind the ExecutionAdapter Protocol, so criterion 2 "mark or last price" holds in full.
-result: blocked
-blocked_by: third-party
-reason: Open work item (19-OWNER-GAPS WR-06), not built; needs scheduling.
+result: pass
+source: automated
+evidence: quick task 261020-l4p (merged). tests/test_pre_placement.py, tests/test_binance_public.py, tests/test_execution_manager.py; `check_last_price`, adapter `get_last_price`, gate 5e. Open: the new owner limit `pre_placement.max_last_price_age_ms` is NOT_CONFIGURED (the owner sets it, O-04), and the exchange endpoint was not called (an owner probe).
 
 ### 11. D055 closure (O-01) and the EXEC-07 reconciliation (O-02)
 expected: DECISIONS row for the fill-driven model accepted; the TP1 fraction, TP2 rule and time in force reconciled with D052 (c).
@@ -116,11 +116,11 @@ reason: Human check of plan 19-17 Task 3.
 ## Summary
 
 total: 16
-passed: 8
+passed: 9
 issues: 0
 pending: 0
 skipped: 0
-blocked: 8
+blocked: 7
 
 ## Gaps
 
