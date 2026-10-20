@@ -7,7 +7,10 @@ The last line of defense when a protective stop is missing: the protection coord
 * builds ONE valid MARKET part from the live exchangeInfo lot filters (``next_close_part``),
 * sends it reduce-only under a deterministic client order id per attempt
   (``derive_close_order_id``),
-* re-reads the position after the part and answers True only when REST shows it flat.
+* re-reads the position after the part and answers True only when REST shows it flat on two
+  consecutive reads (T-8-30, the rule of ``src/reconcile/sweeper.py``; 19-REVIEW CR-03). A zero
+  read followed by a non-zero one fails closed (``TRANSIENT_POSITION_GAP``) and sends nothing
+  more in that call.
 
 Anything it cannot prove ends in SAFE_MODE (``EMERGENCY_CLOSE_FAILED``), a critical alert and a
 journal row, and returns False; a failed emergency close never declares the position safe
@@ -76,6 +79,10 @@ PHASE_REJECTED = "rejected"
 PHASE_AMBIGUOUS = "ambiguous"
 PHASE_ABSENT = "absent"
 PHASE_ENDED_UNFILLED = "ended_unfilled"
+
+# The failure code of a zero position read that a second, fresh read did not confirm (T-8-30
+# two consecutive zero reads, the rule of src/reconcile/sweeper.py; 19-REVIEW CR-03).
+CODE_TRANSIENT_POSITION_GAP = "TRANSIENT_POSITION_GAP"
 
 _ZERO = Decimal("0")
 _POSITION_SIDE_ONE_WAY = "BOTH"
@@ -226,6 +233,9 @@ class MarketEmergencyCloser(EmergencyCloser):
         except Exception as exc:  # noqa: BLE001 - an unreadable position proves nothing
             return self._fail(entry, reason, "POSITION_READ_FAILED", 0, type(exc).__name__)
         if position == _ZERO:
+            refused = await self._refuse_unconfirmed_flat(entry, reason, 0)
+            if refused is not None:
+                return refused
             self._journal_note(entry, PHASE_ALREADY_FLAT, reason)
             self._last_result = EmergencyCloseResult(EmergencyCloseStatus.FLAT, 0, reason)
             return True
@@ -299,6 +309,9 @@ class MarketEmergencyCloser(EmergencyCloser):
                     entry, reason, "POSITION_READ_FAILED", parts_sent, type(exc).__name__
                 )
             if position == _ZERO:
+                refused = await self._refuse_unconfirmed_flat(entry, reason, parts_sent)
+                if refused is not None:
+                    return refused
                 self._last_result = EmergencyCloseResult(
                     EmergencyCloseStatus.FLAT, parts_sent, reason
                 )
@@ -407,6 +420,28 @@ class MarketEmergencyCloser(EmergencyCloser):
     # ------------------------------------------------------------------ #
     # REST reads.
     # ------------------------------------------------------------------ #
+
+    async def _refuse_unconfirmed_flat(
+        self, entry: RestingEntry, close_reason: str, parts_sent: int
+    ) -> bool | None:
+        """T-8-30 (19-REVIEW CR-03): confirm a zero read with a second, fresh REST read.
+
+        Called right after a read showed the position flat and before the closer answers True
+        (which makes the coordinator go FLAT and sweep every protective leg). ``None`` means the
+        second read is flat too. A second read that is not flat (a transient position gap) or
+        that fails is never flat: the close fails closed (SAFE_MODE, critical alert, False)
+        WITHOUT sending another part in this call; the coordinator's next step calls the closer
+        again, which starts over from fresh reads.
+        """
+        try:
+            confirmed = await self._read_position(entry.symbol)
+        except Exception as exc:  # noqa: BLE001 - an unreadable position proves nothing
+            return self._fail(
+                entry, close_reason, "POSITION_READ_FAILED", parts_sent, type(exc).__name__
+            )
+        if confirmed != _ZERO:
+            return self._fail(entry, close_reason, CODE_TRANSIENT_POSITION_GAP, parts_sent, None)
+        return None
 
     async def _read_position(self, symbol: str) -> Decimal:
         """The signed One-way position of ``symbol`` from REST; raises when it cannot be read."""
@@ -581,6 +616,7 @@ class MarketEmergencyCloser(EmergencyCloser):
 __all__ = [
     "ALERT_EMERGENCY_CLOSE_FAILED",
     "ALERT_EMERGENCY_CLOSE_NOT_SENT",
+    "CODE_TRANSIENT_POSITION_GAP",
     "EVENT_EMERGENCY_CLOSE",
     "SAFE_MODE_EMERGENCY_CLOSE_FAILED",
     "CloseAdapter",

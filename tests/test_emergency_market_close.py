@@ -348,7 +348,8 @@ async def test_a_position_above_the_market_maximum_closes_in_three_parts() -> No
     assert rig.sent_ids() == [
         derive_close_order_id(plan_hash=PLAN_HASH, attempt_no=n) for n in (1, 2, 3)
     ]
-    # A position read opens the call and follows every send.
+    # A position read opens the call and follows every send; the flat read is confirmed by a
+    # second, fresh read before the closer answers flat (T-8-30, 19-REVIEW CR-03).
     assert method_order(rig) == [
         "snapshot_positions",
         "symbol_lot_filters",
@@ -357,6 +358,7 @@ async def test_a_position_above_the_market_maximum_closes_in_three_parts() -> No
         "place_market_close",
         "snapshot_positions",
         "place_market_close",
+        "snapshot_positions",
         "snapshot_positions",
     ]
     assert rig.closer.last_result is not None
@@ -455,6 +457,59 @@ async def test_a_position_already_flat_sends_nothing_and_is_flat() -> None:
     assert rig.closer.last_result.parts_sent == 0
     assert rig.safe_mode.entered_reasons == []
     assert rig.alerts.alerts == []
+
+
+async def test_a_single_empty_first_read_is_not_flat_and_sends_nothing() -> None:
+    """19-REVIEW CR-03 / T-8-30: the opening read is a transient empty answer, the next is real.
+
+    The old closer answered True (FLAT) on that one read, and the coordinator then swept every
+    protective leg of an open 0.004 position. Now the second, fresh read shows the position:
+    nothing is sent in this call, the close fails closed and the coordinator retries.
+    """
+    from tests.support.protection_doubles import script_empty_position_reads
+
+    rig = make_close_rig(D("0.004"))
+    script_empty_position_reads(rig.fake, [True, False])
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.fake.calls_to("place_market_close") == []
+    assert rig.fake.positions[SYMBOL] == D("0.004")
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.status == "CLOSE_FAILED"
+    assert_failed_into_safe_mode(rig, code="TRANSIENT_POSITION_GAP")
+    assert "already_flat" not in rig.phases()
+
+
+async def test_a_single_empty_read_after_a_part_is_not_flat_and_sends_no_more() -> None:
+    """After the first of three parts the read is a transient empty answer; 7 is still open.
+
+    The old closer answered True after that part (7 left open, then swept naked); now the
+    confirming read shows 7, no further part is sent in this call and the close fails closed.
+    """
+    from tests.support.protection_doubles import script_empty_position_reads
+
+    rig = make_close_rig(D("12"), filters=whole_unit_filters(market_max="5"))
+    script_empty_position_reads(rig.fake, [False, True, False])
+
+    closed = await close(rig)
+
+    assert closed is False
+    assert rig.sent_quantities() == [D("5")]
+    assert rig.fake.positions[SYMBOL] == D("7")
+    assert_failed_into_safe_mode(rig, code="TRANSIENT_POSITION_GAP")
+    assert rig.closer.last_result is not None
+    assert rig.closer.last_result.parts_sent == 1
+
+
+async def test_a_flat_answer_needs_two_consecutive_zero_reads() -> None:
+    rig = make_close_rig(None)
+
+    closed = await close(rig)
+
+    assert closed is True
+    assert method_order(rig) == ["snapshot_positions", "snapshot_positions"]
 
 
 async def test_a_call_never_sends_more_parts_than_the_first_position_needs() -> None:

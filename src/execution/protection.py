@@ -67,6 +67,11 @@ and sweeps the plan's legs by deterministic id. The manager hand-off is plan 19-
 closer plan 19-12. The stop of a COMPLETE or TP_UNAVAILABLE plan is not supervised any more
 (recorded open item: a stop that stops being ACTIVE while the position stays open is Phase 20/24).
 
+Every FLAT transition (which sweeps every leg, an ACTIVE stop included) needs two consecutive zero
+REST position reads, the T-8-30 rule of ``src/reconcile/sweeper.py`` (19-REVIEW CR-03): a zero
+read followed by a non-zero one is journaled as ``TransientPositionGap`` and the state is kept.
+The emergency closer applies the same rule before it answers flat.
+
 Design rules:
 
 * Step-driven. There is no internal sleep and no running loop: the caller (Phase 24, research
@@ -185,6 +190,9 @@ REASON_POSITION_CLOSED = "POSITION_CLOSED"
 
 # Fixed project text for a position that contradicts the plan (never exchange text).
 DETAIL_POSITION_SIDE_MISMATCH = "position side does not match the plan"
+# The journaled error type of a zero position read that a second, fresh read did not confirm
+# (T-8-30 two consecutive zero reads, the rule of src/reconcile/sweeper.py; 19-REVIEW CR-03).
+ERROR_TRANSIENT_POSITION_GAP = "TransientPositionGap"
 
 
 class ProtectionState(str, Enum):
@@ -697,10 +705,11 @@ class ProtectionCoordinator:
     async def _on_no_position_on_stop(self, tracked: _Tracked) -> None:
         """-4509 on the stop: the exchange says there is no position; the position is read.
 
-        Flat with a terminal entry ends the plan (nothing to close, the legs are swept). Open is
-        contradictory and fails closed into CLOSE_REQUIRED. Flat with an open entry, or an
-        unreadable position, keeps the plan UNPROTECTED and watched: the entry cancel is
-        re-issued every step and the deadline decides.
+        Flat with a terminal entry ends the plan (nothing to close, the legs are swept) only when
+        a second, fresh REST read is flat too (T-8-30, 19-REVIEW CR-03). Open is contradictory
+        and fails closed into CLOSE_REQUIRED. Flat with an open entry, a second read that is not
+        flat, or an unreadable position keeps the plan UNPROTECTED and watched: the entry cancel
+        is re-issued every step and the deadline decides.
         """
         exposed = await self._position_is_open(tracked)
         if exposed is True:
@@ -713,7 +722,7 @@ class ProtectionCoordinator:
                 )
             )
             self._apply_entry_answer(tracked, answer)
-            if tracked.entry_terminal_at is not None:
+            if tracked.entry_terminal_at is not None and await self._second_read_is_flat(tracked):
                 self._transition(
                     tracked, ProtectionState.FLAT, REASON_NO_POSITION_ON_STOP, self._now()
                 )
@@ -1029,12 +1038,18 @@ class ProtectionCoordinator:
 
         Exposure without a stop is B4 (a fill after the stop triggered or was consumed): the
         remainder is cancelled, the new exposure is closed by MARKET, the stop is never re-placed
-        and the plan never carries on. A flat position with a terminal entry just ends the plan.
+        and the plan never carries on. A flat position with a terminal entry just ends the plan,
+        once a second, fresh REST read is flat too (T-8-30, 19-REVIEW CR-03); otherwise the
+        state is kept and the next step reads again.
         """
         exposed = await self._position_is_open(tracked)
         if exposed is True:
             await self._enter_close_required(tracked, BRANCH_B4_FILL_AFTER_STOP)
-        elif exposed is False and tracked.entry_terminal_at is not None:
+        elif (
+            exposed is False
+            and tracked.entry_terminal_at is not None
+            and await self._second_read_is_flat(tracked)
+        ):
             self._transition(tracked, ProtectionState.FLAT, REASON_STOP_CONSUMED_FLAT, self._now())
             await self._sweep(tracked)
 
@@ -1167,6 +1182,29 @@ class ProtectionCoordinator:
             total += amount
         return total
 
+    async def _second_read_is_flat(self, tracked: _Tracked) -> bool:
+        """T-8-30 (19-REVIEW CR-03): a zero position read is confirmed by a second, fresh read.
+
+        Called only after a first read showed the position flat, and before any FLAT transition
+        (which sweeps every protective leg, an ACTIVE stop included). True only when this read
+        is exactly zero too. A non-zero second read is a transient position gap: it is journaled
+        and the caller keeps its state, so the next step reads again. An unreadable read is
+        journaled by ``_position_amount`` and is never flat. One empty REST answer can therefore
+        never cancel the protection of an open position.
+        """
+        amount = await self._position_amount(tracked)
+        if amount is None:
+            return False
+        if amount != _ZERO:
+            self._journal_note(
+                tracked,
+                EVENT_REST_FAILED,
+                {"call": "snapshot_positions", "error_type": ERROR_TRANSIENT_POSITION_GAP},
+                self._now(),
+            )
+            return False
+        return True
+
     async def _attach_take_profits(self, tracked: _Tracked) -> None:
         """PROTECTED -> COMPLETE or TP_UNAVAILABLE (exactly once per plan).
 
@@ -1185,8 +1223,10 @@ class ProtectionCoordinator:
         if amount is None:
             return
         if amount == _ZERO:
-            self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
-            await self._sweep(tracked)
+            # T-8-30 (19-REVIEW CR-03): one zero read never sweeps the confirmed stop.
+            if await self._second_read_is_flat(tracked):
+                self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
+                await self._sweep(tracked)
             return
         if (amount > _ZERO) != (entry.side == "LONG"):
             await self._enter_tp_unavailable(
@@ -1278,10 +1318,13 @@ class ProtectionCoordinator:
 
         The stop, TP1 or TP2 closed the position (whichever fired); the plan's remaining legs are
         cancelled by deterministic id whatever the exchange auto-cancelled (A3). An open or
-        unreadable position keeps the state.
+        unreadable position keeps the state, and so does a zero read that a second, fresh read
+        does not confirm (T-8-30, 19-REVIEW CR-03).
         """
         amount = await self._position_amount(tracked)
         if amount is None or amount != _ZERO:
+            return
+        if not await self._second_read_is_flat(tracked):
             return
         self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
         await self._sweep(tracked)
@@ -1557,6 +1600,7 @@ __all__ = [
     "BRANCH_B4_FILL_AFTER_STOP",
     "BRANCH_B5_STOP_REJECTED",
     "BRANCH_NO_POSITION_BUT_EXPOSED",
+    "ERROR_TRANSIENT_POSITION_GAP",
     "EVENT_CLOSE_ATTEMPT_ERROR",
     "EVENT_CLOSE_REQUIRED",
     "EVENT_ENTRY_CANCEL_FAILED",

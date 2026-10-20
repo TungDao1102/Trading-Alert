@@ -29,6 +29,7 @@ from tests.support.protection_doubles import (
     complete_constraint_snapshot,
     lot_filters_for_tests,
     make_rig,
+    script_empty_position_reads,
 )
 
 D = Decimal
@@ -383,6 +384,67 @@ async def test_tp_a_position_closed_before_the_legs_ends_flat_without_placing_th
     assert _last_transition(rig) == ("PROTECTED", "FLAT", "POSITION_CLOSED")
     assert _placed_ids(rig) == [STOP_ID]
     assert _swept_ids(rig) == [STOP_ID, TP1_ID, TP2_ID]
+
+
+def _gap_note_count(rig: ProtectionRig) -> int:
+    return sum(
+        1
+        for e in rig.journal.calls
+        if e.event_type == "PROTECTION_REST_FAILED"
+        and json.loads(e.payload_json).get("error_type") == "TransientPositionGap"
+    )
+
+
+async def test_tp_one_empty_position_read_in_protected_never_sweeps_the_active_stop() -> None:
+    """19-REVIEW CR-03 / T-8-30: a transient empty read is not FLAT.
+
+    PROTECTED means the stop is REST-confirmed ACTIVE and the position (0.010) is open. The old
+    code went FLAT on one empty `snapshot_positions` answer and cancelled the ACTIVE stop; now a
+    second, fresh read shows the position, the gap is journaled and the state is kept.
+    """
+    rig = await make_rig()
+    await _to_protected(rig)
+    script_empty_position_reads(rig.fake, [True, False])
+
+    await rig.coordinator.step()
+
+    assert _state(rig) is ProtectionState.PROTECTED
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert STOP_ID in rig.fake.open_algos
+    assert _gap_note_count(rig) == 1
+    await rig.coordinator.step()  # the next real read attaches the take profits as usual
+    assert _state(rig) is ProtectionState.COMPLETE
+
+
+async def test_tp_one_empty_position_read_in_complete_keeps_every_leg() -> None:
+    """From COMPLETE, one empty read followed by the real position keeps all three legs."""
+    rig = await make_rig()
+    await _to_protected(rig)
+    await rig.coordinator.step()
+    assert _state(rig) is ProtectionState.COMPLETE
+    script_empty_position_reads(rig.fake, [True, False])
+
+    await rig.coordinator.step()
+
+    assert _state(rig) is ProtectionState.COMPLETE
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert {STOP_ID, TP1_ID, TP2_ID} <= set(rig.fake.open_algos)
+    assert _gap_note_count(rig) == 1
+
+
+async def test_tp_exit_needs_two_consecutive_zero_reads() -> None:
+    """A genuine exit still goes FLAT, after exactly two zero reads in the step."""
+    rig = await make_rig()
+    await _to_protected(rig)
+    await rig.coordinator.step()
+    rig.fake.trigger_stop(TP2_ID)
+    reads_before = len(rig.fake.calls_to("snapshot_positions"))
+
+    await rig.coordinator.step()
+
+    assert _state(rig) is ProtectionState.FLAT
+    assert len(rig.fake.calls_to("snapshot_positions")) - reads_before == 2
+    assert _gap_note_count(rig) == 0
 
 
 async def test_tp_unreadable_position_in_complete_keeps_the_state() -> None:

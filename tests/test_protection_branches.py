@@ -29,6 +29,7 @@ from tests.support.protection_doubles import (
     TEST_ONLY_PLAN_HASH,
     ProtectionRig,
     make_rig,
+    script_empty_position_reads,
 )
 
 D = Decimal
@@ -435,6 +436,93 @@ async def test_branch_stop_consumed_with_a_flat_position_and_terminal_entry_ends
     assert rig.fake.calls_to("place_market_close") == []
     assert rig.alerts.alerts == []
     assert _place_calls(rig) == 1
+
+
+def _gap_notes(rig: ProtectionRig) -> list[dict[str, str]]:
+    """The journaled transient-position-gap notes (19-REVIEW CR-03)."""
+    notes = []
+    for event in rig.journal.calls:
+        if event.event_type == "PROTECTION_REST_FAILED":
+            body = json.loads(event.payload_json)
+            if body.get("error_type") == "TransientPositionGap":
+                notes.append(body)
+    return notes
+
+
+async def test_branch_stop_lost_one_empty_position_read_never_sweeps_the_legs() -> None:
+    """19-REVIEW CR-03 / T-8-30: one zero read followed by a non-zero one must not go FLAT.
+
+    The stop reads NOT_ACTIVE, the entry is terminal and the position (0.004) is still open, but
+    the first REST position answer is a transient empty list. The old code went FLAT on that one
+    read and swept every leg; now the second, fresh read shows the position, the gap is
+    journaled and the state is kept. What the coordinator does next with a lost stop once the
+    entry is terminal is 19-REVIEW WR-04 (an owner decision, not changed here); this test only
+    pins that the open position is never declared FLAT and its legs are never swept.
+    """
+    rig = await make_rig(real_closer=True)
+    _script_failures(rig, "cancel_normal_order", 2)  # the entry stays open for two steps
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    await rig.coordinator.step()  # the remainder cancel goes through (entry read before it)
+    assert _state(rig) is ProtectionState.PROTECTED_ENTRY_OPEN
+    rig.fake.open_algos[rig.stop_id].status = "TRIGGERED"  # the stop no longer looks ACTIVE
+    assert rig.fake.positions["BTCUSDT"] == D("0.004")
+    script_empty_position_reads(rig.fake, [True, False])
+
+    await rig.coordinator.step()  # entry terminal; position read empty, then 0.004
+    assert _state(rig) is ProtectionState.PROTECTED_ENTRY_OPEN
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert rig.stop_id in rig.fake.open_algos
+    assert len(_gap_notes(rig)) == 1
+    assert "FLAT" not in [to for _, to, _ in _transition_reasons(rig)]
+
+    for _ in range(3):
+        await rig.coordinator.step()  # every later read is real: the position stays open
+    assert "FLAT" not in [to for _, to, _ in _transition_reasons(rig)]
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert rig.stop_id in rig.fake.open_algos
+
+
+async def test_branch_stop_consumed_flat_reads_the_position_twice_before_flat() -> None:
+    """The genuine flat case still ends FLAT, on two consecutive zero reads."""
+    rig = await make_rig(real_closer=True)
+    _script_failures(rig, "cancel_normal_order", 2)
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    rig.fake.trigger_stop(rig.stop_id)
+    await rig.coordinator.step()
+    reads_before = len(rig.fake.calls_to("snapshot_positions"))
+    await rig.coordinator.step()
+    assert _state(rig) is ProtectionState.FLAT
+    assert len(rig.fake.calls_to("snapshot_positions")) - reads_before == 2
+    assert _gap_notes(rig) == []
+
+
+async def test_branch_no_position_4509_one_empty_position_read_keeps_the_plan_unprotected() -> None:
+    """19-REVIEW CR-03: -4509, a terminal entry and ONE empty position read are not FLAT.
+
+    The entry filled completely (0.010, terminal) and the position is open; the stop answers
+    -4509 and the first position read is a transient empty list. The old code went FLAT and
+    swept the legs, leaving the open position with no stop. Now the second read shows the
+    position, the plan stays UNPROTECTED (blocking) and the next step re-places the stop.
+    """
+    rig = await make_rig(real_closer=True)
+    rig.fake.reject_next_algo(-4509)
+    script_empty_position_reads(rig.fake, [True, False])
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.010")))
+
+    await rig.coordinator.step()
+    assert _state(rig) is ProtectionState.UNPROTECTED
+    assert rig.coordinator.blocks_new_entries() is True
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert len(_gap_notes(rig)) == 1
+    assert rig.fake.positions["BTCUSDT"] == D("0.010")
+
+    await rig.coordinator.step()  # REST: the stop is absent by id, so it is placed again
+    assert _place_calls(rig) == 2
+    assert rig.fake.calls_to("place_market_close") == []
 
 
 async def test_branch_no_position_4509_flat_and_entry_terminal_ends_flat_without_a_close() -> None:

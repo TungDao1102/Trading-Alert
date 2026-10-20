@@ -305,6 +305,26 @@ async def make_rig(
     )
 
 
+def script_empty_position_reads(fake: BinanceSemanticsFakeAdapter, pattern: Iterable[bool]) -> None:
+    """Script a transient empty `snapshot_positions` answer (19-REVIEW CR-03, T-8-30).
+
+    The next calls follow `pattern`: True answers an EMPTY list (what the exchange returns for a
+    flat position, so one glitch looks exactly like flat) without touching the fake's state;
+    False answers the fake's real rows. After the pattern every call is real again. Every call
+    is still recorded in `fake.calls` (the empty answers under `snapshot_positions` too).
+    """
+    script = deque(pattern)
+    original = fake.snapshot_positions
+
+    async def scripted(**kwargs: Any) -> Any:
+        if script and script.popleft():
+            fake._record_call("snapshot_positions", kwargs)
+            return []
+        return await original(**kwargs)
+
+    fake.snapshot_positions = scripted  # type: ignore[method-assign]
+
+
 def _log_adapter_calls(fake: BinanceSemanticsFakeAdapter, log: list[str]) -> None:
     """Wrap the order-changing adapter methods so the shared log shows when each one starts."""
     for name in ("place_algo_protective", "cancel_normal_order"):
@@ -334,4 +354,5 @@ __all__ = [
     "complete_constraint_snapshot",
     "lot_filters_for_tests",
     "resting_entry_for_tests",
+    "script_empty_position_reads",
 ]
