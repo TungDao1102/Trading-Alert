@@ -344,6 +344,17 @@ def _usage_error(message: str) -> int:
     return int(ExitCode.USAGE)
 
 
+def _remove_own_stamp(directory: Path) -> None:
+    """Best-effort removal of this container's liveness stamp on the way out (plan 16-65)."""
+    try:
+        liveness.remove_liveness(directory)
+    except OSError as exc:
+        structlog.get_logger().warning(
+            "paper runtime: the liveness stamp was not removed at the exit",
+            error=type(exc).__name__,
+        )
+
+
 def _failed_closed(detail: str) -> int:
     print(
         f"paper runtime failed closed (exit {int(ExitCode.FAIL_CLOSED_RUNTIME)}): {detail}",
@@ -876,15 +887,17 @@ class _LiveLoop:
         Wakes at half the bound (a STRUCTURAL sampling rate: a live loop then always has a stamp
         younger than the bound). The bound is only the configuration's
         `health.feed_silence_timeout_seconds`. The silence is measured from the supervisor's
-        connection-wide last-frame stamp, or from the watchdog's start before the first frame. A
-        silence longer than the bound starts the supervisor's bounded drop recovery once per
-        episode; a frame arriving after the silence began ends the episode; when the bound
-        expires again with no frame since the silence began, the process fails closed.
+        connection-wide last-frame stamp, or from the watchdog's start before the first frame. The
+        liveness stamp records no last-frame time until a message arrived (plan 16-65), so the
+        probe never reports a process live before its feed spoke. A silence longer than the bound
+        starts the supervisor's bounded drop recovery once per episode; a frame arriving after
+        the silence began ends the episode; when the bound expires again with no frame since the
+        silence began, the process fails closed.
         """
         bound = self._context.config.health.feed_silence_timeout_seconds
         wake = timedelta(seconds=bound) / 2
         watch_started = self._feed_clock()
-        self._stamp_liveness(watch_started, watch_started)
+        self._stamp_liveness(watch_started, None)
         silent_since: float | None = None
         recovery_started: float | None = None
         while not self._finished():
@@ -894,7 +907,7 @@ class _LiveLoop:
             now = self._feed_clock()
             last = self._supervisor.last_frame_monotonic
             reference = watch_started if last is None else max(last, watch_started)
-            self._stamp_liveness(now, reference)
+            self._stamp_liveness(now, None if last is None else reference)
             if recovery_started is None or silent_since is None:
                 if now - reference > bound:
                     silent_since, recovery_started = reference, now
@@ -913,12 +926,13 @@ class _LiveLoop:
                 )
                 return
 
-    def _stamp_liveness(self, now: float, last_frame: float) -> None:
+    def _stamp_liveness(self, now: float, last_frame: float | None) -> None:
         """Write this container's liveness stamp from the event loop (plan 16-56 Task 4).
 
         The wall-clock time of the last message is derived from the feed clock, so the SDK
-        handler's stamp stays one attribute write. A failed write is logged and never fails the
-        loop: the probe then reports not live and the heartbeat stops.
+        handler's stamp stays one attribute write; `last_frame` is None until the first message
+        of this process (plan 16-65), and the stamp then records none. A failed write is logged
+        and never fails the loop: the probe then reports not live and the heartbeat stops.
         """
         directory = self._context.liveness_dir
         if directory is None:
@@ -928,7 +942,9 @@ class _LiveLoop:
             liveness.write_liveness(
                 directory,
                 loop_alive_utc=at,
-                last_frame_utc=at - timedelta(seconds=max(0, now - last_frame)),
+                last_frame_utc=(
+                    None if last_frame is None else at - timedelta(seconds=max(0, now - last_frame))
+                ),
             )
         except (OSError, ValueError) as exc:
             log.warning(
@@ -1459,6 +1475,17 @@ def main(
             registry_root=registry_root,
             now=now,
         )
+    # The liveness stamp belongs to this process (plan 16-65, 16-DEC-LIVENESS-FIRST-FRAME): one
+    # left by an earlier process of this container goes before any start step, so a restart loop
+    # never inherits its health. The probes above and the one-shot pin never touch it.
+    owns_stamp = not args.pin_epoch
+    if owns_stamp:
+        try:
+            liveness.remove_liveness(marker_dir)
+        except OSError as exc:
+            return _failed_closed(
+                f"the liveness stamp of an earlier process cannot be removed ({type(exc).__name__})"
+            )
     if args.pin_epoch and hold:
         return _usage_error(
             "--pin-epoch is a one-shot operator command that never holds "
@@ -1669,6 +1696,11 @@ def main(
     finally:
         if lease is not None:
             lease.release()
+        if owns_stamp:
+            # Every exit after the lease, fail-closed ones included: the stamp of this process
+            # never outlives it (best effort; a kill -9 leaves one that ages out within the
+            # bound or goes at the next start). Nothing before the lease writes a stamp.
+            _remove_own_stamp(marker_dir)
 
 
 if __name__ == "__main__":

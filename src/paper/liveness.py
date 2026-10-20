@@ -9,11 +9,18 @@ The separate paper heartbeat (owner decision 16-DEC-HUNG-RUNTIME, 16-55 Q2 = B, 
   container, `liveness-<container>.json`, in the directory of the pinned-state file
   (`logs/paper/`). It holds the container name (`socket.gethostname()`), the wall-clock time of
   this wake (`loop_alive_utc`) and the wall-clock time of the last message on the market
-  connection (`last_frame_utc`; before the first frame, the time the watchdog started watching).
-  A hung event loop stops refreshing it; a silent feed stops moving `last_frame_utc`.
+  connection of this process (`last_frame_utc`; null until the first message arrived, plan
+  16-65). A hung event loop stops refreshing it; a silent feed stops moving `last_frame_utc`.
+- The stamp belongs to one process (plan 16-65, decisions/16-DEC-LIVENESS-FIRST-FRAME.md): the
+  runtime removes this container's stamp at its start, before any other start step, and again on
+  its way out, so a stamp of an earlier process never counts as health of a restarted one. Only a
+  process killed without a chance to clean up (kill -9, power loss) leaves a stamp behind; that
+  stamp is no longer refreshed and fails the probe once its loop-alive time is older than the
+  bound (at most `health.feed_silence_timeout_seconds`), or is removed by the next start.
 - `python -m src.paper.runtime --liveness` passes only when no held marker of this container
-  exists (`src/paper/held_marker.py`), the liveness file of this container exists and both of its
-  times are within `health.feed_silence_timeout_seconds` of now. `deploy/heartbeat.sh --target
+  exists (`src/paper/held_marker.py`), the liveness file of this container exists, it records a
+  message of this process, and both of its times are within `health.feed_silence_timeout_seconds`
+  of now. `deploy/heartbeat.sh --target
   paper` sends a success ping only when it passes.
 
 The file never holds a value of the environment or of the configuration. Stdlib only; nothing here
@@ -31,7 +38,9 @@ from pathlib import Path
 
 from src.paper import held_marker
 
-LIVENESS_SCHEMA = "paper-liveness/1"
+# paper-liveness/2 (plan 16-65): `last_frame_utc` may be null (no message yet in this process).
+# A file of another schema, such as paper-liveness/1, is refused as unreadable, never counted.
+LIVENESS_SCHEMA = "paper-liveness/2"
 LIVENESS_PREFIX = "liveness-"
 
 
@@ -41,7 +50,8 @@ class LivenessStamp:
 
     container: str
     loop_alive_utc: datetime
-    last_frame_utc: datetime
+    # None until the first message on the market connection of this process (plan 16-65).
+    last_frame_utc: datetime | None
 
 
 class LivenessUnreadable(Exception):
@@ -63,7 +73,7 @@ def write_liveness(
     directory: Path,
     *,
     loop_alive_utc: datetime,
-    last_frame_utc: datetime,
+    last_frame_utc: datetime | None,
     container: str | None = None,
 ) -> Path:
     """Write the stamp atomically (temporary file in the same directory, then replace).
@@ -72,7 +82,8 @@ def write_liveness(
         OSError: the file cannot be written (the caller logs it; the probe then fails).
     """
     _require_utc(loop_alive_utc, "loop_alive_utc")
-    _require_utc(last_frame_utc, "last_frame_utc")
+    if last_frame_utc is not None:
+        _require_utc(last_frame_utc, "last_frame_utc")
     name = container if container is not None else held_marker.container_name()
     path = liveness_path(directory, name)
     directory.mkdir(parents=True, exist_ok=True)
@@ -80,7 +91,7 @@ def write_liveness(
         "schema": LIVENESS_SCHEMA,
         "container": name,
         "loop_alive_utc": loop_alive_utc.isoformat(),
-        "last_frame_utc": last_frame_utc.isoformat(),
+        "last_frame_utc": None if last_frame_utc is None else last_frame_utc.isoformat(),
     }
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=directory)
     try:
@@ -91,6 +102,16 @@ def write_liveness(
         Path(temporary).unlink(missing_ok=True)
         raise
     return path
+
+
+def remove_liveness(directory: Path, container: str | None = None) -> None:
+    """Remove the stamp of `container` (this container by default); an absent file is fine.
+
+    Raises:
+        OSError: the file exists and cannot be removed (the caller decides: fail closed at the
+            start, log at the exit).
+    """
+    liveness_path(directory, container).unlink(missing_ok=True)
 
 
 def read_liveness(directory: Path, container: str | None = None) -> LivenessStamp | None:
@@ -106,14 +127,16 @@ def read_liveness(directory: Path, container: str | None = None) -> LivenessStam
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if raw["schema"] != LIVENESS_SCHEMA:
-            raise ValueError("unknown schema")
+            raise LivenessUnreadable(f"not a stamp of schema {LIVENESS_SCHEMA}")
+        frame = raw["last_frame_utc"]
         stamp = LivenessStamp(
             container=str(raw["container"]),
             loop_alive_utc=datetime.fromisoformat(raw["loop_alive_utc"]),
-            last_frame_utc=datetime.fromisoformat(raw["last_frame_utc"]),
+            last_frame_utc=None if frame is None else datetime.fromisoformat(frame),
         )
         _require_utc(stamp.loop_alive_utc, "loop_alive_utc")
-        _require_utc(stamp.last_frame_utc, "last_frame_utc")
+        if stamp.last_frame_utc is not None:
+            _require_utc(stamp.last_frame_utc, "last_frame_utc")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise LivenessUnreadable(type(exc).__name__) from None
     if stamp.container != name:
@@ -130,8 +153,9 @@ def liveness_problem(
 ) -> str | None:
     """None when this container is live; otherwise a one-line reason (names and ages only).
 
-    Live means: no held marker of this container, a liveness file of this container, and both
-    its loop-alive time and its last-frame time within `bound_seconds` of `now_utc`.
+    Live means: no held marker of this container, a liveness file of this container that records
+    a message of this process, and both its loop-alive time and its last-frame time within
+    `bound_seconds` of `now_utc`.
     """
     _require_utc(now_utc, "now_utc")
     bound = timedelta(seconds=bound_seconds)
@@ -155,6 +179,8 @@ def liveness_problem(
             f"the event loop stamp is {int(loop_age.total_seconds())} s old: the loop is hung or "
             "stopped"
         )
+    if stamp.last_frame_utc is None:
+        return "no market message since this process started: the feed has not spoken yet"
     frame_age = now_utc - stamp.last_frame_utc
     if frame_age > bound:
         return f"no market message for {int(frame_age.total_seconds())} s: the feed is silent"
@@ -169,5 +195,6 @@ __all__ = [
     "liveness_path",
     "liveness_problem",
     "read_liveness",
+    "remove_liveness",
     "write_liveness",
 ]
