@@ -237,6 +237,10 @@ STRATEGY_ID = "trend-pullback"
 PARAMETER_SET_ID = "baseline-v5"
 OPERATOR_ID = "demo-rehearsal-runner"
 FAR_BAND_FRACTION = Decimal("0.5")  # fraction of the PERCENT_PRICE band used for the entry
+# 19-REVIEW CR-02: the entry zone reaches this far past the derive-time mark on the near side,
+# so the live mark read at gate 5e (after the approval tap) can still sit inside the zone.
+# A rehearsal value, not a strategy parameter; the production zone check is unchanged.
+MARK_ZONE_CUSHION_RATE = Decimal("0.005")
 SL_DISTANCE_RATE = Decimal("0.015")
 TP1_DISTANCE_RATE = Decimal("0.03")
 TP2_DISTANCE_RATE = Decimal("0.06")
@@ -1478,6 +1482,8 @@ class DerivedPlan:
                 "run_id": self.run_id,
                 "mark_price": self.mark_price,
                 "entry_price": self.entry_price,
+                "entry_min_price": self.trade_plan.entry_min_price,
+                "entry_max_price": self.trade_plan.entry_max_price,
                 "stop_loss": self.stop_loss,
                 "tp1_trigger": self.tp1_trigger,
                 "tp2_trigger": self.tp2_trigger,
@@ -1608,10 +1614,31 @@ def derive_plan(
     tick = filters.price_tick_size
     step = filters.quantity_step_size
     entry = quantize_price(price=raw_entry, price_tick_size=tick, direction=PRICE_ROUND_DOWN)
-    # The stop is anchored at or below the mark and the targets at or above it, so neither
-    # can trigger on placement even when the entry sits on the far side of the mark.
+    # 19-REVIEW CR-02: gate 5e refuses a live mark outside [entry_min, entry_max], so a one-price
+    # zone at the far/fill entry could never place. The zone reaches past the mark by the cushion
+    # on the near side and is mirrored on the far side, so its mid (the price the manager
+    # places at) is still exactly `entry`. Both edges are on the tick grid.
+    if scenario == "fill":
+        entry_min = quantize_price(
+            price=mark_price * (Decimal("1") - MARK_ZONE_CUSHION_RATE),
+            price_tick_size=tick,
+            direction=PRICE_ROUND_DOWN,
+        )
+        entry_max = entry + (entry - entry_min)
+    else:
+        entry_max = quantize_price(
+            price=mark_price * (Decimal("1") + MARK_ZONE_CUSHION_RATE),
+            price_tick_size=tick,
+            direction=PRICE_ROUND_UP,
+        )
+        entry_min = entry - (entry_max - entry)
+    if not Decimal("0") < entry_min < mark_price < entry_max:
+        raise RehearsalAbort("the entry zone does not contain the mark price")
+    # The stop is anchored below the zone (the binding requires sl < entry_min for a LONG, and
+    # it is then below the mark) and the targets at or above the mark, so neither can trigger
+    # on placement even when the entry sits on the far side of the mark.
     stop = quantize_price(
-        price=min(entry, mark_price) * (Decimal("1") - SL_DISTANCE_RATE),
+        price=entry_min * (Decimal("1") - SL_DISTANCE_RATE),
         price_tick_size=tick,
         direction=PRICE_ROUND_UP,
     )
@@ -1626,7 +1653,7 @@ def derive_plan(
         price_tick_size=tick,
         direction=PRICE_ROUND_DOWN,
     )
-    if not stop < entry or not stop < mark_price or not tp1 > mark_price or not tp2 > tp1:
+    if not stop < entry_min or not stop < mark_price or not tp1 > mark_price or not tp2 > tp1:
         raise RehearsalAbort("derived levels would trigger on placement or are out of order")
     if scenario == "fill" and not entry > mark_price:
         raise RehearsalAbort("the fill entry is not above the mark price")
@@ -1654,8 +1681,9 @@ def derive_plan(
         parameter_set=parameter_set, commission=commission, observed_at=observed_at
     )
     risk_rate = params["risk_rate"]
-    risk_per_unit = (entry - stop) + per_unit_round_trip_cost(
-        side="LONG", entry_price=entry, stop_price=stop, rates=rates
+    # The risk pipeline sizes a LONG at the adverse zone edge `entry_max` (Phase 12 D-03).
+    risk_per_unit = (entry_max - stop) + per_unit_round_trip_cost(
+        side="LONG", entry_price=entry_max, stop_price=stop, rates=rates
     )
     # The risk pipeline sizes from equity, so back-solve the rehearsal equity that makes it
     # return exactly this quantity, rounded UP to the cent. It is a rehearsal input.
@@ -1675,8 +1703,8 @@ def derive_plan(
     expiry_utc = observed_at + timedelta(seconds=approval_timeout_seconds) + PLAN_EXPIRY_MARGIN
     plan_hash = plan_hash_from_fields(
         signal_id=signal_id,
-        entry_min_price=entry,
-        entry_max_price=entry,
+        entry_min_price=entry_min,
+        entry_max_price=entry_max,
         stop_loss_price=stop,
         take_profit_json=take_profit_json,
         invalidation_rule_json=invalidation_rule_json,
@@ -1687,8 +1715,8 @@ def derive_plan(
         signal_id=signal_id,
         trade_plan_version="demo-rehearsal-v1",
         entry_model="LIMIT_ZONE",
-        entry_min_price=entry,
-        entry_max_price=entry,
+        entry_min_price=entry_min,
+        entry_max_price=entry_max,
         stop_loss_price=stop,
         take_profit_json=take_profit_json,
         invalidation_rule_json=invalidation_rule_json,

@@ -154,9 +154,10 @@ class FakeDemoAdapter:
         self.raise_when_symbol_none: BaseException | None = None
         self.info_calls = 0
         self.drift_after_info_calls: int | None = None
-        # Plan 19-13: the mark price `get_mark_price` reports. The rehearsal zone is the single
-        # far entry price and gate 5e needs the live mark inside the zone, so a flow test that
-        # reaches the manager sets this to the derived entry price (see run_flow).
+        # Plan 19-13: the mark price `get_mark_price` reports; `None` reports MARK, the same
+        # mark the plan is derived from (19-REVIEW CR-02: the derived zone must contain it, so
+        # no flow test moves the gate mark onto the entry any more). A test that wants the
+        # mark to have left the zone sets it explicitly.
         self.gate_mark_price: Decimal | None = None
         self._next_id = 1
 
@@ -690,8 +691,6 @@ def run_flow(
     snapshot_live_inputs: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any], FakeDemoAdapter, FakeApprovalChannel]:
     exchange = adapter if adapter is not None else FakeDemoAdapter()
-    if exchange.gate_mark_price is None and scenario in ("far", "fill"):
-        exchange.gate_mark_price = _derive(scenario).entry_price
     # TEST_ONLY limits by default; `committed_limits=True` loads config/execution instead,
     # where every value is NOT_CONFIGURED (plan 19-13).
     limits = (
@@ -883,14 +882,21 @@ def _derive(scenario: str, **filter_overrides: Any) -> dr.DerivedPlan:
 
 def test_plan_derivation_is_decimal_and_hits_the_smallest_passing_quantity() -> None:
     plan = _derive("far")
+    # entry 60000 * (1 - 0.05 * 0.5) = 58500.0 (the zone mid, the placed price). 19-REVIEW
+    # CR-02: entry_max = 60000 * 1.005 = 60300.0 (the cushion past the mark), entry_min is the
+    # mirror 2 * 58500.0 - 60300.0 = 56700.0, stop = 56700.0 * 0.985 = 55849.5 (below the zone).
     assert plan.entry_price == Decimal("58500.0")
-    assert plan.stop_loss == Decimal("57622.5")
+    assert plan.trade_plan.entry_min_price == Decimal("56700.0")
+    assert plan.trade_plan.entry_max_price == Decimal("60300.0")
+    assert plan.stop_loss == Decimal("55849.5")
     assert plan.tp1_trigger == Decimal("61800.0")
     assert plan.tp2_trigger == Decimal("63600.0")
     # 0.002 and 0.003 fail the TP1 notional gate (0.001 * 61800 < 100); 0.004 is the first pass.
     assert plan.quantity == Decimal("0.004")
     assert plan.tp1_quantity == Decimal("0.002")
-    assert plan.equity == Decimal("766.96")
+    # Back-solved at the adverse edge entry_max: 0.004 * (60300.0 - 55849.5 + 80.8596) / 0.005
+    # = 3625.08768, rounded up to the cent.
+    assert plan.equity == Decimal("3625.09")
     assert plan.trade_plan.status.value == "APPROVAL_PENDING"
     for value in (
         plan.entry_price,
@@ -933,6 +939,78 @@ def test_far_entry_price_is_inside_the_percent_price_band_and_fill_price_crosses
         _derive("far", percent_price_multiplier_down=None)
     with pytest.raises(dr.RehearsalAbort):
         _derive("fill", percent_price_multiplier_up=None)
+
+
+def test_derived_zone_contains_the_mark_and_its_mid_is_the_entry() -> None:
+    """19-REVIEW CR-02: the far/fill plans pass the production gate 5e checks unchanged.
+
+    The old one-price zone [entry, entry] excluded the mark (far sits below it, fill above it),
+    so `check_mark_price` refused both scenarios with MARK_PRICE_OUTSIDE_ZONE on the exchange.
+    """
+    from src.execution.binding import check_snapped_geometry
+    from src.execution.placement import derive_limit_price
+    from src.execution.pre_placement import check_mark_price
+
+    for scenario in ("far", "fill"):
+        plan = _derive(scenario)
+        trade_plan = plan.trade_plan
+        assert trade_plan.entry_min_price < MARK < trade_plan.entry_max_price, scenario
+        mid = derive_limit_price(
+            entry_min_price=trade_plan.entry_min_price,
+            entry_max_price=trade_plan.entry_max_price,
+        )
+        assert mid == plan.entry_price, scenario  # the manager places exactly the entry
+        assert (
+            check_mark_price(
+                side="LONG",
+                mark_price=MARK,
+                mark_time_utc=SERVER_NOW,
+                now_utc=SERVER_NOW,
+                max_mark_price_age_ms=0,
+                max_clock_skew=timedelta(0),
+                sl_trigger_price=plan.stop_loss,
+                entry_min_price=trade_plan.entry_min_price,
+                entry_max_price=trade_plan.entry_max_price,
+            )
+            is None
+        ), scenario
+        assert (
+            check_snapped_geometry(
+                side="LONG",
+                limit_price=plan.entry_price,
+                sl_trigger_price=plan.stop_loss,
+                entry_min_price=trade_plan.entry_min_price,
+                entry_max_price=trade_plan.entry_max_price,
+            )
+            is None
+        ), scenario
+    fill = _derive("fill").trade_plan
+    # fill: entry_min = 60000 * 0.995 = 59700.0, entry_max = 2 * 61500.0 - 59700.0 = 63300.0.
+    assert (fill.entry_min_price, fill.entry_max_price) == (Decimal("59700.0"), Decimal("63300.0"))
+
+
+@pytest.mark.parametrize("scenario", ["far", "fill"])
+def test_order_scenarios_reach_the_entry_against_the_fakes_own_mark(
+    tmp_path: Path, scenario: str
+) -> None:
+    """19-REVIEW CR-02: no gate-mark override; the fake reports the mark the plan came from."""
+    adapter = FakeDemoAdapter()
+    assert adapter.gate_mark_price is None
+    _, data, _, _ = run_flow(tmp_path, scenario=scenario, adapter=adapter, execute=True)
+    assert "MARK_PRICE_OUTSIDE_ZONE" not in json.dumps(data)
+    entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
+    assert entry_kwargs["price"] == _derive(scenario).entry_price
+    assert step(data, "place_entry")["status"] == "PASSED"
+
+
+def test_a_mark_past_the_zone_cushion_is_still_refused(tmp_path: Path) -> None:
+    """The production zone check is not weakened: a mark one tick above entry_max refuses."""
+    adapter = FakeDemoAdapter()
+    adapter.gate_mark_price = _derive("far").trade_plan.entry_max_price + Decimal("0.1")
+    code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
+    assert code == dr.EXIT_ABORTED
+    assert adapter.mutating_calls() == []
+    assert "MARK_PRICE_OUTSIDE_ZONE" in json.dumps(data)
 
 
 def test_tp1_quantity_fraction_is_the_backtest_constant() -> None:
@@ -1289,7 +1367,6 @@ def test_sdk_error_code_and_text_are_recorded_but_other_errors_stay_type_only(
 async def test_enablement_is_in_process_only() -> None:
     adapter = FakeDemoAdapter()
     adapter.raise_when_symbol_none = RuntimeError("account-wide read failed")
-    adapter.gate_mark_price = _derive("far").entry_price
     channel = FakeApprovalChannel(script=approve_script())
     ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE)
     with pytest.raises(RuntimeError):
