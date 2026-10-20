@@ -120,8 +120,8 @@ No BLOCKER. Warnings and notes (none changes a criterion verdict):
 
 ## Human items
 
-1. Sign off `18-VALIDATION.md` (draft/false/pending).
-2. Attest no-withdrawal keys and the IP allowlist (OPS-02; Phase 24-26).
+1. ~~Sign off `18-VALIDATION.md`~~ DONE 2026-10-20: frontmatter and boxes were already set by the 2026-10-19 audit; the owner had the Approval line written in the session (scope in that file).
+2. ~~Attest no-withdrawal keys and the IP allowlist~~ OWNER-STATED DONE 2026-10-20 (recorded from the owner's statement in the session, not checked by Claude or by code): withdrawal permission is off and an IP allowlist is set on the API key(s) the owner has created so far. Not recorded: which environment (Demo or mainnet), and whether the whitelisted IP is the development machine or the VPS. Still open for OPS-02: re-point the allowlist to the VPS Elastic IP when the VPS exists (Phase 24, RUNBOOK 15.6) and attest the read-only mainnet canary key (Phase 26). The OPS-02 requirement stays Pending.
 3. D055 stays OPEN: decision pending the user, informed by `decisions/18-DRAFT-D055-evidence-for-user.md` and `19-NOTES.md`. Partial-fill and triggered-stop behaviour on Demo remain unobserved and should be probed before relying on them.
 
 ---
