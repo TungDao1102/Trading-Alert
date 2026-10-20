@@ -1,0 +1,27 @@
+16-43 preflight (checklist section 0), read-only checks on the development machine
+run on 2026-10-20 (UTC date of the run), by the orchestrator at the owner's request; no soak-host command was run here
+branch state: local HEAD is master at 9d8a9b0; origin/master = origin/develop = 9d8a9b0 (ls-remote). Reflog shows develop merged into master (fast-forward) and back, the owner's merge and push, after the commit 9d8a9b0 of this record.
+
+IMAGE_COMMIT (from evidence/16-66-gate-post-phase19.txt, the fresh full gate after the Phase 19 merge): 36dcad846f19e0214d80803669994007fd87d131 (40 hex)
+  superseded: 9b27da5 of evidence/16-65-gate.txt (not used)
+
+checks:
+  [PASS] git fetch origin: exit 0
+  [PASS] 36dcad8 is an ancestor of origin/master: git merge-base --is-ancestor 36dcad8... origin/master, exit 0
+  [PASS] config/paper/paper-runtime-v2.toml exists at IMAGE_COMMIT: git cat-file -e, exit 0; the same file exists on origin/master
+  [PASS] .github/workflows/paper_freeze_check.yml on origin/master (blob 8a2f0e9): contains --from-allowlist (line 140), concurrency group paper-freeze-check, cancel-in-progress false, queue max (lines 69-72), exactly one cron line: cron: "34 * * * *" (line 53)
+  [PASS] cron line equals decisions/16-DEC-Q-Q.md ("cron: 34 * * * *", line 8)
+  [PASS] src/paper/freeze.py on origin/master: exactly one PaperAllowlistEntry in PAPER_START_ALLOWLIST (strategy trend-pullback, parameter set research-run-1-a01)
+  [PASS] origin/master contains plan 16-51: feat(16-51) commits 191e25b and 64e7257
+  [PASS] origin/master contains plan 16-52: feat(16-52) commit b64fc62
+  [PASS] gh workflow list --all: Paper Freeze Check = active (id 368247901)
+  [PASS] uv run pytest tests/test_paper_runtime_config_file.py -q -p no:cacheprovider: 8 passed, exit 0
+
+not checked here (other sections of the checklist, soak host or evidence the orchestrator has not seen):
+  - evidence of plan 16-40 rehearsal, 16-47/16-49 destination, 16-50 operator verification (HEARTBEAT_MONITOR_ALERT_RECEIVED): the files were not re-read in this preflight
+  - 16-51/16-52 evidence was matched by commit subject only
+  - "gh run list" for the scheduled runs: no scheduled run is required before the pin
+  - the re-review of c654524..36dcad8: SKIPPED by owner decision (not performed, not claimed)
+  - the full set of five automated checks of plan 16-43 Task 1 (only the config test and the git/gh checks listed above were run)
+
+result: section 0 checks listed above pass; the re-review step is skipped by owner decision and is therefore an open item, not a pass.
