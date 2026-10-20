@@ -233,7 +233,7 @@ Production code also emits the following plain strings as `reason_code` values o
 | `MARK_PRICE_OUTSIDE_ZONE` | `src/execution/pre_placement.py` | The mark price has left the entry zone on the adverse side (LONG: strictly below the zone minimum; SHORT: strictly above the zone maximum), so the approved entry is no longer valid; a mark on the favorable side is allowed because the GTD LIMIT rests (owner decision, 19-REVIEW WR-06) | proposed canonical, promote in Phase 24 |
 | `HEDGE_MODE_UNSUPPORTED` | `src/execution/pre_placement.py` | The account is in Hedge position mode; V1 places only One-way orders | proposed canonical, promote in Phase 24 |
 | `ENTRY_REFUSED_BEFORE_SEND` | `src/execution/manager.py` | The entry was refused before anything reached the exchange (REST gate pause or ban, entries blocked by the clock-drift guard, missing signed-call policy); no probe, no SAFE_MODE | proposed canonical, promote in Phase 24 |
-| `APPROVED_QUANTITY_NOT_CONFIRMED` | `src/execution/manager.py` | The approval row read inside the consume transaction does not confirm the quantity: its stored `approved_quantity` is NULL, differs from the quantity bound from the caller's approval, or is below the quantity about to be placed (D078 (6)); the transaction rolls back, the approval is not consumed and nothing is sent | proposed canonical, promote in Phase 24 |
+| `APPROVED_QUANTITY_NOT_CONFIRMED` | `src/execution/manager.py` | The approval row read inside the consume transaction does not confirm the quantity: its stored `approved_quantity` is NULL, differs from the quantity bound from the caller's approval, or is below the quantity about to be placed (D078 (6)); the transaction rolls back, the approval is not consumed and nothing is sent; the differing and below cases also enter SAFE_MODE `APPROVED_QUANTITY_INCONSISTENT`, a NULL (legacy row) does not | proposed canonical, promote in Phase 24 |
 
 ### 9.4 SAFE_MODE entry reasons
 
@@ -253,6 +253,7 @@ Reason strings passed to `SafeModeController.enter_safe_mode(reason=...)` or rec
 | `CLOSE_REQUIRED` | `src/execution/protection.py` (a protection branch decided that a filled entry must be closed with a reduce-only order: the stop is unconfirmed at the deadline, was definitively rejected, or the entry cancel stayed slow; SAFE_MODE is entered before the emergency closer is asked) |
 | `EMERGENCY_CLOSE_FAILED` | `src/execution/emergency_close.py` (the automatic reduce-only MARKET close did not end flat) |
 | `PROTECTION_HANDOFF_FAILED` | `src/execution/manager.py` (the entry was placed but could not be handed to the protection coordinator, so no stop will be placed automatically) |
+| `APPROVED_QUANTITY_INCONSISTENT` | `src/execution/manager.py` (the approval row read inside the consume transaction stores a quantity that differs from the bound one or is below the quantity to place, D078 (6); nothing was consumed or sent; a NULL legacy row does not enter SAFE_MODE) |
 
 Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and `SKIPPED_USER` in different modules. Use the canonical enum names above.
 

@@ -572,6 +572,8 @@ NEW_SAFE_MODE_REASONS: dict[str, str] = {
     "CLOSE_REQUIRED": "src/execution/protection.py",
     "EMERGENCY_CLOSE_FAILED": "src/execution/emergency_close.py",
     "PROTECTION_HANDOFF_FAILED": "src/execution/manager.py",
+    # WR-01 follow-up, quick task 261020-q2d, D078 (6), owner decision 2026-10-20.
+    "APPROVED_QUANTITY_INCONSISTENT": "src/execution/manager.py",
 }
 EXTENDED_SAFE_MODE_REASONS: dict[str, str] = {
     "ENTRY_WITHOUT_PROTECTIVE": "src/execution/protection.py",

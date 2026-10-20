@@ -1260,5 +1260,12 @@ approval row storing NULL, or 2.000, while the caller's Approval carried 2.415, 
 - Docs: D078 amended in place (status note and item (6); item (5) no longer says the check is not
   built), DOC_STATUS line, GLOSSARY 9.3 row, DATA_MODEL 2.5 sentence, OWNER-GAPS WR-01 row.
 
+- SAFE_MODE policy (owner decision 2026-10-20, "ok tôi đồng ý"): the store raises `ApprovedQuantityMissing`
+  for a NULL (legacy row; NO_TRADE, no SAFE_MODE) and `ApprovedQuantityInconsistent` when the stored
+  value differs from the bound quantity or is below the quantity to place; the manager then also
+  enters SAFE_MODE `APPROVED_QUANTITY_INCONSISTENT` through its non-raising `_enter_safe_mode` helper
+  (moved above the consume). NO_TRADE `APPROVED_QUANTITY_NOT_CONFIRMED` in all three cases; a replay
+  enters no SAFE_MODE. D078 item (6) and GLOSSARY 9.4 state it.
+
 Verification and results are in `.planning/quick/261020-q2d-wr01-db-consume-check/261020-q2d-SUMMARY.md`.
 Not run: the full suite, `-m docker`, any Demo / `--execute` / network.
