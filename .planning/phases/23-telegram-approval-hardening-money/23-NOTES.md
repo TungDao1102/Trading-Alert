@@ -15,3 +15,8 @@ Input for `/gsd-discuss-phase 23` and the planner. Not a decision record. Writte
 ## 3. What the operator sees after a placement problem
 
 - Since Q5 an ambiguous entry failure ends as intent `UNKNOWN` plus SAFE_MODE, not as a silent NO_TRADE. The CONFIRM card flow (criterion 4) and any "already executed" message (G4-032) must show that state (needs reconciliation), not "rejected".
+
+## 4. Quantity on the APPROVE message (done by quick task 261020-r3b)
+
+- Since quick task 261020-r3b (D078 item (6)) the APPROVE message (`src/adapters/telegram_notify.py::format_approve`, which renders the SHADOW alert and the Demo rehearsal approval message) shows the approved quantity on a `Quantity:` line: the value stored on the approval row as `approved_quantity`, in fixed-point notation, never rounded. A message without a valid quantity is refused and not sent.
+- Still for this phase (criterion 2): notional, margin at the configured leverage, estimated loss at SL and profit at each TP (gross and net of modeled costs) and the equity used; the SIMULATE message still shows no quantity.

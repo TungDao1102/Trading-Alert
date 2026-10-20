@@ -48,6 +48,8 @@ At minimum:
 - current exposure,
 - clear reason codes.
 
+The APPROVE message also shows the approved quantity on a `Quantity:` line: the plan's `quantity_after_rounding`, the same value that is stored on the approval row as `approved_quantity` (D078 item (6)), written in fixed-point notation with every digit of the Decimal and never rounded. A message without it is refused and not sent. The SIMULATE message has no approval row and does not carry it.
+
 ## 5. Failure behavior
 
 If Telegram is unavailable:

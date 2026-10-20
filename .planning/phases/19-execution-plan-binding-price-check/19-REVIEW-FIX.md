@@ -1090,6 +1090,8 @@ change (D051 (c)).
    confirmation card shows. The 12-field APPROVE message (APRV-01) and the Demo rehearsal message
    show no quantity, and neither message was changed (showing it is Phase 23, money amounts on the
    card).
+   **Follow-up (quick task 261020-r3b, 2026-10-20):** both messages now show the stored quantity
+   on a `Quantity:` line (D078 item (6)); the other money amounts stay Phase 23.
 6. **The residual.** The Approval object is supplied by the caller, so the bound is as strong as the
    object the caller passes. Every current caller passes the stored row. A consume-time check inside
    `consume_and_record_entry_intent` (approved_quantity is not null and is at least the intended
@@ -1232,6 +1234,7 @@ others appear in more than one run); they are not additive.
   migration was exercised only on throwaway `t17_*_test` databases built by `alembic upgrade`.
 - A consume-time database check of the approved quantity (choice 6) and the APPROVE message showing
   a quantity (Phase 23).
+  The APPROVE message quantity was done afterwards by quick task 261020-r3b (D078 item (6)).
 
 _Batch 4 fixed: 2026-10-20T12:22:00Z_
 _Fixer: Claude (gsd-executor, quick 261020-q1o)_
