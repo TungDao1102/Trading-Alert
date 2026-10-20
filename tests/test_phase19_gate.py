@@ -23,6 +23,7 @@ import ast
 import importlib
 import inspect
 import re
+import subprocess
 import tomllib
 from decimal import Decimal
 from pathlib import Path
@@ -86,6 +87,7 @@ PHASE19_ARTIFACTS: tuple[str, ...] = (
     ".planning/phases/19-execution-plan-binding-price-check/19-RESEARCH.md",
     ".planning/phases/19-execution-plan-binding-price-check/19-DEC-D055-DRAFT.md",
     ".planning/phases/19-execution-plan-binding-price-check/19-DEC-Q5-DRAFT.md",
+    ".planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md",
 )
 
 # The planning files below are only required while the phase directory is in the checkout:
@@ -621,3 +623,142 @@ def test_glossary_91_and_the_rejection_reason_enum_are_unchanged() -> None:
     listed = set(codes.group(1).split())
     assert listed == {member.value for member in RejectionReason}
     assert listed.isdisjoint(NEW_PLAIN_CODES)
+
+
+# --------------------------------------------------------------------------- #
+# Owner-gap register, EXEC-07 note, ROADMAP criteria, hand-off notes (plan 19-17 Task 3).
+# --------------------------------------------------------------------------- #
+
+OWNER_GAPS = PHASE_DIR / "19-OWNER-GAPS.md"
+ROADMAP = ROOT / ".planning" / "ROADMAP.md"
+# The commit after which the Phase 19 and 20 success criteria must stay byte-identical (the
+# last commit of the Q5 change, before the hand-off notes touched the ROADMAP).
+ROADMAP_CRITERIA_BASELINE = "fffdb6e"
+
+# Owner decisions that are still OPEN (the row's status cell says so).
+OPEN_OWNER_ITEMS: tuple[str, ...] = ("O-01", "O-02", "O-03", "O-04", "O-05", "Q3", "Q4")
+# Phase 18 review items skipped as owner decisions (19-NOTES.md, last section).
+SKIPPED_REVIEW_ITEMS: tuple[str, ...] = ("src/WR-08", "src/WR-01", "src/WR-10", "src/CR-02")
+ASSUMPTIONS: tuple[str, ...] = tuple(f"A{number}" for number in range(1, 11))
+HANDOFF_NOTES: tuple[str, ...] = tuple(
+    f".planning/phases/{directory}/{number}-NOTES.md"
+    for directory, number in (
+        ("20-reconcile-safe-mode-hardening", "20"),
+        ("21-account-equity-daily-loss", "21"),
+        ("22-leverage-margin-liquidation-guard", "22"),
+        ("23-telegram-approval-hardening-money", "23"),
+        ("24-live-runtime-composition-demo", "24"),
+    )
+)
+
+
+def _register_rows() -> dict[str, str]:
+    """First cell -> the whole table line of 19-OWNER-GAPS.md."""
+    rows: dict[str, str] = {}
+    for line in OWNER_GAPS.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"\|\s*([^|\s][^|]*?)\s*\|", line)
+        if match is not None:
+            rows.setdefault(match.group(1), line)
+    return rows
+
+
+@requires_phase19_planning
+def test_owner_gaps_names_every_open_item_assumption_and_skipped_review_item() -> None:
+    text = OWNER_GAPS.read_text(encoding="utf-8")
+    rows = _register_rows()
+    for item in OPEN_OWNER_ITEMS:
+        assert item in rows, f"{item} has no row in 19-OWNER-GAPS.md"
+        assert "OPEN" in rows[item], f"{item} is not marked OPEN"
+    # Q5 is decided in behavior by the owner; its DECISIONS row is still a draft and the
+    # closing rule for an UNKNOWN entry is still open. The register must say all three.
+    assert "Q5" in rows
+    for word in ("DECIDED", "DRAFT", "OPEN"):
+        assert word in rows["Q5"], f"the Q5 row does not say {word}"
+    for assumption in ASSUMPTIONS:
+        assert assumption in rows, f"{assumption} has no row"
+    for item in SKIPPED_REVIEW_ITEMS:
+        assert item in text, f"{item} is not named in the register"
+    assert "owner runs every --execute" in text
+    assert "19-DEC-Q5-DRAFT.md" in text and "19-DEC-D055-DRAFT.md" in text
+    for notes in HANDOFF_NOTES:
+        assert Path(notes).name in text, f"the register does not point at {Path(notes).name}"
+
+
+@requires_phase19_planning
+def test_owner_gaps_lists_all_eleven_probes_verbatim() -> None:
+    rows = _register_rows()
+    notes = (PHASE_DIR / "19-NOTES.md").read_text(encoding="utf-8")
+    section = notes[notes.index("## Probes before D055 can be closed") :]
+    section = section[: section.index("Hedge Mode:")]
+    probes = re.findall(r"^(\d+)\. (.+)$", section, re.MULTILINE)
+    assert [number for number, _ in probes] == [str(n) for n in range(1, 12)]
+    for number, probe_text in probes:
+        assert f"P{number}" in rows, f"probe {number} has no row"
+        wanted = probe_text.split(" [open question")[0].rstrip(".")
+        assert wanted in rows[f"P{number}"], f"probe {number} is not quoted verbatim"
+
+
+@requires_phase19_planning
+def test_owner_gaps_never_claims_an_owner_item_is_solved() -> None:
+    text = OWNER_GAPS.read_text(encoding="utf-8").lower()
+    for phrase in (
+        "is solved",
+        "are solved",
+        "now solved",
+        "has been solved",
+        "resolved by phase 19",
+    ):
+        assert phrase not in text, f"the register claims something is solved: {phrase!r}"
+
+
+def test_exec_07_stays_pending_with_the_phase19_note() -> None:
+    lines = (ROOT / ".planning" / "REQUIREMENTS.md").read_text(encoding="utf-8").splitlines()
+    items = [line for line in lines if line.startswith("- [ ] **EXEC-07**")]
+    assert len(items) == 1, "EXEC-07 must stay an unchecked requirement"
+    assert "Phase 19, 2026-10-19: no code change" in items[0]
+    assert "O-02" in items[0] and "stays Pending" in items[0]
+    assert [line for line in lines if line.startswith("| EXEC-07 |")] == [
+        "| EXEC-07 | Phase 19 | Pending |"
+    ]
+
+
+def _success_criteria(roadmap: str, phase: int) -> str:
+    start = roadmap.index(f"### Phase {phase}: ")
+    block = roadmap[start:]
+    first = block.index("**Success Criteria**")
+    return block[first : block.index("**Audit refs**", first)]
+
+
+@requires_phase19_planning
+def test_roadmap_success_criteria_of_phases_19_and_20_are_unchanged() -> None:
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{ROADMAP_CRITERIA_BASELINE}^{{commit}}"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"commit {ROADMAP_CRITERIA_BASELINE} is not in this clone; criteria unchecked")
+    shown = subprocess.run(
+        ["git", "show", f"{ROADMAP_CRITERIA_BASELINE}:.planning/ROADMAP.md"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    before = shown.stdout.decode("utf-8")
+    now = ROADMAP.read_text(encoding="utf-8")
+    for phase in (19, 20):
+        assert _success_criteria(now, phase) == _success_criteria(before, phase), (
+            f"Phase {phase} success criteria changed since {ROADMAP_CRITERIA_BASELINE}"
+        )
+
+
+@requires_phase19_planning
+def test_handoff_notes_exist_and_the_roadmap_points_at_them() -> None:
+    roadmap = ROADMAP.read_text(encoding="utf-8")
+    for notes in HANDOFF_NOTES:
+        path = ROOT / notes
+        assert path.is_file(), f"{notes} is missing"
+        text = path.read_text(encoding="utf-8").lower()
+        assert "from phase 19" in text or "carried from phase 19" in text, notes
+        assert f"Input: {notes}" in roadmap.splitlines(), f"ROADMAP has no Input line for {notes}"

@@ -1,0 +1,92 @@
+# Phase 19 owner-gap register
+
+Written by plan 19-17 on 2026-10-20. This file records what Phase 19 did NOT decide and what only the owner can decide or run. Nothing in Phase 19 solves any item below. Evidence in this phase is fake-exchange agreement: no Binance Demo or mainnet call was made by any Phase 19 plan, and no `--execute` was run.
+
+Hard limits that still hold: `docs/DECISIONS.md`, `config/binance/` and `config/execution/execution-limits-v1.toml` were not edited; no limit number exists in the repository for the four `NOT_CONFIGURED` keys; no ROADMAP success criterion was edited; live placement is not enabled.
+
+Downstream hand-off notes: `20-NOTES.md`, `21-NOTES.md`, `22-NOTES.md`, `23-NOTES.md`, `24-NOTES.md`, section "From Phase 19" (21, 22 and 23 start with "carried from Phase 19"). They are inputs for the next discuss and plan steps, not decisions.
+
+## 1. Decisions the owner still owns
+
+Status values: OPEN means no decision exists and the code does not pretend one does. Q5 is the only item the owner has answered.
+
+| ID | Item | Status | What Phase 19 did, and what stays open |
+|----|------|--------|----------------------------------------|
+| O-01 | D055 closure as a DECISIONS row | OPEN | The draft is `19-DEC-D055-DRAFT.md`. The code makes the fill-driven model (D-10) the only flow but enables no live order: LIVE stays blocked until the owner accepts the draft and runs the probes (section 2). The row (D077 or later) is not written. |
+| O-02 | EXEC-07 versus the D052 item (c) constant | OPEN | No code change. The TP1 split fraction stays the code constant `TP1_QUANTITY_FRACTION` passed explicitly to the live TP sizing; the TP2 rule stays `closePosition`; the entry time in force is GTD as an exchange-side backstop. Turning these into versioned registry parameters needs a protocol-level decision because the backtest fraction is frozen. EXEC-07 stays Pending (see `.planning/REQUIREMENTS.md`). |
+| O-03 | Single-TP fallback versus backtest rule D-27 (G4-007) | OPEN | Only the refusal is built: a TP1 that cannot be sized is refused (`MIN_QTY_REJECT` or `NOTIONAL_REJECT`), and the plan ends in `TP_UNAVAILABLE` with the stop kept. The single-TP fallback of ROADMAP criterion 4 is not built; the backtest and the live path must move together. |
+| O-04 | The four numeric limits and the Phase 18 skipped review items | OPEN | Keys, all `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml`: `protection.max_unprotected_ms` (milliseconds from the first detected fill to a REST-confirmed stop), `protection.entry_terminal_timeout_ms` (milliseconds the entry order may stay non-terminal after the first fill), `pre_placement.min_remaining_validity_seconds` (minimum remaining plan validity at placement, in seconds; the exchange GTD floor of 600 seconds is separate and always applies), `pre_placement.max_mark_price_age_ms` (maximum age of the mark price used by the price check, in milliseconds). No number is proposed here. Phase 18 review items skipped as owner decisions: `src/WR-08` (every 4xx other than 400/401/403/404/418/429 maps to a retryable unknown), `src/WR-01` (the supervisor resends listenKey and snapshot calls after a 429 pause; the 2026-10-16 amendment says no 429 retry), `src/WR-10` (rate-limit response headers are never read; needs a new key in the ratified file), and the `src/CR-02` liveness remainder (`max_liveness_age_seconds = "none"` and `stream_is_stale` is called by no production code; the SUBSCRIBE acknowledgement check is unconfirmed). None is implemented. |
+| O-05 | The 11 Demo probes | OPEN | Listed in section 2. The owner runs every `--execute`. No Phase 19 task ran one. |
+| Q3 | exchangeInfo cannot be read during an emergency close | OPEN | The splitter takes explicit filters. The closer reads live filters with `symbol_lot_filters`; what it does when that read fails (refuse into SAFE_MODE, or use the plan-time snapshot flagged stale) is a caller policy the owner has not chosen. |
+| Q4 | A 429/418 rate-limit pause versus protection (Phase 18 `src/WR-12`) | OPEN | Current behavior is not safe for that window: while the REST gate is paused or banned, a stop placement, an entry cancel and an emergency close are refused before send. The coordinator journals the refusal (`STOP_NOT_SENT`, `PROTECTION_ENTRY_CANCEL_NOT_SENT`, `CLOSE_NOT_SENT`) and the close ends `CLOSE_FAILED`; a TP leg refused this way ends `TP_UNAVAILABLE`. Options are a reduce-risk exemption in the gate, or a durable pending-cancel/stop record. Not decided. |
+| Q5 | A placement is never re-sent | DECIDED in behavior (owner, 2026-10-20), DECISIONS row still a DRAFT, closing rule OPEN | Implemented by quick task 261020-jua: one `place_entry` POST per approval; after an ambiguous error one probe by client order id; found hands off; not found, a probe error or an indeterminate answer give intent `UNKNOWN`, SAFE_MODE `ENTRY_STATE_UNKNOWN` and `RECONCILIATION_REQUIRED`. The row text is `19-DEC-Q5-DRAFT.md`, pending the owner (the file is a draft; `docs/DECISIONS.md` is untouched). Remaining open part: Phase 20 must define when an entry left `UNKNOWN` may be closed, because `resolve_unresolved_intents` (EXECUTION_SPEC 10.1 step 4) records a not-found intent younger than 3 days as `REJECTED`, which is the conclusion Q5 refused. The numbers (windows, probe counts) are the owner's (O-04). |
+| N1 | A partial fill below the minimum risk utilization or minimum notional | OPEN | `19-NOTES.md` asks whether that remainder is a normal completion or an exception. Not decided; the coordinator sizes TP1 from the real position and refuses what cannot be sized (see O-03). |
+
+## 2. Demo probes the owner runs (O-05)
+
+Status: owner runs every --execute; no agent runs one. The command family is `uv run python scripts/demo_probe.py --environment demo --probe-limits-file <owner file>` (dry run by default; `--only <case ids>` narrows it; `--execute` needs an interactive terminal and the typed phrase `DEMO PROBE <SYMBOL>`), and `uv run python -m scripts.demo_rehearsal --scenario <taps|far|fill>` for the end-to-end rehearsal (Phase 19 rewired its fill flow). Some probes overlap the Phase 18 case ids of `demo_probe.py` only in part; whether a probe needs a new case is for the next planner, and none was added here. "Settles" names the assumption of section 3 that the evidence would confirm or refute; it is not a promise that Demo shows it.
+
+| ID | Probe (verbatim from `19-NOTES.md`) | Settles |
+|----|-------------------------------------|---------|
+| P1 | `closePosition` STOP_MARKET with a position open (One-way). | A6 (the whole model rests on it) |
+| P2 | Trigger a real stop on Demo; check the child order, the fill and REST position flat. | A3 (stop lifecycle after a trigger) |
+| P3 | Partial fill, the remainder and the protection lifecycle. [open question: whether Demo can produce a partial fill at all] | A5, A2 (is `t` present on a partial fill) |
+| P4 | Entry rejected, canceled, expired, timed out. | A2 (a GTD expiry is `EXPIRED` and terminal), A1 (which clock the 600 s rule uses) |
+| P5 | Stop rejected or timed out, and reconciliation when the user-data stream is lost or late. | The branch timing of B2 and B3, the `ALGO_UPDATE.o.rm` text |
+| P6 | Close the position by another mechanism while the stop is open (is the stop orphaned, does it trigger and reopen anything). | A3 |
+| P7 | Fill, cancel and trigger race. | The branch B4 order, A5 |
+| P8 | `-2021` after a fill. | The B5 classification of `-2021` as a definitive stop rejection |
+| P9 | Emergency MARKET close (reduce-only, One-way) and its answer. | A4, A8 |
+| P10 | TP1 quantity from the real fill. | A7 (MARKET_LOT_SIZE step and trigger-time validation) |
+| P11 | Cleanup: account flat, no unexpected algo order. | A3 (orphan algo orders) |
+
+Hedge Mode is not in the required set; it stays unverified and unsupported (the pre-placement check refuses it, `HEDGE_MODE_UNSUPPORTED`). Changing the Demo account position mode is the owner's action and would need its own decision.
+
+## 3. Assumptions the code depends on (research A1 to A10)
+
+None of these is verified against Binance. Each row names the module that relies on it.
+
+| ID | Assumption | Relied on by | If wrong |
+|----|------------|--------------|----------|
+| A1 | The "current time" in `goodTillDate > now + 600 s` is Binance server time. | `src/execution/pre_placement.py` (`good_till_date_ms`, `check_remaining_validity`, the clock margin), the GTD entry in `src/adapters/binance_usdm.py` | A GTD entry is rejected near the boundary. |
+| A2 | A GTD entry that expires is reported `EXPIRED` and counts as terminal. | `src/execution/protection.py` (`TERMINAL_ENTRY_STATUSES`) | The coordinator waits to `entry_terminal_timeout` and escalates to CLOSE_REQUIRED. |
+| A3 | `closePosition` algo orders are tied to an open position and the exchange cancels them when it closes. | `src/execution/protection.py` (PROTECTED/COMPLETE end states), Phase 20 sweeper | Orphan stops remain after TP2 or a manual close. |
+| A4 | A reduce-only MARKET order on a flat position is rejected, not executed (the New Order page is silent). | `src/execution/emergency_close.py` (query before resend; reduce-only as the duplicate bound) | A duplicate close could open a position. |
+| A5 | Demo can produce a partial fill at all. | `src/execution/protection.py` branches B1/B3, `tests/support/fake_binance_exchange.py` | Branch timing stays proven only offline. |
+| A6 | Binance accepts a `closePosition` STOP_MARKET while a position is open (never probed). | `src/execution/protection.py` (the stop placement after the first fill) | The model fails on the first live fill. |
+| A7 | The MARKET_LOT_SIZE step is measured from its own `minQty`, and a triggered TAKE_PROFIT_MARKET leg is validated against MARKET_LOT_SIZE at trigger time. | `src/execution/tp_sizing.py`, `src/execution/lot_split.py` (the quantizer uses the intersection with LOT_SIZE) | A quantity valid for LOT_SIZE is rejected at trigger. |
+| A8 | `-2022` or `-2024` is the answer to a reduce-only MARKET with no or too small a position; which one is unproven. | `src/execution/emergency_close.py` (both are "close rejected, requery the position") | Close failures are classified wrongly. |
+| A9 | The Account Trade List `realizedPnl` semantics (commission) are unverified, so live R stays INCOMPLETE after the sized-risk persistence of D-22. | `src/analytics/live_outcomes.py`, `src/persistence/execution_state.py` | The owner expects a complete live R. |
+| A10 | A fresh exchangeInfo read during an emergency close is possible, and a fallback to the plan-time snapshot is acceptable. | `src/execution/emergency_close.py` (`symbol_lot_filters`) | The close is blocked by a failed filter read (this is Q3). |
+
+## 4. Known consequences
+
+- Every live and Demo placement refuses with `LIMITS_NOT_CONFIGURED` until the owner sets the four numbers of O-04.
+- Take-profit placement is refused into `TP_UNAVAILABLE` while plan constraint snapshots are INCOMPLETE (margin type, leverage and equity have no live source before Phases 21 and 22). The stop is kept, SAFE_MODE is entered and the plan never flattens by itself.
+- The coordinator is stepped only by tests and `scripts/demo_rehearsal.py`; its step cadence and the running loop that feeds it user-data fills are Phase 24. In a real process a filled entry has no stop until then.
+- Rebuilding the coordinator's state after a restart is Phase 20 and 24 (G4-029: `resolve_unresolved_intents` has no production caller).
+- Phase 20 reads the `ProtectionState` names (ten stable names) and the `STOP_LOSS` intent `intended_at_utc`.
+- No real `CriticalAlertSink` exists: `scripts/demo_rehearsal.py` implements the interface and sends nothing. The entry path (SAFE_MODE `ENTRY_STATE_UNKNOWN`, `PROTECTION_HANDOFF_FAILED`, `DB_FAILURE`, `RECONCILIATION_REQUIRED`) sends no alert at all (Phases 20 and 23).
+- No stop supervision after `PROTECTED`, `COMPLETE` or `TP_UNAVAILABLE`: a stop cancelled or lost later stays invisible until reconciliation finds it (Phase 20 and 24).
+- `TP_UNAVAILABLE` is terminal for the plan, also after a 418/429 pre-send refusal.
+- An entry left `UNKNOWN` by Q5 stays blocked, and a resting GTD entry that nobody tracks can fill with no stop; the closing rule is Phase 20 (Q5 above).
+- Live R stays INCOMPLETE (`UNVERIFIED_EXCHANGE_SEMANTICS`) even though `sized_realized_risk` is persisted (A9).
+- `_place_protective_leg` in `src/execution/manager.py` has no caller in `src` (19-16 deviation 3); `tests/test_algo_status.py` still pins it. Left as a follow-up, not owner-open.
+
+## 5. Documentation that waits for the owner's acceptance of the D055 closure draft (O-01)
+
+Not edited by Phase 19, listed so that nobody assumes it was done:
+
+- `docs/trading/EXECUTION_SPEC.md` sections that describe the fill-driven model (stop after the first fill, the two deadlines, the emergency close).
+- A GLOSSARY section for the `ProtectionState` names (GLOSSARY 9.3 and 9.4 list only the new reason codes and SAFE_MODE reasons).
+- ROADMAP Phase 19 success criteria 1 and 3 and the inherited items `[D055]` and `[G2-032]`; ROADMAP Phase 20 success criterion 2 (it speaks of an entry-time stop that Phase 19 removed) and the inherited item `[D055]`.
+- The `docs/DECISIONS.md` rows for D055 and Q5 (drafts: `19-DEC-D055-DRAFT.md`, `19-DEC-Q5-DRAFT.md`).
+
+## 6. Network gaps from the research
+
+Not read through a tool that could return them; the labels stay UNVERIFIED until the owner re-reads the pages (`19-GAP-RESEARCH-CHECKLIST.md`):
+
+- The ORDER_TRADE_UPDATE and ALGO_UPDATE pages: the value lists were read from raw markdown, but `t` (trade id) on every partial fill and the full `rm` (algo failure reason) list are not on the page. The page still documents `CONDITIONAL_ORDER_TRIGGER_REJECT`, which AGENTS.md calls gone after the December 2025 Algo migration; the owner confirms against the changelog which of the two the exchange still delivers (rejection reasons are expected in `ALGO_UPDATE.o.rm`).
+- The New Order page is silent (not truncated) on a reduce-only MARKET order against a flat or smaller position (A4, A8).
+- The New Algo Order page is silent on whether `closePosition` needs an open position (A6).
+- The Account Trade List page does not define whether `realizedPnl` includes commission (A9).
