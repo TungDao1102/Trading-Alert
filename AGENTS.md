@@ -148,6 +148,22 @@ These fail CI, they are not style preferences:
   Simulator semantics are 2.3.0; changing them regenerates research records (D075/D076).
 - **Missing contract ⇒ TBD, never invent.**
 
+## Style and what not to add
+
+- Always `uv run ...`, never a bare `python`. Ruff line length 100 (`.planning` is excluded from
+  formatting); mypy `strict` on `src` only; pytest `asyncio_mode = "auto"`. Every module starts with
+  `from __future__ import annotations`; first-party imports are absolute `src.*`.
+- Every parameter value carries a provenance label (STRUCTURAL, COST_GUARD, DECISION, EXPERIMENT,
+  PLACEHOLDER) in its `[rationale.<key>]` table.
+- Do not add without a DECISIONS row: the legacy `binance-connector`, `ccxt`, Kafka/RabbitMQ/Redis,
+  a Node/npm toolchain (`package.json` is an inert placeholder), pandas/NumPy/SciPy/VectorBT on the
+  decision path (not installed; the project engine is canonical), or any pre-release dependency
+  (httpx 1.0, Polars 2.0 RC, SQLAlchemy 2.1 RC, Python 3.14). A new dependency means `uv add` and a
+  committed `uv.lock` in the same change.
+- Hash-pinned images and actions: never float a tag; refresh them with `deploy/refresh-pins.sh`.
+- Dev machine is Windows: use Git Bash for `deploy/*.sh` checks, expect CRLF warnings from git, and
+  see `.planning/WINDOWS.md` for what could not be verified here.
+
 ## Where to read
 
 | Need | Read | Trust |
