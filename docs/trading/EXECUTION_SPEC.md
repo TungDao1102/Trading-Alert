@@ -166,7 +166,7 @@ STOP_LOSS result: ACKED (confirmed) / UNKNOWN (not confirmed)        -> COMMIT
 ENTRY outcome (is_no_trade, reason_code) recorded                    -> COMMIT
 ```
 
-A crash between any two steps leaves a readable row. An intent left INTENDED or SENT is never re-sent blindly (section 10).
+A crash between any two steps leaves a readable row. An intent left INTENDED or SENT is never re-sent (section 10).
 
 - Consumption happens only at placement. A NO_TRADE decided before placement (binding, enablement, SAFE_MODE, cost, risk, placement gates, position mode) does not consume the approval, so a later retry of the same approved plan re-runs every gate until the plan expires. A store failure before the entry is sent returns `RECONCILIATION_REQUIRED` and places nothing; a second approval of the same plan (`uq_execution_intents_plan_role`) returns `INVALIDATED` and places nothing.
 - The loser of a concurrent consume of the same approval gets `False` from the store (it read the winner's row) and returns the winner's stored outcome or, if none is recorded yet, `RECONCILIATION_REQUIRED`; it never places an order and never raises.
@@ -216,11 +216,19 @@ Do not rely only on the WebSocket event stream. Periodic authoritative reconcili
 
 ## 10. No blind recovery
 
-If placement response is ambiguous due to timeout/network failure:
+A placement is sent once. No code path re-sends it, neither because of its own error nor because of the probe that follows it (Q5, owner decision 2026-10-20; the proposal for a `DECISIONS.md` row is `.planning/phases/19-execution-plan-binding-price-check/19-DEC-Q5-DRAFT.md`, pending the owner). The adapter makes one attempt per placement call (source guard `tests/test_binance_usdm_source_guard.py`).
 
-1. do not immediately retry blindly;
-2. query/reconcile by client order ID where supported;
-3. only retry if absence is confirmed.
+The entry (`_place_entry_no_blind_retry`, `src/execution/manager.py`) ends in exactly one of these ways:
+
+1. A `PreSendRefusal` sent nothing: NO_TRADE `ENTRY_REFUSED_BEFORE_SEND`, no probe, no SAFE_MODE.
+2. `REJECTED_DEFINITIVE`: NO_TRADE `EXCHANGE_CONSTRAINT`, no probe, no SAFE_MODE.
+3. Any other failure or an empty response (timeout, 5xx, `STATUS_UNKNOWN`, `UNKNOWN_EXCHANGE_ERROR`, a failure that cannot be classified) is ambiguous, and the order is queried once by its deterministic client order id.
+4. Found: the ENTRY is recorded ACKED and handed to the protection coordinator.
+5. Not found, a probe error or an indeterminate answer: the ENTRY intent is UNKNOWN, SAFE_MODE is entered with reason `ENTRY_STATE_UNKNOWN`, and the outcome is `RECONCILIATION_REQUIRED`, never REJECTED.
+
+Why not-found is not absence here. The client id is unique only among open orders (`BINANCE.md` section 6.1). The Binance pages read do not document idempotency or immediate query visibility for a new order. `-1007` reads "Send status unknown; execution status unknown". The entry is a GTD LIMIT and its stop is placed only after a fill (D-10), so an entry wrongly recorded as REJECTED could fill with nothing protecting it.
+
+The UNKNOWN entry is resolved by query only, never by placing (section 10.1, Phase 20). Restart recovery (10.1) still records a not-found intent younger than the lookup window as REJECTED. Whether that rule may apply to an entry that went UNKNOWN after an ambiguous placement error, and any numbers for bounded reconciliation (windows, re-probe counts), are owner-open (O-04). This section sets none.
 
 ### 10.1 Restart recovery of execution intents
 
