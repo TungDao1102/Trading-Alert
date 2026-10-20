@@ -1238,3 +1238,37 @@ others appear in more than one run); they are not additive.
 
 _Batch 4 fixed: 2026-10-20T12:22:00Z_
 _Fixer: Claude (gsd-executor, quick 261020-q1o)_
+
+## WR-01 follow-up: consume-time check of the stored approved quantity (quick task 261020-q2d, D078 (6))
+
+Owner: "làm cả 2" (both WR-01 follow-ups). This one closes batch 4 choice 6: the Approval object
+`bind_plan` reads is caller-supplied, so nothing re-checked the stored database value at consume
+time. RED evidence at base `996f91f` (a scratch test, deleted, not committed): with the fixture
+approval row storing NULL, or 2.000, while the caller's Approval carried 2.415, the manager returned
+`OK` and called `place_entry` once.
+
+- `PgExecutionStateStore.consume_and_record_entry_intent` takes `approved_quantity` (required
+  keyword; the Protocol and every test fake take it too). After the ENTRY intent INSERT and in the
+  same transaction it reads the approval row `FOR UPDATE`; for an APPROVED, unconsumed row the
+  stored `approved_quantity` must be NOT NULL, equal to the bound quantity and at least the
+  intended quantity, else `ApprovedQuantityRefused` (subclass of `IntentStateConflict`) is raised
+  and the INSERT rolls back. The consuming UPDATE carries the same three conditions.
+- A missing, not-APPROVED or consumed row keeps the plain `IntentStateConflict`; a replay (the ENTRY
+  row exists) still answers False before any quantity is read.
+- `execute_approved_plan` passes `bound.approved_quantity` and maps the refusal to NO_TRADE
+  `APPROVED_QUANTITY_NOT_CONFIRMED` (new plain code in `src/execution/manager.py`; GLOSSARY 9.3).
+- Tests: `tests/test_consume_approved_quantity_pg.py` (new), two unit tests in
+  `tests/test_execution_manager.py`; direct consume callers in six existing test files pass the
+  fixture quantity; `tests/test_phase19_gate.py` lists the new code.
+- Docs: D078 amended in place (status note and item (6); item (5) no longer says the check is not
+  built), DOC_STATUS line, GLOSSARY 9.3 row, DATA_MODEL 2.5 sentence, OWNER-GAPS WR-01 row.
+
+- SAFE_MODE policy (owner decision 2026-10-20, "ok tôi đồng ý"): the store raises `ApprovedQuantityMissing`
+  for a NULL (legacy row; NO_TRADE, no SAFE_MODE) and `ApprovedQuantityInconsistent` when the stored
+  value differs from the bound quantity or is below the quantity to place; the manager then also
+  enters SAFE_MODE `APPROVED_QUANTITY_INCONSISTENT` through its non-raising `_enter_safe_mode` helper
+  (moved above the consume). NO_TRADE `APPROVED_QUANTITY_NOT_CONFIRMED` in all three cases; a replay
+  enters no SAFE_MODE. D078 item (6) and GLOSSARY 9.4 state it.
+
+Verification and results are in `.planning/quick/261020-q2d-wr01-db-consume-check/261020-q2d-SUMMARY.md`.
+Not run: the full suite, `-m docker`, any Demo / `--execute` / network.
