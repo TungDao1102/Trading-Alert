@@ -536,3 +536,229 @@ The WR-06 commit was checked on its own before WR-05 began. These all passed on 
 
 _Batch 1 fixed: 2026-10-20T10:20:00Z_
 _Fixer: Claude (gsd-code-fixer)_
+
+---
+
+## Batch 2 (owner decision WR-03)
+
+**Fixed at:** 2026-10-20T10:40:00Z, on top of `2175754d` (branch `develop`). The CR-01, CR-02,
+CR-03, WR-02, WR-06 and WR-05 commits above were kept as they are.
+**Scope:** WR-03 only, as the owner decided it. Its "Skipped Issues" entry above is superseded by
+this section. WR-01, WR-04, WR-07 and IN-01..IN-06 stay skipped.
+
+| Finding | Status | Commit |
+|---|---|---|
+| WR-03 | fixed: requires human verification (emergency-close safety logic) | `0110b938` |
+
+### WR-03: the emergency close could over-close
+
+**Owner decision:** apply Q5 to the emergency close. Never send a second close order while the
+result of the previous one is not determined, and do not rely on assumption A4.
+
+**Files modified:**
+- `src/execution/emergency_close.py`, `src/execution/execution_limits.py`
+- `config/execution/execution-limits-v1.toml`, `config/execution/README.md`
+- `docs/GLOSSARY.md`: the `LIMITS_NOT_CONFIGURED` row, "five" became "six"
+- `scripts/demo_rehearsal.py`: passes `limits=` to the closer, plus a comment count
+- `tests/support/execution_limits.py`, `tests/support/fake_binance_exchange.py`,
+  `tests/support/protection_doubles.py`
+- `19-OWNER-GAPS.md`: hard-limits line, O-04, a new WR-03 row, the A4 row, and section 4
+- `20-NOTES.md`: one bullet on the restart gap
+- the tests listed below
+
+`src/execution/protection.py` was not changed. The coordinator already calls the closer on every
+CLOSE_REQUIRED / CLOSE_FAILED step, and that call is now the poll.
+
+**Applied fix (closer):**
+- **An ACK is PENDING, never CLOSED.** `place_market_close` returning is journaled
+  `post_send` (the ACK), and the attempt is then queried by its deterministic id. Only a query
+  answering FILLED (journaled `filled`) or another terminal status (CANCELED, EXPIRED,
+  EXPIRED_IN_MATCH, REJECTED, journaled `ended_unfilled`) ends the attempt.
+- **One pending attempt per plan, in process.** `_PendingAttempt` holds the attempt number, id,
+  send time, `seen` (an ACK or a find proved it exists), a sticky `unknown_code` and the
+  `alerted` flag. It is written BEFORE the send and dropped only when nothing was placed
+  (PreSendRefusal, definitive rejection) or a query proves it terminal.
+- **Every call queries the pending attempt first.** While it is not terminal the call sends
+  nothing and answers False, with one of two statuses:
+  - `PENDING` (new `EmergencyCloseStatus` member, reason `ATTEMPT_NOT_TERMINAL`), or
+  - `PENDING_UNKNOWN`.
+- **found=False is never absence for a sent attempt.**
+  - Right after an ambiguous send it gives `ABSENT_AFTER_AMBIGUOUS_SEND`.
+  - After an ACK or an earlier find it gives `ATTEMPT_NOT_FOUND_AFTER_ACK`.
+  - Both are UNKNOWN and no new attempt is created.
+  - A failed or indeterminate query of an attempt never seen is UNKNOWN (`PROBE_FAILED`,
+    `PROBE_INDETERMINATE`). Of an attempt known to exist, it only waits.
+  - A found status that is neither NEW/PARTIALLY_FILLED nor terminal is UNKNOWN
+    (`ATTEMPT_STATUS_UNREADABLE`).
+- **`discover_next_attempt_no`** now raises `CloseAttemptNotTerminal` (a `ValueError`) for a found
+  attempt whose status is not terminal. `found=False` for a number never sent keeps its meaning:
+  that number is free. The closer adopts the named attempt as pending (`ATTEMPT_HISTORY_NOT_TERMINAL`,
+  UNKNOWN) and sends nothing.
+- **After the attempt is terminal:** the position is re-read, with the CR-03 rule of two
+  consecutive zero reads unchanged. Exposure that remains gets the next attempt under a NEW id
+  (discovery as before), sized from that REST read and split by MARKET_LOT_SIZE as before.
+- **Poll deadline:** `elapsed_ms = (clock() - sent_at) // 1 ms`, injected clock, whole
+  milliseconds. When it is `>= protection.emergency_close_poll_timeout_ms` and the attempt is
+  still not terminal, the attempt becomes UNKNOWN (`CLOSE_POLL_DEADLINE_PASSED`).
+- **One alert per episode.** The first time a pending attempt is UNKNOWN, for any reason
+  including the deadline: SAFE_MODE `EMERGENCY_CLOSE_FAILED`, ONE critical alert
+  `EMERGENCY_CLOSE_FAILED` and one `failed` journal row. Every later call reports
+  `PENDING_UNKNOWN` without another alert. The attempt keeps being queried, and no overlapping
+  close is ever sent.
+- **New owner key:** `protection.emergency_close_poll_timeout_ms = "NOT_CONFIGURED"`, in
+  `[protection]` and in `[provenance.protection]`. It is loaded like `entry_unknown_grace_ms`.
+  `MarketEmergencyCloser` now takes a required `limits=` argument and refuses at construction,
+  like the coordinator: it calls `limits.require_live_ready()`, then raises
+  `ExecutionLimitsNotConfigured` naming the key if the key is unset. The closer never reads
+  `max_unprotected_ms`. Tests use the fake value 6161; no real number was chosen and
+  `docs/DECISIONS.md` was not edited.
+- **Kept:** deterministic ids, query before any resend, MARKET_LOT_SIZE parts, the per-call
+  parts bound (now counted on confirmed parts), the CR-03 rule, the Hedge refusal, and the
+  NOT_SENT and REJECTED paths.
+
+**Choices for the owner to confirm:**
+1. **The alert episode is the pending attempt.** An attempt that becomes UNKNOWN for a reason
+   other than the deadline (ambiguous send then found=False, a failed first probe, an unreadable
+   status, an adopted history attempt) alerts at once, as before the fix. It does not alert
+   again at the deadline. So there is at most one alert per attempt, and possibly an earlier
+   one than the deadline.
+2. **A found NEW/PARTIALLY_FILLED attempt after an ambiguous send is now `PENDING`** (no SAFE_MODE
+   from the closer, no alert) until the deadline. Before the fix it was `PENDING_UNKNOWN` with an
+   immediate alert. The coordinator's own SAFE_MODE `CLOSE_REQUIRED` and alert are already in
+   force at that point.
+3. **found=False after an ACK is UNKNOWN** (`ATTEMPT_NOT_FOUND_AFTER_ACK`). The owner's text
+   covered found=False after an ambiguous send. I applied the same rule here because the ACK
+   proved the order existed.
+4. **An attempt adopted from the exchange history** (found and not terminal at discovery, for
+   example after a restart) has its deadline counted from the moment it was adopted, because the
+   real send time is unknown. It alerts at once because its origin is unknown.
+5. **The closer constructor calls `require_live_ready()`,** so it refuses while ANY execution
+   limit is unset, the same as the coordinator. It does not refuse only on its own key.
+6. **The coordinator's journal reason stays `CLOSE_FAILED`** while a close is merely pending. The
+   state is CLOSE_FAILED (blocking, retried every step), which is correct, but the reason text
+   does not say "pending". I did not add a new reason to `protection.py`.
+7. **The pending attempt is in-process only.** After a restart, an ambiguous attempt the exchange
+   does not show (found=False) is forgotten. `discover_next_attempt_no` would then hand out the
+   same number again and the close would be re-sent under that id. This restart gap is recorded
+   in `19-OWNER-GAPS.md` (rows WR-03 and A4) and in `20-NOTES.md`. It belongs with the
+   coordinator rebuild (Phase 20/24, G4-029).
+
+**Existing tests changed, and why:**
+- `tests/test_emergency_market_close.py`:
+  - `make_close_rig` and the "restart" closer in
+    `test_a_second_call_after_a_crash_never_reuses_an_attempt_id` pass
+    `limits=limits_with()`. The helper is imported under an alias so pytest does not collect it.
+  - `test_tracer_journals_pre_send_before_the_send_and_post_send_after`: the expected journal
+    order gains `journal:filled`, the query that proves the fill.
+  - `test_a_call_never_sends_more_parts_than_the_first_position_needs`: the ACK-only stub was
+    counted as three closed parts. Each part now has to be reported FILLED by a query stub
+    before it counts. The position stub stays stuck, so the parts bound (3 sends,
+    `PARTS_EXHAUSTED`) is still what the test proves.
+  - `test_a_found_but_non_terminal_or_unknown_attempt_stops_without_a_resend[NEW|PARTIALLY_FILLED|SOMETHING_ELSE|None]`
+    was split in two:
+    - `test_a_found_active_attempt_after_an_ambiguous_send_is_pending_without_a_resend[NEW|PARTIALLY_FILLED]`
+      now expects `PENDING`, no SAFE_MODE and no alert (choice 2).
+    - `test_a_found_attempt_with_an_unreadable_status_stops_without_a_resend[SOMETHING_ELSE|None]`
+      keeps the old expectation.
+  - `test_definitive_absence_sends_the_next_part_under_a_new_attempt_id` and
+    `test_repeated_definitive_absence_is_bounded_by_the_planned_parts` encoded the bug: found=False
+    after an ambiguous send led to a new send. Both were replaced by
+    `test_wr03_absence_right_after_an_ambiguous_send_is_unknown_and_never_resent`.
+  - `script_probes` now falls back to the fake's real query once its script is exhausted, because
+    every sent attempt is now queried. This keeps
+    `test_an_attempt_found_terminal_without_closing_gets_a_fresh_id_for_the_next_part`
+    unchanged.
+- Key-set pins gained `emergency_close_poll_timeout_ms` /
+  `protection.emergency_close_poll_timeout_ms`:
+  - `tests/test_execution_limits.py`: `EXPECTED_UNSET`, the all-set document (value 13), the
+    all-unset round trip, the module docstring, and the committed-file `NOT_CONFIGURED` count,
+    which went from 10 to 12.
+  - `tests/test_no_unratified_defaults.py`: `len(GUARDED_NAMES)` went from 35 to 36.
+  - `tests/test_execution_manager.py::test_unset_limit_refuses_with_zero_adapter_calls`
+  - `tests/test_protection_coordinator.py::test_constructor_refuses_while_any_limit_is_not_configured`
+  - `tests/test_demo_rehearsal_flow.py::test_committed_not_configured_limits_abort_before_any_mutation`
+  - `tests/test_phase19_gate.py` needed no edit. Its execution-limits invariant iterates
+    `EXECUTION_LIMIT_KEYS`.
+- Test support:
+  - `tests/support/execution_limits.py` gained the fake value 6161.
+  - `tests/support/protection_doubles.py::make_rig` passes the same limits to the real closer.
+  - `tests/support/fake_binance_exchange.py` gained the opt-in flag `market_close_rests`: a close
+    is booked OPEN as NEW, nothing is executed, and the test fills or cancels it. The default
+    behavior is unchanged.
+
+**New regressions** (all in `tests/test_emergency_market_close.py`):
+- `test_wr03_an_ack_new_with_nothing_executed_is_pending_and_nothing_else_is_sent`
+- `test_wr03_polled_to_filled_then_two_flat_reads_is_closed`
+- `test_wr03_polled_to_filled_with_exposure_left_sends_a_new_id_sized_from_rest`: a late entry
+  fill while 0001 rests. 0002 is sent for the reconciled 0.003.
+- `test_wr03_an_attempt_ended_unfilled_while_pending_gets_a_new_id`
+- `test_wr03_absence_right_after_an_ambiguous_send_is_unknown_and_never_resent`: 6 calls, one send,
+  one alert.
+- `test_wr03_discovery_stops_on_a_found_attempt_that_is_not_terminal`: direct discovery, plus a
+  fresh closer that adopts the attempt, sends nothing, alerts once, and closes after the fill.
+- `test_wr03_the_poll_deadline_holds_unknown_with_one_alert_and_no_second_send`: 6160 ms is
+  PENDING, 6161 ms is UNKNOWN. Ten more calls 60 s apart give one alert and one send, with
+  SAFE_MODE kept.
+- `test_wr03_the_deadline_is_the_new_limit_never_max_unprotected_ms[50000-1-50000|1000-1000000000-1000]`
+- `test_wr03_the_closer_never_reads_max_unprotected_ms` (AST)
+- `test_wr03_the_closer_refuses_while_its_poll_deadline_is_not_configured`
+- `test_wr03_found_false_after_an_ack_is_unknown_and_never_resent`
+- `test_wr03_coordinator_keeps_a_resting_close_blocking_and_never_sends_a_second`: the real
+  coordinator with B5. CLOSE_FAILED stays blocking for 5 steps with one close, then FLAT after
+  the fill.
+
+**Pre-fix check:**
+- I restored the HEAD `src/execution/emergency_close.py`, with only a `limits: Any = None`
+  argument added so that construction works, and kept the new tests. Result: 16 failed and
+  1 error.
+- The failures are every new `wr03` test, the two `PENDING` cases and the tracer journal order.
+- The error comes from `test_wr03_found_false_after_an_ack_is_unknown_and_never_resent`. Under
+  the old code the file's autouse guard caught attempt id 0001 being SENT TWICE.
+- The key-set pins fail on the old loader by construction, because the key did not exist.
+
+### Batch 2 verification
+
+**Where the checks ran:** all checks ran in the main checkout (`C:\Users\admin\Music\Trading`,
+branch `develop`). `workflow.use_worktrees` is `false`, so no worktree was created.
+
+| Check | Result |
+|---|---|
+| `uv run ruff check` | All checks passed |
+| `uv run ruff format --check` | 665 files already formatted |
+| `uv run mypy src` | Success: no issues found in 213 source files |
+| `uv run python scripts/verify_decision_alignment.py all` | ALL_PASS |
+| Targeted pytest, 17 files (listed below) | 624 passed, 0 skipped |
+
+The 17 files in the targeted run:
+- `tests/test_emergency_market_close.py`
+- `tests/test_protection_branches.py`
+- `tests/test_protection_coordinator.py`
+- `tests/test_protection_router_rig.py`
+- `tests/test_protection_take_profits.py`
+- `tests/test_protection_unknown_entry.py`
+- `tests/test_phase19_gate.py`
+- `tests/test_execution_limits.py`
+- `tests/test_no_unratified_defaults.py`
+- `tests/test_execution_manager.py`
+- `tests/test_demo_rehearsal_flow.py`
+- `tests/test_exchange_error_rejections.py`
+- `tests/test_demo_rehearsal_safety.py`
+- `tests/test_execution_emergency.py`
+- `tests/test_fake_exchange_v2.py`
+- `tests/test_paper_shadow_isolation.py`
+- `tests/test_binance_usdm_source_guard.py`
+
+The last six are consumers of the changed fake and closer. None is a `_pg.py` file, so
+`TEST_DATABASE_URL` was not needed.
+
+**Not run or not verified:**
+- The full suite (`-m "not docker"`) and the `-m docker` suite.
+- Any `--execute`, the Demo, or the network.
+- Real Binance behavior of a reduce-only MARKET close. Whether an ACK is NEW, how long until
+  FILLED, and the -2022/-2024 answers are still probe P9 (A4/A8).
+- The restart gap of choice 7.
+- The coordinator cadence that drives the polling is still Phase 24. Without a step loop, a
+  pending close is not polled in a real process.
+
+_Batch 2 fixed: 2026-10-20T10:40:00Z_
+_Fixer: Claude (gsd-code-fixer)_
