@@ -1057,6 +1057,8 @@ This was former Phase 12. Today `AccountState.equity` and `daily_loss_quote` are
 
 **Audit refs**: F-012, F-013, F-963, F-407, F-955, F-908, F-014
 
+Input: .planning/phases/21-account-equity-daily-loss/21-NOTES.md
+
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [G4-039] Phases 21 and 22 replace the UNKNOWN margin type, leverage and equity in the plan constraint snapshot so that it can become COMPLETE (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 - [G2-042] Daily loss (D033) counts commissions, but whether Binance `realizedPnl` excludes commission is unverified: `LIVE_NET_PNL_SEMANTICS_VERIFIED` is False, so live R stays INCOMPLETE; the verification itself is owned by Phase 24 and this phase depends on its outcome (source: src/analytics/live_outcomes.py:77, .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208; decision: none required)
@@ -1083,6 +1085,8 @@ This was former Phases 13 and 14.
 4. Position mode is one-way single-asset only. Any other mode results in NO_TRADE (F-965, F-020).
 
 **Audit refs**: F-011, F-964, F-966, F-965, F-020, F-019
+
+Input: .planning/phases/22-leverage-margin-liquidation-guard/22-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [G3-001] The Change-Position-Mode wording was not fetched in Phase 11 and docs/SOURCES.md still carries it unconfirmed; re-confirm it on the official page before criterion 4 relies on the one-way check (source: .planning/phases/11-decision-alignment/11-05-SUMMARY.md:125-126, docs/SOURCES.md:46; decision: D044)
@@ -1117,6 +1121,8 @@ This was former Phase 16.
 5. **Findings from the live Telegram test (2026-10-04, Phase 8 behaviour):** a decided message keeps its button and the bot answers every later tap (replays are idempotent: 3 taps gave 1 transition, but the keyboard must be removed and later taps refused); `actor_id` is empty on the decided approval, so the journal does not say who decided; APPROVE moves straight to APPROVED with no CONFIRM step (D041); the application has no error handler, so callbacks queued during downtime raise `BadRequest: Query is too old` at `query.answer()` and must be handled; the messages show no money amounts and the display note says Asia/Ho_Chi_Minh while the times are UTC; SIMULATE/APPROVE/SKIP are separate keyboards, so one message carries one button (decide whether one message should carry APPROVE and SKIP together).
 
 **Audit refs**: F-508, F-707, F-405, F-509, F-127, F-015, F-016, D041
+
+Input: .planning/phases/23-telegram-approval-hardening-money/23-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [G4-032] After a plan expires, a redelivered APPROVE is answered APPROVAL_EXPIRED even if the plan was executed; if the message should show "already executed", the composition must read the stored outcome via `PgExecutionStateStore.get_entry`, and criterion 4 tests should cover it (source: .planning/phases/17-operational-persistence-layer/17-14-SUMMARY.md:159; decision: none required)
@@ -1157,6 +1163,8 @@ Plans:
 5. **Findings from the live Binance Demo probe (2026-10-04, key verified for trading):** `BinanceUsdmAdapter(sdk_client)` already works against `demo-fapi.binance.com` (place, query, cancel of a LIMIT order; algo place/query/cancel); a `closePosition=true` SL/TP is rejected with `-4509` while no position is open and accepted once the position is filled, so protective legs must be placed after the entry fills; `query_algo_order_by_client` still reports `NEW` for about a second after a cancel (open-algo list already empty), so the reconciler and sweeper must not read that as a failed cancel; `snapshot_positions` returned `entry_price` `84816.40000000001` (float noise at the SDK boundary, check the Decimal conversion); the adapter has no market-order or close-position helper (the probe used marketable LIMIT orders).
 
 **Audit refs**: F-201, F-956, F-202, F-104, F-124, D042
+
+Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [D055] The -4509 finding in criterion 5 (protective legs placed after the entry fills) is a recorded observation, not a chosen execution model; criteria 1 and 2 are NOT amended and depend on the D055 outcome (the Phase 18 probe, then a user decision); no LIVE execution until D055 is closed with a verified execution policy (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
