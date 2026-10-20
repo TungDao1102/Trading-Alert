@@ -27,6 +27,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import text
@@ -463,6 +464,11 @@ async def test_negative_control_a_store_that_never_remembers_places_two_entries(
             proc, adapter, query_id=QUERY_ID, now_utc=NOW_UTC, intent_store=forgetful
         )
         adapter.fill(ENTRY_CLIENT_ID)
+        # 19-REVIEW WR-02: the manager reads the live position before it places; flatten the
+        # filled position so that only the durable intent row can stop the second entry.
+        for symbol, amount in list(adapter.positions.items()):
+            if amount != Decimal("0"):
+                adapter._apply_position_delta(symbol, -amount, Decimal("0"))
         second = await deliver(
             proc, adapter, query_id=QUERY_ID, now_utc=NOW_UTC, intent_store=forgetful
         )

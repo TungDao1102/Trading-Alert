@@ -523,6 +523,17 @@ def test_check_symbol_free_precedence() -> None:
     assert _free(open_order_symbols=frozenset({SYMBOL})) == pp.SYMBOL_HAS_OPEN_ORDER
 
 
+def test_check_symbol_free_unreadable_positions_refuse() -> None:
+    """19-REVIEW WR-02: an unreadable live position read is "not available" (fail closed)."""
+    assert _free(position_symbols=None) == pp.SYMBOL_STATE_UNAVAILABLE
+    assert _free(position_symbols=None, open_order_symbols=frozenset()) == (
+        pp.SYMBOL_STATE_UNAVAILABLE
+    )
+    # The account-wide unprotected check still comes first.
+    assert _free(any_unprotected=True, position_symbols=None) == pp.UNPROTECTED_POSITION_EXISTS
+    assert evaluate_pre_placement(_inputs(position_symbols=None)) == pp.SYMBOL_STATE_UNAVAILABLE
+
+
 def test_check_symbol_free_other_symbols_do_not_block() -> None:
     others = frozenset({"ETHUSDT", "SOLUSDT"})
     assert _free(position_symbols=others, open_order_symbols=others) is None

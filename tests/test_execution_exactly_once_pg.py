@@ -312,6 +312,7 @@ async def test_negative_control_never_remembering_store_places_two_entries() -> 
 
     first = await _run_plan(adapter, intent_store=store)
     adapter.fill(ENTRY_CLIENT_ID)
+    _flatten_position(adapter)
     second = await _run_plan(adapter, intent_store=store)
 
     assert first.is_no_trade is False
@@ -345,6 +346,18 @@ def _free_the_client_id(adapter: BinanceSemanticsFakeAdapter, scenario: str) -> 
     if scenario == "open":
         return  # still on the open book: the exchange itself would reject a duplicate id
     getattr(adapter, "fill" if scenario == "filled" else "cancel")(ENTRY_CLIENT_ID)
+
+
+def _flatten_position(adapter: BinanceSemanticsFakeAdapter) -> None:
+    """Close the filled position outside the plan before the second call (19-REVIEW WR-02).
+
+    The manager now reads the live position before it places, so a filled first entry alone
+    refuses the second call with SYMBOL_HAS_POSITION. A negative control must isolate the
+    durable-intent guard, so the position is flattened and only the store can stop a duplicate.
+    """
+    for symbol, amount in list(adapter.positions.items()):
+        if amount != Decimal("0"):
+            adapter._apply_position_delta(symbol, -amount, Decimal("0"))
 
 
 class _RejectionRecordingAdapter(BinanceSemanticsFakeAdapter):
@@ -488,6 +501,7 @@ async def test_negative_control_never_remembering_store_places_two_entries_after
 
     first = await _run_plan(adapter, intent_store=store)
     _free_the_client_id(adapter, scenario)
+    _flatten_position(adapter)
     second = await _run_plan(adapter, intent_store=store)
 
     assert first.is_no_trade is False

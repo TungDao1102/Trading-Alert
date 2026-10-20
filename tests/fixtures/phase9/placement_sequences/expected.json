@@ -5,6 +5,7 @@
     "get_mark_price",
     "snapshot_open_normal_orders",
     "snapshot_open_algo_orders",
+    "snapshot_positions",
     "get_position_mode",
     "place_entry"
   ],

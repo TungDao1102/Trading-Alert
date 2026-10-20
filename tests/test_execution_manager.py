@@ -116,11 +116,13 @@ def _mark_reading_for(case_input: dict[str, Any], **overrides: Any) -> Any:
     return MarkPriceReading(**values)
 
 
-# The three reads that precede the position-mode read and the placement (plan 19-13, gate 5e).
+# The reads that precede the position-mode read and the placement (plan 19-13, gate 5e; the
+# live position read is 19-REVIEW WR-02).
 PRE_PLACEMENT_READS = [
     "get_mark_price",
     "snapshot_open_normal_orders",
     "snapshot_open_algo_orders",
+    "snapshot_positions",
 ]
 
 
@@ -153,6 +155,9 @@ class FakeExecutionAdapter:
         self.open_algo_orders: list[Any] = []
         self.normal_orders_exception: BaseException | None = None
         self.algo_orders_exception: BaseException | None = None
+        # 19-REVIEW WR-02: the live position rows of the symbol (none by default).
+        self.open_positions: list[Any] = []
+        self.positions_exception: BaseException | None = None
         # Default to a non-None entry response so the happy path doesn't
         # trigger the query-before-retry path. Tests that want to test
         # the ambiguous path explicitly pass entry_response=None.
@@ -206,6 +211,13 @@ class FakeExecutionAdapter:
         if self.algo_orders_exception is not None:
             raise self.algo_orders_exception
         return list(self.open_algo_orders)
+
+    async def snapshot_positions(self, **kwargs: Any) -> Any:
+        self._bind_real("snapshot_positions", kwargs)
+        self.calls.append({"method": "snapshot_positions", "kwargs": dict(kwargs)})
+        if self.positions_exception is not None:
+            raise self.positions_exception
+        return list(self.open_positions)
 
     async def place_entry(self, **kwargs: Any) -> Any:
         self._bind_real("place_entry", kwargs)
@@ -2876,8 +2888,9 @@ async def test_golden_case_reads_precede_the_position_mode_and_the_placement() -
         adapter, live_context=_build_live_context(case_input, protection_registry=registry)
     )
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
-    assert _reads_only(adapter)[:4] == [*PRE_PLACEMENT_READS, "get_position_mode"]
-    for call in adapter.calls[:3]:
+    reads = len(PRE_PLACEMENT_READS)
+    assert _reads_only(adapter)[: reads + 1] == [*PRE_PLACEMENT_READS, "get_position_mode"]
+    for call in adapter.calls[:reads]:
         assert call["kwargs"] == {"symbol": "BTCUSDT"}
     assert registry.block_checks == 1
 
@@ -3196,6 +3209,74 @@ async def test_open_orders_and_unreadable_order_state_refuse() -> None:
         await _assert_refused_then_placeable(
             label=label, reason=reason, adapter=adapter, expected_calls=PRE_PLACEMENT_READS
         )
+
+
+def _live_position(symbol: str = "BTCUSDT", amount: Any = Decimal("0.004")) -> Any:
+    """One live position row as the adapter's `PositionSnapshot` exposes it (duck-typed)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(symbol=symbol, position_side="BOTH", position_amt=amount)
+
+
+async def test_wr02_a_live_position_on_the_symbol_refuses_with_an_empty_caller_list() -> None:
+    """19-REVIEW WR-02: the exchange shows a position the caller's list does not carry.
+
+    The caller passes `open_positions=[]` (the only real caller always does); a manual position,
+    or one left by an UNKNOWN entry, is only on the exchange. The old code built the check from
+    the caller's list alone and placed a second entry on the symbol.
+    """
+    case_input = _load_input()
+    assert _build_risk_kwargs(case_input)["open_positions"] == []
+    cases: list[tuple[str, Any]] = [
+        ("long position on the symbol", _live_position()),
+        ("short position on the symbol", _live_position(amount=Decimal("-0.004"))),
+        ("unreadable amount counts as a position", _live_position(amount=None)),
+        ("a row without a symbol counts as on the symbol", _live_position(symbol="")),
+    ]
+    for label, row in cases:
+        adapter = FakeExecutionAdapter()
+        adapter.open_positions = [row]
+        await _assert_refused_then_placeable(
+            label=label,
+            reason="SYMBOL_HAS_POSITION",
+            adapter=adapter,
+            expected_calls=PRE_PLACEMENT_READS,
+        )
+
+
+class _PositionsNotAList(FakeExecutionAdapter):
+    """A position read that answers something other than a list (unusable, fail closed)."""
+
+    async def snapshot_positions(self, **kwargs: Any) -> Any:
+        self.calls.append({"method": "snapshot_positions", "kwargs": dict(kwargs)})
+        return None
+
+
+async def test_wr02_an_unreadable_position_read_refuses_fail_closed() -> None:
+    raising = FakeExecutionAdapter()
+    raising.positions_exception = TimeoutError("read timeout")
+    for label, adapter in (
+        ("position read raises", raising),
+        ("position read is not a list", _PositionsNotAList()),
+    ):
+        await _assert_refused_then_placeable(
+            label=label,
+            reason="SYMBOL_STATE_UNAVAILABLE",
+            adapter=adapter,
+            expected_calls=PRE_PLACEMENT_READS,
+        )
+
+
+async def test_wr02_a_flat_row_or_another_symbol_does_not_block() -> None:
+    adapter = FakeExecutionAdapter()
+    adapter.open_positions = [
+        _live_position(amount=Decimal("0")),
+        _live_position(symbol="ETHUSDT"),
+    ]
+    outcome = await _run_plan(adapter)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    position_reads = [c for c in adapter.calls if c["method"] == "snapshot_positions"]
+    assert position_reads[0]["kwargs"] == {"symbol": "BTCUSDT"}
 
 
 async def test_an_order_on_another_symbol_does_not_block() -> None:

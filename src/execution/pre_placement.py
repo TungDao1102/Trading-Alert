@@ -94,8 +94,8 @@ def _require_optional_int(value: object, name: str) -> None:
 class PrePlacementInputs:
     """Every value `evaluate_pre_placement` reads; all fields are required (no defaults).
 
-    `None` on a live reading (`latest_closed_bar_close`, `open_order_symbols`, `mark_price`,
-    `mark_time_utc`, `mark_checked_at_utc`) and on an owner limit
+    `None` on a live reading (`latest_closed_bar_close`, `position_symbols`, `open_order_symbols`,
+    `mark_price`, `mark_time_utc`, `mark_checked_at_utc`) and on an owner limit
     (`min_remaining_validity_seconds`, `max_mark_price_age_ms`) means "not available" and refuses
     (D-06, D-07).
 
@@ -114,7 +114,7 @@ class PrePlacementInputs:
     now_utc: datetime
     min_remaining_validity_seconds: int | None
     gtd_clock_margin: timedelta
-    position_symbols: frozenset[str]
+    position_symbols: frozenset[str] | None
     open_order_symbols: frozenset[str] | None
     any_unprotected: bool
     symbol: str
@@ -312,18 +312,22 @@ def check_mark_price(
 def check_symbol_free(
     *,
     symbol: str,
-    position_symbols: frozenset[str],
+    position_symbols: frozenset[str] | None,
     open_order_symbols: frozenset[str] | None,
     any_unprotected: bool,
 ) -> str | None:
     """Refuse a second plan or any exposure on the symbol, or any unprotected position (RISK-04).
 
-    `any_unprotected` is account-wide (D-11) and is checked first. `open_order_symbols` holds the
-    symbols with an open normal or algo order; `None` means the order state could not be read and
-    refuses (SYMBOL_STATE_UNAVAILABLE, fail closed). Other symbols never block.
+    `any_unprotected` is account-wide (D-11) and is checked first. `position_symbols` holds the
+    symbols with an open position, from a live exchange read (19-REVIEW WR-02) and the caller's
+    reconciled positions; `open_order_symbols` holds the symbols with an open normal or algo
+    order. `None` for either means that state could not be read and refuses
+    (SYMBOL_STATE_UNAVAILABLE, fail closed). Other symbols never block.
     """
     if any_unprotected:
         return UNPROTECTED_POSITION_EXISTS
+    if position_symbols is None:
+        return SYMBOL_STATE_UNAVAILABLE
     if symbol in position_symbols:
         return SYMBOL_HAS_POSITION
     if open_order_symbols is None:

@@ -138,9 +138,10 @@ class ExecutionAdapter(Protocol):
 
     The real `BinanceUsdmAdapter` implements this protocol; tests inject
     a `FakeExecutionAdapter` that records every call. The manager never
-    imports the Binance SDK — only the adapter does. Phase 19 (plan 19-13) adds the three
-    pre-placement reads: the live mark price and the open normal and algo orders of the symbol;
-    plan 19-15 adds `error_facts`, the SDK-free route to the exchange error taxonomy.
+    imports the Binance SDK — only the adapter does. Phase 19 (plan 19-13) adds the
+    pre-placement reads: the live mark price, the open normal and algo orders and (19-REVIEW
+    WR-02) the open positions of the symbol; plan 19-15 adds `error_facts`, the SDK-free route to
+    the exchange error taxonomy.
     """
 
     async def place_entry(self, **kwargs: Any) -> Any: ...
@@ -162,6 +163,8 @@ class ExecutionAdapter(Protocol):
     async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> Any: ...
 
     async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> Any: ...
+
+    async def snapshot_positions(self, *, symbol: str | None = None) -> Any: ...
 
     def error_facts(self, exc: BaseException) -> Any:
         """The Phase 18 `ErrorFacts` (class, int code, Retry-After) of `exc`; facts only (D-21)."""
@@ -477,7 +480,7 @@ async def execute_approved_plan(
          evaluated on the risk verdict's own `sized` (WR-05).
       Phase 19 pre-placement gates, all BEFORE the approval is consumed (a refusal leaves no
       ENTRY intent row, so a later call with corrected inputs can still place). The pure
-      refusals come first (no adapter call), then the three reads, then the position mode:
+      refusals come first (no adapter call), then the four reads, then the position mode:
       5b. Quantity bound (D-02, RISK-04): the sized quantity may not exceed the approved plan
           quantity; it is refused as QUANTITY_ABOVE_APPROVED, never clipped.
       5c. Snapped geometry (D-03): after the tick snap the stop must still sit outside the
@@ -485,10 +488,11 @@ async def execute_approved_plan(
       5d. TP1 sizeable at the sized quantity (O-03 auto default, backtest D-27): the frozen
           protective sizing must accept it, else NO_TRADE with its MIN_QTY_REJECT or
           NOTIONAL_REJECT; there is no single-take-profit fallback.
-      5e. Live reads (mark price, open normal orders and open algo orders of the symbol; a
-          failed read is "not available") and `evaluate_pre_placement`: plan status,
-          invalidation, remaining validity, same-symbol and account-wide unprotected checks,
-          mark price (D-05, D-06, D-08, D-09, D-11).
+      5e. Live reads (mark price, open normal orders, open algo orders and open positions of
+          the symbol, 19-REVIEW WR-02; a failed read is "not available"), then the injected
+          clock (19-REVIEW CR-01), and `evaluate_pre_placement`: plan status, invalidation,
+          remaining validity, same-symbol and account-wide unprotected checks, mark price
+          (D-05, D-06, D-08, D-09, D-11).
       5f. Position mode (D-02, D-14): an unreadable mode is UNCERTAIN_ACCOUNT_STATE and a
           Hedge account is HEDGE_MODE_UNSUPPORTED, both before anything is consumed.
       7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
@@ -843,7 +847,7 @@ async def execute_approved_plan(
     if tp_sizing.is_no_trade:
         return ExecutionOutcome(is_no_trade=True, reason_code=tp_sizing.reason_code)
 
-    # Gate 5e (D-05, D-06, D-08, D-09, D-11, RISK-04): the three live reads, then the pure
+    # Gate 5e (D-05, D-06, D-08, D-09, D-11, RISK-04): the four live reads, then the pure
     # pre-placement evaluation. A read that fails is "not available" and refuses (fail
     # closed); nothing here consumes the approval.
     mark_reading = await _read_or_none(lambda: adapter.get_mark_price(symbol=bound.symbol))
@@ -853,6 +857,10 @@ async def execute_approved_plan(
     algo_orders = await _read_or_none(
         lambda: adapter.snapshot_open_algo_orders(symbol=bound.symbol)
     )
+    # 19-REVIEW WR-02: the same-symbol position check reads the exchange, not only the caller's
+    # reconciled list (a manual position or one left by an UNKNOWN entry is seen); an unreadable
+    # read refuses SYMBOL_STATE_UNAVAILABLE.
+    positions = await _read_or_none(lambda: adapter.snapshot_positions(symbol=bound.symbol))
     try:
         any_unprotected = bool(live_context.protection_registry.blocks_new_entries())
     except Exception:  # noqa: BLE001 — an unreadable registry blocks (fail closed)
@@ -874,7 +882,11 @@ async def execute_approved_plan(
                 live_context.execution_limits.min_remaining_validity_seconds
             ),
             gtd_clock_margin=live_context.gtd_clock_margin,
-            position_symbols=frozenset(p.symbol for p in risk_kwargs["open_positions"]),
+            position_symbols=_position_symbols(
+                bound.symbol,
+                positions,
+                frozenset(p.symbol for p in risk_kwargs["open_positions"]),
+            ),
             open_order_symbols=_open_order_symbols(bound.symbol, (normal_orders, algo_orders)),
             any_unprotected=any_unprotected,
             symbol=bound.symbol,
@@ -1196,6 +1208,26 @@ def _open_order_symbols(symbol: str, row_sets: tuple[Any, ...]) -> frozenset[str
         for row in rows:
             row_symbol = _get_attr_or_key(row, "symbol")
             symbols.add(row_symbol if isinstance(row_symbol, str) and row_symbol else symbol)
+    return frozenset(symbols)
+
+
+def _position_symbols(symbol: str, rows: Any, reconciled: frozenset[str]) -> frozenset[str] | None:
+    """The symbols with an open position: the live read plus the caller's reconciled list.
+
+    `None` when the live position snapshot could not be read or is not a list or tuple (an
+    empty one is a valid "no position"). A row counts unless its amount is a Decimal zero: a
+    missing or unreadable amount counts as a position, and a row that carries no symbol counts
+    as on `symbol` (fail closed, 19-REVIEW WR-02).
+    """
+    if not isinstance(rows, list | tuple):
+        return None
+    symbols: set[str] = set(reconciled)
+    for row in rows:
+        amount = _get_attr_or_key(row, "position_amt")
+        if isinstance(amount, Decimal) and amount.is_finite() and amount == Decimal("0"):
+            continue
+        row_symbol = _get_attr_or_key(row, "symbol")
+        symbols.add(row_symbol if isinstance(row_symbol, str) and row_symbol else symbol)
     return frozenset(symbols)
 
 
