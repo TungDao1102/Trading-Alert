@@ -24,3 +24,13 @@ A process killed without a chance to run its `finally` (kill -9, OOM kill, power
 ## Evidence
 
 tests/test_paper_runtime_liveness.py (plan 16-65 section): removal at start (before the loop and during a held refusal) and at exit (fail closed and clean stop); a restart loop of two short-lived runtimes that each reach the watchdog's start stamp and then fail closed never yields a passing probe, neither while running nor after the exit (before the fix the probe passed in all four checks); live after a real frame; not live before the first frame; the old schema is refused.
+
+## Follow-up: only the lease holder owns the stamp (2026-10-20, commit 9b27da5)
+
+Orchestrator decision, owner informed. In 5c866c4 `main` removed the stamp at process start, before the instance lease. A second non-probe start in the same container, refused by the lease with exit 8, therefore deleted the stamp of the running holder until that holder's next watchdog wake (at most half the bound later): a false "not live", never a false "live", but still a stamp touched by a process that does not own it.
+
+Now the removal happens right after the lease is taken (inside the `try` whose `finally` removes the stamp again at the exit); a start refused before the lease or by the lease touches no stamp. Everything else above is unchanged: removal on every exit of the lease holder, no last-frame time before the first frame, the probes and the one-shot pin never touch the stamp, a failed removal at the start is exit 7.
+
+Consequence for a refused start before the lease: a stamp left by an earlier process stays while the refused process holds. It cannot pass the probe during the hold (the held marker of this container wins), and it is only fresh if the earlier process was killed without cleanup, which is the residual above (ages out within the bound, or goes when the next start takes the lease).
+
+Evidence: tests/test_paper_runtime_liveness.py `test_a_start_refused_by_the_lease_leaves_the_holders_stamp_untouched` (with and without the hold; the holder's stamp stays byte-identical and the holder stays live) and `test_a_held_refusal_before_the_lease_touches_no_stamp_and_is_not_live`; both failed before the change.
