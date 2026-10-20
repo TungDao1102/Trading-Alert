@@ -550,6 +550,11 @@ def _build_approval(case_input: dict[str, Any]) -> Any:
         actor_id=case_input.get("actor_id", ""),
         telegram_message_id=None,
         request_hash=_plan_hash_of(case_input),
+        # D078 (19-REVIEW WR-01): the quantity stored on the approval row is the quantity of the
+        # plan the request was issued for, taken from the fixture field (never a typed literal).
+        approved_quantity=_coerce_decimal(
+            case_input["quantity_after_rounding"], "quantity_after_rounding"
+        ),
     )
 
 
@@ -3127,26 +3132,119 @@ async def test_risk04_quantity_above_the_approved_quantity_is_never_clipped() ->
     risk_kwargs["trade_plan"] = dataclasses.replace(
         risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.414")
     )
+    # D078: the approval row stores the same quantity as the plan (gate 1c passes), so the
+    # sized 2.415 is above the stored 2.414 and gate 5b refuses it, never clipped.
     await _assert_refused_then_placeable_with_risk(
         label="plan quantity one step below the sized quantity",
         reason="QUANTITY_ABOVE_APPROVED",
         risk_kwargs=risk_kwargs,
+        approval=dataclasses.replace(
+            _build_approval(case_input), approved_quantity=Decimal("2.414")
+        ),
     )
 
 
 async def _assert_refused_then_placeable_with_risk(
-    *, label: str, reason: str, risk_kwargs: dict[str, Any]
+    *, label: str, reason: str, risk_kwargs: dict[str, Any], **overrides: Any
 ) -> None:
     """Refusal check for a risk_kwargs edit that is not a hashed-field edit (no re-hash needed)."""
     case_input = _load_input()
     adapter = FakeExecutionAdapter()
     store = InMemoryExecutionIntentStore()
-    outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs)
+    outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs, **overrides)
     assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
     assert adapter.calls == [], label
     assert store.get_entry(approval_id=case_input["approval_id"]) is None, label
     placed = await _run_plan(FakeExecutionAdapter(), intent_store=store)
     assert (placed.is_no_trade, placed.reason_code) == (False, "OK"), label
+
+
+async def test_wr01_a_plan_quantity_above_the_stored_approved_quantity_is_refused() -> None:
+    """D078 / 19-REVIEW WR-01: the quantity is not hashed (D051 c), so gate 1c compares it with
+    the quantity stored on the approval row; an inflated plan object does not place."""
+    import dataclasses
+
+    from src.execution.binding import recompute_plan_hash
+
+    case_input = _load_input()
+    risk_kwargs = _build_risk_kwargs(case_input)
+    inflated = dataclasses.replace(
+        risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.416")
+    )
+    risk_kwargs["trade_plan"] = inflated
+    assert recompute_plan_hash(inflated) == inflated.plan_hash  # the hash still verifies
+
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "PLAN_QUANTITY_MISMATCH")
+    assert adapter.calls == []
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+    # The approval was not consumed: the corrected call on the SAME store places 2.415.
+    placed_adapter = FakeExecutionAdapter()
+    placed = await _run_plan(placed_adapter, intent_store=store)
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK")
+    entry = next(c for c in placed_adapter.calls if c["method"] == "place_entry")
+    assert entry["kwargs"]["quantity"] == Decimal("2.415")
+
+
+async def test_wr01_a_plan_quantity_below_the_stored_approved_quantity_is_refused() -> None:
+    import dataclasses
+
+    case_input = _load_input()
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["trade_plan"] = dataclasses.replace(
+        risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.414")
+    )
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(adapter, intent_store=store, risk_kwargs=risk_kwargs)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "PLAN_QUANTITY_MISMATCH")
+    assert adapter.calls == []
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_wr01_an_approval_without_a_stored_quantity_is_refused() -> None:
+    """D078: NULL marks a row written before migration 0006; it is never placeable."""
+    import dataclasses
+
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        approval=dataclasses.replace(_build_approval(case_input), approved_quantity=None),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "APPROVED_QUANTITY_MISSING")
+    assert adapter.calls == []
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+    placed = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK")
+
+
+async def test_wr01_the_bound_carries_the_stored_quantity_not_the_plan_objects() -> None:
+    """Gate 5b compares the sized quantity with the stored one: a stored 2.414 with a matching
+    plan 2.414 refuses the sized 2.415 even though the hashed golden plan says 2.415."""
+    import dataclasses
+
+    case_input = _load_input()
+    risk_kwargs = _build_risk_kwargs(case_input)
+    risk_kwargs["trade_plan"] = dataclasses.replace(
+        risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.414")
+    )
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        risk_kwargs=risk_kwargs,
+        approval=dataclasses.replace(
+            _build_approval(case_input), approved_quantity=Decimal("2.414")
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "QUANTITY_ABOVE_APPROVED")
+    assert "place_entry" not in _reads_only(adapter)
 
 
 async def test_risk04_a_quantity_equal_to_the_approved_quantity_places() -> None:
@@ -3640,6 +3738,19 @@ def _order_pairs() -> list[tuple[str, dict[str, Any], str]]:
         )
         return risk_kwargs
 
+    def small_approval() -> Any:
+        # D078: the stored approved quantity moves with the plan, so gate 1c passes.
+        return dataclasses.replace(
+            _build_approval(case_input), approved_quantity=Decimal("2.414")
+        )
+
+    def inflated_plan_quantity() -> dict[str, Any]:
+        risk_kwargs = _build_risk_kwargs(case_input)
+        risk_kwargs["trade_plan"] = dataclasses.replace(
+            risk_kwargs["trade_plan"], quantity_after_rounding=Decimal("2.416")
+        )
+        return risk_kwargs
+
     from src.execution.enablement import LiveEnablementController
 
     return [
@@ -3673,14 +3784,27 @@ def _order_pairs() -> list[tuple[str, dict[str, Any], str]]:
             "headroom gate before quantity bound",
             {
                 "risk_kwargs": small_plan_quantity(),
+                "approval": small_approval(),
                 "gate_kwargs": _build_gate_kwargs(case_input, open_algo_count=196),
             },
             "EXCHANGE_CONSTRAINT",
         ),
         (
             "quantity bound before the pre-placement reads",
-            {"risk_kwargs": small_plan_quantity(), "adapter_mark": Decimal("98.00")},
+            {
+                "risk_kwargs": small_plan_quantity(),
+                "approval": small_approval(),
+                "adapter_mark": Decimal("98.00"),
+            },
             "QUANTITY_ABOVE_APPROVED",
+        ),
+        (
+            "plan quantity binding before enablement",
+            {
+                "risk_kwargs": inflated_plan_quantity(),
+                "enablement": LiveEnablementController(journal=FakeJournal()),
+            },
+            "PLAN_QUANTITY_MISMATCH",
         ),
         (
             "plan status before the mark price",

@@ -21,7 +21,9 @@ from src.domain.registry import ParameterSet, load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.execution.binding import (
+    APPROVED_QUANTITY_MISSING,
     GEOMETRY_INVALID_AFTER_SNAP,
+    PLAN_QUANTITY_MISMATCH,
     PLAN_SIDE_MISMATCH,
     PLAN_SIGNAL_MISMATCH,
     PLAN_SYMBOL_MISMATCH,
@@ -95,9 +97,9 @@ def _real_plan(side: str) -> tuple[Signal, TradePlan]:
     return result.signal, planned.trade_plan
 
 
-def _bind(signal: Signal, trade_plan: TradePlan, **overrides: str) -> BindingVerdict:
+def _bind(signal: Signal, trade_plan: TradePlan, **overrides: object) -> BindingVerdict:
     """bind_plan with every argument consistent, then the named overrides applied."""
-    kwargs: dict[str, str] = {
+    kwargs: dict[str, object] = {
         "callback_plan_hash": trade_plan.plan_hash,
         "approval_request_hash": trade_plan.plan_hash,
         "approval_strategy_version": signal.strategy_version,
@@ -107,9 +109,11 @@ def _bind(signal: Signal, trade_plan: TradePlan, **overrides: str) -> BindingVer
         "plan_snapshot_trade_plan_id": trade_plan.trade_plan_id,
         "caller_symbol": signal.symbol,
         "caller_side": signal.direction,
+        # D078 (19-REVIEW WR-01): the quantity stored on the approval row.
+        "approval_quantity": trade_plan.quantity_after_rounding,
     }
     kwargs.update(overrides)
-    return bind_plan(trade_plan=trade_plan, signal=signal, **kwargs)
+    return bind_plan(trade_plan=trade_plan, signal=signal, **kwargs)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("side", ["LONG", "SHORT"])
@@ -213,6 +217,7 @@ def test_signal_or_approval_identity_mismatch(field: str, value: str) -> None:
         plan_snapshot_trade_plan_id=trade_plan.trade_plan_id,
         caller_symbol=signal.symbol,
         caller_side=signal.direction,
+        approval_quantity=trade_plan.quantity_after_rounding,
     )
     _refused(verdict, PLAN_SIGNAL_MISMATCH)
 
@@ -283,6 +288,109 @@ def test_first_failure_order_symbol_beats_side() -> None:
     signal, trade_plan = _real_plan("LONG")
     verdict = _bind(signal, trade_plan, caller_symbol="ETHUSDT", caller_side="SHORT")
     _refused(verdict, PLAN_SYMBOL_MISMATCH)
+
+
+# --------------------------------------------------------------------------- #
+# Review-fix batch 4 (19-REVIEW WR-01, D078) - the approved quantity bound.
+# --------------------------------------------------------------------------- #
+
+
+def test_wr01_an_equal_quantity_binds_and_the_bound_carries_the_approval_value() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    stored = trade_plan.quantity_after_rounding.quantize(Decimal("1.000000000000000000"))
+    assert stored == trade_plan.quantity_after_rounding
+
+    verdict = _bind(signal, trade_plan, approval_quantity=stored)
+
+    assert verdict.ok is True
+    assert verdict.bound is not None
+    # The bound holds the approval's value (same object, same scale), not the plan's own field.
+    assert verdict.bound.approved_quantity is stored
+    assert str(verdict.bound.approved_quantity) == str(stored)
+
+
+@pytest.mark.parametrize("delta", [Decimal("0.000000000000000001"), Decimal("-0.000000000000000001")])
+def test_wr01_a_plan_quantity_that_differs_from_the_approval_is_refused(delta: Decimal) -> None:
+    signal, trade_plan = _real_plan("LONG")
+    stored = trade_plan.quantity_after_rounding + delta
+    _refused(_bind(signal, trade_plan, approval_quantity=stored), PLAN_QUANTITY_MISMATCH)
+
+
+def test_wr01_an_inflated_plan_object_is_refused_although_its_hash_still_verifies() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    inflated = dataclasses.replace(
+        trade_plan, quantity_after_rounding=trade_plan.quantity_after_rounding * 2
+    )
+    # D051 (c): the quantity is not a hashed field, so the plan hash is unchanged.
+    assert recompute_plan_hash(inflated) == trade_plan.plan_hash == inflated.plan_hash
+    _refused(
+        _bind(signal, inflated, approval_quantity=trade_plan.quantity_after_rounding),
+        PLAN_QUANTITY_MISMATCH,
+    )
+
+
+def test_wr01_a_missing_approval_quantity_is_refused_as_missing() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    _refused(_bind(signal, trade_plan, approval_quantity=None), APPROVED_QUANTITY_MISSING)
+
+
+def test_wr01_numeric_equality_ignores_the_scale() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    scaled = dataclasses.replace(trade_plan, quantity_after_rounding=Decimal("0.0800"))
+    verdict = _bind(signal, scaled, approval_quantity=Decimal("0.08"))
+    assert verdict.ok is True
+    assert verdict.bound is not None
+    assert verdict.bound.approved_quantity == Decimal("0.08")
+
+
+def test_wr01_a_hash_mismatch_beats_a_quantity_mismatch() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    mutated = dataclasses.replace(trade_plan, stop_loss_price=Decimal("1"))
+    _refused(
+        _bind(signal, mutated, approval_quantity=trade_plan.quantity_after_rounding * 2),
+        STALE_SETUP,
+    )
+
+
+def test_wr01_a_side_mismatch_beats_a_quantity_mismatch() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    _refused(
+        _bind(signal, trade_plan, caller_side="SHORT", approval_quantity=Decimal("1")),
+        PLAN_SIDE_MISMATCH,
+    )
+
+
+@pytest.mark.parametrize("bad", [0.5, 1, "0.5", True])
+def test_wr01_a_non_decimal_approval_quantity_is_a_programming_error(bad: object) -> None:
+    signal, trade_plan = _real_plan("LONG")
+    with pytest.raises(TypeError):
+        _bind(signal, trade_plan, approval_quantity=bad)
+
+
+def test_wr01_the_plan_hash_field_set_ignores_the_quantity() -> None:
+    _, trade_plan = _real_plan("LONG")
+    other = dataclasses.replace(
+        trade_plan, quantity_after_rounding=trade_plan.quantity_after_rounding + Decimal("1")
+    )
+    assert recompute_plan_hash(other) == recompute_plan_hash(trade_plan)
+
+
+def test_wr01_approval_quantity_is_a_required_keyword() -> None:
+    signal, trade_plan = _real_plan("LONG")
+    with pytest.raises(TypeError):
+        bind_plan(  # type: ignore[call-arg]
+            trade_plan=trade_plan,
+            signal=signal,
+            callback_plan_hash=trade_plan.plan_hash,
+            approval_request_hash=trade_plan.plan_hash,
+            approval_strategy_version=signal.strategy_version,
+            approval_parameter_set_id=signal.parameter_set_id,
+            approval_parameter_set_hash=signal.parameter_set_hash,
+            plan_snapshot_symbol=signal.symbol,
+            plan_snapshot_trade_plan_id=trade_plan.trade_plan_id,
+            caller_symbol=signal.symbol,
+            caller_side=signal.direction,
+        )
 
 
 def test_binding_verdict_validates_its_shape() -> None:

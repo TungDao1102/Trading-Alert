@@ -12,7 +12,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * The chain must be reversible (upgrade head, downgrade base, upgrade head) and a
     data-bearing upgrade 0003 -> 0004 and 0004 -> 0005 must keep every pre-existing row.
   * Migration 0005 (Phase 19, D-22, G4-008) adds the nullable `sized_realized_risk` column
-    and its named CHECK to `execution_intents`; no test pins the literal head revision.
+    and its named CHECK to `execution_intents`.
+  * Migration 0006 (Phase 19 review-fix batch 4, D078, 19-REVIEW WR-01) adds the nullable
+    `approved_quantity` column and its named CHECK to `approvals`; the head test pins 0006.
 """
 
 from __future__ import annotations
@@ -80,6 +82,8 @@ REVISION_0003 = "0003_callback_mapping"
 REVISION_0004 = "0004_persistence_integrity"
 REVISION_0005 = "0005_live_sized_risk"
 MIGRATION_0005 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0005_live_sized_risk.py"
+REVISION_0006 = "0006_approval_quantity"
+MIGRATION_0006 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0006_approval_quantity.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -443,7 +447,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0005
+    assert alembic_head_revision() == REVISION_0006
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:

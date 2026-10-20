@@ -1541,6 +1541,7 @@ async def test_build_live_context_binds_to_the_derived_plan() -> None:
         plan_snapshot_trade_plan_id=live.plan_constraint_snapshot.trade_plan_id,
         caller_symbol="BTCUSDT",
         caller_side="LONG",
+        approval_quantity=plan.trade_plan.quantity_after_rounding,
     )
     assert verdict.ok is True
     assert adapter.mutating_calls() == []
