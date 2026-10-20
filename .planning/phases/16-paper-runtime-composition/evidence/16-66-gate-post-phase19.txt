@@ -1,0 +1,23 @@
+16-43 pre-pin gate after the Phase 19 merge into develop (fresh full gate, owner decision 2026-10-20)
+run on 2026-10-20, start 14:44:46Z, end 15:03:14Z (about 18.5 min), by the orchestrator at the owner's request
+branch: develop
+environment: Windows 11, .venv Python 3.13, TRADING_CI_STRICT unset, TEST_DATABASE_URL set (PostgreSQL, throwaway *_test database; the PostgreSQL tests ran, none of the skips below is a *_pg file)
+tracked tree: only .planning/state.json modified (.planning only, not part of the code under test); untracked .gsd/, .planning/milestone.lock, .claude/, package.json, package-lock.json were not touched
+run discipline: one heavy process, sequential (no -n), command:
+  uv run pytest -m "not docker" -p no:cacheprovider -q -rs
+exit code: 0
+result: 11557 passed, 7 skipped, 0 failed, 0 errors (counted from the progress dots; the -q summary line was not printed)
+skips (all platform: Windows):
+  tests/test_analytics_files.py:974 symlinks unavailable (1)
+  tests/test_bootstrap.py:947 NTFS cannot represent POSIX modes (1)
+  tests/test_deploy_heartbeat.py:401 file modes do not exist on Windows (4)
+  tests/test_user_data_smoke_dry_run.py:383 symlinks unavailable (1)
+docker-marked tests: not run
+
+tree under test: HEAD ee8a2aae14418d74c9efc44ed3c979c2bddaea35 (docs commits after the merge)
+commit under test (IMAGE_COMMIT, last commit that changes code, tests, configuration or deployment files):
+  git log -1 --format=%H -- src scripts tests config deploy Dockerfile .dockerignore docker-compose.yml params pyproject.toml uv.lock alembic.ini docs/research/universe
+    36dcad846f19e0214d80803669994007fd87d131  (Merge last-price pre-placement check (l4p))
+  git diff --stat on those paths against the working tree: empty (the tested tree equals IMAGE_COMMIT for them)
+
+IMAGE_COMMIT=36dcad846f19e0214d80803669994007fd87d131
