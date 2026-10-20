@@ -19,7 +19,7 @@ The four behaviors pinned here:
   3. Risk NO_TRADE verdict yields no adapter calls and the risk reason
      code preserved byte-identically.
   4. Ambiguous `place_entry` response triggers `query_order_by_client`
-     first; retry occurs only when the probe confirms absence.
+     once; the entry is never re-sent (Q5).
 
 The tests load the golden fixture pair
 (`tests/fixtures/phase9/placement_sequences/{input,expected}.json`) and
@@ -29,6 +29,8 @@ sequence byte-for-byte.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -815,10 +817,10 @@ async def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code()
 # --------------------------------------------------------------------------- #
 
 
-async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
-    """Beh. 4: an ambiguous `place_entry` response triggers
-    `query_order_by_client` first; retry occurs only when the probe
-    confirms absence.
+async def test_ambiguous_entry_response_is_probed_and_never_resent() -> None:
+    """Beh. 4: an ambiguous `place_entry` response triggers one
+    `query_order_by_client`; the probe decides between hand-off and UNKNOWN
+    and never leads to a second `place_entry` (Q5).
     """
     from src.execution.manager import execute_approved_plan
 
@@ -856,8 +858,8 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
         **_live_wiring(),
     )
 
-    # The manager should have called query_order_by_client before any
-    # retry. Since the probe found the order, no retry is needed.
+    # The manager probes once after the ambiguous failure. The probe found the order,
+    # so it is handed off; in no case is the entry sent again.
     method_sequence = [c["method"] for c in adapter.calls]
     assert "query_order_by_client" in method_sequence, (
         f"ambiguous response must trigger query_order_by_client, got {method_sequence}"
@@ -866,9 +868,9 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     entry_idx = method_sequence.index("place_entry")
     query_idx = method_sequence.index("query_order_by_client")
     assert query_idx > entry_idx, f"query must come after initial place_entry: {method_sequence}"
-    # No retry place_entry after the query (probe found the order).
+    # No second place_entry after the query.
     entry_count = method_sequence.count("place_entry")
-    assert entry_count == 1, f"probe found order → no retry, got {entry_count} place_entry calls"
+    assert entry_count == 1, f"the entry is never re-sent, got {entry_count} place_entry calls"
 
 
 # --------------------------------------------------------------------------- #
@@ -944,7 +946,7 @@ async def _run_plan(
 
 
 def _status_unknown() -> BaseException:
-    """An SDK 5xx: STATUS_UNKNOWN on a placement, the class of failure the retry rule is for."""
+    """An SDK 5xx: STATUS_UNKNOWN on a placement, an ambiguous placement failure."""
     from binance_common.errors import ServerError
 
     return ServerError(error_message="status unknown", status_code=503)
@@ -962,23 +964,31 @@ def _probe(found: bool) -> Any:
     )
 
 
-async def test_definitive_absence_allows_exactly_one_retry() -> None:
-    """CR-09: an ambiguous entry followed by a DEFINITIVE `found=False`
-    probe retries once; the retry's ack is handed to the protection registry (no stop yet)."""
+async def test_definitive_absence_after_an_ambiguous_error_is_unknown_not_a_resend() -> None:
+    """Q5: an ambiguous entry followed by a `found=False` probe is NOT proof of absence (the
+    id is unique among open orders only), so the entry is never re-sent: the intent is UNKNOWN,
+    SAFE_MODE `ENTRY_STATE_UNKNOWN` is entered and the outcome is RECONCILIATION_REQUIRED."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
     adapter = FakeExecutionAdapter()
     adapter.entry_exceptions.append(_status_unknown())
     adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
 
-    outcome = await _run_plan(adapter)
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode, intent_store=store)
 
-    assert outcome.is_no_trade is False
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert [c["method"] for c in adapter.calls] == [
         *PRE_PLACEMENT_READS,
         "get_position_mode",
         "place_entry",
         "query_order_by_client",
-        "place_entry",
     ]
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
 
 
 async def test_probe_failure_fails_closed_to_safe_mode_without_retry_or_sl() -> None:
@@ -1015,31 +1025,193 @@ async def test_indeterminate_probe_is_unknown_not_absent() -> None:
     assert safe_mode_controller.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
 
 
-async def test_repeated_definitive_absence_is_bounded_no_trade() -> None:
-    """CR-09: at most two entry attempts; both absent → NO_TRADE, no SL."""
+# Q5 (owner decision 2026-10-20): each approval sends exactly ONE `place_entry` POST.
+_Q5_AMBIGUOUS_FAILURES = ("server_5xx", "timeout", "none_response", "unknown_error")
+_Q5_PROBE_ANSWERS = ("found", "absent", "probe_raises", "indeterminate")
+_Q5_CASES: list[tuple[str, str]] = [
+    ("pre_send_refusal", "no_probe"),
+    ("definitive_rejection", "no_probe"),
+    *[(failure, probe) for failure in _Q5_AMBIGUOUS_FAILURES for probe in _Q5_PROBE_ANSWERS],
+]
+
+
+def _q5_seed(adapter: FakeExecutionAdapter, failure: str, probe: str) -> None:
+    """Queue the failure and the probe answer of one Q5 case; fresh objects on every call."""
+    from binance_common.errors import BadRequestError
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+
+    if failure == "pre_send_refusal":
+        adapter.entry_exceptions.append(RestGateRefusal("RATE_LIMIT_PAUSE_429", 7))
+    elif failure == "definitive_rejection":
+        adapter.entry_exceptions.append(
+            BadRequestError(error_message="rejected", status_code=-1106)
+        )
+    elif failure == "server_5xx":
+        adapter.entry_exceptions.append(_status_unknown())
+    elif failure == "timeout":
+        adapter.entry_exceptions.append(TimeoutError("read timeout"))
+    elif failure == "none_response":
+        adapter._entry_response = None  # the constructor replaces None with a default dict
+    elif failure == "unknown_error":
+        adapter.entry_exceptions.append(RuntimeError("unmapped"))
+    else:  # pragma: no cover - guards the table itself
+        raise AssertionError(failure)
+    if probe == "found":
+        adapter.query_responses.append(_probe(found=True))
+    elif probe == "absent":
+        adapter.query_responses.append(_probe(found=False))
+    elif probe == "probe_raises":
+        adapter.query_exceptions.append(RuntimeError("probe failed"))
+    elif probe not in ("indeterminate", "no_probe"):  # pragma: no cover
+        raise AssertionError(probe)
+
+
+@pytest.mark.parametrize(
+    ("failure", "probe"), _Q5_CASES, ids=[f"{failure}-{probe}" for failure, probe in _Q5_CASES]
+)
+async def test_q5_place_entry_is_sent_once_for_every_error_kind(failure: str, probe: str) -> None:
+    """Q5: `place_entry` is called exactly once per approval, for every failure kind and every
+    probe answer. `newClientOrderId` is unique only among OPEN orders, Binance documents no
+    idempotency and no immediate query visibility, and `-1007` reads "Send status unknown;
+    execution status unknown". So `found=False` right after an ambiguous error does not prove
+    the order is absent: the result is UNKNOWN + SAFE_MODE + RECONCILIATION_REQUIRED, never
+    REJECTED. A resting GTD entry that nobody tracks would fill with no stop, because the
+    coordinator places the stop only after a fill (D-10)."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
     adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.extend([_status_unknown(), _status_unknown()])
-    adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
-    safe_mode_controller = RecordingSafeModeController()
+    _q5_seed(adapter, failure, probe)
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
 
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
 
-    assert outcome.is_no_trade is True
-    assert outcome.reason_code == "EXCHANGE_CONSTRAINT"
     methods = [c["method"] for c in adapter.calls]
-    assert methods.count("place_entry") == 2
+    assert methods.count("place_entry") == 1
+    assert methods.count("query_order_by_client") == (0 if probe == "no_probe" else 1)
     assert "place_algo_protective" not in methods
-    assert safe_mode_controller.entered_reasons == []
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None
+    if failure in ("pre_send_refusal", "definitive_rejection"):
+        reason = (
+            "ENTRY_REFUSED_BEFORE_SEND" if failure == "pre_send_refusal" else "EXCHANGE_CONSTRAINT"
+        )
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason)
+        assert entry.intent_status == ExecutionIntentStatus.REJECTED
+        assert safe_mode.entered_reasons == []
+        assert registry.register_attempts == 0
+    elif probe == "found":
+        assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+        assert entry.intent_status == ExecutionIntentStatus.ACKED
+        assert safe_mode.entered_reasons == []
+        assert len(registry.entries) == 1
+    else:
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+        assert entry.intent_status == ExecutionIntentStatus.UNKNOWN
+        assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+        assert registry.register_attempts == 0
 
 
-def test_q5_the_second_entry_attempt_is_kept_and_pinned_at_two() -> None:
-    """Q5 (owner-open, recorded not decided): `_ENTRY_MAX_ATTEMPTS == 2` is kept unchanged for
-    STATUS_UNKNOWN and the other ambiguous categories after a definitive-absence probe. The
-    Phase 18 review (src/WR-02) asked for its removal or an explicit decision; neither is made
-    here, so a change of this number must come with that decision."""
+_ENTRY_PLACEMENT_FUNCTION = "_place_entry_no_blind_retry"
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_LOOP_NODES = (ast.For, ast.AsyncFor, ast.While, *_COMPREHENSIONS)
+
+
+def _entry_resend_constructs(source: str) -> list[str]:
+    """Everything in `source` that could send the entry placement a second time.
+
+    Reports a loop or comprehension in the placement function, a call to itself (recursion),
+    a tenacity or retry helper, a `.place_entry(...)` call outside that function, more than
+    one such call, and any loop that contains a call to `.place_entry` or to the function.
+    A missing function is reported too, so renaming it cannot hide a resend.
+    """
+    tree = ast.parse(source)
+    found: list[str] = []
+    functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        and node.name == _ENTRY_PLACEMENT_FUNCTION
+    ]
+    if not functions:
+        found.append(f"{_ENTRY_PLACEMENT_FUNCTION}: not defined")
+    inside_ids: set[int] = set()
+    for function in functions:
+        for inner in ast.walk(function):
+            inside_ids.add(id(inner))
+            if isinstance(inner, _LOOP_NODES):
+                found.append(f"{function.name}:{inner.lineno}: loop {type(inner).__name__}")
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == function.name
+            ):
+                found.append(f"{function.name}:{inner.lineno}: calls itself")
+            if isinstance(inner, ast.Name) and inner.id == "tenacity":
+                found.append(f"{function.name}:{inner.lineno}: uses tenacity")
+            if isinstance(inner, ast.Attribute) and inner.attr in {
+                "AsyncRetrying",
+                "Retrying",
+                "retry",
+            }:
+                found.append(f"{function.name}:{inner.lineno}: uses a retry helper")
+
+    def _sends(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "place_entry") or (
+            isinstance(func, ast.Name) and func.id == _ENTRY_PLACEMENT_FUNCTION
+        )
+
+    sends = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "place_entry"
+    ]
+    if len(sends) != 1:
+        found.append(f"module: {len(sends)} .place_entry( calls, expected exactly 1")
+    found.extend(
+        f"module:{node.lineno}: .place_entry( outside {_ENTRY_PLACEMENT_FUNCTION}"
+        for node in sends
+        if id(node) not in inside_ids
+    )
+    for loop in (n for n in ast.walk(tree) if isinstance(n, _LOOP_NODES)):
+        if any(_sends(inner) for inner in ast.walk(loop)):
+            found.append(f"module:{loop.lineno}: a loop contains a placement call")
+    return sorted(found)
+
+
+def test_q5_entry_placement_has_no_resend_construct() -> None:
+    """Q5: no loop, recursion, retry helper or attempt-count knob can resend the entry."""
     from src.execution import manager
 
-    assert manager._ENTRY_MAX_ATTEMPTS == 2
+    source = inspect.getsource(manager)
+    assert _entry_resend_constructs(source) == []
+    assert [name for name in vars(manager) if "MAX_ATTEMPTS" in name] == []
+    # The guard is not vacuous: the old loop shape is reported.
+    old_shape = (
+        "async def _place_entry_no_blind_retry(adapter, kwargs):\n"
+        "    for _ in range(2):\n"
+        "        response = await adapter.place_entry(**kwargs)\n"
+        "    return response\n"
+    )
+    reported = _entry_resend_constructs(old_shape)
+    assert any("loop For" in line for line in reported)
+    assert any("a loop contains a placement call" in line for line in reported)
+    assert _entry_resend_constructs("x = 1\n") == [
+        f"{_ENTRY_PLACEMENT_FUNCTION}: not defined",
+        "module: 0 .place_entry( calls, expected exactly 1",
+    ]
 
 
 def _refusals() -> list[tuple[str, BaseException]]:
@@ -1087,23 +1259,6 @@ async def test_refusal_before_send_is_no_trade_without_probe_retry_or_safe_mode(
     assert entry.intent_status == ExecutionIntentStatus.REJECTED
     assert entry.outcome is not None
     assert entry.outcome.reason_code == "ENTRY_REFUSED_BEFORE_SEND"
-
-
-async def test_refusal_on_the_second_attempt_is_also_no_trade_before_send() -> None:
-    """A first ambiguous failure whose probe proves absence, then a refusal of the second send:
-    still nothing sent, so NO_TRADE ENTRY_REFUSED_BEFORE_SEND and no SAFE_MODE."""
-    from src.adapters.binance_ratelimit_gate import RestGateRefusal
-
-    adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.extend([_status_unknown(), RestGateRefusal("IP_BAN_418", 60)])
-    adapter.query_responses.append(_probe(found=False))
-    safe_mode = RecordingSafeModeController()
-
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
-
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_REFUSED_BEFORE_SEND")
-    assert [c["method"] for c in adapter.calls].count("place_entry") == 2
-    assert safe_mode.entered_reasons == []
 
 
 @pytest.mark.parametrize("code", [-1106, -4016, -4024])
@@ -1161,9 +1316,9 @@ async def test_an_unknown_exchange_error_found_by_the_probe_is_handed_off() -> N
     assert safe_mode.entered_reasons == []
 
 
-async def test_an_unknown_exchange_error_absent_by_the_probe_is_never_retried() -> None:
-    """UNKNOWN_EXCHANGE_ERROR with a definitive-absence probe: NO second attempt (it is never
-    retried), SAFE_MODE(UNKNOWN_EXCHANGE_ERROR), RECONCILIATION_REQUIRED, nothing handed off."""
+async def test_an_unknown_exchange_error_absent_by_the_probe_is_unknown_and_never_resent() -> None:
+    """UNKNOWN_EXCHANGE_ERROR with a `found=False` probe: NO second attempt (Q5), intent
+    UNKNOWN, SAFE_MODE(ENTRY_STATE_UNKNOWN), RECONCILIATION_REQUIRED, nothing handed off."""
     from src.domain.enums import ExecutionIntentStatus
 
     case_input = _load_input()
@@ -1185,29 +1340,15 @@ async def test_an_unknown_exchange_error_absent_by_the_probe_is_never_retried() 
     methods = [c["method"] for c in adapter.calls]
     assert methods.count("place_entry") == 1
     assert methods.count("query_order_by_client") == 1
-    assert safe_mode.entered_reasons == ["UNKNOWN_EXCHANGE_ERROR"]
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
     assert registry.register_attempts == 0
     entry = store.get_entry(approval_id=case_input["approval_id"])
     assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
 
 
-async def test_a_second_unknown_exchange_error_is_not_retried_either() -> None:
-    """A STATUS_UNKNOWN first failure (absent by the probe) followed by an UNKNOWN_EXCHANGE_ERROR
-    on the second send ends in the same SAFE_MODE: the second error is probed and not retried."""
-    adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.extend([_status_unknown(), RuntimeError("unmapped")])
-    adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
-    safe_mode = RecordingSafeModeController()
-
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
-
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
-    assert [c["method"] for c in adapter.calls].count("place_entry") == 2
-    assert safe_mode.entered_reasons == ["UNKNOWN_EXCHANGE_ERROR"]
-
-
 async def test_a_failing_error_facts_is_treated_as_an_unknown_exchange_error() -> None:
-    """Fail closed: when the adapter cannot classify the exception the failure is unknown."""
+    """Fail closed: when the adapter cannot classify the exception the failure is ambiguous,
+    probed once and never re-sent (Q5): UNKNOWN + SAFE_MODE(ENTRY_STATE_UNKNOWN)."""
 
     class _NoFacts(FakeExecutionAdapter):
         @staticmethod
@@ -1223,7 +1364,7 @@ async def test_a_failing_error_facts_is_treated_as_an_unknown_exchange_error() -
 
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert [c["method"] for c in adapter.calls].count("place_entry") == 1
-    assert safe_mode.entered_reasons == ["UNKNOWN_EXCHANGE_ERROR"]
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
 
 
 async def test_real_adapter_place_entry_makes_a_single_attempt() -> None:
