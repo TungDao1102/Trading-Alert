@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
-current_plan: "63 with Total Plans in Phase: 63 — 61 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63); open: 16-43, 16-44; next is 16-43 after the soak image rebuild (R7)"
+current_plan: "64 with Total Plans in Phase: 64 — 61 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63); open: 16-64, 16-43, 16-44; next is 16-64 (R7: 16-62 gate repeated, new soak IMAGE_COMMIT with the TP2 guard), then 16-43"
 status: executing
 stopped_at: "Phase 19 planned: 17 plans, checker passed"
 last_updated: "2026-10-19T06:08:17.821Z"
@@ -13,7 +13,7 @@ state_head: 10e471657189841116a957c8ce017ec19b2f809a
 progress:
   total_phases: 29
   completed_phases: 18
-  total_plans: 250
+  total_plans: 251
   completed_plans: 229
 milestone_name: milestone
 ---
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Current Plan: 63 with Total Plans in Phase: 63 — 61 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63); open: 16-43, 16-44; next is 16-43 after the soak image rebuild (R7)
+Current Plan: 64 with Total Plans in Phase: 64 — 61 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63); open: 16-64, 16-43, 16-44; next is 16-64 (R7: 16-62 gate repeated, new soak IMAGE_COMMIT with the TP2 guard), then 16-43
 Status: Executing Phase 16
 Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
 
