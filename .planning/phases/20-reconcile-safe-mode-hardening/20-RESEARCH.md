@@ -4,6 +4,8 @@
 **Domain:** Exchange reconciliation, protection supervision, durable SAFE_MODE, risk-reducing-first ordering, operational alerts (Python 3.13, asyncio, SQLAlchemy sync stores, Binance USD-M Futures, fakes only)
 **Confidence:** MEDIUM-HIGH (code facts HIGH, read this session; Binance behaviour facts MEDIUM or ASSUMED because the official pages are silent on the manual-close question)
 
+> **Review addendum (2026-10-21): where this file and `20-CONTEXT.md` differ, CONTEXT wins.** The reviewer resolutions changed these research recommendations: Q-B/D-13 is now a bound check only, no `positions` writer and no `update_position_snapshot` in Phase 20 (deferred to Phase 24 with the fills ledger and `Order` rows; `fills.order_id` has a foreign key to `orders`); Q-E/WR-03 is deferred to Phase 24 with the Phase 20 state-safety invariants (D-29); D-20 means queue order only; the closed-entry reason is `RECONCILED_ABSENT` (D-11); SAFE_MODE exit blocks on a missing local source and the operator id is audit only (D-15); `PROTECTIVE_REJECTED` is a new alert (D-24); the new keys go in `execution-limits-v1.toml` (D-25); OPS-05 is infrastructure plus test trigger until Phase 21 (D-23); the journal alone is not the rebuild source (D-30, Q-A). Treat the Open Questions below as answered by those decisions where they match.
+
 <user_constraints>
 ## User Constraints (from CONTEXT.md)
 

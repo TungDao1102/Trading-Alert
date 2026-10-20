@@ -36,7 +36,7 @@ Line numbers are from the files as read this session. The RESEARCH file (20-RESE
 | `src/execution/execution_limits.py` + toml + README (modify) | config | config | itself | exact |
 | `src/execution/order_ids.py` (modify, add predicates) | pure utility | transform | itself | exact |
 | `src/domain/enums.py` (modify) | model | n/a | itself | exact |
-| `src/persistence/entities.py` (modify, `update_position_snapshot`) | store | CRUD | `transition_position` (645-687) | exact |
+| `src/persistence/entities.py` (`update_position_snapshot`) | store | CRUD | `transition_position` (645-687) | DEFERRED to Phase 24 (CONTEXT D-13 revised; no caller, no independent local source) |
 | `src/ops/drills.py` (modify) | test harness | event-driven | itself (`make_unprotected_drill` ... `make_restore_drill`) | exact |
 | `tests/*` (new/rewrite) | test | request-response | `tests/test_system_state_pg.py`, `tests/test_reconcile.py`, `tests/support/ast_guards.py` | exact |
 
@@ -55,6 +55,8 @@ _DIVERGENCE_KINDS: frozenset[str] = frozenset({ DIVERGENCE_KIND_ORPHAN_PROTECTIV
 `Divergence.__post_init__` (lines 140-148) rejects unknown kinds, so a new kind must be added to the frozenset first.
 
 **Carriers to extend with optional fields** (lines 73-104): `LocalOrderIntent`, `LocalAlgoIntent`, `LocalPositionIntent` are frozen dataclasses; add fields with defaults (`plan_hash: str | None = None`, `max_abs_amount: Any = None`, expected side) so existing fixtures keep working. `position_amt` is typed `Any` to stay dependency-free; compare with `Decimal` only.
+
+**Position check (CONTEXT D-01a, review 2026-10-21):** bound check only: sign equals the plan side, `abs(exchange amount) <= intended_quantity`, per symbol. Document in the docstring that it cannot see an over-fill below the intended quantity. If two local plans share a symbol, or an exposure has no determinable owning plan, emit a divergence and let SAFE_MODE follow; never pick one plan. Do not read from or write to a `positions` table here (no independent local source exists; exact comparison is Phase 24).
 
 **Index build to modify for D-03 duplicates** (lines 223-224) silently keeps the last row:
 ```python
@@ -89,7 +91,7 @@ Add `class SafeModeStateStore(Protocol): save(...) / load()` the same way.
 self._journal_safe_mode_event(event_type="SAFE_MODE_EXIT", reason="clean_three_source_compare", now_utc=effective_now)
 self._in_safe_mode = False
 ```
-**Fix F2 (vacuous exit)** lines 326-341: remove `local_open_orders or []`; require `local_intent_fn` and raise `ValueError` when `None`.
+**Fix F2 (vacuous exit)** lines 326-341: remove `local_open_orders or []`. A missing local source or a read error BLOCKS the exit (CONTEXT D-15): require `local_intent_fn` (or explicit lists proven read) and refuse when absent; an empty list is valid only after a successful read. Add exit preconditions through injected callables (no import from persistence): fresh Binance data for positions, open orders and algo orders; no unresolved divergence, `UNKNOWN` intent, `UNPROTECTED`, `CLOSE_REQUIRED` or pending protective action. The operator id is recorded for audit only. `safe_mode.py` still falls back to `datetime.now(UTC)` (lines 233, 320); new code must not copy that.
 
 **Strict state format** (lines 404-443): `_STATE_KEYS` and `_parse_state` must gain `last_exit_operator_id`, `last_exit_at_utc`; keep the "in_safe_mode false but entry time set" invariants. `state_snapshot()` (189-202) and `rehydrate()` (149-187) change together; `rehydrate` is the startup load path.
 
@@ -157,7 +159,7 @@ elif answer.found is False and now_utc - record.intended_at_utc < lookup_window:
 else:
     return status
 ```
-For ENTRY intents that went UNKNOWN after an ambiguous error, and for protective legs of a live plan (F5), this must leave the status `UNKNOWN`. `_record(...)` (line 146) is the writer; its return value signals a failed write (`PersistenceError` -> False, line 166). Journal the evidence source per D-11/D-12.
+For ENTRY intents that went UNKNOWN after an ambiguous error, and for protective legs of a live plan (F5), this must leave the status `UNKNOWN`. Closing an UNKNOWN ENTRY (CONTEXT D-11) needs N consecutive `found=False` probes, GTD plus grace passed, a clean position read and open-orders read, and `ExitEvidence(REST_RECONCILE, ...)` per step; the terminal `REJECTED` then carries reason code `RECONCILED_ABSENT` (`RecordedOutcome.reason_code` is a free string; confirm `record_result` accepts it), never the code of a definite Binance rejection. An INTENDED entry keeps the existing REJECTED rule with its own reason. Closing an intent never exits SAFE_MODE. `_record(...)` (line 146) is the writer; its return value signals a failed write (`PersistenceError` -> False, line 166). Journal the evidence source per D-11/D-12.
 
 ---
 
@@ -303,9 +305,24 @@ Build predicates from these constants (note `x-` is a prefix of nothing else, bu
 
 ---
 
-### `src/persistence/entities.py` (modify, `update_position_snapshot`, D-13)
+### `src/execution/manager.py` (modify, `emergency_manual_close`, CONTEXT D-09 defect)
 
-**Analog:** `transition_position` lines 645-687 (same file): `with self._unit(tx) as session:`, `row = _lock(session, _POSITION, position_id)`, `_apply(session, _POSITION, position_id, "status", old_status.value, changes)` where `changes` includes `"updated_at_utc": now_utc`. The new method updates quantity and PnL columns the same way and journals via `exit_evidence_event` only when leaving UNKNOWN (evidence rule already enforced, F4).
+**Analog:** itself, lines 2224-2245. Today `expire_pending_entry` then `cancel_untriggered_protectives` (2049-2110, SL, TP1, TP2 in order, journal pre/post image per leg, per-leg isolation raised as `ExceptionGroup`) run with no position read. Keep the per-leg isolation and journal-first shape of `cancel_untriggered_protectives`, but move the protective cancel behind a gate: two independent fresh REST position reads flat, entry terminal, closer-confirmed close; then verify no orphan remains, else keep SAFE_MODE and alert. Never cancel while the position is not flat or the entry is open. Tests in `tests/test_phase8_audit_reviewfix.py` / `tests/test_reconcile.py` that assert the old unconditional cancel are rewritten (F-604).
+
+---
+
+### Also constrained by CONTEXT after review (no new file)
+
+- **Queue priority (D-20):** the pending-actions queue orders protective, emergency-close, entry-remainder-cancel and the deciding queries before new entries; ordering only once the REST gate allows sending; the 429/418 cooldown is never bypassed (RESEARCH Pattern 10).
+- **Alerts (D-24):** add `PROTECTIVE_REJECTED` (high severity, rides the D034/CLOSE_REQUIRED flow) next to the `_send_bounded` style sender; distinct from `PROTECTION_HANDOFF_FAILED`. DAILY_STOP / daily-loss WARNING: contract, dispatcher, dedupe and test trigger only.
+- **State safety (D-29):** `protection.py` state changes go through the checked `_transition`; a stale or duplicate event cannot lower `CLOSE_REQUIRED`, erase `UNPROTECTED` or clear SAFE_MODE. No event-time column or Order monotonic rule in Phase 20.
+- **Config (D-25):** new keys in `config/execution/execution-limits-v1.toml` under `reconcile.*`, `stale_feed.*`, `alerts.*`, `protection.*`; `SAFE_MODE_TICK_SECONDS` replaced by `reconcile.tick_interval_ms` (the test pinning it at `tests/test_reconcile.py:675` is rewritten).
+
+---
+
+### `src/persistence/entities.py` (`update_position_snapshot`) — DEFERRED to Phase 24 (CONTEXT D-13)
+
+Do not implement in Phase 20. Kept only as a reference for Phase 24. **Analog:** `transition_position` lines 645-687 (same file): `with self._unit(tx) as session:`, `row = _lock(session, _POSITION, position_id)`, `_apply(session, _POSITION, position_id, "status", old_status.value, changes)` where `changes` includes `"updated_at_utc": now_utc`. The new method updates quantity and PnL columns the same way and journals via `exit_evidence_event` only when leaving UNKNOWN (evidence rule already enforced, F4).
 
 ---
 
