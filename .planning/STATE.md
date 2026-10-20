@@ -3,7 +3,7 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 16
 current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
-current_plan: "62 with Total Plans in Phase: 62 — 59 with a SUMMARY (open: 16-43, 16-44, 16-61; next is 16-43, then 16-61 and 16-44)"
+current_plan: "63 with Total Plans in Phase: 63 — 61 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63); open: 16-43, 16-44; next is 16-43 after the soak image rebuild (R7)"
 status: executing
 stopped_at: "Phase 19 planned: 17 plans, checker passed"
 last_updated: "2026-10-19T06:08:17.821Z"
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Current Plan: 62 with Total Plans in Phase: 62 — 59 with a SUMMARY (open: 16-43, 16-44, 16-61; next is 16-43, then 16-61 and 16-44)
+Current Plan: 63 with Total Plans in Phase: 63 — 61 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63); open: 16-43, 16-44; next is 16-43 after the soak image rebuild (R7)
 Status: Executing Phase 16
 Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
 
@@ -42,6 +42,7 @@ Progress: [██████░░░░] 61%
 
 - Phase 18 (user-data stream and error taxonomy): CLOSED 2026-10-18, status human_needed (no gap, no BLOCKER). All 26 plans are executed on develop (18-19 skipped by design: gate result `transport: sdk`). The user integrated `phase-18-smoke` with `git merge --no-ff` (merge commit dde100b); plan 18-26 recorded the owner's taxonomy decision of 2026-10-17 (-1106, -4016, -4024 REJECTED_DEFINITIVE on placement, -1125 Demo provenance); fix 1291caa made the Demo credential names `BINANCE_DEMO_API_KEY` and `BINANCE_DEMO_API_SECRET`; the verification report is c45bbfc (`18-VERIFICATION.md`, verified at fea8e2e). The gates are green at fea8e2e (`18-TRACEABILITY.md`). Nothing is pushed. All evidence is Demo-observed, not mainnet. Human items left: the user signs `18-VALIDATION.md` (still draft), the no-withdrawal key and IP-allowlist attestation (OPS-02, Phases 24 to 26), and the D055 decision. D055 stays OPEN (no DECISIONS row); the Demo evidence is `decisions/18-DRAFT-D055-evidence-for-user.md` and the adopted direction is noted, not decided, in `.planning/phases/19-execution-plan-binding-price-check/19-NOTES.md` for `/gsd-discuss-phase 19`. Requirements EXEC-01, EXEC-02, EXEC-05 and OPS-02 stay Pending in REQUIREMENTS.md (library-proven, Demo-observed, no running-process proof). Next for Phase 18's successors: Phase 19 discussion, in order after Phase 16 closes.
 - Phase 16 fix plans: 16-55, 16-56, 16-57, 16-58 and 16-59 done on develop (owner decisions in 16-DEC-FIXPLANS.md; 16-57 adds 16-DEC-CONFIG-PIN; 16-58 fixed the SHADOW lock order, refusal of unsizable plans, data-horizon expiry, midnight roll, unknown-append reconcile, per-press replies and the dispatch error log; 16-59 added the as-of export with partial-bundle refusal, per-bundle create-only evidence keys, the merged freeze log with missing-tick records, the workflow concurrency group with queue max and the dispositions in deferred-items.md). The blocking set 16-55 to 16-59 is green on GATE_COMMIT a54f9da47ca8b7b7c6c2488b0d8cb67b506f4ba0 (evidence/16-59-gate.txt); the soak image is NOT built from it, plan 16-62 records the image commit. Plan 16-62 (B1-WR-09) is done: rest_backfill_depth_bars (1500, v2 file unchanged) now bounds every supervisor REST backfill, newest closes first, older missing closes are recorded gaps with the window reason; the soak image is built from IMAGE_COMMIT efae1f3efe3211f75f94e165e5d1c9956b20a6f1 (evidence/16-62-gate.txt, full suite 10118 ran, 10112 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and uv lock --check clean); the targeted re-review of c654524..efae1f3 is still to run before anything is pushed or merged. Next in order: 16-60 and 16-43, then 16-61 and 16-44. Phase 16's new DECISIONS rows are D073 (protocol v2.5.0 warm-up amendment) and D074 (regeneration inventory), because Phase 18 took D072.
+- Plan 16-63 done on develop (2026-10-20): TP2 positivity guard (NO_TRADE RR_TOO_LOW), simulator semantics 2.3.0, protocol v2.6.0 with D075 and D076 (landing commit 6f599dd). The rerun of research run 1 at 2.3.0 is complete: 240 records in docs/research/experiments/research-run-1-v2-3-0/ (commit b17312a, RUN_COMMIT 58a5374), the three families ran in parallel by owner decision of 2026-10-19 (16-DEC-RERUN-PARALLEL.md), each exit 0 with 80 records; verification rerun all present. The 2.1.0 records are kept and superseded (16-DEC-RUN1-SUPERSEDED.md, f8453f9). Final gate 03e29ee: 10394 passed, 19 skipped (no PostgreSQL skip; native Windows PostgreSQL 17.11 service), ruff, format, mypy, uv lock clean. 16-61 stays partial; its Tasks 3 and 4 were done as 16-63 Tasks 6 and 7. BKTS-03 unchanged (already Complete). Next: plan 16-43 on the soak host, after the soak image is rebuilt from a commit that contains the TP2 guard and the 16-62 gate is repeated (R7, answered 2026-10-19).
 - Plan 16-60 done on develop (2026-10-17, landing commit c96fa0d, gate commit 76b1da0): research windows get a 50-day price-only warm-up (`RESEARCH_WARMUP_SPAN`), simulator semantics 2.2.0, protocol v2.5.0 with DECISIONS D073 and D074 (the Phase 18 row D072 keeps its number); the Development window starts cold (data begins 2024-10-03); the 240 records of run 1 are unchanged and superseded by D074. Full suite at the landing: 10145 ran, 10139 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and `uv lock --check` clean. Next: 16-43 (host/owner), then 16-61 (sixth authorization key, three new authorization files, the rerun into `research-run-1-v2-2-0`) and 16-44. BKTS-03 stays open (requirements.ready-ids: blocked).
 - Full suite after 16-59 (2026-10-16, GATE_COMMIT a54f9da): `pytest -m "not docker"` 10099 ran, 10093 passed, 6 skipped, 0 failed; ruff, ruff format, mypy src and `uv lock --check` clean. Earlier, after 16-58: 10071 collected, 10065 passed, 6 skipped, 0 failed. In that shell TEST_DATABASE_URL was set and the PostgreSQL tests ran (tests/test_paper_shadow_runtime_pg.py passed 3 of 3).
 - Remaining for Phase 23 from 16-58: a distinct canonical rejection reason for store failures (INVALIDATED covers them now, with an error log line by class name).
@@ -555,6 +556,9 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-62: rest_backfill_depth_bars is a required keyword through build_supervisor into backfill_missed_closes; closes beyond the depth are gaps with the window reason (B1-WR-09)
 - [Phase 16]: 16-60: research windows are built with RESEARCH_WARMUP_SPAN (50 days, STRUCTURAL) of price history before their start; simulator semantics 2.2.0; protocol v2.5.0 with D073 and D074 (B3-CR-01); the Development window starts cold (data begins 2024-10-03)
 - [Phase 16]: 16-60: the original 240 research records stay unchanged and are superseded by the rerun under 2.2.0 (D074, owner's wording); rerun directory research-run-1-v2-2-0 and a sixth authorization key are implemented by 16-61
+- [Phase 16]: 16-63: a plan whose stored TP2 is not above zero is NO_TRADE RR_TOO_LOW (owner Option A, strict reading); simulator semantics 2.3.0, protocol v2.6.0, D075 and D076
+- [Phase 16]: 16-63: research run 1 regenerated under 2.3.0 (240 records, families in parallel by owner decision); the 2.1.0 records are superseded in the owner's wording with only the versions replaced (16-DEC-RUN1-SUPERSEDED.md)
+- [Phase 16]: 16-63: R7: the soak image is rebuilt from a commit containing the TP2 guard and the 16-62 gate repeated before plan 16-43 pins the epoch
 
 ### Pending Todos
 
@@ -638,6 +642,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-19T06:08:16.520Z
-Stopped at: Phase 19 planned: 17 plans, checker passed
+Last session: 2026-10-20T00:45:05Z
+Stopped at: Completed 16-63-PLAN.md (2026-10-20); Phase 19 planned: 17 plans, checker passed
 Resume file: .planning/phases/19-execution-plan-binding-price-check/19-01-PLAN.md
