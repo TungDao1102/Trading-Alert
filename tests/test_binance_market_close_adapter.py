@@ -244,6 +244,33 @@ def test_a_drift_guard_that_blocks_entries_does_not_block_the_close() -> None:
     assert len(rest.new_order_calls) == 1
 
 
+def test_a_1008_on_the_entry_does_not_refuse_the_reduce_only_close() -> None:
+    """Quick task 261020-g1a: a -1008 is not a 429, so the gate stays open for the close."""
+    from binance_common.errors import BadRequestError
+
+    adapter, rest, gate = _adapter()
+    rest.new_order_error = BadRequestError("Request throttled by system-level protection.", -1008)
+    with pytest.raises(BadRequestError):
+        asyncio.run(
+            adapter.place_entry(
+                symbol="BTCUSDT",
+                side="BUY",
+                position_side="BOTH",
+                time_in_force="GTC",
+                quantity=Decimal("0.010"),
+                price=Decimal("100.0"),
+                new_client_order_id="e" * 36,
+            )
+        )
+    assert len(rest.new_order_calls) == 1
+    assert gate.restriction() is None
+    rest.new_order_error = None
+    result = _close(adapter)
+    assert len(rest.new_order_calls) == 2
+    assert rest.new_order_calls[1]["reduce_only"] is NewOrderReduceOnlyEnum.TRUE
+    assert result.client_order_id == CLOSE_ID
+
+
 def test_a_gate_pause_refuses_the_close_with_nothing_sent() -> None:
     from src.adapters.binance_ratelimit_gate import RestGateRefusal
 

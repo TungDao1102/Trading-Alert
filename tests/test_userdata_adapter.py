@@ -457,6 +457,14 @@ _TRANSLATION_MATRIX: list[tuple[str, Any, type[Exception], ExchangeErrorCategory
         None,
     ),
     (
+        # Quick task 261020-g1a: still a transient report, but its own category (no gate pause).
+        "system_throttled_1008",
+        lambda: BadRequestError(TEST_ONLY_SDK_MESSAGE, -1008),
+        ListenKeyTransient,
+        _C.SYSTEM_THROTTLED,
+        None,
+    ),
+    (
         "server_5xx",
         lambda: ServerError(TEST_ONLY_SDK_MESSAGE, 503),
         ListenKeyTransient,
@@ -634,6 +642,18 @@ async def test_listen_key_port_records_and_respects_shared_gate() -> None:
             await getattr(port, public)()
         assert rest.calls[method] == 1
         assert sum(rest.calls.values()) == 1
+
+        # A -1008 (system-level throttle, quick task 261020-g1a) is reported as transient and
+        # pauses nothing: the next call of the port is sent.
+        gate = _rest_gate()
+        rest = FakeRestUserDataApi()
+        rest.fail_next(method, BadRequestError(TEST_ONLY_SDK_MESSAGE, -1008))
+        port = SdkListenKeyPort(rest, rest_gate=gate)
+        with pytest.raises(ListenKeyTransient):
+            await getattr(port, public)()
+        assert gate.restriction() is None
+        await getattr(port, public)()
+        assert rest.calls[method] == 2
 
         # A 429 with a Retry-After pauses for that many seconds.
         gate = _rest_gate()

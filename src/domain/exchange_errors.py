@@ -75,6 +75,9 @@ class ExchangeErrorCategory(StrEnum):
     AUTH_OR_SIGNATURE = "AUTH_OR_SIGNATURE"
     RATE_LIMITED = "RATE_LIMITED"
     IP_BANNED = "IP_BANNED"
+    # -1008: system-level overload protection of the node (quick task 261020-g1a). Not a
+    # request-rate limit: never recorded in the REST gate, never retried automatically.
+    SYSTEM_THROTTLED = "SYSTEM_THROTTLED"
     STATUS_UNKNOWN = "STATUS_UNKNOWN"
     INVALID_LISTEN_KEY = "INVALID_LISTEN_KEY"
     POSITION_MODE = "POSITION_MODE"
@@ -229,9 +232,20 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
             _entry(
                 -1008,
                 "Request Throttled",
-                _every(_C.RATE_LIMITED),
+                _every(_C.SYSTEM_THROTTLED),
                 "documented",
-                f"{_BASELINE}. 'Request throttled by system-level protection.'",
+                f"{_BASELINE}. 'Request throttled by system-level protection.' Quick task "
+                "261020-g1a read the error-code and general-info pages again on 2026-10-20 "
+                "(WebFetch summaries, not character-exact): 'Request throttled by system-level "
+                "protection. Reduce-only/close-position orders are exempt. Please try again.' "
+                "and 'Server is currently overloaded with other requests. Please try again in a "
+                "few minutes.'; general-info: the node has exceeded its maximum concurrency, "
+                "rate-limit counting: not counted (overload protection), covered endpoints "
+                "POST /fapi/v1/order and /batchOrders. So it is SYSTEM_THROTTLED, not "
+                "RATE_LIMITED: it never pauses or bans the process-wide REST gate (a 429 or a "
+                "418 class still does), and it is never retried automatically (a placement is "
+                "never re-sent). General-info also names cancel orders as exempt; the error-code "
+                "page does not, so nothing here relies on it.",
             ),
             _entry(
                 -1015,
@@ -624,9 +638,9 @@ _RETRYABLE_CALL_KINDS: frozenset[CallKind] = frozenset(
 def retry_eligible(category: ExchangeErrorCategory, call_kind: CallKind) -> bool:
     """True only for a status-unknown failure of a query, cancel, time or listenKey call.
 
-    A placement is never retried for any category; RATE_LIMITED and IP_BANNED
-    are never retried for any call kind; definitive, auth, clock-skew and
-    unknown errors are never retried.
+    A placement is never retried for any category; RATE_LIMITED, IP_BANNED and
+    SYSTEM_THROTTLED (-1008) are never retried for any call kind; definitive,
+    auth, clock-skew and unknown errors are never retried.
     """
     if not isinstance(category, ExchangeErrorCategory):
         raise TypeError("category must be an ExchangeErrorCategory")
@@ -672,9 +686,9 @@ def rate_limit_decision(
 
     IP_BANNED waits a valid Retry-After, otherwise the 418 fallback (the REST
     ban); RATE_LIMITED waits a valid Retry-After, otherwise the 429 fallback
-    (the process-wide REST pause); the cap bounds both. Any other category
-    gives `RateLimitDecision(False, None)`. A missing or unparseable
-    Retry-After arrives here as None. The three waits are required keyword
+    (the process-wide REST pause); the cap bounds both. Any other category,
+    SYSTEM_THROTTLED (-1008) included, gives `RateLimitDecision(False, None)`.
+    A missing or unparseable Retry-After arrives here as None. The three waits are required keyword
     arguments with no default: the numbers are the user's (configuration),
     never this module's. The call kind is not an argument because no call kind
     may retry a 418 or a 429.

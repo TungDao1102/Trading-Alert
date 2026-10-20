@@ -1272,3 +1272,13 @@ approval row storing NULL, or 2.000, while the caller's Approval carried 2.415, 
 
 Verification and results are in `.planning/quick/261020-q2d-wr01-db-consume-check/261020-q2d-SUMMARY.md`.
 Not run: the full suite, `-m docker`, any Demo / `--execute` / network.
+
+## Follow-up: a -1008 is not a 429 (quick task 261020-g1a)
+
+- `-1008` ("Request throttled by system-level protection", node overload protection, not counted
+  toward rate limits, reduce-only/close-position exempt) was classified RATE_LIMITED and recorded
+  in the process-wide REST gate as a 429, so one -1008 on an entry refused the stop, the entry
+  cancel and the emergency close. It is now `ExchangeErrorCategory.SYSTEM_THROTTLED`: never
+  recorded in the gate, never retried, not SAFE_MODE-eligible; 429/418 class rules, -1003 and
+  -1015 are unchanged. Q4 (the 429/418 pause itself) stays OPEN with its policy recorded in
+  19-OWNER-GAPS.md. Details: `.planning/quick/261020-g1a-gate-1008-not-a-429/261020-g1a-SUMMARY.md`.

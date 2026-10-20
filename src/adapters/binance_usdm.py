@@ -171,8 +171,15 @@ _RECONCILER_CANCEL_WAIT_MAX_SECONDS: int = 10
 # exchange default decides the replay window), runs the shared REST gate check
 # first, records a 418 or 429 in the gate and notifies the optional -1021 hook.
 # It never retries and never sleeps for any category.
+#
+# A -1008 (SYSTEM_THROTTLED, quick task 261020-g1a) is NOT recorded: it is the node's
+# overload protection, not counted toward rate limits, and reduce-only / close-position
+# orders are exempt from it. Recording it as a 429 paused every REST call of the process
+# and refused the protective stop, the entry cancel and the emergency close. The call that
+# got it is re-raised unchanged and never retried (a placement is never re-sent).
 # --------------------------------------------------------------------------- #
 
+# The categories recorded in the process-wide gate: a 418 (ban) and a 429 (pause) only.
 _RATE_LIMIT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
     {ExchangeErrorCategory.IP_BANNED, ExchangeErrorCategory.RATE_LIMITED}
 )
@@ -697,7 +704,8 @@ class BinanceUsdmAdapter:
         In order: refuse without a policy (`SignedCallPolicyMissing`, nothing checked or
         sent); run the shared gate check (a ban or a pause refuses unchanged, nothing sent);
         run `method(recv_window=<policy value>, **kwargs)` in a worker thread. On an
-        exception: classify it with `call_kind`; record a 418 or 429 in the gate; call the
+        exception: classify it with `call_kind`; record a 418 or 429 in the gate (never a
+        -1008 SYSTEM_THROTTLED, which pauses nothing); call the
         -1021 hook once for CLOCK_SKEW (a hook failure is logged by type name only); then
         re-raise the ORIGINAL exception object. Never retries, never sleeps.
         """

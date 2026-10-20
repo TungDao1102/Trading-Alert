@@ -166,12 +166,13 @@ class ListenKeyInvalid(ListenKeyError):  # noqa: N818 - public name fixed by pla
 
 
 class ListenKeyTransient(ListenKeyError):  # noqa: N818 - public name fixed by plan 18-11
-    """RATE_LIMITED or STATUS_UNKNOWN.
+    """RATE_LIMITED, SYSTEM_THROTTLED or STATUS_UNKNOWN.
 
     A report for the supervisor's failure count, not a retry permission: a 429 is never
     retried and pauses every REST call of the process through the shared gate wired by plan
     18-14 (user amendment of 2026-10-16); `retry_after_seconds` is carried so the gate can be
-    set from it.
+    set from it. A -1008 (SYSTEM_THROTTLED, quick task 261020-g1a) is reported the same way but
+    pauses nothing: it is overload protection, not a rate limit.
     """
 
 
@@ -180,7 +181,11 @@ class ListenKeyFailure(ListenKeyError):  # noqa: N818 - public name fixed by pla
 
 
 _TRANSIENT_CATEGORIES: frozenset[ExchangeErrorCategory] = frozenset(
-    {ExchangeErrorCategory.RATE_LIMITED, ExchangeErrorCategory.STATUS_UNKNOWN}
+    {
+        ExchangeErrorCategory.RATE_LIMITED,
+        ExchangeErrorCategory.SYSTEM_THROTTLED,
+        ExchangeErrorCategory.STATUS_UNKNOWN,
+    }
 )
 
 
