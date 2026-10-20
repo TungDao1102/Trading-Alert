@@ -182,7 +182,23 @@ def warn_offsite_skipped() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def rclone_env(environ: Mapping[str, str]) -> dict[str, str]:
+_SUBPATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _checked_subpath(subpath: str) -> str:
+    """A relative ``a/b`` path below the bucket: plain segments only, no ``.`` or ``..``."""
+    segments = subpath.split("/")
+    if any(
+        not _SUBPATH_SEGMENT_RE.fullmatch(segment) or segment in {".", ".."} for segment in segments
+    ):
+        raise RemoteConfigError(
+            "refusing a remote sub-path that is not plain relative segments of letters, digits "
+            "and . _ -"
+        )
+    return subpath
+
+
+def rclone_env(environ: Mapping[str, str], *, subpath: str = "") -> dict[str, str]:
     """Map ``BACKUP_S3_*`` / ``BACKUP_CRYPT_*`` to the ``RCLONE_CONFIG_*`` form.
 
     ``BACKUP_CRYPT_PASSWORD`` and ``BACKUP_CRYPT_PASSWORD2`` must already be ``rclone obscure``
@@ -190,7 +206,13 @@ def rclone_env(environ: Mapping[str, str]) -> dict[str, str]:
     when ``BACKUP_S3_PROVIDER`` is AWS or Wasabi (rclone resolves the endpoint
     from the region); any other provider requires it. Raises ``RemoteConfigError``
     listing every missing or empty variable by name.
+
+    ``subpath`` roots the crypt remote at ``<bucket>/<subpath>`` instead of the bucket itself;
+    only the D064 gate (``src.ops.backup_gate``) uses it, for its throwaway prefix. Everything
+    else of the mapping is the same.
     """
+    if subpath:
+        _checked_subpath(subpath)
     required = [name for name in S3_VARIABLES if name != "BACKUP_S3_ENDPOINT"]
     if environ.get("BACKUP_S3_PROVIDER", "").strip().lower() not in PROVIDERS_WITHOUT_ENDPOINT:
         required.append("BACKUP_S3_ENDPOINT")
@@ -217,25 +239,42 @@ def rclone_env(environ: Mapping[str, str]) -> dict[str, str]:
         f"{s3}ACCESS_KEY_ID": environ["BACKUP_S3_ACCESS_KEY_ID"],
         f"{s3}SECRET_ACCESS_KEY": environ["BACKUP_S3_SECRET_ACCESS_KEY"],
         f"{crypt}TYPE": "crypt",
-        f"{crypt}REMOTE": f"{S3_REMOTE}:{environ['BACKUP_S3_BUCKET']}",
+        f"{crypt}REMOTE": f"{S3_REMOTE}:{environ['BACKUP_S3_BUCKET']}"
+        + (f"/{subpath}" if subpath else ""),
         f"{crypt}PASSWORD": environ["BACKUP_CRYPT_PASSWORD"],
         f"{crypt}PASSWORD2": environ["BACKUP_CRYPT_PASSWORD2"],
     }
 
 
-def raw_bucket_remote(environ: Mapping[str, str]) -> str:
+def raw_bucket_remote(environ: Mapping[str, str], *, subpath: str = "") -> str:
     """The un-encrypted ``BACKUPS3:<bucket>`` remote (ciphertext names), for emptiness checks."""
-    return rclone_env(environ)[f"RCLONE_CONFIG_{CRYPT_REMOTE}_REMOTE"]
+    return rclone_env(environ, subpath=subpath)[f"RCLONE_CONFIG_{CRYPT_REMOTE}_REMOTE"]
 
 
-def make_rclone_runner(environ: Mapping[str, str] | None = None) -> RcloneRunner:
+def force_multipart_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Backend options that make a small object a multipart upload (D064 gate only).
+
+    For the S3 backend: ``upload_cutoff`` and ``chunk_size`` of 5 MiB (the S3 minimum part size),
+    so a 12 MiB object is uploaded in three parts. Passed as extra child environment of the gate's
+    multipart scenario only; the backup itself keeps rclone's defaults.
+    """
+    rclone_env(environ)  # the same validation as every other remote use
+    return {
+        f"RCLONE_CONFIG_{S3_REMOTE}_UPLOAD_CUTOFF": "5M",
+        f"RCLONE_CONFIG_{S3_REMOTE}_CHUNK_SIZE": "5M",
+    }
+
+
+def make_rclone_runner(
+    environ: Mapping[str, str] | None = None, *, subpath: str = ""
+) -> RcloneRunner:
     """Production runner: ``rclone`` (``RCLONE_BIN`` overrides) with the mapped env.
 
     The configuration is validated now, so a missing variable fails before any work starts.
     Credentials travel only in the child environment, never in argv.
     """
     source = os.environ if environ is None else environ
-    mapped = rclone_env(source)
+    mapped = rclone_env(source, subpath=subpath)
     binary = source.get("RCLONE_BIN") or "rclone"
 
     def run(argv: Sequence[str], extra: Mapping[str, str]) -> RcloneResult:

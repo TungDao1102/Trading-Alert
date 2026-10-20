@@ -59,6 +59,9 @@ case "$*" in
   *"src.ops.backup pull"*) exit "${STUB_PULL_RC:-0}" ;;
   *"src.ops.backup restore"*) exit "${STUB_RESTORE_RC:-0}" ;;
   *"src.ops.backup drill-remote"*) exit "${STUB_DRILL_RC:-0}" ;;
+  *"src.ops.backup real-s3-gate"*)
+    printf '%s\n' "${STUB_GATE_OUT:-RESULT: PASS}"
+    exit "${STUB_GATE_RC:-0}" ;;
   *" up -d"*) exit "${STUB_UP_RC:-0}" ;;
   *" build") # a build moves the active tags to new images
     printf '%s' "${STUB_NEW_APP:?}" > "$(img trading-alert:dev)"

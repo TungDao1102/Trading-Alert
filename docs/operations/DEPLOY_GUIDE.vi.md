@@ -1251,6 +1251,42 @@ deploy/backup-drill.sh --dry-run
 
 **Không bao giờ:** chạm dữ liệu sống (cơ sở dữ liệu tạm bị xóa sau đó); tự xóa thư mục `drill-<timestamp>` (bạn xóa tay, bước 6.7).
 
+### Thẻ lệnh: deploy/backup-real-s3-gate.sh
+
+> - **Để làm gì:** Chạy cổng D064 trên S3 thật: kiểm từng khẳng định phát hiện của bước đẩy Parquet (so SHA-256 với manifest, `cryptcheck` sau khi tải lên, đối tượng nhiều phần) với remote mà bản sao lưu đang dùng, dưới một prefix dùng một lần.
+> - **Giải quyết vấn đề gì:** D064 chỉ chấp nhận thiết kế đẩy khi các khẳng định đó được chứng minh trên S3 thật qua lớp crypt; kết quả S3 thật còn chờ cho tới khi bạn chạy lệnh này và thấy `RESULT: PASS` (RUNBOOK 11, "Real-S3 gate").
+> - **Mức quan trọng:** **BẮT BUỘC** trước bản sao lưu thật đầu tiên của project soak (D064; quyết định của chủ dự án ngày 2026-10-20; RUNBOOK 11; checklist 16-43 bước 1a).
+
+**Mục đích:** lớp vỏ mỏng chạy `python -m src.ops.backup real-s3-gate` trong image `ops`. Mọi đối tượng được ghi dưới prefix mới `d064-gate-<UTC>-<12 hex>` ngay dưới bucket đã cấu hình (từ chối nếu prefix không trống), prefix bị xóa sạch ở mọi lối ra, và kết quả là một dòng `CLAIM <id>: PASS` hay `FAIL` cho mỗi khẳng định, kết thúc bằng `RESULT: PASS` hoặc `RESULT: FAIL`. Không in bucket (hiện là `<bucket>`) hay khóa nào.
+
+**Khi nào chạy:** trước bản sao lưu thật đầu tiên, và lại sau mọi thay đổi nhà cung cấp, phiên bản rclone hay image.
+
+**Chạy ở máy nào:** `[MÁY EC2]` bằng user `trading`, từ checkout có commit 261020-bkp.
+
+**Lệnh:**
+
+```bash
+COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/home/trading/soak.env deploy/backup-real-s3-gate.sh --execute --evidence-dir /home/trading/gate-evidence
+```
+
+Cờ: `--execute`, `--evidence-dir DIR` (mặc định `$HOME/trading-evidence`, ngoài checkout), `--dry-run`, `-h`/`--help`. Không có `--execute` thì chỉ in kế hoạch, không gọi remote.
+
+**Chạy thử:**
+
+```bash
+COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/home/trading/soak.env deploy/backup-real-s3-gate.sh --execute --dry-run
+```
+
+Không có `--execute`, lệnh chỉ in kế hoạch (prefix và các khẳng định) mà không gọi remote.
+
+**Dấu hiệu thành công:** tệp bằng chứng `d064-real-s3-gate-<UTC>.txt` có mọi dòng `CLAIM ...: PASS` (kể cả `cleanup`) và dòng cuối `RESULT: PASS`.
+
+**Mã thoát:** 0 mọi khẳng định qua; 1 có khẳng định trượt hoặc bị ngắt; 2 lỗi cách dùng hay cấu hình (không đụng gì, kể cả khi `BACKUP_REMOTE=none`).
+
+**Khi lỗi:** một dòng `FAIL`: dừng, không sao lưu thật, báo cho chủ dự án (D064: thiết kế khi đó không được coi là bảo vệ toàn vẹn). `cleanup` trượt: xóa tay prefix được nêu tên.
+
+**Không bao giờ:** chạy với một prefix tự chọn ngoài dạng `d064-gate-...`; dán nội dung tệp env hay khóa vào bằng chứng.
+
 ### Thẻ lệnh: scripts/backup-drill.ps1
 
 > - **Để làm gì:** Diễn tập bundle sao lưu cục bộ trên Windows (hai pha backup rồi drill), không qua S3.
@@ -2397,6 +2433,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | backup, chạy một lần ngay (`--dry-run`) | `[MÁY EC2]` | `deploy/backup.sh --dry-run` | 6.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | restore (`--snapshot`, `--force`, `--no-start`, `--dry-run`) | `[MÁY EC2]` | `deploy/restore.sh --snapshot 20260930T031500Z --force --no-start --dry-run` | 6.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | diễn tập khôi phục (`--dry-run`) | `[MÁY EC2]` | `deploy/backup-drill.sh --dry-run` | 6.6 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| cổng D064 trên S3 thật (`--execute`, `--evidence-dir`, `--dry-run`) | `[MÁY EC2]` | `deploy/backup-real-s3-gate.sh --execute --evidence-dir /home/trading/gate-evidence` | thẻ `deploy/backup-real-s3-gate.sh` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | diễn tập bundle cục bộ trên Windows (`scripts/backup-drill.ps1`) | `[MÁY PHÁT TRIỂN]` hoặc `[MÁY CŨ]` Windows | `powershell -NoProfile -File scripts/backup-drill.ps1` | thẻ `scripts/backup-drill.ps1` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-backup.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-backup.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-backup` | 6.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |

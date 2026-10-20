@@ -25,7 +25,8 @@ The restore drill (`run_drill`):
      to the manifest. Any mismatch is a hard failure — exits non-zero.
 
 The CLI entry point is `python -m src.ops.backup <subcommand>` (backup, drill,
-prune, verify, restore, dump, restore-db, push, pull, retain, scheduled, drill-remote). All
+prune, verify, restore, dump, restore-db, push, pull, retain, scheduled, drill-remote,
+real-s3-gate). All
 shell logic (PowerShell wrapper, scheduling, off-host copy) defers to
 this module — no SQL / copy logic lives in the shell scripts.
 
@@ -69,6 +70,7 @@ from src.ops.redaction import configure_logging, scrub
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from src.ops.backup_gate import GateRemote
     from src.ops.backup_remote import DrillDatabaseOps, RcloneRunner
 
 DEFAULT_PARQUET_ROOT = Path("data") / "raw"
@@ -957,6 +959,7 @@ def main(
     rclone_runner: RcloneRunner | None = None,
     now_utc: datetime | None = None,
     drill_ops: DrillDatabaseOps | None = None,
+    gate_remote: GateRemote | None = None,
 ) -> int:
     configure_logging()
     try:
@@ -969,6 +972,7 @@ def main(
             rclone_runner=rclone_runner,
             now_utc=now_utc,
             drill_ops=drill_ops,
+            gate_remote=gate_remote,
         )
     except Exception as exc:
         print(f"error: {_describe_error(exc)}", file=sys.stderr)
@@ -985,6 +989,7 @@ def _run_cli(
     rclone_runner: RcloneRunner | None,
     now_utc: datetime | None,
     drill_ops: DrillDatabaseOps | None,
+    gate_remote: GateRemote | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.ops.backup",
@@ -1114,7 +1119,37 @@ def _run_cli(
         "--parquet-roots", type=Path, nargs="+", default=[DEFAULT_PARQUET_ROOT]
     )
 
+    gate_p = sub.add_parser(
+        "real-s3-gate",
+        help="D064 gate: the push detection claims on the configured remote (dry run by default).",
+    )
+    gate_p.add_argument(
+        "--execute", action="store_true", help="Run the claims (default: print the plan only)."
+    )
+    gate_p.add_argument(
+        "--prefix",
+        default=None,
+        help="Throwaway prefix d064-gate-<UTC>-<12 hex> (default: a new one); must be empty.",
+    )
+    gate_p.add_argument(
+        "--evidence", type=Path, default=None, help="Also write the evidence to this new file."
+    )
+    gate_p.add_argument("--multipart-mib", type=int, default=12)
+
     args = parser.parse_args(argv)
+    if args.cmd == "real-s3-gate":
+        from src.ops import backup_gate
+
+        return backup_gate.cli_real_s3_gate(
+            execute=args.execute,
+            prefix=args.prefix,
+            evidence=args.evidence,
+            multipart_mib=args.multipart_mib,
+            remote=gate_remote,
+            now_utc=now_utc,
+            out=sys.stdout,
+            err=sys.stderr,
+        )
     seams: dict[str, Any] = {
         "pg_dump_runner": pg_dump_runner,
         "pg_restore_runner": pg_restore_runner,
