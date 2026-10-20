@@ -882,3 +882,85 @@ def test_the_unit_substitution_turns_patsub_replacement_off() -> None:
     body = body[: body.index("\n}\n")]
     assert "shopt -u patsub_replacement" in body
     assert body.index("shopt -u patsub_replacement") < body.index('content="${content//')
+
+
+# --- 261020-bkp A: review of 2026-10-20, two MINOR findings ------------------------------------
+# A1: the checkout path is substituted into every unit (@TRADING_DIR@), so it gets the character
+# rule of --soak-env-file (no systemd specifier %, no bash replacement &, no whitespace).
+# A2: Compose takes the value of a bare `KEY` line (no `=`) from the process environment, so the
+# guard cannot determine it and refuses.
+
+
+def _copied_checkout(tmp_path: Path, name: str) -> Path:
+    """A copy of backup.sh, lib.sh and the unit templates under a checkout named ``name``."""
+    deploy = tmp_path / name / "deploy"
+    (deploy / "systemd").mkdir(parents=True)
+    for rel in ("backup.sh", "lib.sh"):
+        _write(deploy / rel, (DEPLOY / rel).read_text(encoding="utf-8"))
+    for unit in UNITS.iterdir():
+        _write(deploy / "systemd" / unit.name, unit.read_text(encoding="utf-8"))
+    return deploy / "backup.sh"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["re%ipo", "re&po", "re po", "re;po"],
+    ids=["percent", "ampersand", "space", "semicolon"],
+)
+@pytest.mark.parametrize("mode", ["--install-timer", "--install-soak-timer"])
+def test_a_checkout_path_the_units_cannot_carry_is_refused(
+    rig: Rig, tmp_path: Path, name: str, mode: str
+) -> None:
+    script = _copied_checkout(tmp_path, name)
+    soak, trading = _env_files(rig, "soak-bucket", "trading-bucket")
+    args = [mode] if mode == "--install-timer" else [mode, "--soak-env-file", soak.as_posix()]
+    proc = rig.run(script.as_posix(), *args, env={"TRADING_BACKUP_ENV_FILE": trading.as_posix()})
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "checkout path" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+    assert rig.lines() == []
+
+
+def test_a_plain_copied_checkout_still_installs(rig: Rig, tmp_path: Path) -> None:
+    script = _copied_checkout(tmp_path, "plain-checkout_1.2+x")
+    proc = rig.run(script.as_posix(), "--install-timer")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    service = (rig.prefix / "etc" / "systemd" / "system" / "trading-backup.service").read_text(
+        encoding="utf-8"
+    )
+    assert "plain-checkout_1.2+x/deploy/backup.sh" in service
+
+
+@pytest.mark.parametrize(
+    "soak_text",
+    [
+        "BACKUP_S3_BUCKET\n",
+        "BACKUP_S3_BUCKET=soak-bucket\nBACKUP_S3_BUCKET\n",
+        "BACKUP_S3_BUCKET\nBACKUP_S3_BUCKET=soak-bucket\n",
+        "export BACKUP_S3_BUCKET\n",
+        "  BACKUP_S3_BUCKET  \r\n",
+        "BACKUP_S3_BUCKET # from the shell\n",
+    ],
+    ids=["bare", "bare-last", "bare-first", "export-bare", "indented-crlf", "bare-comment"],
+)
+def test_a_bare_key_soak_bucket_cannot_be_determined(rig: Rig, soak_text: str) -> None:
+    proc = _install_soak_texts(rig, soak_text, "BACKUP_S3_BUCKET=trading-bucket\n")
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "BACKUP_S3_BUCKET" in proc.stderr and "cannot be determined" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_a_bare_key_trading_bucket_cannot_be_determined(rig: Rig) -> None:
+    proc = _install_soak_texts(rig, "BACKUP_S3_BUCKET=soak-bucket\n", "BACKUP_S3_BUCKET\n")
+    assert proc.returncode != 0
+    assert "cannot be determined" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_a_bare_line_of_another_name_does_not_matter(rig: Rig) -> None:
+    proc = _install_soak_texts(
+        rig,
+        "OTHER_NAME\nBACKUP_S3_BUCKET_X\nBACKUP_S3_BUCKET=soak-bucket\n",
+        "BACKUP_S3_BUCKET=trading-bucket\n",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr

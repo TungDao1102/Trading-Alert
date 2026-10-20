@@ -115,11 +115,19 @@ write_units() {
   run systemctl enable --now "$timer"
 }
 
+# Every path written into a unit file (the checkout for @TRADING_DIR@, the soak env file): no
+# whitespace, no systemd specifier (%), no bash replacement (&), no quote; the character set of
+# deploy/heartbeat.sh (UNIT_PATH_PATTERN) after the root or drive prefix (a drive-letter path is
+# accepted for the Git Bash tests).
+UNIT_PATH_RE='^(/|[A-Za-z]:/)[A-Za-z0-9._/+=,~-]+$'
+
 require_root_and_plain_checkout() {
   if [[ -z ${TRADING_ROOT_PREFIX:-} && ${EUID} -ne 0 ]]; then
     die "$1 must run as root (sudo deploy/backup.sh $1)"
   fi
   [[ $REPO_ROOT != *[[:space:]]* ]] || die "checkout path contains whitespace: $REPO_ROOT"
+  [[ $REPO_ROOT =~ $UNIT_PATH_RE ]] ||
+    die "checkout path must hold only letters, digits and . _ / + = , ~ - (it is written into the units; no % or &): $REPO_ROOT"
 }
 
 install_timer() {
@@ -132,7 +140,8 @@ install_timer() {
 # surrounding single or double quotes removed, an unquoted ` # comment` removed, a CR removed.
 # Exit 0 prints the value (never logged), 1 when NAME is not assigned, 2 when the value cannot be
 # determined without Compose (interpolation `$`, a backslash escape, an unterminated quote, text
-# after a closing quote, or a quote or `#` inside an unquoted value): the caller fails closed.
+# after a closing quote, a quote or `#` inside an unquoted value, or a bare `NAME` line without
+# `=`, whose value Compose takes from the process environment): the caller fails closed.
 env_value() {
   awk -v key="$2" '
     BEGIN { found = 0; bad = 0; out = ""; dq = "\""; sq = sprintf("%c", 39) }
@@ -142,7 +151,13 @@ env_value() {
       sub(/^[ \t]+/, "", line)
       if (line ~ /^export[ \t]+/) sub(/^export[ \t]+/, "", line)
       eq = index(line, "=")
-      if (eq == 0) next
+      if (eq == 0) {
+        bare = line
+        sub(/[ \t]+#.*$/, "", bare)
+        sub(/[ \t]+$/, "", bare)
+        if (bare == key) bad = 1
+        next
+      }
       name = substr(line, 1, eq - 1)
       sub(/[ \t]+$/, "", name)
       if (name != key) next
@@ -210,9 +225,8 @@ install_soak_timer() {
   [[ $SOAK_ENV_FILE == /* || $SOAK_ENV_FILE =~ ^[A-Za-z]:/ ]] ||
     die "--soak-env-file must be an absolute path: $SOAK_ENV_FILE"
   [[ $SOAK_ENV_FILE != *[[:space:]]* ]] || die "soak env file path contains whitespace"
-  # The path goes into a unit file: no systemd specifier (%) and no bash replacement (&); the
-  # character set of deploy/heartbeat.sh (UNIT_PATH_PATTERN) after the root or drive prefix.
-  [[ $SOAK_ENV_FILE =~ ^(/|[A-Za-z]:/)[A-Za-z0-9._/+=,~-]+$ ]] ||
+  # The path goes into a unit file: the rule of UNIT_PATH_RE.
+  [[ $SOAK_ENV_FILE =~ $UNIT_PATH_RE ]] ||
     die "--soak-env-file must hold only letters, digits and . _ / + = , ~ - (no % or &): $SOAK_ENV_FILE"
   check_soak_bucket
   write_units trading-soak-backup.timer "${SOAK_UNITS[@]}"
