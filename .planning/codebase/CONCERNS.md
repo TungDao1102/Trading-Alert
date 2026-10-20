@@ -252,7 +252,7 @@ current state is stated explicitly, including where the record is now stale.
 **The D055 execution model is neither decided in `docs/DECISIONS.md` nor implemented**
 - Problem: the owner adopted direction (a) on 2026-10-18, but the only records are `.planning/phases/19-execution-plan-binding-price-check/19-NOTES.md` and `19-DEC-D055-DRAFT.md` — explicitly "Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` was not edited."
 - Blocks: any live order; the protective-stop path; the D034 emergency close; the `CLOSE_REQUIRED` state machine.
-- Required: a `docs/DECISIONS.md` row (expected D077 or later) plus the 11 Demo probes listed in `19-NOTES.md`, all run by the owner with `--execute`. D072 records that the user "did not approve running the Demo smoke or the Demo probe".
+- Required: a `docs/DECISIONS.md` row (provisional id D078) plus the 11 Demo probes listed in `19-NOTES.md`, all run by the owner with `--execute`. D072 records that the user "did not approve running the Demo smoke or the Demo probe".
 
 **A live fill-driven protection path in `src/`**
 - Problem: `attach_protectives_to_fill` is only called from `scripts/demo_rehearsal.py` (`src/execution/manager.py:1146`).

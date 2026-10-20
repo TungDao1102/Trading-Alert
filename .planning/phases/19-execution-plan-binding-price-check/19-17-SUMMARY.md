@@ -45,7 +45,7 @@ The phase now has a machine-checked gate, its new strings are documented where o
 ## Not in this plan (recorded for the owner)
 
 - **Probe 1 has no case in `scripts/demo_probe.py`.** The script has `closeposition_stop_flat` only; nothing places `closePosition` with a position open, which is the evidence needed for assumption A6 and for closing D055. The register lists the 11 probes but writing the cases is not a Phase 19 plan. A quick task is planned (case `closeposition_stop_open`, offline fake tests only, no `--execute`).
-- **D055 wording.** `19-DEC-D055-DRAFT.md`, `19-CONTEXT.md` and the register still say "closure". The owner's reviewer asked for: D-10 selected, D055 OPEN pending Probe 1, LIVE blocked, with each statement tagged [DOC], [DEMO] or [DESIGN]. Decision ids D077 (D-10) and D078 (Q5) are provisional and assigned when the rows are written. Pending edit.
+- **D055 wording.** `19-DEC-D055-DRAFT.md`, `19-CONTEXT.md` and the register still say "closure". The owner's reviewer asked for: D-10 selected, D055 OPEN pending Probe 1, LIVE blocked, with each statement tagged [DOC], [DEMO] or [DESIGN]. Decision ids D078 (D-10) and D079 (Q5) are provisional and assigned when the rows are written (renumbered 2026-10-20: D077 is the stop-lost row of 19-REVIEW WR-04). Pending edit.
 - **Coordinator not running and no stop supervision after PROTECTED** are [DESIGN] gaps (Phases 20 and 24 notes); nothing here claims continuous protection.
 - **The `<human-check>`** of Task 3 is open: the owner reads `19-OWNER-GAPS.md` and confirms every open item is listed and none is presented as solved.
 

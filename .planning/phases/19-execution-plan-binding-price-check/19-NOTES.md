@@ -7,7 +7,7 @@ Where this came from: the Phase 18 Demo probe evidence (`.planning/phases/18-use
 
 > adopt kèm các điểm trên
 
-The user then asked for this to be NOTED for Phase 19 only, and for Phase 18 to be completed first. So no `19-DEC-*` record, no DECISIONS row, no ROADMAP change and no code or probe plan exist yet. Phase 19 discussion turns this note into a decision record (a new DECISIONS row, expected D077 or later) before any plan is written.
+The user then asked for this to be NOTED for Phase 19 only, and for Phase 18 to be completed first. So no `19-DEC-*` record, no DECISIONS row, no ROADMAP change and no code or probe plan exist yet. Phase 19 discussion turns this note into a decision record (a new DECISIONS row, provisional id D078) before any plan is written.
 
 Labels: [DOC] official USDⓈ-M page (read through WebFetch, a small-model summary, not a verbatim copy); [DEMO] observed on Demo, not mainnet; [DESIGN] reasoning, not verified Binance behavior.
 
