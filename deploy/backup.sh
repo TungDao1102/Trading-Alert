@@ -96,6 +96,8 @@ backup_run() {
 write_units() {
   local timer=$1 unit_dir content changed=0 unit
   shift
+  # a pattern replacement must not treat an ampersand in a path as the matched text (bash 5.2)
+  shopt -u patsub_replacement 2>/dev/null || true
   unit_dir="$(p /etc/systemd/system)"
   for unit in "$@"; do
     [[ -f $SCRIPT_DIR/systemd/$unit ]] || die "missing unit template: deploy/systemd/$unit"
@@ -125,29 +127,77 @@ install_timer() {
   write_units trading-backup.timer "${UNITS[@]}"
 }
 
-# env_value FILE NAME: the value of NAME in an env file (quotes and a CR removed). Never printed.
+# env_value FILE NAME: the value of NAME in an env file, read the way Compose reads it (plan
+# 16-65): blank and comment lines skipped, an optional `export ` prefix, the LAST assignment wins,
+# surrounding single or double quotes removed, an unquoted ` # comment` removed, a CR removed.
+# Exit 0 prints the value (never logged), 1 when NAME is not assigned, 2 when the value cannot be
+# determined without Compose (interpolation `$`, a backslash escape, an unterminated quote, text
+# after a closing quote, or a quote or `#` inside an unquoted value): the caller fails closed.
 env_value() {
   awk -v key="$2" '
-    index($0, key "=") == 1 {
-      v = substr($0, length(key) + 2)
-      sub(/\r$/, "", v)
-      sub(/^"/, "", v)
-      sub(/"$/, "", v)
-      sub(/^\047/, "", v)
-      sub(/\047$/, "", v)
-      print v
-      exit
+    BEGIN { found = 0; bad = 0; out = ""; dq = "\""; sq = sprintf("%c", 39) }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      sub(/^[ \t]+/, "", line)
+      if (line ~ /^export[ \t]+/) sub(/^export[ \t]+/, "", line)
+      eq = index(line, "=")
+      if (eq == 0) next
+      name = substr(line, 1, eq - 1)
+      sub(/[ \t]+$/, "", name)
+      if (name != key) next
+      raw = substr(line, eq + 1)
+      v = raw
+      sub(/^[ \t]+/, "", v)
+      q = substr(v, 1, 1)
+      if (q == dq || q == sq) {
+        rest = substr(v, 2)
+        stop = index(rest, q)
+        if (stop == 0) { bad = 1; next }
+        val = substr(rest, 1, stop - 1)
+        tail = substr(rest, stop + 1)
+        if (tail !~ /^[ \t]*$/ && tail !~ /^[ \t]+#/) { bad = 1; next }
+        if (q == dq && (index(val, "$") || index(val, "\\"))) { bad = 1; next }
+      } else {
+        val = raw
+        if (match(val, /[ \t]#/)) val = substr(val, 1, RSTART - 1)
+        sub(/^[ \t]+/, "", val)
+        sub(/[ \t]+$/, "", val)
+        if (index(val, "$") || index(val, "\\") || index(val, dq) || index(val, sq) || index(val, "#")) {
+          bad = 1
+          next
+        }
+      }
+      found = 1
+      out = val
+    }
+    END {
+      if (bad) exit 2
+      if (!found) exit 1
+      print out
     }' "$1"
 }
 
+# bucket_of FILE LABEL: BACKUP_S3_BUCKET of FILE ("" when unassigned); dies when undeterminable.
+bucket_of() {
+  local value rc=0
+  value="$(env_value "$1" BACKUP_S3_BUCKET)" || rc=$?
+  if ((rc == 2)); then
+    die "BACKUP_S3_BUCKET of the $2 env file cannot be determined the way Compose reads it (interpolation, escape or quoting): write it as a plain KEY=value line"
+  elif ((rc != 0 && rc != 1)); then
+    die "the $2 env file could not be read for BACKUP_S3_BUCKET"
+  fi
+  printf '%s' "$value"
+}
+
 # check_soak_bucket: the soak env file names a bucket of its own (plan 16-55). The values are
-# compared, never printed.
+# compared, never printed; a value that cannot be determined refuses the install (plan 16-65).
 check_soak_bucket() {
   local trading_env="${TRADING_BACKUP_ENV_FILE:-$REPO_ROOT/.env}" soak_bucket trading_bucket
   [[ -r $SOAK_ENV_FILE ]] || die "the soak env file is not readable: $SOAK_ENV_FILE"
   [[ -r $trading_env ]] || die "the trading env file is not readable: $trading_env (set TRADING_BACKUP_ENV_FILE to the env file trading-backup uses)"
-  soak_bucket="$(env_value "$SOAK_ENV_FILE" BACKUP_S3_BUCKET)"
-  trading_bucket="$(env_value "$trading_env" BACKUP_S3_BUCKET)"
+  soak_bucket="$(bucket_of "$SOAK_ENV_FILE" soak)"
+  trading_bucket="$(bucket_of "$trading_env" trading)"
   [[ -n $soak_bucket ]] || die "BACKUP_S3_BUCKET is empty in the soak env file: the soak project needs a bucket of its own"
   if [[ $soak_bucket == "$trading_bucket" ]]; then
     die "BACKUP_S3_BUCKET of the soak env file is the bucket of the trading env file: the soak project needs its own bucket (one snapshot series per bucket; RUNBOOK 20.5)"
@@ -160,6 +210,10 @@ install_soak_timer() {
   [[ $SOAK_ENV_FILE == /* || $SOAK_ENV_FILE =~ ^[A-Za-z]:/ ]] ||
     die "--soak-env-file must be an absolute path: $SOAK_ENV_FILE"
   [[ $SOAK_ENV_FILE != *[[:space:]]* ]] || die "soak env file path contains whitespace"
+  # The path goes into a unit file: no systemd specifier (%) and no bash replacement (&); the
+  # character set of deploy/heartbeat.sh (UNIT_PATH_PATTERN) after the root or drive prefix.
+  [[ $SOAK_ENV_FILE =~ ^(/|[A-Za-z]:/)[A-Za-z0-9._/+=,~-]+$ ]] ||
+    die "--soak-env-file must hold only letters, digits and . _ / + = , ~ - (no % or &): $SOAK_ENV_FILE"
   check_soak_bucket
   write_units trading-soak-backup.timer "${SOAK_UNITS[@]}"
 }

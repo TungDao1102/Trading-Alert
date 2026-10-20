@@ -748,3 +748,137 @@ def test_soak_env_template_keeps_the_bucket_empty_and_says_it_is_its_own() -> No
     comments = "\n".join(ln for ln in lines if ln.startswith("#"))
     assert "trading-backup" in comments
     assert "own bucket" in comments
+
+
+# --- 16-65: the bucket guard reads the env files as Compose does; safe unit substitution ------
+# Review of c654524..6f73e5b (MINOR 1): the awk reader took the FIRST `BACKUP_S3_BUCKET=` line
+# and kept `export `, inline comments and half-stripped quotes, while Compose accepts `export `,
+# strips quotes and an unquoted ` # comment`, and lets the LAST assignment win. The guard now
+# reads the value the Compose way and refuses the install when it cannot determine it.
+
+
+def _install_soak_texts(
+    rig: Rig, soak_text: str, trading_text: str
+) -> subprocess.CompletedProcess[str]:
+    soak = _write(rig.base / "soak.env", soak_text)
+    trading = _write(rig.base / "trading.env", trading_text)
+    return _install_soak(rig, soak, trading)
+
+
+SHARED = "shared-bucket"
+
+
+@pytest.mark.parametrize(
+    "soak_text",
+    [
+        f"export BACKUP_S3_BUCKET={SHARED}\n",
+        f"BACKUP_S3_BUCKET=soak-bucket\nBACKUP_S3_BUCKET={SHARED}\n",
+        f'BACKUP_S3_BUCKET="{SHARED}"\n',
+        f"BACKUP_S3_BUCKET='{SHARED}'\n",
+        f"BACKUP_S3_BUCKET={SHARED} # the soak bucket\n",
+        f'BACKUP_S3_BUCKET="{SHARED}" # the soak bucket\n',
+        f"  export   BACKUP_S3_BUCKET={SHARED}\r\n",
+    ],
+    ids=[
+        "export",
+        "last-wins",
+        "double-quoted",
+        "single-quoted",
+        "inline-comment",
+        "quoted-comment",
+        "indented-crlf",
+    ],
+)
+def test_install_soak_timer_refuses_the_trading_bucket_in_every_compose_form(
+    rig: Rig, soak_text: str
+) -> None:
+    proc = _install_soak_texts(rig, soak_text, f"BACKUP_S3_BUCKET={SHARED}\n")
+    assert proc.returncode != 0, "Compose would read the trading bucket here"
+    assert "BACKUP_S3_BUCKET" in proc.stderr
+    assert SHARED not in proc.stdout + proc.stderr, "a value is never printed"
+    assert not (rig.prefix / "etc").exists()
+
+
+@pytest.mark.parametrize(
+    "trading_text",
+    [
+        f"export BACKUP_S3_BUCKET={SHARED}\n",
+        f"BACKUP_S3_BUCKET=other-bucket\nBACKUP_S3_BUCKET={SHARED}\n",
+        f'BACKUP_S3_BUCKET="{SHARED}" # comment\n',
+    ],
+    ids=["export", "last-wins", "quoted-comment"],
+)
+def test_the_trading_env_file_is_read_the_same_way(rig: Rig, trading_text: str) -> None:
+    proc = _install_soak_texts(rig, f"BACKUP_S3_BUCKET={SHARED}\n", trading_text)
+    assert proc.returncode != 0
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_the_last_assignment_of_the_soak_file_wins_as_in_compose(rig: Rig) -> None:
+    proc = _install_soak_texts(
+        rig,
+        f"BACKUP_S3_BUCKET={SHARED}\n# BACKUP_S3_BUCKET={SHARED}\n"
+        "BACKUP_S3_BUCKET=soak-bucket # own\n",
+        f"BACKUP_S3_BUCKET={SHARED}\n",
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (rig.prefix / "etc" / "systemd" / "system" / "trading-soak-backup.service").exists()
+
+
+@pytest.mark.parametrize(
+    "soak_text",
+    [
+        "BACKUP_S3_BUCKET=${OTHER_BUCKET}\n",
+        'BACKUP_S3_BUCKET="unterminated\n',
+        'BACKUP_S3_BUCKET="a" trailing\n',
+        "BACKUP_S3_BUCKET=a\\b\n",
+        "BACKUP_S3_BUCKET=soak-bucket\nBACKUP_S3_BUCKET='half\n",
+    ],
+    ids=["interpolation", "unterminated", "text-after-quote", "backslash", "bad-later-line"],
+)
+def test_an_undeterminable_soak_bucket_is_refused(rig: Rig, soak_text: str) -> None:
+    proc = _install_soak_texts(rig, soak_text, "BACKUP_S3_BUCKET=trading-bucket\n")
+    assert proc.returncode != 0
+    assert "BACKUP_S3_BUCKET" in proc.stderr and "cannot be determined" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_an_undeterminable_trading_bucket_is_refused(rig: Rig) -> None:
+    proc = _install_soak_texts(
+        rig, "BACKUP_S3_BUCKET=soak-bucket\n", "BACKUP_S3_BUCKET=${SOMETHING}\n"
+    )
+    assert proc.returncode != 0
+    assert "cannot be determined" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_a_comment_only_value_is_an_empty_bucket(rig: Rig) -> None:
+    proc = _install_soak_texts(
+        rig, "BACKUP_S3_BUCKET= # fill in\n", "BACKUP_S3_BUCKET=trading-bucket\n"
+    )
+    assert proc.returncode != 0
+    assert "empty" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+# MINOR 2: a `&` in a replacement is the matched text under bash 5.2 patsub_replacement, and a
+# `%` in a unit file is a systemd specifier. heartbeat.sh turns patsub_replacement off and
+# accepts only letters, digits and . _ / + = , ~ - in a unit path; backup.sh now does the same.
+
+
+@pytest.mark.parametrize("name", ["soak%i.env", "soak&x.env"], ids=["percent", "ampersand"])
+def test_install_soak_timer_refuses_a_unit_unsafe_env_file_path(rig: Rig, name: str) -> None:
+    soak = _write(rig.base / name, "BACKUP_S3_BUCKET=soak-bucket\n")
+    trading = _write(rig.base / "trading.env", "BACKUP_S3_BUCKET=trading-bucket\n")
+    proc = _install_soak(rig, soak, trading)
+    assert proc.returncode != 0
+    assert "--soak-env-file" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_the_unit_substitution_turns_patsub_replacement_off() -> None:
+    text = (DEPLOY / "backup.sh").read_text(encoding="utf-8")
+    body = text[text.index("write_units() {") :]
+    body = body[: body.index("\n}\n")]
+    assert "shopt -u patsub_replacement" in body
+    assert body.index("shopt -u patsub_replacement") < body.index('content="${content//')
