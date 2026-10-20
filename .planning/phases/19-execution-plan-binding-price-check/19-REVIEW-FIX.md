@@ -1012,3 +1012,226 @@ The files in the targeted run:
 
 _Batch 3 fixed: 2026-10-20T11:10:00Z_
 _Fixer: Claude (gsd-code-fixer)_
+
+
+## Batch 4 (owner decision WR-01, DECISIONS D078)
+
+**Fixed at:** 2026-10-20T12:22:00Z, on top of `18991a7` (branch `develop`). The commits of
+batches 1 to 3 were kept as they are.
+**Scope:** WR-01 and the DECISIONS row that records it, as the owner chose it (option (a): store
+the approved quantity on the Approval row, with an Alembic migration, and make `bind_plan` compare
+`trade_plan.quantity_after_rounding` against it). The "Skipped Issues" entry for WR-01 above is
+superseded by this section. WR-07 and IN-01..IN-06 stay skipped.
+
+| Finding / item | Status | Commit |
+|---|---|---|
+| WR-01 tracer (RED): bind_plan and manager tests | tests fail at the base | `e0801ac` |
+| WR-01 tracer (GREEN): field, column, migration 0006, bind_plan step 5, gate 1c | fixed: requires human verification (money bound at placement) | `1ea1c3b` |
+| WR-01 writers and store (RED) | tests fail at the base | `8497f5c` |
+| WR-01 writers and store (GREEN): SHADOW book, store guard | fixed | `ca49a5c` |
+| D078 row, canonical docs, gate inventory, renumbering of the provisional D-10 / Q5 ids | done | the commit that carries this file ("docs(19): D078 ...") |
+
+### WR-01: the approved quantity was not covered by the plan hash
+
+**Owner decision:** option (a) of finding WR-01. The approved quantity is stored on the Approval
+row (a migration under `src/db/alembic`), and `src/execution/binding.py::bind_plan` compares
+`trade_plan.quantity_after_rounding` with it, failing closed, so a placement quantity is never
+larger than the quantity recorded when the approval was issued. The plan-hash field set does NOT
+change (D051 (c)).
+
+**Files modified:**
+- `src/domain/approval.py`: `Approval.approved_quantity: Decimal | None = None`, validated None or
+  a finite positive Decimal (last field, so positional construction is unchanged)
+- `src/db/models.py`, `src/db/mappers.py`: the `ApprovalRow` column and the CHECK
+  `ck_approvals_approved_quantity`; both mapper directions carry the value
+- `src/db/alembic/versions/0006_approval_quantity.py` (new): one nullable column, one named CHECK,
+  a real downgrade
+- `src/execution/binding.py`: two new reason codes, the required `approval_quantity` keyword, step 5
+- `src/execution/manager.py`: gate 1c feeds `approval.approved_quantity`; docstring items 1c and 5b
+- `src/persistence/approvals.py`: the quantity is part of the request identity; the 18-digit guard
+- `src/paper/shadow.py`, `scripts/demo_rehearsal.py`: the two writers of a PENDING approval
+- tests: `test_execution_binding.py`, `test_execution_manager.py`, `test_demo_rehearsal_flow.py`,
+  `test_persistence_migration_pg.py`, `test_persistence_approvals_pg.py`,
+  `test_paper_shadow_buttons.py`, `test_domain_entities.py`, `test_domain_mappers.py`,
+  `test_phase19_gate.py`
+
+**Applied fix:**
+- `bind_plan(..., approval_quantity=...)` is a required keyword. The check order is hash, signal,
+  symbol, side, quantity (first failure wins). Step 5: `None` gives `APPROVED_QUANTITY_MISSING`; a
+  value that is not a Decimal raises `TypeError`; a plan quantity that is not numerically equal gives
+  `PLAN_QUANTITY_MISMATCH`.
+- `BoundPlan.approved_quantity` is now the approval's value, never a copy of the plan object's field.
+  Gate 5b (`QUANTITY_ABOVE_APPROVED`, never clipped) is unchanged in code; it now compares the sized
+  quantity with what was stored at approval time.
+- The manager passes the Approval row object it already holds. Gate 1c still runs before the
+  approval is consumed, so a refusal leaves no ENTRY intent row and nothing is sent.
+- `recompute_plan_hash` and `src/core/planner.py` are untouched; a test pins that a change of
+  `quantity_after_rounding` alone does not change the recomputed hash.
+- `PgApprovalStore.insert_pending` refuses a value with more than 18 fractional digits
+  (`PrecisionError`, never rounded) and treats `approved_quantity` as part of the request identity.
+  `_decide` still updates only `result`, `status` and `acted_at_utc`.
+- `ShadowApprovalBook.issue` and the Demo rehearsal's `issue_approval` store the issued plan's
+  `quantity_after_rounding` on every PENDING row.
+
+**Choices for the owner to confirm** (the owner delegated these to the planner of quick task
+261020-q1o):
+1. **A plain Decimal, not a hash.** The bound is an order comparison (never more than approved),
+   which a hash cannot answer. The type is NUMERIC(38,18), the project's money and quantity type.
+2. **A nullable column; older rows are refused.** NULL means "no quantity recorded" (every row
+   written before revision 0006). `bind_plan` refuses it as `APPROVED_QUANTITY_MISSING` before any
+   adapter call. There is no backfill: copying the figure from `trade_plans` would claim a recorded
+   approval quantity that no record proves.
+3. **Equality at binding.** The plan's quantity must EQUAL the stored value (numeric equality, so a
+   NUMERIC round trip still matches). The "at most" freedom stays where D-02 put it: gate 5b, the
+   live-sized quantity against the stored approved quantity.
+4. **The quantity is stored on both the APPROVE and the SKIP rows.** The two rows of one request
+   stay identical; the SKIP row's value is never read.
+5. **The stored figure is the plan's `quantity_after_rounding`**, which is the figure the SHADOW
+   confirmation card shows. The 12-field APPROVE message (APRV-01) and the Demo rehearsal message
+   show no quantity, and neither message was changed (showing it is Phase 23, money amounts on the
+   card).
+6. **The residual.** The Approval object is supplied by the caller, so the bound is as strong as the
+   object the caller passes. Every current caller passes the stored row. A consume-time check inside
+   `consume_and_record_entry_intent` (approved_quantity is not null and is at least the intended
+   quantity) is NOT built; it is outside option (a). `src/persistence/execution_state.py` is
+   unchanged.
+7. **Two new reason codes** (plain strings, GLOSSARY 9.3), not a reuse of `QUANTITY_ABOVE_APPROVED`,
+   so a refused older row cannot be mistaken for tampering.
+8. **The 18-digit precision guard.** NUMERIC(38,18) would round a longer value, possibly upward and
+   above the issued quantity, so the store refuses it instead.
+9. **A host takes revision 0006 through the compose `migrate` service** on its next update, and its
+   existing approval rows read NULL (so they are not placeable). The soak `IMAGE_COMMIT` `9b27da5`
+   predates this revision.
+
+**Existing tests changed, and why:**
+- `tests/test_execution_manager.py::_build_approval`: the Approval now carries `approved_quantity`,
+  taken from the fixture field `quantity_after_rounding` (not a typed literal). Without it every
+  manager test would stop at gate 1c with `APPROVED_QUANTITY_MISSING`. No fixture file changed.
+- `test_risk04_quantity_above_the_approved_quantity_is_never_clipped`: the plan quantity is moved to
+  2.414, so the approval must move with it (2.414), otherwise gate 1c would refuse first with
+  `PLAN_QUANTITY_MISMATCH`. The reason stays `QUANTITY_ABOVE_APPROVED`.
+  `_assert_refused_then_placeable_with_risk` now forwards extra keyword overrides to its first call.
+- `_order_pairs`: the two cases that use `small_plan_quantity()` also pass an approval at 2.414
+  (reasons `EXCHANGE_CONSTRAINT` and `QUANTITY_ABOVE_APPROVED` are unchanged), and a new pair pins
+  that gate 1c (`PLAN_QUANTITY_MISMATCH`) precedes the enablement guard.
+- `tests/test_execution_binding.py`: the `_bind` helper and the direct `bind_plan` call in
+  `test_signal_or_approval_identity_mismatch` pass `approval_quantity`.
+- `tests/test_demo_rehearsal_flow.py::test_build_live_context_binds_to_the_derived_plan`: the
+  `bind_plan` call passes `approval_quantity`.
+- `tests/test_persistence_migration_pg.py`: the head-revision test now pins `0006_approval_quantity`
+  (it pinned `0005_live_sized_risk`); the module docstring names 0006.
+- `tests/test_phase19_gate.py`: inventory only (the two new plain codes, the two new binding symbols,
+  the 0006 migration file, two RISK-04 evidence tests). No behavior change.
+- Tests that edit only a hashed field or `quantity_after_rounding` through `_case_with(...)` needed no
+  change: their approval is built from the same case, so the quantity matches.
+
+**New regressions:**
+- `tests/test_execution_binding.py`, `test_wr01_*` (10 test functions, 14 cases with the parameters):
+  - an equal quantity binds and the bound IS the passed value (same scale);
+  - above or below by one 1e-18 unit gives `PLAN_QUANTITY_MISMATCH`;
+  - an inflated plan object whose hash still verifies is refused;
+  - `None` gives `APPROVED_QUANTITY_MISSING`;
+  - `Decimal("0.0800")` against `Decimal("0.08")` binds;
+  - a hash mismatch and a side mismatch each beat a quantity mismatch;
+  - a non-Decimal approval quantity raises `TypeError`;
+  - the hash field set ignores the quantity;
+  - the keyword is required.
+- `tests/test_execution_manager.py`, `test_wr01_*` (4 tests):
+  - an inflated 2.416 plan is refused with zero adapter calls and no ENTRY row, and a corrected call
+    on the same store places 2.415;
+  - a plan below the stored quantity is refused;
+  - a NULL approval quantity is refused with zero calls and no ENTRY row, and a corrected call
+    places;
+  - the bound carries the stored quantity (stored and plan at 2.414 against a sized 2.415 gives
+    `QUANTITY_ABOVE_APPROVED`).
+- `tests/test_persistence_approvals_pg.py` (6 tests):
+  - the quantity round trip;
+  - a replay with an equal or a different quantity (`RowConflict` naming `approved_quantity`);
+  - 19 fractional digits give `PrecisionError` and no row;
+  - a decision write never changes the stored value;
+  - a `make_approval` row reads back `None`.
+- `tests/test_persistence_migration_pg.py` (migration 0006): imports no project module, the column
+  is `("numeric", 38, 18, "YES")`, the CHECK definition, 0 and -1 rejected with SQLSTATE 23514
+  naming `ck_approvals_approved_quantity`, a data-bearing 0005 to 0006 upgrade keeps every row with
+  NULL, and a downgrade to 0005 keeps the rows and removes exactly the column and the CHECK. The
+  existing `compare_metadata` parity test covers ORM against migrated database.
+- `tests/test_paper_shadow_buttons.py`: both SHADOW rows and the APPROVED row that dispatch returns
+  carry the plan quantity. `tests/test_demo_rehearsal_flow.py`: both rehearsal roles do.
+  `tests/test_domain_entities.py` and `tests/test_domain_mappers.py`: the field validation and the
+  mapper round trip.
+
+**Pre-fix check:**
+- Before any test edit I ran a scratch test at the base `18991a7`: the golden case with the plan
+  object's quantity replaced by 2.416 (an unhashed field) reached `place_entry` and returned
+  `OK` (calls: the four reads, `get_position_mode`, `place_entry`). That is the defect. The scratch
+  file was deleted and is not committed.
+- RED commit `e0801ac` (tracer tests): `tests/test_execution_binding.py` fails at collection
+  (`ImportError`: `APPROVED_QUANTITY_MISSING` does not exist) and the manager and rehearsal tests
+  fail with `TypeError` (`Approval` has no `approved_quantity`). The new manager tests therefore fail
+  at the base through a missing field, not through the placing behavior; the placing behavior was
+  shown by the scratch run above.
+- RED commit `8497f5c` (writers and store): three tests fail at the base:
+  `test_wr01_the_pending_approvals_carry_the_issued_plan_quantity`,
+  `test_insert_pending_replay_with_a_different_quantity_is_a_row_conflict` and
+  `test_insert_pending_refuses_more_than_18_fractional_digits_and_never_rounds`. The other new tests
+  of that commit (domain validation, mapper round trip, the Demo rehearsal writer, migration 0006)
+  already passed because those parts landed in the tracer commit `1ea1c3b`. The Demo rehearsal
+  writer had to move there: the rehearsal flow tests build their approval through `issue_approval`
+  and the tracer's verification includes them.
+
+### D078 and the provisional ids
+
+- **`docs/DECISIONS.md`:** one new last row, D078, after D077 (D077 and D034 are byte-unchanged). It
+  records the storage, the writers, the binding rule, the rule for older rows and what is NOT
+  changed (the plan-hash field set, the request hash, the 12-field APPROVE message, the consume
+  transaction). It states that D055 stays OPEN and the D-10 and Q5 rows are still drafts.
+- **Other canonical documents:** `docs/DOC_STATUS.md` gets a 2026-10-20 line;
+  `docs/GLOSSARY.md` section 9.3 gets the two new codes and a revised `QUANTITY_ABOVE_APPROVED`
+  meaning; `docs/data/DATA_MODEL.md` section 2.5 gets the `approved_quantity` field and a paragraph.
+- **Gates:** `verify_decision_alignment.py all` is ALL_PASS.
+- **Renumbered provisional ids** (the same move as commit e4b10e0): D-10 (the D055 closure) moves
+  from D078 to **D079**, and Q5 from D079 to **D080**. Changed files:
+  - `19-DEC-D055-DRAFT.md` and `19-DEC-Q5-DRAFT.md` (status lines)
+  - `19-OWNER-GAPS.md`: the hard-limits line, the status sentence, a new WR-01 row, O-01, Q5 and
+    section 5
+  - `19-NOTES.md`, `19-17-SUMMARY.md`
+  - `.planning/STATE.md`, `.planning/codebase/CONCERNS.md`
+  - `.planning/quick/261020-jua-.../261020-jua-SUMMARY.md`
+
+  **Both rows remain drafts and are NOT written.** D055 stays OPEN. This file's batch 3 lines are
+  left as they are: they record the earlier move as history.
+
+### Batch 4 verification
+
+**Where the checks ran:** the main checkout, branch `develop`; no worktree was created.
+`pytest-xdist` is not installed in this environment, so every pytest run below was sequential
+(`-n` was not used).
+
+| Check | Result |
+|---|---|
+| `uv run ruff check` | All checks passed |
+| `uv run ruff format --check` | 667 files already formatted |
+| `uv run mypy src` | Success: no issues found in 214 source files |
+| `uv lock --check` | Resolved 62 packages (no dependency change) |
+| `uv run python scripts/verify_decision_alignment.py all` | ALL_PASS |
+| Task 1 non-PG: `test_execution_binding`, `test_execution_manager`, `test_demo_rehearsal_flow`, `test_exchange_error_rejections` | 295 passed, 0 skipped |
+| Task 1 PG, `TRADING_CI_STRICT=1`: `test_approval_replay_pg`, `test_callback_redelivery_pg`, `test_execution_exactly_once_pg`, `test_realized_risk_persistence_pg`, `test_intent_recovery_pg`, `test_execution_write_ahead_pg`, `test_persistence_migration_pg` | 135 passed, 0 skipped |
+| Task 2 non-PG: shadow buttons/confirm/runtime/isolation, test-signal rehearsal, demo rehearsal flow, domain entities/mappers/no-float | 323 passed, 0 skipped |
+| Task 2 PG, `TRADING_CI_STRICT=1`: `test_persistence_approvals_pg`, `test_persistence_migration_pg`, `test_paper_shadow_pg`, `test_persistence_constraints_pg`, `test_persistence_enum_columns_pg`, `test_approval_replay_pg` | 162 passed, 0 skipped |
+| Task 3: `test_phase19_gate`, `test_phase18_gate`, `test_decision_alignment*`, `test_agents_md`, `test_binance_limits_ratified_file`, `test_research_protocol_v250/v260`, `test_research_gate_negative`, `test_kill_gate_docs`, `test_deploy_docs`, `test_domain_enums`, `test_transitions`, `test_geometry_audit_doc` | 674 passed, 0 skipped |
+| Other files that build an Approval or read approvals (`test_analytics_lifecycle`, `test_approval_message`, `test_approval_replay`, `test_drills`, `test_paper_attribution`, `test_paper_shadow_messages`, `test_paper_shadow_pg`, `test_paper_shadow_reservations`, `test_persistence_constraints_pg`, `test_persistence_journal_pg`, `test_phase8_audit_reviewfix`), `TRADING_CI_STRICT=1` | 301 passed, 0 skipped |
+
+The pass counts of the runs overlap (`test_persistence_migration_pg`, `test_demo_rehearsal_flow` and
+others appear in more than one run); they are not additive.
+
+**Not run or not verified:**
+- The full suite (`-m "not docker"`) and the `-m docker` suite.
+- Any `--execute`, the Demo, or the network. RISK-04 and APRV-01 stay Pending in
+  `.planning/REQUIREMENTS.md` (no Demo run).
+- A host database upgrade to revision 0006 through the compose `migrate` service (choice 9). The
+  migration was exercised only on throwaway `t17_*_test` databases built by `alembic upgrade`.
+- A consume-time database check of the approved quantity (choice 6) and the APPROVE message showing
+  a quantity (Phase 23).
+
+_Batch 4 fixed: 2026-10-20T12:22:00Z_
+_Fixer: Claude (gsd-executor, quick 261020-q1o)_

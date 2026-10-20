@@ -1,6 +1,6 @@
 # 19-DEC-D055-DRAFT: proposed closure of D055 (draft for the owner)
 
-Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` has no row for it. The owner accepts, edits or rejects it; a row (provisional id D078; D077 is the stop-lost row of 19-REVIEW WR-04) is written only after that.
+Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` has no row for it. The owner accepts, edits or rejects it; a row (provisional id D079; D077 is the stop-lost row of 19-REVIEW WR-04 and D078 is the approved-quantity row of 19-REVIEW WR-01) is written only after that.
 
 Basis: the owner's words of 2026-10-18 ("adopt kèm các điểm trên"), recorded in `19-NOTES.md`, and the Phase 18 Demo probe evidence of 2026-10-16.
 

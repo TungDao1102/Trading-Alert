@@ -59,6 +59,8 @@ PHASE19_ARTIFACTS: tuple[str, ...] = (
     "src/execution/live_context.py",
     # Migration 0005 (19-06).
     "src/db/alembic/versions/0005_live_sized_risk.py",
+    # Migration 0006 (review-fix batch 4, 19-REVIEW WR-01, D078).
+    "src/db/alembic/versions/0006_approval_quantity.py",
     # Configuration (19-01).
     "config/execution/execution-limits-v1.toml",
     "config/execution/README.md",
@@ -126,9 +128,11 @@ PHASE19_SYMBOLS: dict[str, tuple[str, ...]] = {
         "parse_execution_limits",
     ),
     "src.execution.binding": (
+        "APPROVED_QUANTITY_MISSING",
         "BindingVerdict",
         "BoundPlan",
         "GEOMETRY_INVALID_AFTER_SNAP",
+        "PLAN_QUANTITY_MISMATCH",
         "PLAN_SIDE_MISMATCH",
         "PLAN_SIGNAL_MISMATCH",
         "PLAN_SYMBOL_MISMATCH",
@@ -294,6 +298,14 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("tests/test_pre_placement.py", "test_check_symbol_free_verdicts"),
         ("tests/test_pre_placement.py", "test_check_mark_price_position"),
         ("tests/test_execution_binding.py", "test_check_quantity_bound"),
+        (
+            "tests/test_execution_binding.py",
+            "test_wr01_an_inflated_plan_object_is_refused_although_its_hash_still_verifies",
+        ),
+        (
+            "tests/test_execution_manager.py",
+            "test_wr01_a_plan_quantity_above_the_stored_approved_quantity_is_refused",
+        ),
         ("tests/test_protection_branches.py", "test_branch_b2_entry_terminal_stop_unconfirmed"),
     ),
     "EXEC-07": (
@@ -529,6 +541,9 @@ NEW_PLAIN_CODES: dict[str, str] = {
     "PLAN_SYMBOL_MISMATCH": "src/execution/binding.py",
     "PLAN_SIDE_MISMATCH": "src/execution/binding.py",
     "QUANTITY_ABOVE_APPROVED": "src/execution/binding.py",
+    # Review-fix batch 4, 19-REVIEW WR-01, D078.
+    "PLAN_QUANTITY_MISMATCH": "src/execution/binding.py",
+    "APPROVED_QUANTITY_MISSING": "src/execution/binding.py",
     "GEOMETRY_INVALID_AFTER_SNAP": "src/execution/binding.py",
     "WORKING_TYPE_NOT_MARK_PRICE": "src/execution/binding.py",
     "PLAN_STATUS_INVALID": "src/execution/pre_placement.py",

@@ -100,7 +100,7 @@ No other deviations.
 
 ## Open items for the owner
 
-- Accept, edit or reject `19-DEC-Q5-DRAFT.md`; a DECISIONS row (provisional id D079) follows only after that.
+- Accept, edit or reject `19-DEC-Q5-DRAFT.md`; a DECISIONS row (provisional id D080) follows only after that.
 - O-04: the numbers for bounded reconciliation (windows, re-probe counts) are not set anywhere.
 - Phase 20: whether the 3-day not-found rule of restart recovery (EXECUTION_SPEC 10.1, records a young not-found intent as REJECTED) may apply to an entry that went UNKNOWN after an ambiguous placement error. Q5 argues that not-found is not proof of absence there, so this needs an explicit decision.
 - Plan 19-17's owner-gap register lists Q5 and was not touched.

@@ -1,6 +1,6 @@
 # 19-DEC-Q5-DRAFT: proposed closure of Q5 (draft for the owner)
 
-Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` has no row for it. The owner accepts, edits or rejects it; a row (provisional id D079; the D055 draft waits for D078, and D077 is the stop-lost row of 19-REVIEW WR-04) is written only after that.
+Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` has no row for it. The owner accepts, edits or rejects it; a row (provisional id D080; the D055 draft waits for D079, D077 is the stop-lost row of 19-REVIEW WR-04 and D078 is the approved-quantity row of 19-REVIEW WR-01) is written only after that.
 
 Basis: the owner's decision of 2026-10-20 (Q5) that answers the Phase 18 review item src/WR-02 and 19-RESEARCH Q5 (the second `place_entry` attempt), and quick task 261020-jua.
 
