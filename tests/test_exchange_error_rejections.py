@@ -43,9 +43,7 @@ from tests.test_binance_usdm_signed_calls import (
     _protective,
 )
 from tests.test_binance_usdm_signed_calls import _run as _run_coro
-from tests.test_execution_attach import FakeExecutionAdapter as AttachAdapter
-from tests.test_execution_attach import _attach, _load_expected
-from tests.test_execution_attach import _RecordingSafeModeController as AttachSafeMode
+from tests.test_execution_attach import STOP_ID, TP1_ID, TP2_ID, protected_rig, run_attach
 from tests.test_execution_manager import (
     PRE_PLACEMENT_READS,
     FakeExecutionAdapter,
@@ -223,48 +221,48 @@ def test_adapter_makes_one_sdk_call_per_placement_and_reraises_unchanged(
 
 
 @pytest.mark.parametrize(("code", "text"), OWNER_CASES, ids=OWNER_IDS)
-def test_rejected_stop_loss_in_attach_is_entry_without_protective(code: int, text: str) -> None:
-    expected = _load_expected()
+async def test_rejected_take_profit_in_attach_is_entry_without_protective_and_keeps_the_stop(
+    code: int, text: str
+) -> None:
+    """Plan 19-16 (D-17): attach never places a stop, so the owner codes reach it on a take-profit
+    leg. A definitively rejected TP1 holds ENTRY_WITHOUT_PROTECTIVE with SAFE_MODE, names the
+    exception TYPE only (never the message text), leaves TP2 unsent and the confirmed stop in
+    place, and closes the TP1 intent as REJECTED (it replaces the plan 18-26 stop test)."""
+    rig = await protected_rig()
+    rig.fake.reject_next_algo(code, text)
 
-    class _StopRejected(AttachAdapter):
-        async def place_algo_protective(self, **kwargs: Any) -> Any:
-            await super().place_algo_protective(**kwargs)
-            raise _sdk_error(code, text)
-
-    adapter = _StopRejected()
-    safe_mode = AttachSafeMode()
-
-    outcome = _attach(adapter, safe_mode)
-
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
-    assert outcome.placed_legs == ()
-    assert outcome.failure_detail == "STOP_LOSS: BadRequestError"  # never the message text
-    assert [c["kwargs"]["client_algo_id"] for c in adapter.calls] == [expected["sl_algo_client_id"]]
-    assert safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
-
-
-def test_rejected_take_profit_in_attach_is_entry_without_protective() -> None:
-    expected = _load_expected()
-
-    class _Tp1Rejected(AttachAdapter):
-        async def place_algo_protective(self, **kwargs: Any) -> Any:
-            if kwargs.get("client_algo_id") == expected["tp1_algo_client_id"]:
-                await super().place_algo_protective(**kwargs)
-                raise _sdk_error(-4016, DEMO_4016)
-            return await super().place_algo_protective(**kwargs)
-
-    adapter = _Tp1Rejected()
-    safe_mode = AttachSafeMode()
-
-    outcome = _attach(adapter, safe_mode)
+    outcome = await run_attach(rig)
 
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
     assert outcome.placed_legs == ("STOP_LOSS",)
-    assert outcome.failure_detail == "TAKE_PROFIT_1: BadRequestError"
-    placed_ids = [c["kwargs"]["client_algo_id"] for c in adapter.calls]
-    assert placed_ids == [expected["sl_algo_client_id"], expected["tp1_algo_client_id"]]
-    assert expected["tp2_algo_client_id"] not in placed_ids
-    assert safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    assert outcome.failure_detail == "TAKE_PROFIT_1: BadRequestError"  # never the message text
+    assert [c["kwargs"]["client_algo_id"] for c in rig.fake.calls_to("place_algo_protective")] == [
+        TP1_ID
+    ]
+    assert rig.safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    assert STOP_ID in rig.fake.open_algos
+    tp1_row = rig.inner_store.get_intent(approval_id=rig.entry.approval_id, role="TAKE_PROFIT_1")
+    assert tp1_row.intent_status is ExecutionIntentStatus.REJECTED
+
+
+async def test_rejected_second_take_profit_in_attach_keeps_tp1_and_the_stop() -> None:
+    rig = await protected_rig()
+    original = rig.fake.place_algo_protective
+
+    async def reject_tp2(**kwargs: Any) -> Any:
+        if kwargs["client_algo_id"] == TP2_ID:
+            rig.fake.reject_next_algo(-4016, DEMO_4016)
+        return await original(**kwargs)
+
+    rig.fake.place_algo_protective = reject_tp2  # type: ignore[method-assign]
+
+    outcome = await run_attach(rig)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
+    assert outcome.placed_legs == ("STOP_LOSS", "TAKE_PROFIT_1")
+    assert outcome.failure_detail == "TAKE_PROFIT_2: BadRequestError"
+    assert {STOP_ID, TP1_ID} <= set(rig.fake.open_algos)
+    assert rig.safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
 
 
 @pytest.mark.parametrize(("code", "text"), OWNER_CASES, ids=OWNER_IDS)
