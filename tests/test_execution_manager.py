@@ -2427,6 +2427,46 @@ async def test_second_approval_of_the_same_plan_is_invalidated_without_placement
     assert _placement_calls(adapter) == []
 
 
+async def test_stored_quantity_refused_at_consume_places_nothing() -> None:
+    """Quick task 261020-q2d (D078 (5)): the database did not confirm the bound quantity."""
+    from src.execution.manager import APPROVED_QUANTITY_NOT_CONFIRMED
+    from src.persistence.errors import ApprovedQuantityRefused
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=FailingIntentStore(
+            "consume_and_record_entry_intent", ApprovedQuantityRefused("stored NULL")
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, APPROVED_QUANTITY_NOT_CONFIRMED)
+    assert APPROVED_QUANTITY_NOT_CONFIRMED == "APPROVED_QUANTITY_NOT_CONFIRMED"
+    assert _placement_calls(adapter) == []
+
+
+async def test_consume_receives_the_bound_approved_quantity() -> None:
+    """The store is handed the quantity gate 1c bound, next to the quantity it will place."""
+    from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
+
+    seen: list[dict[str, Any]] = []
+
+    class _Spy(InMemoryExecutionIntentStore):
+        def consume_and_record_entry_intent(self, **kwargs: Any) -> bool:
+            seen.append(kwargs)
+            return super().consume_and_record_entry_intent(**kwargs)
+
+    case = _load_input()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, intent_store=_Spy())
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert len(seen) == 1
+    approved = _coerce_decimal(case["quantity_after_rounding"], "quantity_after_rounding")
+    assert seen[0]["approved_quantity"] == approved
+    assert seen[0]["intended_quantity"] <= approved
+
+
 async def test_store_unavailable_at_entry_mark_sent_places_nothing() -> None:
     from src.persistence.errors import StoreUnavailable
 
