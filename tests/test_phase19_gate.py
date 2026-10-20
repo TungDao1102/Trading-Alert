@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import re
 import tomllib
 from decimal import Decimal
 from pathlib import Path
@@ -513,3 +514,110 @@ def test_invariant_9_every_requirement_name_is_a_known_requirement() -> None:
     text = (ROOT / ".planning" / "REQUIREMENTS.md").read_text(encoding="utf-8")
     for requirement in REQUIREMENT_TESTS:
         assert f"**{requirement}**" in text, requirement
+
+
+# --------------------------------------------------------------------------- #
+# GLOSSARY 9.3 and 9.4 (plan 19-17 Task 2).
+# --------------------------------------------------------------------------- #
+
+# New plain-string reason codes (plans 19-02, 19-03, 19-15). They are NOT RejectionReason
+# members (research F10); GLOSSARY 9.3 documents them with their emitting module.
+NEW_PLAIN_CODES: dict[str, str] = {
+    "PLAN_SIGNAL_MISMATCH": "src/execution/binding.py",
+    "PLAN_SYMBOL_MISMATCH": "src/execution/binding.py",
+    "PLAN_SIDE_MISMATCH": "src/execution/binding.py",
+    "QUANTITY_ABOVE_APPROVED": "src/execution/binding.py",
+    "GEOMETRY_INVALID_AFTER_SNAP": "src/execution/binding.py",
+    "WORKING_TYPE_NOT_MARK_PRICE": "src/execution/binding.py",
+    "PLAN_STATUS_INVALID": "src/execution/pre_placement.py",
+    "PLAN_INVALIDATED_BEFORE_PLACEMENT": "src/execution/pre_placement.py",
+    "INVALIDATION_INPUT_UNAVAILABLE": "src/execution/pre_placement.py",
+    "VALIDITY_TOO_SHORT": "src/execution/pre_placement.py",
+    "LIMITS_NOT_CONFIGURED": "src/execution/pre_placement.py",
+    "SYMBOL_HAS_POSITION": "src/execution/pre_placement.py",
+    "SYMBOL_HAS_OPEN_ORDER": "src/execution/pre_placement.py",
+    "UNPROTECTED_POSITION_EXISTS": "src/execution/pre_placement.py",
+    "SYMBOL_STATE_UNAVAILABLE": "src/execution/pre_placement.py",
+    "MARK_PRICE_UNAVAILABLE": "src/execution/pre_placement.py",
+    "MARK_PRICE_CROSSED_STOP": "src/execution/pre_placement.py",
+    "MARK_PRICE_OUTSIDE_ZONE": "src/execution/pre_placement.py",
+    "HEDGE_MODE_UNSUPPORTED": "src/execution/pre_placement.py",
+    "ENTRY_REFUSED_BEFORE_SEND": "src/execution/manager.py",
+}
+
+# New SAFE_MODE entry reasons (plans 19-12, 19-14, 19-15) and the existing reasons whose
+# "Emitted in" cell grew. UNKNOWN_EXCHANGE_ERROR is deliberately absent: plan 19-15 added it as a
+# SAFE_MODE reason and the Q5 quick task (261020-jua) deleted it again; it survives only as an
+# ExchangeErrorCategory in src/domain/exchange_errors.py.
+NEW_SAFE_MODE_REASONS: dict[str, str] = {
+    "CLOSE_REQUIRED": "src/execution/protection.py",
+    "EMERGENCY_CLOSE_FAILED": "src/execution/emergency_close.py",
+    "PROTECTION_HANDOFF_FAILED": "src/execution/manager.py",
+}
+EXTENDED_SAFE_MODE_REASONS: dict[str, str] = {
+    "ENTRY_WITHOUT_PROTECTIVE": "src/execution/protection.py",
+    "DB_FAILURE": "src/execution/protection.py",
+}
+
+
+def _glossary_table_rows(heading: str, next_heading: str) -> dict[str, list[str]]:
+    """First-cell code -> all cells, for the table under a `###` heading of docs/GLOSSARY.md."""
+    text = (ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8")
+    start = text.index(heading)
+    end = text.index(next_heading, start)
+    rows: dict[str, list[str]] = {}
+    for line in text[start:end].splitlines():
+        match = re.match(r"\|\s*`([A-Z0-9_]+)`\s*\|", line)
+        if match is None:
+            continue
+        code = match.group(1)
+        assert code not in rows, f"{code} appears twice under {heading!r}"
+        rows[code] = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return rows
+
+
+def _source_string_constants(relative: str) -> set[str]:
+    """String values assigned to a module-level name in `relative` (the emitted codes)."""
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+    values: set[str] = set()
+    for node in tree.body:
+        value = node.value if isinstance(node, ast.Assign | ast.AnnAssign) else None
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            values.add(value.value)
+    return values
+
+
+def test_glossary_93_lists_every_new_plain_code_once_with_its_module() -> None:
+    rows = _glossary_table_rows("### 9.3 ", "### 9.4 ")
+    missing = sorted(set(NEW_PLAIN_CODES) - set(rows))
+    assert missing == [], f"GLOSSARY 9.3 lacks {missing}"
+    for code, module in NEW_PLAIN_CODES.items():
+        assert module in rows[code][1], f"{code}: 'Emitted in' does not name {module}"
+        assert rows[code][3].startswith("proposed canonical, promote in Phase"), code
+        assert code in _source_string_constants(module), f"{module} no longer defines {code}"
+
+
+def test_glossary_93_marks_the_invalidation_code_as_distinct_from_invalidated() -> None:
+    rows = _glossary_table_rows("### 9.3 ", "### 9.4 ")
+    meaning = rows["PLAN_INVALIDATED_BEFORE_PLACEMENT"][2]
+    assert "INVALIDATED" in meaning and "distinct" in meaning
+
+
+def test_glossary_94_lists_the_new_safe_mode_reasons_once_with_their_module() -> None:
+    rows = _glossary_table_rows("### 9.4 ", "Do not create synonyms")
+    for code, module in {**NEW_SAFE_MODE_REASONS, **EXTENDED_SAFE_MODE_REASONS}.items():
+        assert code in rows, f"GLOSSARY 9.4 lacks {code}"
+        assert module in rows[code][1], f"{code}: 'Emitted in' does not name {module}"
+    assert "UNKNOWN_EXCHANGE_ERROR" not in rows, "no code emits it as a SAFE_MODE reason"
+
+
+def test_glossary_91_and_the_rejection_reason_enum_are_unchanged() -> None:
+    from src.domain.enums import RejectionReason
+
+    text = (ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8")
+    block = text[text.index("### 9.1 ") : text.index("### 9.2 ")]
+    codes = re.search(r"```text\n(.*?)```", block, re.DOTALL)
+    assert codes is not None
+    listed = set(codes.group(1).split())
+    assert listed == {member.value for member in RejectionReason}
+    assert listed.isdisjoint(NEW_PLAIN_CODES)
