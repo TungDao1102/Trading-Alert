@@ -107,7 +107,12 @@ from src.execution.pre_placement import (
 )
 from src.execution.protection import RestingEntry
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
-from src.persistence.errors import ApprovedQuantityRefused, IntentStateConflict, PersistenceError
+from src.persistence.errors import (
+    ApprovedQuantityInconsistent,
+    ApprovedQuantityRefused,
+    IntentStateConflict,
+    PersistenceError,
+)
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
 
@@ -248,7 +253,8 @@ ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
 
 # Plain NO_TRADE reason (D078 (5), quick task 261020-q2d): the approval row read inside the
 # consume transaction stores no approved quantity, one that differs from the quantity bound at
-# gate 1c, or one below the quantity about to be placed. Nothing is consumed or sent.
+# gate 1c, or one below the quantity about to be placed. Nothing is consumed or sent. The last
+# two cases also enter SAFE_MODE (`_APPROVED_QUANTITY_INCONSISTENT`); a NULL does not.
 APPROVED_QUANTITY_NOT_CONFIRMED: str = "APPROVED_QUANTITY_NOT_CONFIRMED"
 
 
@@ -966,6 +972,21 @@ async def execute_approved_plan(
     except (TypeError, ValueError):
         return ExecutionOutcome(is_no_trade=True, reason_code=PROTECTION_INPUTS_INVALID)
 
+    def _enter_safe_mode(reason: str) -> None:
+        """Enter SAFE_MODE without letting its audit row abort the protection steps.
+
+        The controller sets its in-memory flag BEFORE journaling, so when the journal
+        itself fails (the same database that just failed) only the audit row is lost.
+        Protection outranks the audit row (D034, 17-REVIEW CR-01): the stop loss and the
+        unprotected-entry cancel must still run. Only `Exception` is caught; a crash
+        (any `BaseException`) propagates untouched. Defined before the consume so the
+        inconsistent-quantity refusal (D078 (6)) uses the same non-raising entry.
+        """
+        try:
+            safe_mode_controller.enter_safe_mode(reason=reason, now_utc=now_utc)
+        except Exception:  # noqa: BLE001, S110 — flag already set; only the audit row is lost
+            pass
+
     # Write-ahead (D-13, D-14 steps 1-2): consume the approval by committing the
     # ENTRY intent (INTENDED) BEFORE any order leaves. Pre-placement NO_TRADE
     # verdicts above never consume (research Open Q1). Losing the race, or
@@ -985,9 +1006,15 @@ async def execute_approved_plan(
             now_utc=now_utc,
             sized_realized_risk=sized.realized_risk,
         )
+    except ApprovedQuantityInconsistent:
+        # D078 (6), owner decision 2026-10-20: the stored approved quantity differs from the
+        # bound one or is below the quantity to place, so the caller's Approval and the database
+        # disagree. Rolled back, nothing sent; SAFE_MODE is entered (non-raising) as well.
+        _enter_safe_mode(_APPROVED_QUANTITY_INCONSISTENT)
+        return ExecutionOutcome(is_no_trade=True, reason_code=APPROVED_QUANTITY_NOT_CONFIRMED)
     except ApprovedQuantityRefused:
-        # D078 (5): the stored approval row, read inside the consume transaction, does not
-        # confirm the quantity the caller-supplied Approval carried. Rolled back, nothing sent.
+        # D078 (6): the row stores no quantity (a legacy row from before revision 0006), or a
+        # store raised the base class. NO_TRADE without SAFE_MODE (owner decision 2026-10-20).
         return ExecutionOutcome(is_no_trade=True, reason_code=APPROVED_QUANTITY_NOT_CONFIRMED)
     except IntentStateConflict:
         # A second approval for the same plan (or another unique arbiter): the plan
@@ -1010,20 +1037,6 @@ async def execute_approved_plan(
     # placed: protection outranks the audit row, D034). Only `PersistenceError` is
     # caught here; a crash (any BaseException) must propagate untouched.
     store_failed = False
-
-    def _enter_safe_mode(reason: str) -> None:
-        """Enter SAFE_MODE without letting its audit row abort the protection steps.
-
-        The controller sets its in-memory flag BEFORE journaling, so when the journal
-        itself fails (the same database that just failed) only the audit row is lost.
-        Protection outranks the audit row (D034, 17-REVIEW CR-01): the stop loss and the
-        unprotected-entry cancel must still run. Only `Exception` is caught; a crash
-        (any `BaseException`) propagates untouched.
-        """
-        try:
-            safe_mode_controller.enter_safe_mode(reason=reason, now_utc=now_utc)
-        except Exception:  # noqa: BLE001, S110 — flag already set; only the audit row is lost
-            pass
 
     def _store_write(write: Callable[[], object]) -> bool:
         """Run one post-acknowledgement store write; False means the store failed."""
@@ -1329,6 +1342,11 @@ _PROTECTION_HANDOFF_FAILED: str = "PROTECTION_HANDOFF_FAILED"
 # SAFE_MODE reason when the operational database fails after an entry may exist
 # (GLOSSARY section 9.4; the same literal `src/ops/drills.py` uses).
 _DB_FAILURE: str = "DB_FAILURE"
+
+# SAFE_MODE reason when the approval row read inside the consume transaction stores a quantity
+# that differs from the bound one or is below the quantity to place (D078 (6), owner decision
+# 2026-10-20; a NULL legacy row is NO_TRADE without SAFE_MODE).
+_APPROVED_QUANTITY_INCONSISTENT: str = "APPROVED_QUANTITY_INCONSISTENT"
 
 
 @dataclass(frozen=True)

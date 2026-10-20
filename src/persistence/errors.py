@@ -83,3 +83,18 @@ class ApprovedQuantityRefused(IntentStateConflict):
     so a caller that does not know it still fails closed; the transaction rolls back, so the
     intent row is not written and the approval stays unconsumed.
     """
+
+
+class ApprovedQuantityMissing(ApprovedQuantityRefused):
+    """The approval row stores no approved quantity (a legacy row from before revision 0006).
+
+    Owner decision 2026-10-20 (D078 (6)): refused as NO_TRADE without SAFE_MODE.
+    """
+
+
+class ApprovedQuantityInconsistent(ApprovedQuantityRefused):
+    """The stored approved quantity differs from the bound one or is below the quantity to place.
+
+    Owner decision 2026-10-20 (D078 (6)): refused as NO_TRADE and SAFE_MODE is entered, because
+    the caller's Approval and the database disagree.
+    """

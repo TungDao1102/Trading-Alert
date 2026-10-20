@@ -48,7 +48,12 @@ from src.domain.enums import (
 )
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
 from src.execution.intent_store import IntentRecord, RecordedOutcome
-from src.persistence.errors import ApprovedQuantityRefused, IntentStateConflict, ParentRowMissing
+from src.persistence.errors import (
+    ApprovedQuantityInconsistent,
+    ApprovedQuantityMissing,
+    IntentStateConflict,
+    ParentRowMissing,
+)
 from src.persistence.uow import OperationalDatabase
 
 _SQLSTATE_UNIQUE_VIOLATION = "23505"
@@ -132,11 +137,15 @@ def _require_stored_quantity(
         return
     stored: Decimal | None = row.approved_quantity
     if stored is None:
-        raise ApprovedQuantityRefused("approval row stores no approved quantity")
+        raise ApprovedQuantityMissing("approval row stores no approved quantity")
     if stored != approved_quantity:
-        raise ApprovedQuantityRefused("stored approved quantity differs from the bound quantity")
+        raise ApprovedQuantityInconsistent(
+            "stored approved quantity differs from the bound quantity"
+        )
     if intended_quantity > stored:
-        raise ApprovedQuantityRefused("quantity to place is above the stored approved quantity")
+        raise ApprovedQuantityInconsistent(
+            "quantity to place is above the stored approved quantity"
+        )
 
 
 class PgExecutionStateStore:
