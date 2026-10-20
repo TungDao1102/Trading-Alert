@@ -1,0 +1,92 @@
+16-65 final gate after the fixes of the review of c654524..6f73e5b (the Phase 16 part, reviewed 2026-10-20; the Phase 18 part was reviewed by the owner separately)
+run on 2026-10-20 on a clean tracked tree (untracked .gsd/ and .planning/milestone.lock and the modified .planning/config.json pre-exist; they were not staged, edited or reverted and are not part of the repository state under test)
+branch: develop
+environment: Windows 10, .venv Python 3.13, TRADING_CI_STRICT unset, TEST_DATABASE_URL set (native PostgreSQL 17 service on this machine; the PostgreSQL tests ran, none of them is among the skips; tests/test_paper_shadow_pg.py and tests/test_paper_shadow_runtime_pg.py were also run alone afterwards: 7 passed, 0 skipped)
+run discipline: one heavy process at a time; before the run no other python process with pytest or a profiler in its command line was running (Get-CimInstance Win32_Process); the full suite ran sequentially (no -n, pytest-xdist not used); no file was changed while it ran
+tree under test: HEAD ce791934d555bb6e3aef9e1b1933912b20b02f7f (the docs commit of 16-65 Task 1b, .planning only)
+commit under test (IMAGE_COMMIT, the last commit that changes code, tests, configuration or deployment files): 9b27da55ff1675b66c8033792b68186da9b4a498
+  git log -1 --format=%H -- src scripts tests config deploy Dockerfile .dockerignore docker-compose.yml params pyproject.toml uv.lock alembic.ini docs/research/universe
+    9b27da55ff1675b66c8033792b68186da9b4a498  fix(16-65): only the instance-lease holder owns the liveness stamp
+  git diff --quiet 9b27da5 HEAD -- (the same paths): exit 0, so the tested tree and IMAGE_COMMIT have the same code, tests and image build context
+  git diff --name-only 9b27da5 HEAD:
+    .planning/phases/16-paper-runtime-composition/16-65-PLAN.md
+    .planning/phases/16-paper-runtime-composition/decisions/16-DEC-LIVENESS-FIRST-FRAME.md
+  (one commit, ce79193, .planning only; neither file is in the image)
+
+range check
+git merge-base --is-ancestor 6f599dd 9b27da5 -> exit 0 (the TP2 positivity guard is in IMAGE_COMMIT)
+git merge-base --is-ancestor 6f73e5b 9b27da5 -> exit 0 (the previous IMAGE_COMMIT of evidence/16-64-gate.txt is an ancestor)
+commits in 6f73e5b..9b27da5 that change the paths above (oldest last):
+  9b27da5 fix(16-65): only the instance-lease holder owns the liveness stamp
+  8b01a61 perf(261020-spd): relate each case-input file to the raw root once (B1)
+  5000686 test(261020-spd): compute the warm-up manifest dataset_id once per val_end (A3)
+  c410247 test(261020-spd): one session-shared terminal world and lower run (A2)
+  622e65f test(261020-spd): build_store(oi=False) for the modules that only build engine series (A1)
+  56844f9 fix(16-65): export_soak_evidence refuses an explicit --as-of later than the current time (P16R-01)
+  83b46fe docs(261020-xd4): document the opt-in parallel test run and record the xdist measurements
+  7e54082 chore(261020-xd4): add pytest-xdist to the dev extra for an opt-in parallel test run
+  f1cf29b docs(16-65): config/paper/README.md names the stamp schema versions in words
+  4bc0101 docs(16-65): the liveness stamp per process, the Compose-like bucket guard, and the decision note
+  86b4db7 fix(16-65): backup.sh reads BACKUP_S3_BUCKET as Compose does and substitutes unit tokens safely
+  5c866c4 fix(16-65): the liveness stamp belongs to its process and records no frame before the first one
+git diff --stat 6f73e5b 9b27da5 -- (the same paths): 20 files changed, 1127 insertions(+), 128 deletions(-)
+  production code: src/paper/liveness.py, src/paper/runtime.py (16-65), deploy/backup.sh (16-65), scripts/export_soak_evidence.py (16-65, P16R-01), src/data/case_input.py (261020-spd B1, research case-input builder; src/paper imports neither src.data.case_input nor src.research: git grep over src/paper finds none)
+  documentation inside the paths: config/paper/README.md (16-65), scripts/dev/README.md (261020-xd4)
+  dependencies: pyproject.toml and uv.lock (261020-xd4: pytest-xdist in the dev extra)
+  tests: tests/conftest.py, tests/test_case_input_builder.py, tests/test_case_input_relative_paths_equivalence.py, tests/test_research_*.py (261020-spd); tests/test_deploy_backup_scripts.py, tests/test_paper_runtime_liveness.py, tests/test_soak_evidence_export.py (16-65)
+  unchanged since 6f73e5b: Dockerfile, .dockerignore, docker-compose.yml, params/, docs/research/universe, alembic.ini
+note: the speed task 261020-spd (622e65f, c410247, 5000686, 8b01a61) landed before 9b27da5 and is therefore part of IMAGE_COMMIT and of the re-review range; its only production change is 8b01a61 in src/data/case_input.py (research path, not imported by the paper runtime)
+
+what plan 16-65 fixed (review of c654524..6f73e5b)
+  MAJOR  liveness stamp: a crash-restart loop kept --liveness green (the watchdog stamped last_frame = now at its start and no exit removed the stamp). 5c866c4: schema paper-liveness/2 with no last-frame time before the first message; the stamp is removed at the start and on every exit. 9b27da5 (follow-up, orchestrator decision, owner informed): the start removal moved to right after the instance lease, so only the lease holder owns the stamp and a start refused before or by the lease (exit 8) touches no stamp. decisions/16-DEC-LIVENESS-FIRST-FRAME.md.
+  MINOR  deploy/backup.sh read BACKUP_S3_BUCKET differently from Compose (export prefix, last assignment, quotes, inline comment); now parsed like Compose and fail closed when undeterminable (86b4db7)
+  MINOR  deploy/backup.sh unit substitution could rewrite & or % in a path; patsub_replacement off and the heartbeat.sh path pattern enforced (86b4db7)
+  MINOR  P16R-01 export_soak_evidence: an explicit --as-of later than now made a mid-soak bundle look final; now refused, exit 2, nothing written or published (56844f9; owner agreed to fix it in 16-65)
+  deferred, not touched: P16R-02 (shadow_confirm _deferred_confirmed, ROADMAP Phase 23 inherited items) and P16R-03 (expire_due on the loop thread, ROADMAP Phase 24, folded into G4-040); deferred-items.md
+
+exit=0 .venv/Scripts/python -m pytest -m "not docker" -q -rs -p no:cacheprovider
+  10460 tests ran: 10441 passed, 19 skipped, 0 failed, 0 errors (counted from the progress lines; the quiet configuration prints no final count line). 2026-10-20T07:00:21Z to 07:20:46Z (wall time 20 min 25 s). PTBDeprecationWarning (retry_after) from the telegram package, unrelated.
+  skip reasons (19):
+    SKIPPED [1] tests\test_analytics_files.py:974: symlinks unavailable on this platform: OSError
+    SKIPPED [1] tests\test_bootstrap.py:947: NTFS cannot represent POSIX modes
+    SKIPPED [4] tests\test_deploy_heartbeat.py:401: file modes do not exist on Windows
+    SKIPPED [12] tests\infra_helpers.py:50: required tool not found on PATH: shellcheck
+    SKIPPED [1] tests\test_user_data_smoke_dry_run.py:383: symlinks are not available on this platform
+  count note: 16-64 ran 10412; the difference of 48 comes from tests added since then by 16-65 and 261020-spd (among them the 14 of test_case_input_relative_paths_equivalence.py); not traced per file.
+  an earlier full run on a87489b (before the 9b27da5 follow-up and before 261020-spd) was cancelled by the owner's decision and is not a gate result.
+exit=0 .venv/Scripts/python -m ruff check
+  All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+  632 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+  Success: no issues found in 202 source files
+exit=0 uv lock --check
+  Resolved 62 packages in 3ms
+exit=0 .venv/Scripts/python.exe scripts/verify_decision_alignment.py all
+  ALL_PASS all (67 PASS lines, no other line)
+
+user-owned inputs unchanged since the review base c654524:
+git diff --name-only c654524 HEAD -- params/ docs/research/preregistration/research-run-1-manifest.json docs/research/preregistration/research-run-1-grid-*.json docs/research/preregistration/research-run-1-authorization-*.json config/paper/paper-runtime-v1.toml
+  (no output: nothing changed)
+  the owner-signed authorization files research-run-1-v2-2-0-authorization-*.json (dce3195, 16-61) and research-run-1-v2-3-0-authorization-*.json (f5ee61a, 16-63) are additions after c654524 (git diff --name-status: 6 x A), each with exactly one commit
+
+configuration in force: config/paper/paper-runtime-v2.toml
+git log --format=%H -- config/paper/paper-runtime-v2.toml
+  63ffa580b0ca2667eaf0a8c2cd88ab32b461a832
+  (exactly one commit, the one of plan 16-56, which added it after c654524; git diff --name-only 63ffa58 HEAD -- config/paper/paper-runtime-v2.toml: no output)
+
+pytest-xdist and the runtime image
+  pyproject.toml has pytest-xdist>=3.8.0 in [project.optional-dependencies] dev (an extra, 7e54082).
+  the Dockerfile runtime stage copies pyproject.toml and uv.lock and runs `uv sync --frozen --no-dev`; no --extra and no --all-extras appear in the Dockerfile, so the dev extra (pytest, pytest-asyncio, respx, ruff, mypy, pytest-xdist) is not installed in the image; the ops stage builds FROM runtime.
+  check: `uv export --frozen --no-dev --no-hashes` lists no line matching pytest or xdist (0); with `--extra dev` it lists pytest-xdist==3.8.0.
+  the image does contain the changed uv.lock file itself (COPY), not the package.
+
+docker: not run for this gate (the docker-marked tests and a local image build were reported in evidence/16-64-gate.txt; Dockerfile, .dockerignore and docker-compose.yml are unchanged since 6f73e5b). The authoritative build is plan 16-43 on the soak host (RUNBOOK 20.6).
+
+IMAGE_COMMIT=9b27da55ff1675b66c8033792b68186da9b4a498
+  the commit plan 16-43 checks out on the soak host and builds the soak image from (RUNBOOK 20.6); it supersedes 6f73e5bb87167f386b22a64a00effa56ca4ef0bf of evidence/16-64-gate.txt for the soak.
+  it contains the TP2 positivity guard 6f599dd (simulator semantics 2.3.0) and every 16-65 fix; every later commit up to and including the evidence commit of this plan changes .planning files only.
+
+targeted re-review range (required before anything is pushed or merged; not part of this plan):
+  c654524..9b27da55ff1675b66c8033792b68186da9b4a498
+  the Phase 18 part of it was reviewed by the owner separately; the Phase 16 part up to 6f73e5b by the review of 2026-10-20; still unreviewed: 6f73e5b..9b27da5 (the 16-65 fixes, 261020-xd4 and 261020-spd)
