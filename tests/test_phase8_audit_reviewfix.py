@@ -234,6 +234,7 @@ def _valid_approve_kwargs() -> dict[str, Any]:
         "reason_codes": ["RSI_DIV"],
         "signal_id": "sig_audit",
         "detected_at_utc": datetime(2026, 9, 19, 12, 0, tzinfo=UTC),
+        "approved_quantity": Decimal("0.01"),
     }
 
 
@@ -1240,7 +1241,8 @@ def test_wr23_pure_surfaces_import_without_telegram() -> None:
         "expiry_utc=datetime(2026, 9, 19, 14, 0, tzinfo=UTC), "
         "invalidation='x', exposure_quote=Decimal('10'), "
         "reason_codes=['R'], signal_id='s', "
-        "detected_at_utc=datetime(2026, 9, 19, 12, 0, tzinfo=UTC)); "
+        "detected_at_utc=datetime(2026, 9, 19, 12, 0, tzinfo=UTC), "
+        "approved_quantity=Decimal('0.5')); "
         "assert 'BTCUSDT' in t; "
         "print('pure-ok')"
     )

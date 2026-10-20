@@ -53,6 +53,7 @@ def _make_payload() -> dict[str, Any]:
         "reason_codes": ["SETUP_DETECTED"],
         "signal_id": "sig_test_0000000000000000000000000000000000000000000000000000",
         "detected_at_utc": datetime(2026, 9, 19, 9, 0, tzinfo=UTC),
+        "approved_quantity": Decimal("2.415"),
     }
 
 
@@ -1098,3 +1099,71 @@ def test_telegram_callbacks_adapter_is_the_only_ptb_application_importer() -> No
     assert importers == [src_dir / "adapters" / "telegram_callbacks.py"], (
         f"only src/adapters/telegram_callbacks.py may import telegram.ext; found: {importers}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# r3b (D078 item (6)) -- the APPROVE message shows the approved quantity.
+# --------------------------------------------------------------------------- #
+
+
+def test_r3b_format_approve_shows_the_approved_quantity_line() -> None:
+    from src.adapters.telegram_notify import format_approve
+
+    lines = format_approve(**_make_payload()).split("\n")
+    quantity_lines = [i for i, line in enumerate(lines) if line.startswith("Quantity: ")]
+    entry_lines = [i for i, line in enumerate(lines) if line.startswith("Entry: ")]
+    assert len(quantity_lines) == 1 and len(entry_lines) == 1
+    assert lines[quantity_lines[0]] == "Quantity: 2.415"
+    assert quantity_lines[0] == entry_lines[0] + 1
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (Decimal("1E-7"), "0.0000001"),
+        (Decimal("0.0800"), "0.0800"),
+        (Decimal("1E+1"), "10"),
+        (Decimal("12345.123456789012345678"), "12345.123456789012345678"),
+    ],
+)
+def test_r3b_format_approve_quantity_is_plain_fixed_point_never_rounded(
+    value: Decimal, expected: str
+) -> None:
+    from src.adapters.telegram_notify import format_approve
+
+    payload = _make_payload()
+    payload["approved_quantity"] = value
+    lines = format_approve(**payload).split("\n")
+    (line,) = [x for x in lines if x.startswith("Quantity: ")]
+    assert line == f"Quantity: {expected}"
+    assert Decimal(line[len("Quantity: ") :]) == value
+
+
+def test_r3b_format_approve_refuses_a_missing_or_invalid_quantity() -> None:
+    from src.adapters.telegram_notify import format_approve
+
+    payload = _make_payload()
+    del payload["approved_quantity"]
+    with pytest.raises(TypeError):
+        format_approve(**payload)
+    for bad in (
+        None,
+        True,
+        1,
+        0.08,
+        "1",
+        Decimal("0"),
+        Decimal("-0.001"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+    ):
+        payload = _make_payload()
+        payload["approved_quantity"] = bad
+        with pytest.raises(ValueError, match="approved_quantity"):
+            format_approve(**payload)
+
+
+def test_r3b_format_approve_is_byte_stable() -> None:
+    from src.adapters.telegram_notify import format_approve
+
+    assert format_approve(**_make_payload()) == format_approve(**_make_payload())

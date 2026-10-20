@@ -97,6 +97,49 @@ def test_alert_text_carries_label_mode_and_both_time_zones() -> None:
         assert needle in text
 
 
+def test_r3b_shadow_alert_text_shows_the_plan_quantity() -> None:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+
+    text = format_shadow_alert(
+        signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+    )
+
+    lines = text.split("\n")
+    quantity_lines = [i for i, line in enumerate(lines) if line.startswith("Quantity: ")]
+    entry_lines = [i for i, line in enumerate(lines) if line.startswith("Entry: ")]
+    assert len(quantity_lines) == 1 and len(entry_lines) == 1
+    assert lines[quantity_lines[0]] == "Quantity: 0.08"
+    assert quantity_lines[0] == entry_lines[0] + 1
+
+
+async def test_r3b_the_sent_alert_shows_the_quantity_stored_on_both_rows() -> None:
+    stores = InMemoryShadowStores()
+    bot = FakeBot()
+    book = ShadowApprovalBook(stores, clock=lambda: T0)
+
+    await _send(stores, bot, book)
+
+    quantity_lines = [x for x in bot.sent[0].text.split("\n") if x.startswith("Quantity: ")]
+    assert len(quantity_lines) == 1
+    rows = list(stores.approvals.values())
+    assert {row.action for row in rows} == {ApprovalAction.APPROVE, ApprovalAction.SKIP_USER}
+    for row in rows:
+        assert row.approved_quantity is not None
+        assert quantity_lines[0] == "Quantity: " + format(row.approved_quantity, "f")
+        assert Decimal(quantity_lines[0][len("Quantity: ") :]) == row.approved_quantity
+
+
+def test_r3b_a_plan_without_a_positive_quantity_is_refused_by_the_alert_formatter() -> None:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal, quantity_after_rounding=Decimal("0"))
+
+    with pytest.raises(ValueError, match="approved_quantity"):
+        format_shadow_alert(
+            signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Test 2: parents first, journal first, then one send with two live buttons.
 # --------------------------------------------------------------------------- #
