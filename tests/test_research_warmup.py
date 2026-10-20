@@ -103,18 +103,10 @@ def _manifest(
         ),
         encoding="utf-8",
     )
-    dataset_id = build_case_input_data(
-        store,
-        symbols=[SYMBOL],
-        start_utc=STORE_START,
-        end_utc=val_end,
-        as_of_day_utc=val_end.date(),
-        series=ENGINE_SERIES,
-    ).dataset_id
     return DatasetManifest(
         universe_id="research-universe-v1",
         symbols=(SYMBOL,),
-        dataset_id=dataset_id,
+        dataset_id=_manifest_dataset_id(store, val_end),
         development_start_utc=STORE_START,
         development_end_utc=dev_end,
         validation_start_utc=dev_end,
@@ -132,6 +124,25 @@ def _manifest(
         constraint_source=constraints.name,
         constraint_sha256=hashlib.sha256(constraints.read_bytes()).hexdigest(),
     )
+
+
+# The module store is written once and never changed, so the manifest dataset_id of a
+# `val_end` is computed once per (store, val_end) and reused (quick task 261020-spd).
+_DATASET_IDS: dict[tuple[str, datetime], str] = {}
+
+
+def _manifest_dataset_id(store: Path, val_end: datetime) -> str:
+    key = (str(store), val_end)
+    if key not in _DATASET_IDS:
+        _DATASET_IDS[key] = build_case_input_data(
+            store,
+            symbols=[SYMBOL],
+            start_utc=STORE_START,
+            end_utc=val_end,
+            as_of_day_utc=val_end.date(),
+            series=ENGINE_SERIES,
+        ).dataset_id
+    return _DATASET_IDS[key]
 
 
 @dataclass
