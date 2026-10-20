@@ -58,6 +58,7 @@ Authority: `16-43-PLAN.md`. Where a command here differs from the plan, the RUNB
 ## 5. STOP: do not pin (or stop the trial) when
 - any section 0 check fails, IMAGE_COMMIT is not on origin/master, the re-review has not passed, or the workflow is disabled;
 - backup or restore drill fails, or a clean-state count is non-zero (before or after the drill);
+- the soak backup or the drill ran in local-only mode: the pin needs a backup against the real remote whose output carries `OFFSITE_COPY=verified` and a drill that passed against that remote; a run printing `OFFSITE_COPY=skipped` (`BACKUP_REMOTE=none`) never counts (owner decision 2026-10-20, RUNBOOK 20.5);
 - `soak-image.sh` fails, or the inspected image id differs from `APP_IMAGE_ID`;
 - the paper heartbeat did not alert while paper was held, or any of the five drill paths differs from section 3 (reboot and daemon restart are never an accepted deviation);
 - the pin exits non-zero; after the pin: any EvidenceGap, or a first tick that is not CLEAN, means stop and report; a new trial needs a new pin by the owner (REV-18).

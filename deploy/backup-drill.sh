@@ -10,7 +10,9 @@ set -Eeuo pipefail
 # and compare it with the live one; the scratch database is dropped afterwards. The scratch
 # directory is left in place for inspection (remove it by hand). The stack's postgres must be
 # running. The exit code is the drill's own. COMPOSE_PROJECT_NAME and TRADING_ENV_FILE are honoured
-# from the environment.
+# from the environment. With BACKUP_REMOTE=none in the env file (local-only mode, RUNBOOK 11) the
+# push and pull are replaced by a verified copy of the local bundle, no remote is contacted, and the
+# drill prints the OFF-HOST COPY SKIPPED warning and OFFSITE_COPY=skipped.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -24,7 +26,7 @@ PY=/app/.venv/bin/python
 COMPOSE=()
 
 usage() {
-  sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {

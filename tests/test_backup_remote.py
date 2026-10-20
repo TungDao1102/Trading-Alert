@@ -1268,6 +1268,264 @@ def test_scratch_database_name_rejects_names_over_63_characters() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 261020-bkp B: explicit local-only mode (BACKUP_REMOTE=none)
+# --------------------------------------------------------------------------- #
+
+WARNING_HEAD = "OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host"
+
+
+class NoRemote:
+    """A runner that must never be called: local-only mode makes no rclone call at all."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: Sequence[str], env: Mapping[str, str]) -> RcloneResult:
+        self.calls.append(list(argv))
+        raise AssertionError(f"local-only mode called rclone: {list(argv)}")
+
+
+@pytest.fixture
+def no_backup_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (*S3_ENV, "BACKUP_REMOTE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _raw_source(tmp_path: Path) -> Path:
+    source = tmp_path / "raw"
+    source.mkdir(exist_ok=True)
+    (source / "oi.parquet").write_bytes(b"AAA" * 50)
+    return source
+
+
+@pytest.mark.parametrize("injected", [True, False], ids=["fake-runner", "no-runner"])
+def test_local_only_scheduled_backs_up_and_verifies_without_any_remote_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_backup_env: None,
+    injected: bool,
+) -> None:
+    monkeypatch.setenv("BACKUP_REMOTE", "none")
+    runner = NoRemote()
+    bundle = tmp_path / "bundle"
+
+    code = main(
+        ["scheduled", "--bundle-root", str(bundle), "--parquet-roots", str(_raw_source(tmp_path))],
+        pg_dump_runner=_fake_dump,
+        rclone_runner=runner if injected else None,
+        now_utc=NOW,
+    )
+
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert runner.calls == []
+    assert backup_mod.verify_bundle(bundle) == []
+    assert "OFFSITE_COPY=skipped" in out.splitlines()
+    assert "OFFSITE_COPY=verified" not in out
+    assert "scheduled-OK" in out and "local_only=true" in out
+    assert WARNING_HEAD in err
+    assert len([line for line in err.splitlines() if line.strip()]) >= 3, "multi-line warning"
+
+
+def test_default_mode_without_backup_variables_still_fails_closed_before_pg_dump(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], no_backup_env: None
+) -> None:
+    dumped: list[Path] = []
+
+    def dump(out: Path) -> Path:
+        dumped.append(out)
+        return _fake_dump(out)
+
+    code = main(
+        ["scheduled", "--bundle-root", str(tmp_path / "b"), "--parquet-roots", str(tmp_path)],
+        pg_dump_runner=dump,
+        now_utc=NOW,
+    )
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert dumped == []
+    assert "BACKUP_S3_BUCKET" in err
+    assert "OFFSITE_COPY" not in out
+
+
+@pytest.mark.parametrize("value", ["s3", ""], ids=["explicit-s3", "empty"])
+def test_the_s3_mode_pushes_and_prints_the_verified_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    monkeypatch.setenv("BACKUP_REMOTE", value)
+    store = StoreRclone(tmp_path / "remote")
+    store.init()
+
+    code = main(
+        [
+            "scheduled",
+            "--bundle-root",
+            str(tmp_path / "b"),
+            "--parquet-roots",
+            str(_raw_source(tmp_path)),
+        ],
+        pg_dump_runner=_fake_dump,
+        rclone_runner=store,
+        now_utc=NOW,
+    )
+
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert "OFFSITE_COPY=verified" in out.splitlines()
+    assert WARNING_HEAD not in err
+
+
+@pytest.mark.parametrize("value", ["azure", "NONE", "None ", "s4"])
+def test_an_unknown_backup_remote_value_fails_closed_without_printing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_backup_env: None,
+    value: str,
+) -> None:
+    monkeypatch.setenv("BACKUP_REMOTE", value)
+    runner = NoRemote()
+    dumped: list[Path] = []
+
+    def dump(out: Path) -> Path:
+        dumped.append(out)
+        return _fake_dump(out)
+
+    code = main(
+        ["scheduled", "--bundle-root", str(tmp_path / "b"), "--parquet-roots", str(tmp_path)],
+        pg_dump_runner=dump,
+        rclone_runner=runner,
+        now_utc=NOW,
+    )
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert dumped == [] and runner.calls == []
+    assert "BACKUP_REMOTE" in err
+    if value.strip():
+        assert value.strip() not in err.replace("BACKUP_REMOTE", "")
+
+
+@pytest.mark.parametrize(
+    ("argv", "phrase"),
+    [
+        (["push", "--init-remote"], "nothing to initialise"),
+        (["push"], "push"),
+        (["pull", "--dest", "PULL"], "pull"),
+        (["retain"], "retain"),
+    ],
+    ids=["init-remote", "push", "pull", "retain"],
+)
+def test_local_only_mode_refuses_every_remote_subcommand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_backup_env: None,
+    argv: list[str],
+    phrase: str,
+) -> None:
+    monkeypatch.setenv("BACKUP_REMOTE", "none")
+    bundle = _make_bundle(tmp_path)
+    runner = NoRemote()
+    args = [str(tmp_path / "pulled") if a == "PULL" else a for a in argv]
+    if args[0] == "push":
+        args += ["--bundle-root", str(bundle)]
+
+    code = main(args, rclone_runner=runner, now_utc=NOW)
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert runner.calls == []
+    assert "BACKUP_REMOTE=none" in err and phrase in err
+    assert not (tmp_path / "pulled").exists()
+
+
+def _local_drill(
+    tmp_path: Path, ops: FakeDrillOps, monkeypatch: pytest.MonkeyPatch, restored: list[Any]
+) -> tuple[int, NoRemote]:
+    monkeypatch.setenv("BACKUP_REMOTE", "none")
+    monkeypatch.setenv("DATABASE_URL_SYNC", DRILL_URL)
+    runner = NoRemote()
+
+    def fake_restore(dump: Path, target: backup_mod.LibpqTarget) -> None:
+        restored.append((dump, target.url_without_password))
+
+    code = main(
+        [
+            "drill-remote",
+            "--bundle-root",
+            str(tmp_path / "bundle"),
+            "--scratch-root",
+            str(tmp_path / "drill"),
+            "--parquet-roots",
+            str(_raw_source(tmp_path)),
+        ],
+        pg_dump_runner=_fake_dump,
+        pg_restore_runner=fake_restore,
+        data_probe=lambda url: [],
+        rclone_runner=runner,
+        now_utc=NOW,
+        drill_ops=ops.as_ops(),
+    )
+    return code, runner
+
+
+def test_local_only_drill_restores_the_local_bundle_into_a_scratch_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_backup_env: None,
+) -> None:
+    ops = FakeDrillOps()
+    restored: list[Any] = []
+
+    code, runner = _local_drill(tmp_path, ops, monkeypatch, restored)
+
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert runner.calls == []
+    assert ops.events[0] == f"create:{SCRATCH_DB}"
+    assert ops.events[-1] == f"drop:{SCRATCH_DB}"
+    assert restored[0][0] == tmp_path / "drill" / "pg.dump"
+    assert backup_mod.verify_bundle(tmp_path / "drill") == []
+    assert "drill-local-OK" in out and "drill-remote-OK" not in out
+    assert "OFFSITE_COPY=skipped" in out.splitlines()
+    assert WARNING_HEAD in err
+
+
+def test_local_only_drill_fails_on_unequal_counts_and_still_drops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_backup_env: None,
+) -> None:
+    ops = FakeDrillOps(source_rows=3, scratch_rows=2)
+
+    code, _runner = _local_drill(tmp_path, ops, monkeypatch, [])
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert ops.events[-1] == f"drop:{SCRATCH_DB}"
+    assert "drill-local-FAILED" in err and "source=3 restored=2" in err
+    assert "OFFSITE_COPY=skipped" in out.splitlines()
+
+
+def test_the_remote_drill_prints_the_verified_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("BACKUP_REMOTE", raising=False)
+    code, _store = _drill(tmp_path, FakeDrillOps(), monkeypatch, [])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "OFFSITE_COPY=verified" in out.splitlines()
+
+
+# --------------------------------------------------------------------------- #
 # CR-01 replacement (D064): manifest SHA-256 comparison, cryptcheck before the manifest
 # --------------------------------------------------------------------------- #
 

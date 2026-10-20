@@ -5,7 +5,9 @@ S3 endpoint, ``rclone serve s3`` in tests) with an rclone ``crypt`` remote layer
 provider sees ciphertext (names and contents). Everything is configured from ``BACKUP_S3_*`` and
 ``BACKUP_CRYPT_*`` environment variables that are mapped here to ``RCLONE_CONFIG_*``; a missing
 variable fails closed naming the variable, never its value. No credential ever appears in argv:
-the mapped values live only in the child process environment.
+the mapped values live only in the child process environment. ``BACKUP_REMOTE=none`` is the
+operator's explicit local-only opt-in: no remote call at all, a loud warning and the marker
+``OFFSITE_COPY=skipped`` (``remote_mode``); unset, empty or ``s3`` is the default remote.
 
 Remote layout (inside the crypt remote)::
 
@@ -38,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -118,6 +121,60 @@ class RcloneResult:
 
 # argv WITHOUT the binary, extra environment for the child -> result. Tests inject fakes.
 RcloneRunner = Callable[[Sequence[str], Mapping[str, str]], RcloneResult]
+
+
+# --------------------------------------------------------------------------- #
+# Remote mode: the off-host remote (default) or an explicit local-only opt-in (261020-bkp)
+# --------------------------------------------------------------------------- #
+
+REMOTE_VARIABLE = "BACKUP_REMOTE"
+REMOTE_S3 = "s3"
+REMOTE_NONE = "none"
+
+# Machine-readable marker line of every scheduled run and drill (stdout, so the journal of the
+# unit carries it): `verified` after a push that passed cryptcheck, `skipped` in local-only mode.
+OFFSITE_VERIFIED = "OFFSITE_COPY=verified"
+OFFSITE_SKIPPED = "OFFSITE_COPY=skipped"
+OFFSITE_WARNING = (
+    "!" * 78,
+    "WARNING: OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host.",
+    "WARNING: BACKUP_REMOTE=none (local-only mode) is set in the env file: no remote was",
+    "WARNING: contacted and the bundle exists only in data/backup on this host.",
+    "WARNING: a local-only backup never satisfies the soak pin (plan 16-43): the pin needs a",
+    "WARNING: backup on a real remote and a passing restore drill (RUNBOOK 20.5).",
+    "!" * 78,
+)
+
+
+def remote_mode(environ: Mapping[str, str]) -> str:
+    """``s3`` (unset, empty or ``s3``: the off-host remote, the default) or ``none``.
+
+    ``none`` is the operator's explicit local-only opt-in (RUNBOOK 11, "Local-only mode"). Any
+    other value fails closed; the message names the variable, never the value.
+    """
+    value = environ.get(REMOTE_VARIABLE, "")
+    if value in ("", REMOTE_S3):
+        return REMOTE_S3
+    if value == REMOTE_NONE:
+        return REMOTE_NONE
+    raise RemoteConfigError(
+        f"{REMOTE_VARIABLE} must be empty, {REMOTE_S3} or {REMOTE_NONE} (lower case); "
+        "refusing to guess the backup destination"
+    )
+
+
+def require_remote(environ: Mapping[str, str], what: str) -> None:
+    """Refuse a remote operation in local-only mode, before any rclone call."""
+    if remote_mode(environ) == REMOTE_NONE:
+        raise RemoteConfigError(
+            f"{REMOTE_VARIABLE}=none (local-only mode): {what}; there is no off-host remote "
+            "in this mode (RUNBOOK 11, Local-only mode)"
+        )
+
+
+def warn_offsite_skipped() -> None:
+    """The conspicuous multi-line warning of a local-only run (stderr)."""
+    print("\n".join(OFFSITE_WARNING), file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -850,6 +907,10 @@ def cli_push(
     now_utc: datetime | None,
 ) -> int:
     """``push``: optional ``--init-remote``, then verify, upload and cryptcheck one snapshot."""
+    require_remote(
+        os.environ,
+        "push --init-remote has nothing to initialise" if init_remote else "push has nowhere to go",
+    )
     run = runner or make_rclone_runner(os.environ)
     if init_remote:
         written = init_sentinel(run, raw_remote=raw_bucket_remote(os.environ))
@@ -861,6 +922,7 @@ def cli_push(
 
 def cli_retain(*, dry_run: bool, runner: RcloneRunner | None) -> int:
     """``retain``: apply the 7/4/6 policy to the remote snapshots."""
+    require_remote(os.environ, "retain has no remote snapshots to prune")
     run = runner or make_rclone_runner(os.environ)
     report = apply_retention(run, dry_run=dry_run)
     verb = "would delete" if report.dry_run else "deleted"
@@ -874,6 +936,10 @@ def cli_retain(*, dry_run: bool, runner: RcloneRunner | None) -> int:
 
 def cli_pull(dest: Path, *, snapshot: str | None, runner: RcloneRunner | None) -> int:
     """``pull``: rebuild a verified bundle from the newest (or a named) snapshot."""
+    require_remote(
+        os.environ,
+        "pull has no remote to read from (the local bundle is data/backup/bundle on this host)",
+    )
     run = runner or make_rclone_runner(os.environ)
     chosen = pull_snapshot(dest, run, snapshot=snapshot)
     print(f"pull-OK snapshot={chosen} dest={dest}")
@@ -893,8 +959,12 @@ def cli_scheduled(
     Retention only runs after ``push_snapshot`` returned, i.e. after the new snapshot's
     ``cryptcheck`` passed; any earlier failure raises and exits non-zero without deleting.
     The rclone configuration is validated before ``pg_dump`` runs.
+
+    In local-only mode (``BACKUP_REMOTE=none``) the bundle is made and verified, no rclone call
+    is made, the warning goes to stderr and the marker ``OFFSITE_COPY=skipped`` to stdout.
     """
-    run = runner or make_rclone_runner(os.environ)
+    local_only = remote_mode(os.environ) == REMOTE_NONE
+    run = None if local_only else (runner or make_rclone_runner(os.environ))
     backup(
         bundle_root=bundle_root,
         pg_dump_runner=pg_dump_runner,
@@ -906,9 +976,15 @@ def cli_scheduled(
             f"staging bundle failed verification ({len(problems)} problem(s)): "
             + "; ".join(problems[:5])
         )
+    if run is None:
+        warn_offsite_skipped()
+        print(f"scheduled-OK snapshot=none local_only=true bundle_root={bundle_root}")
+        print(OFFSITE_SKIPPED)
+        return 0
     snap = push_snapshot(bundle_root, run, now_utc=now_utc or datetime.now(UTC))
     report = apply_retention(run, dry_run=False)
     print(f"scheduled-OK snapshot={snap} kept={len(report.kept)} deleted={len(report.deleted)}")
+    print(OFFSITE_VERIFIED)
     return 0
 
 
@@ -1011,12 +1087,18 @@ def cli_drill_remote(
     backup -> push -> pull into ``scratch_root`` -> verify -> create ``<db>_drill_<ts>`` ->
     pg_restore -> compare ``collector_watermarks`` row counts with the source -> drop the
     scratch database (always, in a ``finally``). Exit 0 only when the counts are equal.
+
+    In local-only mode (``BACKUP_REMOTE=none``) the push and the pull are replaced by a copy of
+    the verified local bundle into ``scratch_root`` that is verified again; the restore into the
+    scratch database and the comparison are the same. No rclone call is made; the warning and
+    ``OFFSITE_COPY=skipped`` are printed.
     """
+    local_only = remote_mode(os.environ) == REMOTE_NONE
     if not database_url:
         print("drill-REFUSED: DATABASE_URL_SYNC / DATABASE_URL is not set", file=sys.stderr)
         return 1
     database_ops = ops or PROD_DRILL_OPS
-    run = runner or make_rclone_runner(os.environ)
+    run = None if local_only else (runner or make_rclone_runner(os.environ))
     now = now_utc or datetime.now(UTC)
     scratch_name = scratch_database_name(_sqlalchemy_url(database_url).database, now)
     _assert_safe_scratch_root(scratch_root, bundle_root)
@@ -1026,8 +1108,15 @@ def cli_drill_remote(
         pg_dump_runner=pg_dump_runner,
         parquet_roots=tuple(parquet_roots),
     )
-    snap = push_snapshot(bundle_root, run, now_utc=now)
-    pulled = pull_snapshot(scratch_root, run, snapshot=snap)  # verifies the pulled bundle
+    if run is None:
+        warn_offsite_skipped()
+        _copy_local_bundle(bundle_root, scratch_root)
+        pulled = "none"
+        label = "drill-local"
+    else:
+        snap = push_snapshot(bundle_root, run, now_utc=now)
+        pulled = pull_snapshot(scratch_root, run, snapshot=snap)  # verifies the pulled bundle
+        label = "drill-remote"
 
     scratch_url = _sqlalchemy_url(database_url).set(database=scratch_name)
     scratch_url_text = scratch_url.render_as_string(hide_password=False)
@@ -1061,15 +1150,39 @@ def cli_drill_remote(
                     f"warning: could not drop scratch database: {_excerpt(str(drop_exc))}",
                     file=sys.stderr,
                 )
+    marker = OFFSITE_SKIPPED if run is None else OFFSITE_VERIFIED
     if source_rows != scratch_rows:
         print(
-            f"drill-remote-FAILED snapshot={pulled} {WATERMARK_TABLE} rows "
+            f"{label}-FAILED snapshot={pulled} {WATERMARK_TABLE} rows "
             f"source={source_rows} restored={scratch_rows}",
             file=sys.stderr,
         )
+        print(marker)
         return 1
     print(
-        f"drill-remote-OK snapshot={pulled} {WATERMARK_TABLE}_rows={scratch_rows} "
+        f"{label}-OK snapshot={pulled} {WATERMARK_TABLE}_rows={scratch_rows} "
         f"scratch_db={scratch_name} scratch_root={scratch_root}"
     )
+    print(marker)
     return 0
+
+
+def _copy_local_bundle(bundle_root: Path, scratch_root: Path) -> None:
+    """Local-only drill: copy the verified staging bundle into an empty scratch root, verify it."""
+    if scratch_root.exists() and (not scratch_root.is_dir() or any(scratch_root.iterdir())):
+        raise RemoteError(
+            f"refusing drill: --scratch-root {scratch_root} must be an empty directory or not exist"
+        )
+    problems = verify_bundle(bundle_root)
+    if problems:
+        raise RemoteError(
+            f"local bundle failed verification ({len(problems)} problem(s)): "
+            + "; ".join(problems[:5])
+        )
+    shutil.copytree(bundle_root, scratch_root, dirs_exist_ok=True)
+    copied = verify_bundle(scratch_root)
+    if copied:
+        raise RemoteError(
+            f"copied local bundle failed verification ({len(copied)} problem(s)): "
+            + "; ".join(copied[:5])
+        )

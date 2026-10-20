@@ -236,8 +236,14 @@ def test_backup_uses_the_env_file_and_project_from_the_environment(
     assert call.index("--env-file") < call.index("--profile")
 
 
+def _remote_env(rig: Rig, text: str = "BACKUP_S3_BUCKET=b\n") -> dict[str, str]:
+    """TRADING_ENV_FILE pointing at a test env file (never the checkout's own .env)."""
+    path = _write(rig.base / "backup.env", text)
+    return {"TRADING_ENV_FILE": path.as_posix()}
+
+
 def test_init_remote_makes_a_bundle_then_creates_the_sentinel(rig: Rig) -> None:
-    proc = rig.run("backup.sh", "--init-remote")
+    proc = rig.run("backup.sh", "--init-remote", env=_remote_env(rig))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     calls = rig.docker_lines()
     assert len(calls) == 2, calls
@@ -247,7 +253,7 @@ def test_init_remote_makes_a_bundle_then_creates_the_sentinel(rig: Rig) -> None:
 
 
 def test_init_remote_does_not_push_when_the_bundle_backup_fails(rig: Rig) -> None:
-    proc = rig.run("backup.sh", "--init-remote", env={"STUB_BUNDLE_RC": "5"})
+    proc = rig.run("backup.sh", "--init-remote", env={**_remote_env(rig), "STUB_BUNDLE_RC": "5"})
     assert proc.returncode == 5, proc.stdout + proc.stderr
     assert len(rig.docker_lines()) == 1
 
@@ -964,3 +970,104 @@ def test_a_bare_line_of_another_name_does_not_matter(rig: Rig) -> None:
         "BACKUP_S3_BUCKET=trading-bucket\n",
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# --- 261020-bkp B: explicit local-only mode (BACKUP_REMOTE=none in the env file) -------------
+# The decision lives in python (scheduled and drill-remote run locally, print the warning and
+# OFFSITE_COPY=skipped; tests/test_backup_remote.py). The wrapper only refuses --init-remote and
+# lets --install-soak-timer accept a soak env file without a bucket.
+
+OFFSITE_WARNING = "OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host"
+
+
+def test_init_remote_in_local_only_mode_refuses_before_any_docker_call(rig: Rig) -> None:
+    proc = rig.run("backup.sh", "--init-remote", env=_remote_env(rig, "BACKUP_REMOTE=none\n"))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "BACKUP_REMOTE=none" in proc.stderr and "nothing to initialise" in proc.stderr
+    assert rig.lines() == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["BACKUP_REMOTE=${X}\n", "BACKUP_REMOTE\n", "BACKUP_REMOTE=azure\n", "BACKUP_REMOTE=NONE\n"],
+    ids=["interpolation", "bare", "unknown", "upper-case"],
+)
+def test_init_remote_refuses_an_undeterminable_or_unknown_mode(rig: Rig, text: str) -> None:
+    proc = rig.run("backup.sh", "--init-remote", env=_remote_env(rig, text))
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "BACKUP_REMOTE" in proc.stderr
+    assert "azure" not in proc.stderr, "a value is never printed"
+    assert rig.lines() == []
+
+
+def test_init_remote_with_the_explicit_s3_mode_runs(rig: Rig) -> None:
+    proc = rig.run("backup.sh", "--init-remote", env=_remote_env(rig, "BACKUP_REMOTE=s3\n"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(rig.docker_lines()) == 2
+
+
+def test_a_scheduled_run_in_local_only_mode_is_the_same_single_python_call(rig: Rig) -> None:
+    proc = rig.run("backup.sh", env=_remote_env(rig, "BACKUP_REMOTE=none\n"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (call,) = rig.docker_lines()
+    assert f"{PY} -m src.ops.backup scheduled" in call
+
+
+def test_install_soak_timer_in_local_only_mode_needs_no_bucket_and_warns(rig: Rig) -> None:
+    soak = _write(rig.base / "soak.env", "BACKUP_REMOTE=none\nBACKUP_S3_BUCKET=\n")
+    proc = _install_soak(rig, soak, rig.base / "no-trading.env")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert OFFSITE_WARNING in proc.stderr
+    unit_dir = rig.prefix / "etc" / "systemd" / "system"
+    service = (unit_dir / "trading-soak-backup.service").read_text(encoding="utf-8")
+    assert f"Environment=TRADING_ENV_FILE={soak.as_posix()}" in service
+
+
+def test_install_soak_timer_in_local_only_mode_still_refuses_the_trading_bucket(rig: Rig) -> None:
+    proc = _install_soak_texts(
+        rig, f"BACKUP_REMOTE=none\nBACKUP_S3_BUCKET={SHARED}\n", f"BACKUP_S3_BUCKET={SHARED}\n"
+    )
+    assert proc.returncode != 0
+    assert "BACKUP_S3_BUCKET" in proc.stderr
+    assert SHARED not in proc.stdout + proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_install_soak_timer_in_local_only_mode_accepts_an_own_bucket(rig: Rig) -> None:
+    proc = _install_soak_texts(
+        rig, "BACKUP_REMOTE=none\nBACKUP_S3_BUCKET=soak-bucket\n", "BACKUP_S3_BUCKET=trading\n"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert OFFSITE_WARNING in proc.stderr
+
+
+@pytest.mark.parametrize("text", ["BACKUP_REMOTE=azure\n", "BACKUP_REMOTE=$X\n", "BACKUP_REMOTE\n"])
+def test_install_soak_timer_refuses_an_unknown_or_undeterminable_mode(rig: Rig, text: str) -> None:
+    proc = _install_soak_texts(rig, text + "BACKUP_S3_BUCKET=soak\n", "BACKUP_S3_BUCKET=t\n")
+    assert proc.returncode != 0
+    assert "BACKUP_REMOTE" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_the_default_mode_still_refuses_an_empty_soak_bucket(rig: Rig) -> None:
+    proc = _install_soak_texts(rig, "BACKUP_REMOTE=s3\nBACKUP_S3_BUCKET=\n", "BACKUP_S3_BUCKET=t\n")
+    assert proc.returncode != 0
+    assert "empty" in proc.stderr
+    assert not (rig.prefix / "etc").exists()
+
+
+def test_the_help_and_the_docs_describe_the_local_only_mode(rig: Rig) -> None:
+    proc = rig.run("backup.sh", "--help")
+    assert proc.returncode == 0
+    assert "BACKUP_REMOTE=none" in proc.stderr and "OFFSITE_COPY=skipped" in proc.stderr
+    runbook = (REPO_ROOT / "docs" / "operations" / "RUNBOOK.md").read_text(encoding="utf-8")
+    section_11 = runbook[runbook.index("## 11. ") : runbook.index("## 12. ")]
+    for phrase in ("BACKUP_REMOTE=none", "OFFSITE_COPY=skipped", "OFF-HOST COPY SKIPPED"):
+        assert phrase in section_11, phrase
+    section_20_5 = runbook[runbook.index("### 20.5 ") : runbook.index("### 20.6 ")]
+    assert "OFFSITE_COPY=skipped" in section_20_5 and "pin" in section_20_5
+    for name in ("soak.env.example",):
+        lines = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
+        assert "BACKUP_REMOTE=" in lines, name
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    assert "BACKUP_REMOTE=" in env_example

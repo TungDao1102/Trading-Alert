@@ -195,6 +195,8 @@ Retention is 7/4/6: the newest snapshot of each of the last 7 UTC days, 4 ISO we
 
 **Key custody.** Losing the crypt passphrase makes every backup unrecoverable: with a wrong key the bucket looks empty or garbled, and the tool refuses to continue rather than treat it as an empty store. Keep the raw passphrase (and the salt, `BACKUP_CRYPT_PASSWORD2`) off the VPS, in a password manager plus a second offline copy. The values in `.env` are `rclone obscure` output, which is reversible and is not encryption.
 
+**Local-only mode (no off-host copy, 261020-bkp).** By default a missing `BACKUP_S3_*` variable stops every backup command (fail closed); that does not change. An operator who has no remote yet can opt in explicitly with `BACKUP_REMOTE=none` in the env file the backup container reads (`.env`, or the file named by `TRADING_ENV_FILE`; `BACKUP_REMOTE` empty or `s3` is the default remote, any other value refuses). Then `deploy/backup.sh` (and the timers of 11.3, unchanged) makes and verifies the local bundle in `data/backup/bundle`, and `deploy/backup-drill.sh` copies that verified bundle into its `drill-<UTC timestamp>` directory, verifies it again and restores it into the scratch database exactly as in 11.6; neither contacts any remote, and both exit 0 on success. Every such run prints a multi-line warning on stderr whose first line is `OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host`, and the machine-readable line `OFFSITE_COPY=skipped` on stdout (the journal of the unit keeps both); a run against the remote prints `OFFSITE_COPY=verified` instead. `deploy/backup.sh --init-remote` refuses in this mode (exit 2, nothing to initialise), as do `push`, `pull` (so `deploy/restore.sh`) and `retain`. A local-only backup is not an encrypted copy outside the host, so it does not meet the minimum of this section, and it never satisfies the soak pin (20.5). A later backend that is not S3-compatible would be a new value of `BACKUP_REMOTE` and its own mapper; none exists yet.
+
 ### 11.1 Configure the remote
 
 1. Create a bucket (new and empty) and an access key limited to it at your provider.
@@ -738,6 +740,8 @@ sudo deploy/backup.sh --install-soak-timer --soak-env-file /path/to/soak.env
 systemctl list-timers trading-soak-backup.timer
 COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup-drill.sh
 ```
+
+**The pin needs a real off-host backup (owner decision of 2026-10-20).** Local-only mode (`BACKUP_REMOTE=none`, section 11) keeps the soak backup running without a bucket, but it never satisfies the pin of plan 16-43: before the pin, a soak backup must have run against the real remote and printed `OFFSITE_COPY=verified`, and the restore drill must have passed against that remote; a run whose marker reads `OFFSITE_COPY=skipped` does not count. In local-only mode `--install-soak-timer` accepts a soak env file without `BACKUP_S3_BUCKET` (it prints the warning), and still refuses a bucket that is set and equals the trading bucket; `--init-remote` refuses.
 
 `--init-remote` runs once, on the empty soak bucket. The unit runs `deploy/backup.sh` with `COMPOSE_PROJECT_NAME=trading-soak` and `TRADING_ENV_FILE` set to the soak env file. The restore drill covers the soak project with the same two variables (last line): it restores into a scratch database, never into the soak database. A soak backup is not valid until that drill passes. Read the unit's result with `systemctl status trading-soak-backup` and `journalctl -u trading-soak-backup`.
 
