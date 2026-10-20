@@ -31,7 +31,7 @@ from tests.support.fake_binance_exchange import (
     BinanceSemanticsFakeAdapter,
     ExchangeOrderRecord,
 )
-from tests.support.intent_store_fakes import CRASH_STEPS, CrashAfter, SimulatedCrash
+from tests.support.intent_store_fakes import CrashAfter, SimulatedCrash
 from tests.test_execution_exactly_once_pg import (
     APPROVAL_ID,
     CASE,
@@ -47,7 +47,10 @@ from tests.test_intent_recovery import RecordingSafeModeController
 
 SL_ALGO_ID = derive_algo_client_id(plan_hash=PLAN_HASH, role=OrderRole.STOP_LOSS.value)
 RECONCILIATION_REQUIRED = ExecutionOutcome(is_no_trade=True, reason_code="RECONCILIATION_REQUIRED")
-CRASH_STEPS_BEFORE_FINALIZE = tuple(step for step in CRASH_STEPS if step != "finalize")
+# Plan 19-15 (D-10): the manager writes only the ENTRY steps. The STOP_LOSS steps are written by the
+# protection coordinator after the first fill, so they are crashed through `_write_stop_intent`.
+ENTRY_CRASH_STEPS = ("consume", "entry_sent", "entry_result")
+STOP_CRASH_STEPS = ("sl_intent", "sl_sent", "sl_result")
 
 
 def _statuses(engine: Engine) -> dict[str, str]:
@@ -250,14 +253,42 @@ async def test_crash_after_entry_sent_with_the_order_absent_is_rejected(pg_db: s
         assert _place_counts(adapter) == (0, 0)
 
 
+def _write_stop_intent(store: Any) -> None:
+    """The coordinator's three write-ahead steps for the closePosition stop, in order."""
+    assert store.record_protective_intent(
+        approval_id=APPROVAL_ID,
+        role=OrderRole.STOP_LOSS.value,
+        trade_plan_id=CASE["trade_plan_id"],
+        plan_hash=PLAN_HASH,
+        algo_client_id=SL_ALGO_ID,
+        symbol=CASE["symbol"],
+        side="SELL",
+        intended_price=Decimal("98"),
+        now_utc=NOW_UTC,
+        intended_quantity=None,
+    )
+    store.mark_sent(approval_id=APPROVAL_ID, role=OrderRole.STOP_LOSS.value, now_utc=NOW_UTC)
+    store.record_result(
+        approval_id=APPROVAL_ID,
+        role=OrderRole.STOP_LOSS.value,
+        status=ExecutionIntentStatus.ACKED,
+        exchange_order_id="algo-held-1",
+        exchange_status=STATUS_NEW,
+        now_utc=NOW_UTC,
+    )
+
+
 async def test_crash_after_sl_sent_resolves_the_stop_loss_by_algo_id(pg_db: str) -> None:
     adapter = BinanceSemanticsFakeAdapter(now_utc=NOW_UTC)
     safe_mode = RecordingSafeModeController()
 
     with _store_on(pg_db) as (engine, store):
         _seed_parent_chain(engine)
+        outcome = await _run_plan(adapter, intent_store=store)  # the manager writes ENTRY only
+        assert outcome.is_no_trade is False
+        assert _statuses(engine) == {"ENTRY": "ACKED"}
         with pytest.raises(SimulatedCrash):
-            await _run_plan(adapter, intent_store=CrashAfter(store, step="sl_sent"))
+            _write_stop_intent(CrashAfter(store, step="sl_sent"))
         assert _statuses(engine) == {"ENTRY": "ACKED", "STOP_LOSS": "SENT"}
     placed_before = _place_counts(adapter)
     assert placed_before == (1, 0)
@@ -279,7 +310,7 @@ async def test_crash_after_sl_sent_resolves_the_stop_loss_by_algo_id(pg_db: str)
         assert algo_probe_kwargs == [{"client_algo_id": SL_ALGO_ID}]
 
 
-@pytest.mark.parametrize("step", CRASH_STEPS_BEFORE_FINALIZE)
+@pytest.mark.parametrize("step", ENTRY_CRASH_STEPS)
 async def test_recovery_after_a_crash_at_any_step_never_places_an_order(
     pg_db: str, step: str
 ) -> None:
@@ -304,6 +335,36 @@ async def test_recovery_after_a_crash_at_any_step_never_places_an_order(
         assert restarted_store.list_unresolved_intents() == () or len(safe_mode.entered) == 1
 
         await _run_plan(adapter, intent_store=restarted_store)
+        assert _place_counts(adapter) == placed_before
+        assert _scalar(engine2, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
+
+
+@pytest.mark.parametrize("step", STOP_CRASH_STEPS)
+async def test_recovery_after_a_crash_in_the_stop_write_ahead_never_places_an_order(
+    pg_db: str, step: str
+) -> None:
+    adapter = BinanceSemanticsFakeAdapter(now_utc=NOW_UTC)
+    safe_mode = RecordingSafeModeController()
+
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        assert (await _run_plan(adapter, intent_store=store)).is_no_trade is False
+        with pytest.raises(SimulatedCrash):
+            _write_stop_intent(CrashAfter(store, step=step))
+    placed_before = _place_counts(adapter)
+
+    with _store_on(pg_db) as (engine2, restarted_store):
+        await resolve_unresolved_intents(
+            store=restarted_store,
+            adapter=adapter,
+            safe_mode_controller=safe_mode,
+            now_utc=NOW_UTC,
+        )
+        assert _place_counts(adapter) == placed_before
+        # The stop is resolved only by the algo-id query, or the gap stays visible with SAFE_MODE.
+        assert restarted_store.list_unresolved_intents() == () or len(safe_mode.entered) == 1
+
+        await _run_plan(adapter, intent_store=restarted_store)  # the stored outcome, no new order
         assert _place_counts(adapter) == placed_before
         assert _scalar(engine2, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
 

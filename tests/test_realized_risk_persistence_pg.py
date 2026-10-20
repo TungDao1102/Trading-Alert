@@ -350,13 +350,16 @@ def test_always_wins_double_accepts_both_new_arguments() -> None:
     )
 
 
-async def test_manager_stop_loss_intent_is_a_close_position_leg_with_no_quantity() -> None:
+async def test_manager_writes_the_sized_risk_on_the_entry_and_no_stop_loss_intent() -> None:
+    # Plan 19-15 (D-10): the manager writes only the ENTRY intent, with the sizing-time risk.
+    # The closePosition STOP_LOSS intent (quantity passed explicitly as None) is written by the
+    # protection coordinator after the first fill; `test_execution_write_ahead_pg.py::
+    # test_the_coordinator_writes_the_stop_loss_intent_ahead_of_the_stop` pins that.
     spy = _SpyStore()
     outcome = await _run_plan(FakeExecutionAdapter(), intent_store=spy)
     assert outcome.is_no_trade is False
-    stops = [c for c in spy.protective_calls if c["role"] == OrderRole.STOP_LOSS.value]
-    assert len(stops) == 1
-    assert stops[0]["intended_quantity"] is None  # passed explicitly (D-10)
+    assert spy.protective_calls == []
+    assert len(spy.consume_calls) == 1
     assert spy.consume_calls[0]["sized_realized_risk"] > 0
 
 
