@@ -71,8 +71,9 @@ What it does, and what it never does:
   ratified `freeze_tick_grace_seconds` is at or before it is judged; its gaps carry
   `detected_at_utc` = the as-of instant, and a slot after it is neither satisfied nor a gap. The
   manifest records `as_of_utc`. An as-of before the epoch pin or after the window end plus the
-  grace is refused (exit 2). A bundle exported before the window end plus the grace is PARTIAL:
-  `scripts/evaluate_trial_soak.py` refuses to judge it.
+  grace is refused (exit 2), and so is an explicit `--as-of` later than the current time (plan
+  16-65): nothing is written or published. A bundle exported before the window end plus the
+  grace is PARTIAL: `scripts/evaluate_trial_soak.py` refuses to judge it.
 - The proof class follows the source and nothing else: `--source fixture` reads `--records` and
   writes manifest source "fixture"; `--source pg` reads the runtime state port (the soak
   PostgreSQL through `DATABASE_URL_SYNC` / `DATABASE_URL`, the allowed names of
@@ -217,8 +218,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--window-end", required=True, help="UTC ISO-8601 window end")
     parser.add_argument(
         "--as-of",
-        help="UTC ISO-8601 instant the freeze ticks are judged as of (default: now, at most the "
-        "window end plus the ratified grace)",
+        help="UTC ISO-8601 instant the freeze ticks are judged as of, never after now (default: "
+        "now, at most the window end plus the ratified grace)",
     )
     parser.add_argument("--out", required=True, type=Path, help="new bundle directory")
     parser.add_argument("--records", type=Path, help="runtime records file (fixture source only)")
@@ -624,13 +625,24 @@ def _whole_seconds(moment: datetime) -> datetime:
     return moment.replace(microsecond=0)
 
 
+def _system_now() -> datetime:
+    """The default clock of the export: the system clock in UTC."""
+    return datetime.now(UTC)
+
+
 def _as_of(
     args: argparse.Namespace,
     now: Callable[[], datetime],
     pin: datetime,
     final_at: datetime,
 ) -> datetime:
-    """The instant the export is judged as of; refused before the pin or after `final_at`."""
+    """The instant the export is judged as of; refused before the pin, after `final_at`, or (an
+    explicit `--as-of`) after the current time (plan 16-65, P16R-01: a future as-of would judge
+    slots that are not due yet and could make a mid-soak bundle look final)."""
+    current = now()
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise InputError("the clock must be UTC-aware")
+    current = current.astimezone(UTC)
     if args.as_of is not None:
         as_of = _parse_window(args.as_of, "--as-of")
         if as_of.microsecond != 0:
@@ -639,11 +651,10 @@ def _as_of(
             raise InputError("--as-of is before the epoch pin")
         if as_of > final_at:
             raise InputError("--as-of is after the window end plus the freeze-tick grace")
+        if as_of > current:
+            raise InputError("--as-of is after the current time")
         return as_of
-    current = now()
-    if current.tzinfo is None or current.utcoffset() is None:
-        raise InputError("the clock must be UTC-aware")
-    as_of = min(_whole_seconds(current.astimezone(UTC)), final_at)
+    as_of = min(_whole_seconds(current), final_at)
     if as_of < pin:
         raise InputError("--as-of (the current time) is before the epoch pin")
     return as_of
@@ -982,7 +993,7 @@ def main(
             return EXIT_INPUT
     try:
         files, manifest, record_count, gap_count = _build(
-            args, state, env, now if now is not None else (lambda: datetime.now(UTC))
+            args, state, env, now if now is not None else _system_now
         )
     except FreezeLogConflict as exc:
         print(f"cannot export: {exc}", file=sys.stderr)

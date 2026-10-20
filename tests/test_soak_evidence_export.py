@@ -61,6 +61,15 @@ P1 = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
 SIX_HOURS = timedelta(hours=6)
 GRACE_SECONDS = 300  # freeze_tick_grace_seconds of the ratified test configuration
 SYMBOL = "BTCUSDT"
+# Plan 16-65 (P16R-01): an explicit `--as-of` later than the clock is refused, so every export
+# here runs on a fixed clock after every fixture window instead of the system clock; a test that
+# needs another time injects `now` itself.
+CLOCK_AFTER_EVERY_WINDOW = datetime(2030, 1, 1, 0, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _fixed_export_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(export, "_system_now", lambda: CLOCK_AFTER_EVERY_WINDOW)
 
 
 def _iso(moment: datetime) -> str:
@@ -726,6 +735,55 @@ def test_without_an_as_of_the_injected_now_bounds_the_export(tmp_path: Path) -> 
     )
     assert manifest_of(late)["as_of_utc"] == _iso(end + timedelta(seconds=GRACE_SECONDS))
     assert len(_gap_slots(late)) == 336
+
+
+def test_an_explicit_as_of_after_the_injected_now_is_refused_and_nothing_is_written(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Plan 16-65 (P16R-01): a mid-soak export with an `--as-of` at or after the window end plus
+    the grace but later than now would be judged final, and every slot not yet due would become
+    a NO_RUN_FOUND gap detected in the future. It is refused; nothing is written or published."""
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    end = P1 + FOURTEEN_DAYS
+    now = P1 + timedelta(hours=3)
+    final = end + timedelta(seconds=GRACE_SECONDS)
+    for name, moment in (
+        ("final-mid-soak", final),
+        ("one-second-ahead", now + timedelta(seconds=1)),
+    ):
+        out = tmp_path / name
+        uploader = FakeUploader()
+        argv = inputs.argv(source="fixture", epoch=E1, start=P1, end=end, out=out, as_of=moment)
+        for publish in ([], ["--publish"]):
+            try:
+                code = export.main([*argv, *publish], uploader=uploader, now=lambda: now)
+            except SystemExit as stop:
+                code = -1 if not isinstance(stop.code, int) else stop.code
+            assert code == export.EXIT_INPUT, (name, publish)
+            assert not out.exists(), (name, publish)
+            assert uploader.puts == [], (name, publish)
+            err = capsys.readouterr().err
+            assert "cannot export" in err and "--as-of" in err and "current time" in err
+
+    # An as-of equal to now (whole seconds) is still accepted and judged as of that instant.
+    at_now = tmp_path / "at-now"
+    code = export.main(
+        inputs.argv(source="fixture", epoch=E1, start=P1, end=end, out=at_now, as_of=now),
+        now=lambda: now,
+    )
+    assert code == export.EXIT_OK
+    assert manifest_of(at_now)["as_of_utc"] == _iso(now)
+    assert len(_gap_slots(at_now)) == 3
+
+
+def test_an_explicit_as_of_needs_a_utc_aware_clock(tmp_path: Path) -> None:
+    """The clock the explicit `--as-of` is checked against must be UTC-aware (plan 16-65)."""
+    inputs = _empty_freeze_inputs(tmp_path / "in")
+    out = tmp_path / "bundle"
+    argv = inputs.argv(source="fixture", epoch=E1, start=P1, end=P1 + SIX_HOURS, out=out, as_of=P1)
+    naive = datetime(2026, 11, 2, 0, 0)  # a naive clock, refused
+    assert export.main(argv, now=lambda: naive) == export.EXIT_INPUT
+    assert not out.exists()
 
 
 def test_the_hour_three_export_and_the_final_export_differ_only_in_what_is_due(
