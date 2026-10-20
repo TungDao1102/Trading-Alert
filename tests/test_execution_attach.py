@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from src.adapters.binance_usdm import AlgoOrderProbe
+from src.adapters.binance_usdm import AlgoOrderProbe, AlgoPlacementResult
 from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import ExecutionIntentStatus
 from src.domain.lot_filters import LotFilters
@@ -534,6 +534,64 @@ async def test_a_failing_confirmation_query_is_unconfirmed() -> None:
     assert_held(rig, outcome)
     assert outcome.failure_detail == "TAKE_PROFIT_1: confirm probe TimeoutError"
     assert row(rig, "TAKE_PROFIT_1").intent_status is ExecutionIntentStatus.UNKNOWN
+
+
+def _placement_result(status: str) -> AlgoPlacementResult:
+    return AlgoPlacementResult(
+        symbol="BTCUSDT",
+        client_algo_id=TP1_ID,
+        algo_id="1",
+        algo_type="CONDITIONAL",
+        order_type="TAKE_PROFIT_MARKET",
+        side="SELL",
+        position_side="BOTH",
+        algo_status=status,
+        trigger_price=Decimal("62000.00"),
+        close_position=False,
+        working_type="MARK_PRICE",
+        update_time_utc=TEST_ONLY_REGISTERED_AT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "confirmed"),
+    [
+        ("NEW", True),
+        ("REJECTED", False),
+        ("EXPIRED", False),
+        ("CANCELED", False),
+        ("TRIGGERED", False),
+        ("", False),
+    ],
+)
+def test_leg_confirmation_reads_the_real_dataclass_with_the_allow_list(
+    status: str, confirmed: bool
+) -> None:
+    """WR-03: the placement response is read as the REAL dataclass or a dict (class ACTIVE only)."""
+    from src.execution.manager import _is_leg_confirmed
+
+    assert _is_leg_confirmed(_placement_result(status)) is confirmed
+    assert _is_leg_confirmed({"algo_status": status}) is confirmed
+
+
+async def test_a_rejected_placement_response_for_tp1_is_unconfirmed_even_if_rest_shows_it() -> None:
+    """The response must confirm AND a REST query must answer ACTIVE: either failing holds."""
+    rig = await protected_rig()
+    original = rig.fake.place_algo_protective
+
+    async def rejected_response(**kwargs: Any) -> Any:
+        await original(**kwargs)  # the leg is open on the fake, the response says REJECTED
+        return _placement_result("REJECTED")
+
+    rig.fake.place_algo_protective = rejected_response  # type: ignore[method-assign]
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)
+    assert outcome.placed_legs == ("STOP_LOSS",)
+    assert outcome.failure_detail == "TAKE_PROFIT_1: not confirmed"
+    assert row(rig, "TAKE_PROFIT_1").intent_status is ExecutionIntentStatus.UNKNOWN
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
 
 
 # --------------------------------------------------------------------------- #
