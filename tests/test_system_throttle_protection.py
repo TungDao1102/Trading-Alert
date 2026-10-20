@@ -29,7 +29,7 @@ from src.domain.exchange_errors import ExchangeErrorCategory
 from src.execution.emergency_close import EmergencyCloseStatus, MarketEmergencyCloser
 from src.execution.protection import ProtectionState
 
-from tests.support.execution_limits import test_only_execution_limits
+from tests.support.execution_limits import test_only_execution_limits as limits_with
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.support.limits import test_only_signed_call_policy
 from tests.support.protection_doubles import (
@@ -164,7 +164,7 @@ def _closer_rig(clock: VirtualTime, gate: RestRateLimitGate) -> tuple[Any, Any, 
         safe_mode_controller=safe_mode,
         alert_sink=alerts,
         clock=clock,
-        limits=test_only_execution_limits(),
+        limits=limits_with(),
     )
     return fake, closer, safe_mode, alerts
 
