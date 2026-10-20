@@ -71,3 +71,6 @@ Points: 16; points with at least one printed shortfall line: 13.
 
 Points: 16; points with at least one printed shortfall line: 0.
 
+Superseded (16-DEC-RUN1-SUPERSEDED.md, D076):
+The original 240 records are retained unchanged as immutable historical evidence under the simulator semantics and protocol versions recorded in those records. They are superseded for the current confirmatory evaluation by the regenerated records produced under simulator_semantics_version 2.3.0 and protocol v2.6.0. The original records must not be pooled with the regenerated records, combined into their digests, or used as if both sets were produced under the same protocol and simulator semantics. The original artifacts and hashes remain available for historical audit and reproduction of the original run.
+No experiment record was ever written under simulator_semantics_version 2.2.0 or protocol v2.5.0; the 2.2.0 rerun stopped at its first family with 0 records (evidence/16-61-run-output.txt).
