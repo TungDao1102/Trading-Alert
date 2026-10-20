@@ -81,16 +81,36 @@ def _coerce_decimal(value: object, field_name: str) -> Decimal:
 # --------------------------------------------------------------------------- #
 
 
+# 19-REVIEW CR-01: the manager takes `now_utc` BEFORE the gate 5e reads, so a real mark reading
+# is stamped AFTER `now_utc`. The fake models that: its default reading is stamped this long after
+# `now_utc`, and the injected live-context clock (read after the reads) is `mark_age_ms` later.
+MARK_READ_DELAY = timedelta(milliseconds=250)
+
+
+def _mark_time_for(case_input: dict[str, Any]) -> datetime:
+    """The exchange time of the default reading: after the case's `now_utc` (CR-01)."""
+    return _parse_utc(case_input["now_utc"]) + MARK_READ_DELAY
+
+
+def _post_read_instant(case_input: dict[str, Any]) -> datetime:
+    """The live-context clock: `mark_age_ms` after the default reading's exchange time."""
+    return _mark_time_for(case_input) + timedelta(
+        milliseconds=int(case_input["live"]["mark_age_ms"])
+    )
+
+
 def _mark_reading_for(case_input: dict[str, Any], **overrides: Any) -> Any:
-    """The `MarkPriceReading` the fake answers: the fixture mark price, `mark_age_ms` old."""
+    """The `MarkPriceReading` the fake answers: the fixture mark price, stamped after `now_utc`.
+
+    Its age at the live-context clock (`_post_read_instant`) is the fixture's `mark_age_ms`.
+    """
     from src.adapters.binance_public import MarkPriceReading
 
     live = case_input["live"]
     values: dict[str, Any] = {
         "symbol": case_input["symbol"],
         "mark_price": _coerce_decimal(live["mark_price"], "mark_price"),
-        "exchange_time_utc": _parse_utc(case_input["now_utc"])
-        - timedelta(milliseconds=int(live["mark_age_ms"])),
+        "exchange_time_utc": _mark_time_for(case_input),
     }
     values.update(overrides)
     return MarkPriceReading(**values)
@@ -461,6 +481,7 @@ def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
         "tp1_quantity_fraction": _coerce_decimal(
             live["tp1_quantity_fraction"], "tp1_quantity_fraction"
         ),
+        "clock": lambda: _post_read_instant(case_input),
     }
     values.update(overrides)
     return LivePlacementContext(**values)
@@ -2530,6 +2551,7 @@ def test_live_context_validates_every_field() -> None:
         "latest_closed_bar_close",
         "gtd_clock_margin",
         "tp1_quantity_fraction",
+        "clock",
     }
     # Every field is required: building without one raises TypeError.
     for name in fields:
@@ -2544,6 +2566,7 @@ def test_live_context_validates_every_field() -> None:
         "latest_closed_bar_close": 101.5,
         "gtd_clock_margin": 0.5,
         "tp1_quantity_fraction": 0.5,
+        "clock": object(),
     }
     for name, bad in bad_values.items():
         with pytest.raises(TypeError):
@@ -2574,8 +2597,10 @@ def test_live_context_module_is_pure() -> None:
             imported.add(node.module)
         elif isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
+    # `collections.abc` (stdlib) types the injected clock (19-REVIEW CR-01).
     assert imported <= {
         "__future__",
+        "collections.abc",
         "dataclasses",
         "datetime",
         "decimal",
@@ -2998,12 +3023,17 @@ async def test_the_tp1_check_follows_the_live_context_fraction() -> None:
 
 def _mark_cases() -> list[tuple[str, dict[str, Any], str]]:
     case_input = _load_input()
+    # Both are measured at the post-read clock (19-REVIEW CR-01): one millisecond past the
+    # TEST_ONLY age bound (4321 ms), and one millisecond past the drift margin into the future.
+    from tests.support.limits import TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS
+
+    checked_at = _post_read_instant(case_input)
+    margin = timedelta(milliseconds=max(TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS))
     stale = _mark_reading_for(
-        case_input,
-        exchange_time_utc=_parse_utc(case_input["now_utc"]) - timedelta(milliseconds=4322),
+        case_input, exchange_time_utc=checked_at - timedelta(milliseconds=4322)
     )
     future = _mark_reading_for(
-        case_input, exchange_time_utc=_parse_utc(case_input["now_utc"]) + timedelta(seconds=1)
+        case_input, exchange_time_utc=checked_at + margin + timedelta(milliseconds=1)
     )
     return [
         ("mark at the stop trigger", {"mark": Decimal("98.00")}, "MARK_PRICE_CROSSED_STOP"),
@@ -3033,6 +3063,68 @@ async def test_mark_price_refusals_make_only_the_reads_and_leave_the_approval_un
             adapter.mark_reading = spec["reading"]
         await _assert_refused_then_placeable(
             label=label, reason=reason, adapter=adapter, expected_calls=PRE_PLACEMENT_READS
+        )
+
+
+async def test_mark_age_a_fresh_mark_stamped_after_now_utc_places() -> None:
+    """19-REVIEW CR-01: the mark is read AFTER `now_utc`, so Binance stamps it later.
+
+    The reading is 3 s after `now_utc` and the injected clock (read after the live reads) is
+    1 s after the reading: a fresh 1 s old mark. The old code measured `now_utc - mark_time`
+    (-3 s) and refused it as MARK_PRICE_UNAVAILABLE.
+    """
+    case_input = _load_input()
+    now = _parse_utc(case_input["now_utc"])
+    adapter = FakeExecutionAdapter()
+    adapter.mark_reading = _mark_reading_for(
+        case_input, exchange_time_utc=now + timedelta(seconds=3)
+    )
+    calls_seen_by_clock: list[int] = []
+
+    def clock() -> datetime:
+        calls_seen_by_clock.append(len(adapter.calls))
+        return now + timedelta(seconds=4)
+
+    outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    # The clock was read once, after the three gate 5e reads (the mark read among them).
+    assert calls_seen_by_clock == [len(PRE_PLACEMENT_READS)]
+    assert _reads_only(adapter)[: len(PRE_PLACEMENT_READS)] == PRE_PLACEMENT_READS
+
+
+async def test_mark_age_staleness_is_measured_at_the_post_read_clock() -> None:
+    """A mark fresh relative to `now_utc` but older than the bound at the check refuses."""
+    case_input = _load_input()
+    now = _parse_utc(case_input["now_utc"])
+    adapter = FakeExecutionAdapter()
+    adapter.mark_reading = _mark_reading_for(case_input, exchange_time_utc=now)
+    # TEST_ONLY max_mark_price_age_ms is 4321: 4322 ms after the reading is one ms too old.
+    late = _build_live_context(case_input, clock=lambda: now + timedelta(milliseconds=4322))
+    await _assert_refused_then_placeable(
+        label="stale at the post-read clock",
+        reason="MARK_PRICE_UNAVAILABLE",
+        adapter=adapter,
+        expected_calls=PRE_PLACEMENT_READS,
+        live_context=late,
+    )
+
+
+async def test_mark_age_an_unreadable_clock_refuses() -> None:
+    """A clock that raises or answers a naive time is "not available" (fail closed)."""
+
+    def broken() -> datetime:
+        raise OSError("clock unavailable")
+
+    for label, clock in (
+        ("clock raises", broken),
+        ("clock is naive", lambda: datetime(2026, 1, 1, 0, 0, 0)),
+    ):
+        await _assert_refused_then_placeable(
+            label=label,
+            reason="MARK_PRICE_UNAVAILABLE",
+            adapter=FakeExecutionAdapter(),
+            expected_calls=PRE_PLACEMENT_READS,
+            live_context=_build_live_context(_load_input(), clock=clock),
         )
 
 

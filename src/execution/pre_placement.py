@@ -95,8 +95,14 @@ class PrePlacementInputs:
     """Every value `evaluate_pre_placement` reads; all fields are required (no defaults).
 
     `None` on a live reading (`latest_closed_bar_close`, `open_order_symbols`, `mark_price`,
-    `mark_time_utc`) and on an owner limit (`min_remaining_validity_seconds`,
-    `max_mark_price_age_ms`) means "not available" and refuses (D-06, D-07).
+    `mark_time_utc`, `mark_checked_at_utc`) and on an owner limit
+    (`min_remaining_validity_seconds`, `max_mark_price_age_ms`) means "not available" and refuses
+    (D-06, D-07).
+
+    `mark_checked_at_utc` is the injected clock read AFTER the mark-price read: the mark age is
+    measured against it, never against `now_utc`, which the manager takes before the read
+    (19-REVIEW CR-01). `gtd_clock_margin` (the ratified drift bound) is also the most the reading
+    may be stamped ahead of `mark_checked_at_utc` before it counts as future-dated.
     """
 
     side: str
@@ -114,6 +120,7 @@ class PrePlacementInputs:
     symbol: str
     mark_price: Decimal | None
     mark_time_utc: datetime | None
+    mark_checked_at_utc: datetime | None
     max_mark_price_age_ms: int | None
     sl_trigger_price: Decimal
     entry_min_price: Decimal
@@ -127,6 +134,8 @@ class PrePlacementInputs:
         _require_utc(self.now_utc, "now_utc")
         if self.mark_time_utc is not None:
             _require_utc(self.mark_time_utc, "mark_time_utc")
+        if self.mark_checked_at_utc is not None:
+            _require_utc(self.mark_checked_at_utc, "mark_checked_at_utc")
         for name in ("sl_trigger_price", "entry_min_price", "entry_max_price"):
             _require_decimal(getattr(self, name), name)
         for name in ("latest_closed_bar_close", "mark_price"):
@@ -251,27 +260,41 @@ def check_mark_price(
     side: str,
     mark_price: Decimal | None,
     mark_time_utc: datetime | None,
-    now_utc: datetime,
+    now_utc: datetime | None,
     max_mark_price_age_ms: int | None,
+    max_clock_skew: timedelta,
     sl_trigger_price: Decimal,
     entry_min_price: Decimal,
     entry_max_price: Decimal,
 ) -> str | None:
     """Refuse when the live mark price is unusable, crossed the stop, or left the zone.
 
-    A missing price or time, an unset age bound, a future-dated reading (negative age) and an
-    older-than-bound reading all give MARK_PRICE_UNAVAILABLE (D-06 fail closed). A LONG whose mark
-    is at or below the stop trigger (SHORT: at or above) gives MARK_PRICE_CROSSED_STOP; a mark
-    outside the inclusive entry zone gives MARK_PRICE_OUTSIDE_ZONE. The stop convention matches
-    `src.backtest.exits.is_sl_touched` (LONG low <= trigger, SHORT high >= trigger).
+    `now_utc` is the instant the age is measured at: it must be a clock reading taken AFTER the
+    mark-price read (19-REVIEW CR-01), so a fresh reading has a small non-negative age. Binance's
+    clock may run ahead of the local one by up to `max_clock_skew` (the ratified drift bound), so a
+    reading stamped at most that far in the future is treated as age zero.
+
+    A missing price, time or check instant, an unset age bound, a reading stamped more than
+    `max_clock_skew` in the future and an older-than-bound reading all give MARK_PRICE_UNAVAILABLE
+    (D-06 fail closed). A LONG whose mark is at or below the stop trigger (SHORT: at or above)
+    gives MARK_PRICE_CROSSED_STOP; a mark outside the inclusive entry zone gives
+    MARK_PRICE_OUTSIDE_ZONE. The stop convention matches `src.backtest.exits.is_sl_touched`
+    (LONG low <= trigger, SHORT high >= trigger).
     """
     _require_side(side)
-    _require_utc(now_utc, "now_utc")
-    if mark_price is None or mark_time_utc is None or max_mark_price_age_ms is None:
+    if not isinstance(max_clock_skew, timedelta) or max_clock_skew < timedelta(0):
+        raise ValueError("max_clock_skew must be a non-negative timedelta")
+    if (
+        mark_price is None
+        or mark_time_utc is None
+        or now_utc is None
+        or max_mark_price_age_ms is None
+    ):
         return MARK_PRICE_UNAVAILABLE
+    _require_utc(now_utc, "now_utc")
     _require_utc(mark_time_utc, "mark_time_utc")
     age = now_utc - mark_time_utc
-    if age < timedelta(0):
+    if age < -max_clock_skew:
         return MARK_PRICE_UNAVAILABLE
     if age // _MILLISECOND > max_mark_price_age_ms:
         return MARK_PRICE_UNAVAILABLE
@@ -359,8 +382,9 @@ def evaluate_pre_placement(inputs: PrePlacementInputs) -> str | None:
         side=inputs.side,
         mark_price=inputs.mark_price,
         mark_time_utc=inputs.mark_time_utc,
-        now_utc=inputs.now_utc,
+        now_utc=inputs.mark_checked_at_utc,
         max_mark_price_age_ms=inputs.max_mark_price_age_ms,
+        max_clock_skew=inputs.gtd_clock_margin,
         sl_trigger_price=inputs.sl_trigger_price,
         entry_min_price=inputs.entry_min_price,
         entry_max_price=inputs.entry_max_price,

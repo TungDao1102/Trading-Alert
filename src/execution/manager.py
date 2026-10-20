@@ -857,6 +857,10 @@ async def execute_approved_plan(
         any_unprotected = bool(live_context.protection_registry.blocks_new_entries())
     except Exception:  # noqa: BLE001 — an unreadable registry blocks (fail closed)
         any_unprotected = True
+    # 19-REVIEW CR-01: the mark age is measured at an instant read from the injected clock
+    # AFTER the live reads, never against `now_utc` (taken before them). An unreadable clock is
+    # "not available" and refuses.
+    mark_checked_at_utc = _clock_or_none(live_context.clock)
     pre_placement_reason = evaluate_pre_placement(
         PrePlacementInputs(
             side=bound.side,
@@ -876,6 +880,7 @@ async def execute_approved_plan(
             symbol=bound.symbol,
             mark_price=_mark_price_of(mark_reading),
             mark_time_utc=_mark_time_of(mark_reading),
+            mark_checked_at_utc=mark_checked_at_utc,
             max_mark_price_age_ms=live_context.execution_limits.max_mark_price_age_ms,
             sl_trigger_price=sl_trigger_price,
             entry_min_price=trade_plan.entry_min_price,
@@ -1151,6 +1156,15 @@ def _utc_or_none(value: Any) -> datetime | None:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         return None
     return value.astimezone(UTC)
+
+
+def _clock_or_none(clock: Callable[[], datetime]) -> datetime | None:
+    """One reading of the injected clock as UTC; a failing or naive clock is `None` (refuses)."""
+    try:
+        value = clock()
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable clock refuses the placement
+        return None
+    return _utc_or_none(value)
 
 
 def _mark_price_of(reading: Any) -> Decimal | None:

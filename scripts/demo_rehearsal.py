@@ -1960,6 +1960,9 @@ async def build_live_context(
         latest_closed_bar_close=bar_close,
         gtd_clock_margin=margin,
         tp1_quantity_fraction=TP1_QUANTITY_FRACTION,
+        # 19-REVIEW CR-01: the manager reads this clock after the mark-price read; the local
+        # clock's drift from Binance's is bounded by the drift guard and `margin`.
+        clock=ctx.clock,
     )
 
 

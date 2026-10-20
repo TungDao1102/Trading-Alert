@@ -796,7 +796,7 @@ class BinanceUsdmAdapter:
         """The live mark price of `symbol`; delegates to the public reader (shared REST gate).
 
         The adapter takes no clock: the execution manager measures the age of the reading
-        with its injected `now_utc`.
+        with its injected clock, read after this call (19-REVIEW CR-01).
         """
         return await self._public.mark_price(symbol)
 

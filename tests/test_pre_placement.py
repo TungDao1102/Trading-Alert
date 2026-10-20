@@ -8,6 +8,8 @@ Hand oracles (tick 0.10, LONG zone 99.50-100.60, stop 98.00; SHORT zone 99.50-10
            99.50 and 100.60 pass; 99.40 is below the zone.
     Mark age is measured against `max_mark_price_age_ms`; an equal age passes, a future reading
     (negative age) and an unset bound refuse as MARK_PRICE_UNAVAILABLE.
+    19-REVIEW CR-01: the age is taken at `mark_checked_at_utc` (a clock read AFTER the mark read),
+    not at `now_utc`; a reading stamped up to `gtd_clock_margin` ahead of it is age zero.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ def _mark_kwargs(side: str, **over: Any) -> dict[str, Any]:
         "mark_time_utc": NOW - timedelta(milliseconds=1000),
         "now_utc": NOW,
         "max_mark_price_age_ms": MAX_AGE_MS,
+        "max_clock_skew": timedelta(0),
         "sl_trigger_price": D(stop),
         "entry_min_price": D("99.50"),
         "entry_max_price": D("100.60"),
@@ -84,6 +87,7 @@ def _inputs(side: str = "LONG", **over: Any) -> PrePlacementInputs:
         "symbol": SYMBOL,
         "mark_price": D("100.00"),
         "mark_time_utc": NOW - timedelta(milliseconds=1000),
+        "mark_checked_at_utc": NOW,
         "max_mark_price_age_ms": MAX_AGE_MS,
         "sl_trigger_price": D(stop),
         "entry_min_price": D("99.50"),
@@ -138,7 +142,9 @@ def test_check_mark_price_age_bounds(side: str) -> None:
 
 
 @pytest.mark.parametrize("side", ["LONG", "SHORT"])
-@pytest.mark.parametrize("missing", ["mark_price", "mark_time_utc", "max_mark_price_age_ms"])
+@pytest.mark.parametrize(
+    "missing", ["mark_price", "mark_time_utc", "now_utc", "max_mark_price_age_ms"]
+)
 def test_check_mark_price_missing_input_is_unavailable(side: str, missing: str) -> None:
     assert check_mark_price(**_mark_kwargs(side, **{missing: None})) == pp.MARK_PRICE_UNAVAILABLE
 
@@ -159,6 +165,25 @@ def test_check_mark_price_rejects_bad_side_and_naive_time() -> None:
         check_mark_price(**_mark_kwargs("BUY"))
     with pytest.raises(ValueError, match="UTC"):
         check_mark_price(**_mark_kwargs("LONG", mark_time_utc=datetime(2026, 1, 5, 9, 59, 59)))
+    with pytest.raises(ValueError, match="max_clock_skew"):
+        check_mark_price(**_mark_kwargs("LONG", max_clock_skew=timedelta(milliseconds=-1)))
+
+
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+def test_check_mark_price_tolerates_only_the_bounded_clock_skew(side: str) -> None:
+    """19-REVIEW CR-01: Binance may stamp the reading up to `max_clock_skew` ahead of the check."""
+    skew = timedelta(milliseconds=876)
+    ahead_within = _mark_kwargs(side, mark_time_utc=NOW + skew, max_clock_skew=skew)
+    assert check_mark_price(**ahead_within) is None
+    ahead_beyond = _mark_kwargs(
+        side, mark_time_utc=NOW + skew + timedelta(milliseconds=1), max_clock_skew=skew
+    )
+    assert check_mark_price(**ahead_beyond) == pp.MARK_PRICE_UNAVAILABLE
+    # The tolerance never relaxes the staleness bound.
+    too_old = _mark_kwargs(
+        side, mark_time_utc=NOW - timedelta(milliseconds=MAX_AGE_MS + 1), max_clock_skew=skew
+    )
+    assert check_mark_price(**too_old) == pp.MARK_PRICE_UNAVAILABLE
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +211,43 @@ def test_inputs_validation() -> None:
         _inputs(now_utc=datetime(2026, 1, 5, 10, 0, 0))
     with pytest.raises(TypeError, match="mark_price"):
         _inputs(mark_price=100.0)
+
+
+def test_evaluate_mark_age_a_reading_taken_after_now_utc_is_fresh() -> None:
+    """19-REVIEW CR-01: the read happens after `now_utc`, so its exchange time is later.
+
+    Old code measured `now_utc - mark_time_utc` (negative here) and refused a fresh reading.
+    The age is now measured at the post-read clock instant, with no clock skew involved
+    (the reading is stamped BEFORE the check instant).
+    """
+    for side in ("LONG", "SHORT"):
+        fresh_after_now = _inputs(
+            side,
+            gtd_clock_margin=timedelta(0),
+            mark_time_utc=NOW + timedelta(milliseconds=300),
+            mark_checked_at_utc=NOW + timedelta(milliseconds=500),
+        )
+        assert evaluate_pre_placement(fresh_after_now) is None
+
+
+def test_evaluate_mark_age_staleness_is_measured_at_the_check_instant() -> None:
+    """A reading fresh relative to the pre-read `now_utc` but stale at the check refuses."""
+    stale_at_check = _inputs(
+        mark_time_utc=NOW,
+        mark_checked_at_utc=NOW + timedelta(milliseconds=MAX_AGE_MS + 1),
+    )
+    assert evaluate_pre_placement(stale_at_check) == pp.MARK_PRICE_UNAVAILABLE
+    # An unreadable check instant is "not available" (fail closed).
+    assert evaluate_pre_placement(_inputs(mark_checked_at_utc=None)) == pp.MARK_PRICE_UNAVAILABLE
+    # A reading clearly ahead of the check instant (beyond the drift margin) refuses.
+    future = _inputs(
+        gtd_clock_margin=timedelta(seconds=5),
+        mark_time_utc=NOW + timedelta(seconds=5, milliseconds=1),
+        mark_checked_at_utc=NOW,
+    )
+    assert evaluate_pre_placement(future) == pp.MARK_PRICE_UNAVAILABLE
+    with pytest.raises(ValueError, match="UTC"):
+        _inputs(mark_checked_at_utc=datetime(2026, 1, 5, 10, 0, 0))
 
 
 def test_evaluate_refuses_a_crossed_mark_price() -> None:

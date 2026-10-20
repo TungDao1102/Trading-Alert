@@ -5,8 +5,9 @@ exchange (D-01..D-04, APRV-01), refuses while the owner's execution limits are u
 D-13) and runs the pre-placement checks (D-05..D-09, D-11, D-14, RISK-04). Those gates need
 values the Phase 9 signature never carried: the persisted `Signal`, the per-plan constraint
 snapshot, the execution limits, the protection registry, the latest closed strategy-bar close,
-the GTD clock margin and the TP1 fraction. `LivePlacementContext` bundles them into ONE required
-keyword so the signature churns once and `_GATE_KWARG_KEYS` stays exactly as it was.
+the GTD clock margin, the TP1 fraction and the injected clock that times the live mark-price
+read. `LivePlacementContext` bundles them into ONE required keyword so the signature churns once
+and `_GATE_KWARG_KEYS` stays exactly as it was.
 
 The dataclass is pure: it validates types and ranges and holds no number of its own. Every field
 is required and keyword-only, none has a default (a default would be a hidden decision), and the
@@ -19,8 +20,9 @@ Recorded, not decided: Q6 - the latest closed bar close is injected (its produce
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from src.domain.signal import Signal
@@ -47,7 +49,13 @@ class LivePlacementContext:
         latest_closed_bar_close: The latest closed strategy-bar close for the invalidation rule,
             or `None` when it is not available (the invalidation check then refuses).
         gtd_clock_margin: The drift margin added to the exchange's 600 second `goodTillDate` floor.
+            The same ratified drift bound is the most a mark-price reading may be stamped ahead
+            of `clock` (Binance's clock vs the local one) before it refuses as future-dated.
         tp1_quantity_fraction: The TP1 share of the position, in (0, 1].
+        clock: The injected aware-UTC clock. The manager reads it AFTER the gate 5e live reads,
+            so the mark-price age is measured at the placement instant, never against the
+            `now_utc` taken before the read (19-REVIEW CR-01). The manager itself reads no
+            wall clock.
     """
 
     signal: Signal
@@ -57,6 +65,7 @@ class LivePlacementContext:
     latest_closed_bar_close: Decimal | None
     gtd_clock_margin: timedelta
     tp1_quantity_fraction: Decimal
+    clock: Callable[[], datetime]
 
     def __post_init__(self) -> None:
         if not isinstance(self.signal, Signal):
@@ -82,6 +91,8 @@ class LivePlacementContext:
             raise TypeError("tp1_quantity_fraction must be Decimal")
         if not fraction.is_finite() or fraction <= _ZERO or fraction > _ONE:
             raise ValueError("tp1_quantity_fraction must be in (0, 1]")
+        if not callable(self.clock):
+            raise TypeError("clock must be a callable returning an aware UTC datetime")
 
 
 __all__ = ["LivePlacementContext"]
