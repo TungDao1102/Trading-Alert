@@ -430,7 +430,11 @@ async def test_branch_stop_consumed_with_a_flat_position_and_terminal_entry_ends
     await rig.coordinator.step()
     rig.fake.trigger_stop(rig.stop_id)  # the stop did its job; no new fill
     await rig.coordinator.step()  # the cancel goes through; REST: stop FINISHED, flat
-    assert _state(rig) is ProtectionState.PROTECTED_ENTRY_OPEN
+    # 19-REVIEW WR-04 (owner, D077): flat while the entry was still open (read before the cancel)
+    # is not a safe state; the lost stop makes the plan UNPROTECTED (blocking), never re-placed.
+    assert _state(rig) is ProtectionState.UNPROTECTED
+    assert _transition_reasons(rig)[-1] == ("PROTECTED_ENTRY_OPEN", "UNPROTECTED", "STOP_LOST")
+    assert rig.coordinator.blocks_new_entries() is True
     await rig.coordinator.step()  # entry terminal, flat
     assert _state(rig) is ProtectionState.FLAT
     assert rig.fake.calls_to("place_market_close") == []
@@ -449,15 +453,16 @@ def _gap_notes(rig: ProtectionRig) -> list[dict[str, str]]:
     return notes
 
 
-async def test_branch_stop_lost_one_empty_position_read_never_sweeps_the_legs() -> None:
+async def test_branch_stop_lost_one_empty_position_read_never_sweeps_an_open_position() -> None:
     """19-REVIEW CR-03 / T-8-30: one zero read followed by a non-zero one must not go FLAT.
 
     The stop reads NOT_ACTIVE, the entry is terminal and the position (0.004) is still open, but
-    the first REST position answer is a transient empty list. The old code went FLAT on that one
-    read and swept every leg; now the second, fresh read shows the position, the gap is
-    journaled and the state is kept. What the coordinator does next with a lost stop once the
-    entry is terminal is 19-REVIEW WR-04 (an owner decision, not changed here); this test only
-    pins that the open position is never declared FLAT and its legs are never swept.
+    the first REST position answer is a transient empty list. The pre-CR-03 code went FLAT on
+    that one read and swept every leg; the second, fresh read shows the position and the gap is
+    journaled. 19-REVIEW WR-04 (owner, D077) decides what follows: the plan is UNPROTECTED
+    (blocking), never settles to PROTECTED and never gets take profits (the pre-WR-04 code did
+    both on the next step), and the next read of the open position is B4: CLOSE_REQUIRED, one
+    MARKET close, no stop placement. The legs are swept only after the close made it flat.
     """
     rig = await make_rig(real_closer=True)
     _script_failures(rig, "cancel_normal_order", 2)  # the entry stays open for two steps
@@ -471,17 +476,26 @@ async def test_branch_stop_lost_one_empty_position_read_never_sweeps_the_legs() 
     script_empty_position_reads(rig.fake, [True, False])
 
     await rig.coordinator.step()  # entry terminal; position read empty, then 0.004
-    assert _state(rig) is ProtectionState.PROTECTED_ENTRY_OPEN
+    assert _state(rig) is ProtectionState.UNPROTECTED
+    assert rig.coordinator.blocks_new_entries() is True
     assert rig.fake.calls_to("cancel_algo_order") == []
     assert rig.stop_id in rig.fake.open_algos
     assert len(_gap_notes(rig)) == 1
     assert "FLAT" not in [to for _, to, _ in _transition_reasons(rig)]
 
-    for _ in range(3):
-        await rig.coordinator.step()  # every later read is real: the position stays open
-    assert "FLAT" not in [to for _, to, _ in _transition_reasons(rig)]
-    assert rig.fake.calls_to("cancel_algo_order") == []
-    assert rig.stop_id in rig.fake.open_algos
+    await rig.coordinator.step()  # the real read shows 0.004: B4, closed by MARKET
+    assert _transition_reasons(rig)[-1] == ("UNPROTECTED", "CLOSE_REQUIRED", "B4_FILL_AFTER_STOP")
+    assert [c["kwargs"]["quantity"] for c in rig.fake.calls_to("place_market_close")] == [
+        D("0.004")
+    ]
+    assert rig.fake.positions["BTCUSDT"] == D("0")
+    await rig.coordinator.step()  # entry terminal and flat: FLAT, then the sweep
+    assert _state(rig) is ProtectionState.FLAT
+    states = [to for _, to, _ in _transition_reasons(rig)]
+    assert "PROTECTED" not in states and "COMPLETE" not in states
+    assert _place_calls(rig) == 1  # no stop re-placed, no take profit placed
+    completed = rig.fake.completed
+    assert completed.index("place_market_close") < completed.index("cancel_algo_order")
 
 
 async def test_branch_stop_consumed_flat_reads_the_position_twice_before_flat() -> None:

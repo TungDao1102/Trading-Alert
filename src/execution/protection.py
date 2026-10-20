@@ -36,6 +36,14 @@ deadline means escalate):
 * B4 ``B4_FILL_AFTER_STOP``: a once-confirmed stop that is no longer ACTIVE while a position
   exists (decided by the position, never by the algo status class, research P6) is never
   re-placed; the rest is cancelled and the new exposure is closed by MARKET.
+* Stop lost, exposure not proven (19-REVIEW WR-04, owner decision D077): a once-confirmed stop
+  that is no longer ACTIVE while the position cannot be read, or reads flat while the entry can
+  still fill, moves the plan to UNPROTECTED (blocking) and records ``stop_lost_at`` once, at the
+  first detection. The stop is never read, re-placed or trusted again. Every later step decides
+  by the position: exposure is B4, flat on two consecutive reads with a terminal entry is FLAT,
+  anything else keeps UNPROTECTED. A failed read never stops the clock: ``max_unprotected_ms``
+  measured from ``stop_lost_at`` escalates to CLOSE_REQUIRED (``B4_STOP_LOST_UNRESOLVED``), and
+  the emergency closer reads the quantity itself (it never sends a guessed one).
 * ``NO_POSITION_ON_STOP_BUT_EXPOSED``: -4509 on the stop reads the position; flat with a terminal
   entry ends FLAT, an open position goes CLOSE_REQUIRED.
 
@@ -154,6 +162,9 @@ BRANCH_B3_BOTH_AMBIGUOUS = "B3_BOTH_AMBIGUOUS"
 BRANCH_B4_FILL_AFTER_STOP = "B4_FILL_AFTER_STOP"
 BRANCH_B5_STOP_REJECTED = "B5_STOP_REJECTED"
 BRANCH_NO_POSITION_BUT_EXPOSED = "NO_POSITION_ON_STOP_BUT_EXPOSED"
+# 19-REVIEW WR-04 (owner, D077): a lost stop whose plan did not reach a safe state (position zero
+# AND entry terminal) within max_unprotected_ms of the first detection of the loss.
+BRANCH_B4_STOP_LOST_UNRESOLVED = "B4_STOP_LOST_UNRESOLVED"
 
 EVENT_PROTECTION_TRANSITION = "PROTECTION_TRANSITION"
 EVENT_FILL_QUANTITY_UNKNOWN = "PROTECTION_FILL_QUANTITY_UNKNOWN"
@@ -204,6 +215,7 @@ REASON_CLOSE_FAILED = "CLOSE_FAILED"
 REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
 REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
 REASON_STOP_CONSUMED_FLAT = "STOP_CONSUMED_FLAT"
+REASON_STOP_LOST = "STOP_LOST"
 REASON_NO_POSITION_ON_STOP = "NO_POSITION_ON_STOP"
 REASON_TP_LEGS_CONFIRMED = "TP_LEGS_CONFIRMED"
 REASON_TP_UNAVAILABLE = "TP_UNAVAILABLE"
@@ -226,6 +238,8 @@ class ProtectionState(str, Enum):
     -> FLAT (plan 19-16). 19-REVIEW WR-05 (owner) adds the eleventh name ENTRY_UNRESOLVED: an
     ENTRY_STATE_UNKNOWN entry never found by its GTD time plus the grace; it leaves to
     UNPROTECTED on a fill, ENTRY_ENDED_NO_FILL when found ended, or AWAITING_FILL when found open.
+    19-REVIEW WR-04 (owner, D077) adds no name: a lost stop moves PROTECTED_ENTRY_OPEN back to
+    UNPROTECTED (reason ``STOP_LOST``), which leaves only to CLOSE_REQUIRED or FLAT.
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -364,6 +378,9 @@ class PlanProtection:
     stop_confirmed_at_utc: datetime | None
     entry_terminal_at_utc: datetime | None
     last_reason: str | None
+    # 19-REVIEW WR-04: the first detection of a once-confirmed stop that is no longer ACTIVE;
+    # set once and never reset (``stop_confirmed_at_utc`` keeps the earlier confirmation).
+    stop_lost_at_utc: datetime | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -477,6 +494,8 @@ class _Tracked:
         self.seq = 0
         self.first_fill_at: datetime | None = None
         self.stop_confirmed_at: datetime | None = None
+        # 19-REVIEW WR-04: set once when a confirmed stop is first seen lost, never reset.
+        self.stop_lost_at: datetime | None = None
         self.entry_terminal_at: datetime | None = None
         self.last_reason: str | None = None
         self.entry_exchange_order_id: str | None = None
@@ -498,6 +517,7 @@ class _Tracked:
             stop_confirmed_at_utc=self.stop_confirmed_at,
             entry_terminal_at_utc=self.entry_terminal_at,
             last_reason=self.last_reason,
+            stop_lost_at_utc=self.stop_lost_at,
         )
 
 
@@ -1074,11 +1094,19 @@ class ProtectionCoordinator:
         Reads the stop (until it is confirmed, and while the entry is open afterwards, so a stop
         that stopped being ACTIVE is seen: B4) and the entry (until terminal) by deterministic id,
         re-issues the entry cancel while the entry is not terminal, re-places a stop that REST
-        proved absent, and then applies the two separate deadlines of D-13.
+        proved absent before it was ever confirmed, and then applies the two separate deadlines
+        of D-13.
+
+        19-REVIEW WR-04 (owner, D077): a stop that was confirmed and then lost (``stop_lost_at``)
+        is never read, re-placed or trusted again. Every step decides by the position
+        (``_on_stop_lost``), and the one unprotected-deadline branch that covers a stop that was
+        never confirmed covers it too, measured from ``stop_lost_at``. Such a plan never settles
+        back to PROTECTED_ENTRY_OPEN or PROTECTED.
         """
         entry = tracked.entry
+        already_lost = tracked.stop_lost_at is not None
         need_entry = tracked.entry_terminal_at is None
-        need_stop = tracked.stop_confirmed_at is None or need_entry
+        need_stop = not already_lost and (tracked.stop_confirmed_at is None or need_entry)
         stop_result: Any = None
         entry_result: Any = None
         if need_stop and need_entry:
@@ -1112,66 +1140,101 @@ class ProtectionCoordinator:
             # terminal (a failed or ambiguous cancel is never taken as done).
             await self._cancel_entry_remainder(tracked)
 
-        if was_confirmed:
-            if reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE):
-                # The stop is no longer ACTIVE (triggered or consumed): never re-placed.
-                await self._on_stop_lost(tracked)
+        # The stop is lost when it was seen lost before, or when a stop confirmed on an earlier
+        # step reads ABSENT or NOT_ACTIVE now (triggered, consumed or cancelled).
+        stop_lost = already_lost or (
+            was_confirmed and reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE)
+        )
+        if stop_lost:
+            # Decided by the position on every step; never re-placed (19-REVIEW WR-04).
+            await self._on_stop_lost(tracked)
+            if tracked.state is not ProtectionState.UNPROTECTED:
                 return
+        elif was_confirmed:
             if self._entry_deadline_reached(tracked):
                 await self._enter_close_required(tracked, BRANCH_B1_ENTRY_NOT_TERMINAL)
                 return
-        elif tracked.stop_confirmed_at is None:
-            if reading is _StopReading.ABSENT:
-                # Definitive absence by id: the same id may be placed again, never blindly.
-                outcome = await self._place_stop(tracked, probe_first=False)
-                await self._on_place_outcome(tracked, outcome)
-                if tracked.state is not ProtectionState.UNPROTECTED:
-                    return
+        elif reading is _StopReading.ABSENT:
+            # A stop never confirmed and absent by id: the same id may be placed again, never
+            # blindly. A lost stop never reaches this branch.
+            outcome = await self._place_stop(tracked, probe_first=False)
+            await self._on_place_outcome(tracked, outcome)
+            if tracked.state is not ProtectionState.UNPROTECTED:
+                return
+        if stop_lost or tracked.stop_confirmed_at is None:
+            # The stop is not protection (never confirmed: B2 / B3; lost: WR-04). One deadline
+            # branch covers both; a lost stop never settles back to a protected state.
             if self._unprotected_deadline_reached(tracked):
-                branch = (
-                    BRANCH_B2_STOP_UNCONFIRMED
-                    if tracked.entry_terminal_at is not None
-                    else BRANCH_B3_BOTH_AMBIGUOUS
-                )
-                await self._enter_close_required(tracked, branch)
+                await self._enter_close_required(tracked, self._unprotected_branch(tracked))
+                return
+            if stop_lost:
                 return
         self._settle_state(tracked)
 
-    def _elapsed_ms(self, tracked: _Tracked) -> int:
-        """Whole milliseconds since the first fill was detected (integer arithmetic only)."""
-        assert tracked.first_fill_at is not None
-        return (self._now() - tracked.first_fill_at) // timedelta(milliseconds=1)
+    def _elapsed_ms(self, since: datetime | None) -> int:
+        """Whole milliseconds since ``since`` (integer arithmetic only)."""
+        assert since is not None
+        return (self._now() - since) // timedelta(milliseconds=1)
 
     def _unprotected_deadline_reached(self, tracked: _Tracked) -> bool:
-        """max_unprotected_ms (D-13): measured from the first fill, reached means escalate."""
-        return self._elapsed_ms(tracked) >= self._max_unprotected_ms
+        """max_unprotected_ms (D-13), reached means escalate.
+
+        Measured from the first fill; for a lost stop from ``stop_lost_at``, the first detection
+        of the loss (19-REVIEW WR-04). Neither is ever reset, so a failed read never stops it.
+        """
+        since = tracked.first_fill_at if tracked.stop_lost_at is None else tracked.stop_lost_at
+        return self._elapsed_ms(since) >= self._max_unprotected_ms
+
+    def _unprotected_branch(self, tracked: _Tracked) -> str:
+        """The branch code of a reached unprotected deadline."""
+        if tracked.stop_lost_at is not None:
+            return BRANCH_B4_STOP_LOST_UNRESOLVED
+        if tracked.entry_terminal_at is not None:
+            return BRANCH_B2_STOP_UNCONFIRMED
+        return BRANCH_B3_BOTH_AMBIGUOUS
 
     def _entry_deadline_reached(self, tracked: _Tracked) -> bool:
         """entry_terminal_timeout_ms (D-13): its own clock, never added to the other."""
         return (
             tracked.entry_terminal_at is None
-            and self._elapsed_ms(tracked) >= self._entry_terminal_timeout_ms
+            and self._elapsed_ms(tracked.first_fill_at) >= self._entry_terminal_timeout_ms
         )
 
     async def _on_stop_lost(self, tracked: _Tracked) -> None:
         """A once-confirmed stop is not ACTIVE any more: decide by the position (research P6).
 
-        Exposure without a stop is B4 (a fill after the stop triggered or was consumed): the
-        remainder is cancelled, the new exposure is closed by MARKET, the stop is never re-placed
-        and the plan never carries on. A flat position with a terminal entry just ends the plan,
-        once a second, fresh REST read is flat too (T-8-30, 19-REVIEW CR-03); otherwise the
-        state is kept and the next step reads again.
+        19-REVIEW WR-04 (owner decision, D077). Runs on the step that first sees the loss and on
+        every later step of the plan; the stop is never re-placed and never read again.
+
+        * ``stop_lost_at`` is recorded once, at the first detection, and never reset: a failed
+          position read neither clears the blocking state nor stops this clock.
+        * Exposure without a stop is B4 (a fill after the stop triggered or was consumed):
+          CLOSE_REQUIRED, the remainder is cancelled, the exposure is closed by MARKET (the
+          closer reads the quantity itself and never sends a guessed one) and the plan never
+          carries on.
+        * A flat position with a terminal entry ends the plan, once a second, fresh REST read is
+          flat too (T-8-30, 19-REVIEW CR-03).
+        * Anything else is not a safe state: the position unreadable, flat while the entry can
+          still fill, or a zero read the second read did not confirm. The plan is UNPROTECTED
+          (blocking new entries) until one of the above happens or the unprotected deadline,
+          measured from ``stop_lost_at``, escalates it.
         """
+        if tracked.stop_lost_at is None:
+            tracked.stop_lost_at = self._now()
         exposed = await self._position_is_open(tracked)
         if exposed is True:
             await self._enter_close_required(tracked, BRANCH_B4_FILL_AFTER_STOP)
-        elif (
+            return
+        if (
             exposed is False
             and tracked.entry_terminal_at is not None
             and await self._second_read_is_flat(tracked)
         ):
             self._transition(tracked, ProtectionState.FLAT, REASON_STOP_CONSUMED_FLAT, self._now())
             await self._sweep(tracked)
+            return
+        if tracked.state is not ProtectionState.UNPROTECTED:
+            self._transition(tracked, ProtectionState.UNPROTECTED, REASON_STOP_LOST, self._now())
 
     @staticmethod
     async def _guarded(awaitable: Any) -> Any:
@@ -1249,7 +1312,13 @@ class ProtectionCoordinator:
             tracked.entry_terminal_at = self._now()
 
     def _settle_state(self, tracked: _Tracked) -> None:
-        """Move UNPROTECTED / PROTECTED_ENTRY_OPEN to the state the confirmed facts support."""
+        """Move UNPROTECTED / PROTECTED_ENTRY_OPEN to the state the confirmed facts support.
+
+        A lost stop is never protection again (19-REVIEW WR-04 and the CR-03 interaction): its
+        earlier confirmation does not count, so such a plan is never settled here.
+        """
+        if tracked.stop_lost_at is not None:
+            return
         stop_confirmed = tracked.stop_confirmed_at is not None
         entry_terminal = tracked.entry_terminal_at is not None
         now = self._now()
@@ -1718,6 +1787,7 @@ __all__ = [
     "BRANCH_B2_STOP_UNCONFIRMED",
     "BRANCH_B3_BOTH_AMBIGUOUS",
     "BRANCH_B4_FILL_AFTER_STOP",
+    "BRANCH_B4_STOP_LOST_UNRESOLVED",
     "BRANCH_B5_STOP_REJECTED",
     "BRANCH_NO_POSITION_BUT_EXPOSED",
     "ERROR_TRANSIENT_POSITION_GAP",
