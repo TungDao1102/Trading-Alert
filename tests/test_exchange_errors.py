@@ -163,7 +163,9 @@ _EXPECTED_BY_CODE: dict[int, tuple[ExchangeErrorCategory, tuple[CallKind, ...]]]
     -1003: (_C.RATE_LIMITED, _ALL),
     -1006: (_C.STATUS_UNKNOWN, _ALL),
     -1007: (_C.STATUS_UNKNOWN, _ALL),
-    -1008: (_C.RATE_LIMITED, _ALL),
+    # Changed on purpose (quick task 261020-g1a): system-level overload protection, not a
+    # request-rate limit; it never pauses the process-wide REST gate.
+    -1008: (_C.SYSTEM_THROTTLED, _ALL),
     -1015: (_C.RATE_LIMITED, _ALL),
     -1021: (_C.CLOCK_SKEW, _ALL),
     -1022: (_C.AUTH_OR_SIGNATURE, _ALL),
@@ -523,6 +525,52 @@ def test_table_class_with_missing_or_unknown_code_is_unknown(
         assert classify(ErrorFacts(http_class, code, None), kind) is _C.UNKNOWN_EXCHANGE_ERROR
 
 
+# --------------------------------------------------------------------------- #
+# Quick task 261020-g1a: -1008 is system-level overload protection, not a 429.
+# Binance (general-info, read 2026-10-20): the node exceeded its concurrency; not counted
+# toward rate limits; reduce-only / close-position orders are exempt. It must never pause
+# or ban the process-wide REST gate, and it is never retried automatically.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("http_class", [HttpClass.BAD_REQUEST, HttpClass.NOT_FOUND])
+def test_1008_is_system_throttled_never_a_rate_limit(http_class: HttpClass) -> None:
+    facts = ErrorFacts(http_class, -1008, None)
+    for kind in CallKind:
+        category = classify(facts, kind)
+        assert category is _C.SYSTEM_THROTTLED, kind
+        assert category is not _C.RATE_LIMITED
+        assert retry_eligible(category, kind) is False
+    assert safe_mode_eligible(_C.SYSTEM_THROTTLED) is False
+    for retry_after in (None, 0, 7, 50):
+        decision = rate_limit_decision(_C.SYSTEM_THROTTLED, retry_after, **_kw())
+        assert decision == RateLimitDecision(retry=False, wait_seconds=None)
+
+
+def test_1008_under_a_429_or_418_class_still_pauses_or_bans() -> None:
+    """The class rule wins: a real HTTP 429 / 418 keeps its pause / ban, whatever the code."""
+    for kind in CallKind:
+        assert classify(ErrorFacts(HttpClass.TOO_MANY_429, -1008, None), kind) is _C.RATE_LIMITED
+        assert classify(ErrorFacts(HttpClass.BANNED_418, -1008, None), kind) is _C.IP_BANNED
+
+
+def test_1003_and_1015_stay_rate_limited() -> None:
+    """-1003 is the request-weight limit and -1015 the order-count limit: both still pause."""
+    for code in (-1003, -1015):
+        for kind in CallKind:
+            assert classify(ErrorFacts(HttpClass.BAD_REQUEST, code, None), kind) is (
+                _C.RATE_LIMITED
+            )
+
+
+def test_1008_note_records_the_exemption_and_the_read() -> None:
+    note = ERROR_CODE_TABLE[-1008].note
+    assert "Reduce-only/close-position orders are exempt" in note
+    assert "not counted" in note
+    assert "2026-10-20" in note
+    assert "261020-g1a" in note
+
+
 def test_retry_after_does_not_change_the_category() -> None:
     for kind in CallKind:
         assert classify(ErrorFacts(HttpClass.TOO_MANY_429, -1003, 7), kind) is _C.RATE_LIMITED
@@ -559,7 +607,7 @@ def test_retry_eligible_cross_product(category: ExchangeErrorCategory, call_kind
     assert retry_eligible(category, call_kind) is expected
     if call_kind is _K.PLACEMENT:
         assert retry_eligible(category, call_kind) is False
-    if category in {_C.RATE_LIMITED, _C.IP_BANNED}:
+    if category in {_C.RATE_LIMITED, _C.IP_BANNED, _C.SYSTEM_THROTTLED}:
         assert retry_eligible(category, call_kind) is False
 
 

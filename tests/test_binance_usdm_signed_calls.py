@@ -743,6 +743,76 @@ def test_signed_methods_never_retry_429_or_418(
 
 
 # --------------------------------------------------------------------------- #
+# Quick task 261020-g1a: a -1008 (system-level throttle, HTTP 400) is NOT a 429. It is
+# re-raised unchanged after one call, never retried, and never recorded in the gate, so the
+# protective stop, the cancels and every read of the process keep reaching the exchange.
+# --------------------------------------------------------------------------- #
+
+
+def _throttled() -> BadRequestError:
+    return BadRequestError("Request throttled by system-level protection.", -1008)
+
+
+def test_1008_on_the_entry_leaves_the_gate_open_for_every_signed_method() -> None:
+    adapter, rest, sleep, gate = _adapter()
+    assert gate is not None
+    throttled = _throttled()
+    rest.fail("new_order", throttled, _throttled())
+    with pytest.raises(BadRequestError) as info:
+        _run(_place_entry(adapter))
+    assert info.value is throttled
+    assert rest.calls["new_order"] == 1  # one POST, never re-sent
+    assert sleep.waits == []
+    assert gate.restriction() is None
+    assert gate.remaining_seconds() == 0
+    rest.script.clear()
+    # The protective stop, both cancels, the queries and the snapshots all reach the SDK.
+    for name in SIGNED_NAMES:
+        call, sdk_name = SIGNED[name]
+        before = rest.calls[sdk_name]
+        _run(call(adapter))
+        assert rest.calls[sdk_name] == before + 1, name
+    assert gate.restriction() is None
+
+
+@pytest.mark.parametrize("method", SIGNED_NAMES)
+def test_1008_on_any_signed_method_is_never_recorded_nor_retried(method: str) -> None:
+    adapter, rest, sleep, gate = _adapter()
+    assert gate is not None
+    call, sdk_name = SIGNED[method]
+    throttled = _throttled()
+    rest.fail(sdk_name, throttled, _throttled(), _throttled())
+    with pytest.raises(BadRequestError) as info:
+        _run(call(adapter))
+    assert info.value is throttled
+    assert rest.calls[sdk_name] == 1
+    assert rest.total() == 1
+    assert sleep.waits == []
+    assert gate.restriction() is None
+
+
+def test_a_real_429_after_a_1008_still_pauses_everything() -> None:
+    """The fix narrows nothing about a 429: it still pauses every method, placements included."""
+    adapter, rest, _, gate = _adapter()
+    assert gate is not None
+    rest.fail("new_order", _throttled())
+    with pytest.raises(BadRequestError):
+        _run(_place_entry(adapter))
+    assert gate.restriction() is None
+    rest.fail("query_order", TooManyRequestsError("slow down", -1003, None))
+    with pytest.raises(TooManyRequestsError):
+        _run(_query_order(adapter))
+    restriction = gate.restriction()
+    assert restriction is not None
+    assert restriction.reason == RATE_LIMIT_PAUSE_429
+    assert restriction.remaining_seconds == WAIT_429
+    for name in SIGNED_NAMES:
+        other, _ = SIGNED[name]
+        with pytest.raises(RateLimitPauseActive):
+            _run(other(adapter))
+
+
+# --------------------------------------------------------------------------- #
 # -1021 on every signed method, the cancels included: the hook once, no retry.
 # --------------------------------------------------------------------------- #
 
