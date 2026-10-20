@@ -243,7 +243,9 @@ async def test_branch_b2_a_stop_active_one_step_before_the_deadline_avoids_close
     assert _state(rig) is ProtectionState.PROTECTED
     await _advance_ms(rig, 60_000)
     await rig.coordinator.step()
-    assert _state(rig) is ProtectionState.PROTECTED
+    # Plan 19-16: the step after PROTECTED attaches the take profits (COMPLETE); what this test
+    # pins is that the confirmed stop, however late, never reaches CLOSE_REQUIRED.
+    assert _state(rig) is ProtectionState.COMPLETE
     assert rig.alerts.alerts == []
     assert rig.fake.calls_to("place_market_close") == []
 

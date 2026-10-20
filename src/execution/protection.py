@@ -54,8 +54,18 @@ claimed for that window), A3 (whether a closePosition stop is auto-cancelled whe
 closes, probe 6) and A2 (a GTD expiry reported as EXPIRED and terminal). An exception's message
 text is never read (D-21): only its class and int code through the taxonomy.
 
-The take-profit legs are plan 19-16, the manager hand-off plan 19-15, the emergency closer plan
-19-12.
+Plan 19-16 adds the take-profit step and the exit: from PROTECTED (entry terminal, stop confirmed
+by REST) the next step reads the REST position and calls ``attach_protectives_to_fill``, which
+sizes TP1 and TP2 from that position, writes their intents ahead and confirms them by REST; the
+plan is COMPLETE when both are confirmed. A stale but COMPLETE plan snapshot gets the live
+exchangeInfo filters read here (D-20); an INCOMPLETE snapshot, an un-sizeable TP1 (no single-TP
+fallback, O-03) or a rejected leg is TP_UNAVAILABLE (SAFE_MODE with ENTRY_WITHOUT_PROTECTIVE, a
+critical alert ``TP_UNAVAILABLE``, the confirmed stop kept, never a flatten for that reason
+alone). The legs are placed once after the entry is terminal, so TP1 is never resized by a late
+fill (G2-032). From COMPLETE or TP_UNAVAILABLE, a step that reads a flat REST position goes FLAT
+and sweeps the plan's legs by deterministic id. The manager hand-off is plan 19-15, the emergency
+closer plan 19-12. The stop of a COMPLETE or TP_UNAVAILABLE plan is not supervised any more
+(recorded open item: a stop that stops being ACTIVE while the position stays open is Phase 20/24).
 
 Design rules:
 
@@ -96,7 +106,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from src.domain.algo_status import is_protection_confirmed
-from src.domain.enums import ExecutionIntentStatus, OrderRole
+from src.domain.enums import ExecutionIntentStatus, LiveInputsStatus, OrderRole
 from src.domain.exchange_errors import (
     CallKind,
     ExchangeErrorCategory,
@@ -104,7 +114,7 @@ from src.domain.exchange_errors import (
     classify,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
-from src.execution.constraint_snapshot import PlanConstraintSnapshot
+from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
 from src.execution.order_ids import derive_algo_client_id
@@ -115,7 +125,9 @@ POSITION_MODE_HEDGE = "HEDGE"
 
 SAFE_MODE_DB_FAILURE = "DB_FAILURE"
 SAFE_MODE_CLOSE_REQUIRED = "CLOSE_REQUIRED"
+SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
 ALERT_CLOSE_REQUIRED = "CLOSE_REQUIRED"
+ALERT_TP_UNAVAILABLE = "TP_UNAVAILABLE"
 
 # The branch codes of 19-NOTES.md "Fill, stop and entry remainder" (D-12): the reason journaled on
 # the transition into CLOSE_REQUIRED, the reason of the critical alert and the reason handed to the
@@ -139,6 +151,7 @@ EVENT_ENTRY_CANCEL_NOT_SENT = "PROTECTION_ENTRY_CANCEL_NOT_SENT"
 EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
+EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 
 # The order statuses that end an entry (research P5): FILLED, and the three "ended without
 # (further) fills" statuses of the router (TERMINAL_NOT_FILLED_STATUSES).
@@ -166,15 +179,22 @@ REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
 REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
 REASON_STOP_CONSUMED_FLAT = "STOP_CONSUMED_FLAT"
 REASON_NO_POSITION_ON_STOP = "NO_POSITION_ON_STOP"
+REASON_TP_LEGS_CONFIRMED = "TP_LEGS_CONFIRMED"
+REASON_TP_UNAVAILABLE = "TP_UNAVAILABLE"
+REASON_POSITION_CLOSED = "POSITION_CLOSED"
+
+# Fixed project text for a position that contradicts the plan (never exchange text).
+DETAIL_POSITION_SIDE_MISMATCH = "position side does not match the plan"
 
 
 class ProtectionState(str, Enum):
     """The stable protection state names (Phase 20 reads them, research P8).
 
     Implemented: AWAITING_FILL -> UNPROTECTED -> PROTECTED_ENTRY_OPEN / PROTECTED,
-    AWAITING_FILL -> ENTRY_ENDED_NO_FILL (plan 19-11) and, from UNPROTECTED or
-    PROTECTED_ENTRY_OPEN, CLOSE_REQUIRED <-> CLOSE_FAILED -> FLAT (plan 19-14). The transitions
-    into COMPLETE and TP_UNAVAILABLE are plan 19-16.
+    AWAITING_FILL -> ENTRY_ENDED_NO_FILL (plan 19-11), from UNPROTECTED or
+    PROTECTED_ENTRY_OPEN, CLOSE_REQUIRED <-> CLOSE_FAILED -> FLAT (plan 19-14), and PROTECTED ->
+    COMPLETE / TP_UNAVAILABLE, with COMPLETE / TP_UNAVAILABLE (and PROTECTED, when REST is flat)
+    -> FLAT (plan 19-16).
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -617,6 +637,10 @@ class ProtectionCoordinator:
                     await self._poll_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
                 await self._confirm(tracked)
+            elif state is ProtectionState.PROTECTED:
+                await self._attach_take_profits(tracked)
+            elif state in (ProtectionState.COMPLETE, ProtectionState.TP_UNAVAILABLE):
+                await self._watch_exit(tracked)
             elif state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
                 await self._close_flow(tracked)
             elif state is ProtectionState.FLAT and not tracked.sweep_done:
@@ -1110,6 +1134,159 @@ class ProtectionCoordinator:
             )
 
     # ------------------------------------------------------------------ #
+    # Take profits and the exit (plan 19-16; D-18, D-19, D-20, G2-032, O-03).
+    # ------------------------------------------------------------------ #
+
+    async def _position_amount(self, tracked: _Tracked) -> Decimal | None:
+        """The signed REST position quantity of the symbol; None when it cannot be read."""
+        symbol = tracked.entry.symbol
+        answer = await self._guarded(self._adapter.snapshot_positions(symbol=symbol))
+        if isinstance(answer, BaseException):
+            if not isinstance(answer, Exception):
+                raise answer
+            self._journal_note(
+                tracked,
+                EVENT_REST_FAILED,
+                {"call": "snapshot_positions", "error_type": type(answer).__name__},
+                self._now(),
+            )
+            return None
+        total = _ZERO
+        for row in answer:
+            if _attr(row, "symbol") != symbol:
+                continue
+            amount = _attr(row, "position_amt")
+            if not isinstance(amount, Decimal) or not amount.is_finite():
+                self._journal_note(
+                    tracked,
+                    EVENT_REST_FAILED,
+                    {"call": "snapshot_positions", "error_type": "UnreadablePositionAmount"},
+                    self._now(),
+                )
+                return None
+            total += amount
+        return total
+
+    async def _attach_take_profits(self, tracked: _Tracked) -> None:
+        """PROTECTED -> COMPLETE or TP_UNAVAILABLE (exactly once per plan).
+
+        The entry is terminal and the stop confirmed, so the final position is settled (G2-032:
+        no later resize path exists). The REST position is read; a flat one ends the plan, an
+        unreadable one waits for the next step. A snapshot that is stale but COMPLETE gets the
+        live exchangeInfo filters read here (D-20); an INCOMPLETE one is refused by attach.
+        ``attach_protectives_to_fill`` enters SAFE_MODE for every refusal it reports, so this
+        method adds a SAFE_MODE entry only for its own refusal (a contradicting side).
+        """
+        # Imported here: ``manager`` imports ``live_context``, which imports this module.
+        from src.execution.manager import attach_protectives_to_fill
+
+        entry = tracked.entry
+        amount = await self._position_amount(tracked)
+        if amount is None:
+            return
+        if amount == _ZERO:
+            self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
+            await self._sweep(tracked)
+            return
+        if (amount > _ZERO) != (entry.side == "LONG"):
+            await self._enter_tp_unavailable(
+                tracked,
+                reason_code="POSITION_SIDE_MISMATCH",
+                detail=DETAIL_POSITION_SIDE_MISMATCH,
+                safe_mode_entered=False,
+            )
+            return
+        now = self._now()
+        snapshot = entry.plan_constraint_snapshot
+        live_filters: Any = None
+        if (
+            not snapshot_is_valid_for_live(snapshot, now_utc=now, ttl=entry.snapshot_ttl)
+            and snapshot.live_inputs_status is LiveInputsStatus.COMPLETE
+        ):
+            read = await self._guarded(self._adapter.symbol_lot_filters(symbol=entry.symbol))
+            if isinstance(read, BaseException):
+                if not isinstance(read, Exception):
+                    raise read
+                # Attach refuses a stale snapshot without live filters (fail closed).
+                self._journal_note(
+                    tracked,
+                    EVENT_REST_FAILED,
+                    {"call": "symbol_lot_filters", "error_type": type(read).__name__},
+                    now,
+                )
+            else:
+                live_filters = read
+        outcome = await attach_protectives_to_fill(
+            entry=entry,
+            position_quantity=abs(amount),
+            live_lot_filters=live_filters,
+            adapter=self._adapter,  # type: ignore[arg-type]
+            intent_store=self._store,
+            now_utc=now,
+            safe_mode_controller=self._safe_mode,
+        )
+        if not outcome.is_no_trade:
+            self._transition(tracked, ProtectionState.COMPLETE, REASON_TP_LEGS_CONFIRMED, now)
+        elif outcome.reason_code != "NO_FILL":
+            await self._enter_tp_unavailable(
+                tracked,
+                reason_code=outcome.reason_code,
+                detail=outcome.failure_detail or outcome.reason_code,
+                safe_mode_entered=True,
+            )
+
+    async def _enter_tp_unavailable(
+        self, tracked: _Tracked, *, reason_code: str, detail: str, safe_mode_entered: bool
+    ) -> None:
+        """The CR-03 routine: the take profits are not in place but the stop is (once per plan).
+
+        The confirmed stop is kept (never cancelled here), nothing is closed for this reason
+        alone (O-03: no automatic flatten, no single-TP fallback), the plan is never a normal
+        completion, and ``blocks_new_entries()`` stays False (SAFE_MODE blocks entries through
+        its own gate). SAFE_MODE with ENTRY_WITHOUT_PROTECTIVE, the journal note and the
+        critical alert are all attempted; one failing never skips the others.
+        """
+        entry = tracked.entry
+        now = self._now()
+        self._transition(tracked, ProtectionState.TP_UNAVAILABLE, REASON_TP_UNAVAILABLE, now)
+        self._journal_note(
+            tracked,
+            EVENT_TP_UNAVAILABLE,
+            {"failure_detail": detail, "reason_code": reason_code},
+            now,
+        )
+        if not safe_mode_entered:
+            try:
+                self._safe_mode.enter_safe_mode(
+                    reason=SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE, now_utc=now
+                )
+            except Exception:  # noqa: BLE001, S110 - the alert still goes out
+                pass
+        try:
+            self._alerts.critical(
+                event=ALERT_TP_UNAVAILABLE,
+                plan_hash=entry.plan_hash,
+                symbol=entry.symbol,
+                reason=detail,
+                now_utc=now,
+            )
+        except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist
+            pass
+
+    async def _watch_exit(self, tracked: _Tracked) -> None:
+        """COMPLETE / TP_UNAVAILABLE: a flat REST position ends the plan (FLAT) and is swept.
+
+        The stop, TP1 or TP2 closed the position (whichever fired); the plan's remaining legs are
+        cancelled by deterministic id whatever the exchange auto-cancelled (A3). An open or
+        unreadable position keeps the state.
+        """
+        amount = await self._position_amount(tracked)
+        if amount is None or amount != _ZERO:
+            return
+        self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
+        await self._sweep(tracked)
+
+    # ------------------------------------------------------------------ #
     # CLOSE_REQUIRED, the emergency close, FLAT and the orphan sweep (D-12, D034).
     # ------------------------------------------------------------------ #
 
@@ -1372,6 +1549,7 @@ class ProtectionCoordinator:
 
 __all__ = [
     "ALERT_CLOSE_REQUIRED",
+    "ALERT_TP_UNAVAILABLE",
     "BLOCKING_STATES",
     "BRANCH_B1_ENTRY_NOT_TERMINAL",
     "BRANCH_B2_STOP_UNCONFIRMED",
@@ -1390,12 +1568,14 @@ __all__ = [
     "EVENT_STOP_NOT_SENT",
     "EVENT_STOP_PLACEMENT_FAILED",
     "EVENT_SWEEP_FAILED",
+    "EVENT_TP_UNAVAILABLE",
     "EVENT_UNKNOWN_FILL",
     "FILLED_ENTRY_STATUSES",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
     "SAFE_MODE_CLOSE_REQUIRED",
     "SAFE_MODE_DB_FAILURE",
+    "SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE",
     "TERMINAL_ENTRY_STATUSES",
     "CriticalAlertSink",
     "EmergencyCloser",
