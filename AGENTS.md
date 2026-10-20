@@ -60,7 +60,7 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
   `Claude Opus 5.5` for an opus subagent, `Claude Sonnet 5.5` for Sonnet. Never copy another
   model's trailer. History is not rewritten.
 - **Never push, never merge to `master`.** The owner pushes and merges. Stage explicit paths only;
-  leave untracked `.gsd/`, `.planning/milestone.lock` and modified `.planning/config.json` alone.
+  leave untracked `.gsd/`, .planning/milestone.lock (local only) and modified `.planning/config.json` alone.
 - Work through a GSD command (`/gsd-quick` for small changes, `/gsd-execute-phase` for planned work).
   Plans, summaries and decisions go in `.planning/phases/<n>-*/`; quick tasks in `.planning/quick/`.
 - Repo docs and evidence are written in English. Some files are CRLF-sensitive: edit bytes-aware.

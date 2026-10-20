@@ -213,7 +213,12 @@ def test_spelled_roots_give_the_same_files_and_identity(
                     lambda s=spelled, f=files: _old_files_and_identity(s, f),
                     lambda s=spelled, f=files: ci._files_and_identity(s, f),
                 )
-                assert kind == "ok"
+                # A backslash separates only on Windows; elsewhere that root does not exist.
+                foreign = os.sep != "\\" and "\\" in str(spelled)
+                if not foreign:
+                    assert kind == "ok"
+                elif files:
+                    assert kind == "error"
                 _same(
                     lambda s=spelled, f=files: _old_dataset_identity(s, f),
                     lambda s=spelled, f=files: ci.dataset_identity(s, f),
