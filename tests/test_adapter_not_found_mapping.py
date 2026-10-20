@@ -4,9 +4,9 @@ Observed on demo-fapi.binance.com (read-only GET /fapi/v1/algoOrder, 2026-10-05)
 the SDK raises ``BadRequestError`` with ``status_code=-2013`` and
 ``error_message='Order does not exist.'``. Only the taxonomy category ORDER_ABSENT of a
 QUERY call (``src/domain/exchange_errors.py``: -2013 or -2011 carried as the int code of a
-400 or 404 SDK error) may become ``found=False`` (that enables a retry of the placement);
-every other error must raise the same exception object (fail closed), and message text never
-decides (D-10, 08-REVIEW IN-10).
+400 or 404 SDK error) may become ``found=False`` (a placement is never re-sent because of
+a found=False answer, Q5); every other error must raise the same exception object (fail
+closed), and message text never decides (D-10, 08-REVIEW IN-10).
 """
 
 from __future__ import annotations

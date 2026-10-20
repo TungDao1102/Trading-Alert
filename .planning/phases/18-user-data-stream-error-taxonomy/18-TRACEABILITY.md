@@ -121,7 +121,7 @@ Plans 18-01 to 18-21, 18-23 and 18-24 had a SUMMARY when this file was written. 
 
 ### Codes seen by the smoke and probe: decided by the owner on 2026-10-17 (plan 18-26)
 
-The owner's decision is in `decisions/18-DEC-TAXONOMY-CODES.md` (option adopt-with-addition: -4024 added with -4016). The error-code page was read again on 2026-10-17 (`evidence/18-error-code-page-reread-20261017.txt`, page last modified 2026-10-16 as the page shows). The tests are in `tests/test_exchange_error_rejections.py` and `tests/test_exchange_errors.py`; for example `test_exchange_error_rejections.py::test_each_owner_code_classifies_rejected_definitive_on_placement_only`, `test_exchange_error_rejections.py::test_tracer_1106_on_the_protective_stop_is_entry_without_protective` and `test_exchange_errors.py::test_1125_keeps_its_mapping_and_records_the_smoke_observation`.
+The owner's decision is in `decisions/18-DEC-TAXONOMY-CODES.md` (option adopt-with-addition: -4024 added with -4016). The error-code page was read again on 2026-10-17 (`evidence/18-error-code-page-reread-20261017.txt`, page last modified 2026-10-16 as the page shows). The tests are in `tests/test_exchange_error_rejections.py` and `tests/test_exchange_errors.py`; for example `test_exchange_error_rejections.py::test_each_owner_code_classifies_rejected_definitive_on_placement_only`, `test_exchange_error_rejections.py::test_tracer_1106_on_the_protective_stop_after_a_fill_goes_close_required` (renamed by Phase 19 plan 19-15, the stop is now decided by the protection coordinator) and `test_exchange_errors.py::test_1125_keeps_its_mapping_and_records_the_smoke_observation`.
 
 | Code | Seen in | Class at the time of the evidence | Class now |
 |---|---|---|---|

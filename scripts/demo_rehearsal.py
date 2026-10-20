@@ -85,6 +85,7 @@ from src.adapters.binance_usdm import (  # noqa: E402
     CommissionRates,
     EntryPlacementResult,
     Kline,
+    MarketCloseResult,
     MarkKline,
     OpenAlgoOrderSnapshot,
     OpenOrderSnapshot,
@@ -137,26 +138,28 @@ from src.execution.execution_limits import (  # noqa: E402
     ExecutionLimitsInvalid,
     load_execution_limits,
 )
-from src.execution.fill_monitor import CurrentPositionView, FillEvent  # noqa: E402
 from src.execution.intent_store import ExecutionIntentStore  # noqa: E402
 from src.execution.live_context import LivePlacementContext  # noqa: E402
 from src.execution.manager import (  # noqa: E402
     LIVE5_SYMBOLS,
-    attach_protectives_to_fill,
     cancel_untriggered_protectives,
     execute_approved_plan,
     expire_pending_entry,
-    resolve_position_mode,
 )
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id  # noqa: E402
 from src.execution.placement import (  # noqa: E402
     PRICE_ROUND_DOWN,
     PRICE_ROUND_UP,
-    ProtectiveTemplate,
     quantize_price,
 )
 from src.execution.pre_placement import LIMITS_NOT_CONFIGURED  # noqa: E402
-from src.execution.protection import ProtectionCoordinator  # noqa: E402
+from src.execution.protection import (  # noqa: E402
+    ALERT_TP_UNAVAILABLE,
+    EVENT_PROTECTION_TRANSITION,
+    PlanProtection,
+    ProtectionCoordinator,
+    ProtectionState,
+)
 from src.ops.health import (  # noqa: E402
     ALL_CHECK_NAMES,
     CHECK_DB_WRITES,
@@ -432,7 +435,7 @@ def default_adapter_factory(
 # Evidence (SR-8): only exchange-returned dataclasses can become exchange records.
 # --------------------------------------------------------------------------- #
 
-_ORDER_RECORD_TYPES = (EntryPlacementResult, AlgoPlacementResult)
+_ORDER_RECORD_TYPES = (EntryPlacementResult, AlgoPlacementResult, MarketCloseResult)
 _OBSERVATION_TYPES = (
     OrderProbe,
     AlgoOrderProbe,
@@ -782,6 +785,7 @@ class GuardedAdapter:
         quantity: Decimal,
         price: Decimal,
         new_client_order_id: str,
+        good_till_date: int | None = None,
     ) -> EntryPlacementResult:
         self.mutating_attempts += 1
         if self._mode is RunMode.DRY_RUN:
@@ -792,6 +796,7 @@ class GuardedAdapter:
                     "side": side,
                     "position_side": position_side,
                     "time_in_force": time_in_force,
+                    "good_till_date": good_till_date,
                     "quantity": quantity,
                     "price": price,
                     "new_client_order_id": new_client_order_id,
@@ -821,6 +826,7 @@ class GuardedAdapter:
                 quantity=quantity,
                 price=price,
                 new_client_order_id=new_client_order_id,
+                good_till_date=good_till_date,
             ),
         )
         self._recorder.record_exchange_record(result)
@@ -923,6 +929,52 @@ class GuardedAdapter:
             "cancel_algo_order",
             lambda: self._inner.cancel_algo_order(symbol=symbol, client_algo_id=client_algo_id),
         )
+
+    async def place_market_close(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+        new_client_order_id: str,
+    ) -> MarketCloseResult:
+        """The emergency reduce-only MARKET close (plan 19-12): counted, simulated in DRY_RUN."""
+        self.mutating_attempts += 1
+        if self._mode is RunMode.DRY_RUN:
+            self._recorder.record_planned_request(
+                "place_market_close",
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "position_side": position_side,
+                    "quantity": quantity,
+                    "new_client_order_id": new_client_order_id,
+                },
+            )
+            return MarketCloseResult(
+                symbol=symbol,
+                client_order_id=new_client_order_id,
+                exchange_order_id=f"DRYRUN-{new_client_order_id}",
+                side=side,
+                position_side=position_side,
+                status="NEW",
+                executed_quantity=None,
+                average_price=None,
+                update_time_utc=self._clock(),
+            )
+        result = await self._call(
+            "place_market_close",
+            lambda: self._inner.place_market_close(
+                symbol=symbol,
+                side=side,
+                position_side=position_side,
+                quantity=quantity,
+                new_client_order_id=new_client_order_id,
+            ),
+        )
+        self._recorder.record_exchange_record(result)
+        return result
 
 
 # --------------------------------------------------------------------------- #
@@ -1207,6 +1259,12 @@ class RunContext:
     # limits file (drift limits); a test injects a value instead.
     execution_limits: ExecutionLimits | None = None
     drift_limits: DriftLimits | None = None
+    # Plan 19-16. The coordinator `build_live_context` built (the fill scenario steps it).
+    coordinator: ProtectionCoordinator | None = None
+    # Plan 19-16, TEST SEAM only (no CLI flag): margin_type, leverage and equity_used for the
+    # plan snapshot. None is the real behavior: they are unknown until Phases 21-22, the
+    # snapshot stays INCOMPLETE and every TP placement is refused into TP_UNAVAILABLE.
+    snapshot_live_inputs: Mapping[str, Any] | None = None
 
 
 def build_context(
@@ -1224,6 +1282,7 @@ def build_context(
     token_factory: Callable[[], str],
     execution_limits: ExecutionLimits | None = None,
     drift_limits: DriftLimits | None = None,
+    snapshot_live_inputs: Mapping[str, Any] | None = None,
 ) -> RunContext:
     journal = RunJournal()
     return RunContext(
@@ -1243,6 +1302,7 @@ def build_context(
         run_id=f"{scenario}-{_utc_stamp(clock())}",
         execution_limits=execution_limits,
         drift_limits=drift_limits,
+        snapshot_live_inputs=snapshot_live_inputs,
     )
 
 
@@ -1861,6 +1921,7 @@ async def build_live_context(
         filters.max_quantity,
         "MARK_PRICE",
         captured_at_utc=now,
+        **dict(ctx.snapshot_live_inputs or {}),
     )
     alerts = RehearsalAlertSink(ctx)
     closer = MarketEmergencyCloser(
@@ -1887,8 +1948,10 @@ async def build_live_context(
             "gtd_clock_margin_ms": int(margin.total_seconds() * 1000),
             "tp1_quantity_fraction": TP1_QUANTITY_FRACTION,
             "working_type": snapshot.working_type,
+            "plan_snapshot_status": snapshot.live_inputs_status.value,
         }
     )
+    ctx.coordinator = coordinator
     return LivePlacementContext(
         signal=signal,
         plan_constraint_snapshot=snapshot,
@@ -2262,9 +2325,13 @@ async def _cancel_everything(
     return ok
 
 
-async def _entry_and_stop_probes(
-    ctx: RunContext, plan: DerivedPlan
-) -> tuple[OrderProbe, AlgoOrderProbe]:
+async def _entry_probe(ctx: RunContext, plan: DerivedPlan) -> OrderProbe:
+    """Read back the entry and the open orders. No stop is read: none exists at entry time (D-10).
+
+    The closePosition stop is placed after the first fill by the protection coordinator, which
+    the fill scenario steps (plan 19-16), so a rehearsal that has only placed the entry has
+    nothing protective to probe.
+    """
     plan_hash = plan.trade_plan.plan_hash
     entry_probe = await ctx.guarded.query_order_by_client(
         symbol=SYMBOL,
@@ -2272,14 +2339,11 @@ async def _entry_and_stop_probes(
             plan_hash=plan_hash, role=OrderRole.ENTRY.value
         ),
     )
-    stop_probe = await ctx.guarded.query_algo_order_by_client(
-        client_algo_id=derive_algo_client_id(plan_hash=plan_hash, role=OrderRole.STOP_LOSS.value)
-    )
     snaps_orders = await ctx.guarded.snapshot_open_normal_orders(symbol=SYMBOL)
     snaps_algos = await ctx.guarded.snapshot_open_algo_orders(symbol=SYMBOL)
     for snapshot in (*snaps_orders, *snaps_algos):
         ctx.recorder.record_exchange_record(snapshot)
-    return entry_probe, stop_probe
+    return entry_probe
 
 
 async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderProbe) -> str:
@@ -2287,7 +2351,7 @@ async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderPro
         ctx.recorder.add_step(
             "cleanup",
             STEP_FAILED,
-            f"entry status is {entry_probe.status!r}, not NEW: the stop is left in place",
+            f"entry status is {entry_probe.status!r}, not NEW: nothing was cancelled",
         )
         _instruct(
             ctx,
@@ -2295,12 +2359,11 @@ async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderPro
             "in the Binance Demo UI.",
         )
         return OUTCOME_FAILED
-    cancelled = await _cancel_everything(ctx, plan, entry=True)
+    cancelled = await _cancel_everything(ctx, plan, entry=True, protectives=False)
     ctx.recorder.add_step(
         "cleanup",
         STEP_PASSED if cancelled else STEP_FAILED,
-        "entry cancelled by deterministic id, then the protective legs (TP1 and TP2 were "
-        "never placed, so their cancels may report unknown orders)",
+        "entry cancelled by deterministic id; no protective leg exists to cancel (D-10)",
     )
     clean = await _confirm_clean(ctx)
     if not (cancelled and clean):
@@ -2309,61 +2372,77 @@ async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderPro
     return OUTCOME_COMPLETE
 
 
-async def _attach_after_fill(
-    ctx: RunContext,
-    plan: DerivedPlan,
-    constraints: ConstraintSnapshot,
-    safe_mode: SafeModeController,
-    probe: OrderProbe,
-    position: PositionSnapshot,
-) -> str:
-    guarded = ctx.guarded
-    now = await guarded.server_time()
-    order_id = probe.order_id or "unknown-order"
-    fill = FillEvent(
-        order_id=order_id,
-        exchange_trade_id=f"position-view:{order_id}",
-        symbol=SYMBOL,
-        side="BUY",
-        position_side=position.position_side,
-        fill_price=position.entry_price,
-        fill_quantity=position.position_amt,
-        fill_time_utc=probe.update_time_utc or now,
-    )
-    ctx.recorder.details["fill_event"] = {
-        "order_id": order_id,
-        "exchange_trade_id": fill.exchange_trade_id,
-        "fill_quantity": _jsonable(fill.fill_quantity),
-        "fill_price": _jsonable(fill.fill_price),
-        "label": "built from a REST position view; the trade id is not an exchange trade id",
+_FINAL_PROTECTION_STATES = frozenset(
+    {
+        ProtectionState.COMPLETE,
+        ProtectionState.TP_UNAVAILABLE,
+        ProtectionState.FLAT,
+        ProtectionState.CLOSE_FAILED,
+        ProtectionState.ENTRY_ENDED_NO_FILL,
     }
-    mode = resolve_position_mode(await guarded.get_position_mode())
-    template = ProtectiveTemplate(
-        stop_loss_trigger_price=plan.stop_loss,
-        tp1_trigger_price=plan.tp1_trigger,
-        tp2_trigger_price=plan.tp2_trigger,
-        tp1_quantity_fraction=TP1_QUANTITY_FRACTION,
-    )
-    attach = await attach_protectives_to_fill(
-        fill_events=[fill],
-        current_position_view=CurrentPositionView(
-            symbol=SYMBOL, position_side=position.position_side, position_amt=Decimal("0")
-        ),
-        protective_template=template,
-        constraint_snapshot=constraints,
-        position_mode=mode,
-        candidate_position_side="LONG",
-        plan_hash=plan.trade_plan.plan_hash,
-        adapter=cast(Any, guarded),
-        now_utc=now,
-        safe_mode_controller=safe_mode,
-    )
+)
+_KNOWN_GAP_PREFIX = "plan snapshot is INCOMPLETE"
+
+
+def _protection_view(ctx: RunContext, plan: DerivedPlan) -> PlanProtection | None:
+    coordinator = ctx.coordinator
+    if coordinator is None:
+        return None
+    return coordinator.protection_of(plan.trade_plan.plan_hash)
+
+
+def _protection_transitions(ctx: RunContext, plan: DerivedPlan) -> list[dict[str, str]]:
+    """The journaled protection transitions of this plan, in order (from, to, reason)."""
+    plan_hash = plan.trade_plan.plan_hash
+    transitions: list[dict[str, str]] = []
+    for event in ctx.journal.events:
+        if event.event_type != EVENT_PROTECTION_TRANSITION or event.entity_id != plan_hash:
+            continue
+        payload = json.loads(event.payload_json)
+        transitions.append(
+            {"from": payload["from"], "to": payload["to"], "reason": payload["reason"]}
+        )
+    return transitions
+
+
+def _record_protection_flow(ctx: RunContext, plan: DerivedPlan) -> None:
+    view = _protection_view(ctx, plan)
+    ctx.recorder.details["protection_flow"] = {
+        "final_state": None if view is None else view.state.value,
+        "transitions": _protection_transitions(ctx, plan),
+    }
+
+
+async def _drive_protection(ctx: RunContext, plan: DerivedPlan) -> ProtectionState | None:
+    """Step the coordinator (REST-only: no user-data stream) until the plan settles or the bound.
+
+    Each iteration is one `coordinator.step()` followed by the injected sleep; the loop ends at
+    COMPLETE, TP_UNAVAILABLE, FLAT, CLOSE_FAILED, ENTRY_ENDED_NO_FILL or after FILL_MAX_POLLS
+    sleeps. The coordinator's own deadlines run on the context clock.
+    """
+    coordinator = ctx.coordinator
+    if coordinator is None:
+        raise RehearsalAbort("the protection coordinator was not built")
+    state: ProtectionState | None = None
+    for poll in range(FILL_MAX_POLLS + 1):
+        await coordinator.step()
+        view = coordinator.protection_of(plan.trade_plan.plan_hash)
+        state = None if view is None else view.state
+        if state in _FINAL_PROTECTION_STATES:
+            break
+        if poll < FILL_MAX_POLLS:
+            await ctx.sleep(FILL_POLL_SECONDS)
+    return state
+
+
+async def _record_leg_echoes(ctx: RunContext, plan: DerivedPlan) -> None:
+    """Record the open algo legs the exchange echoes back (stop, and TP1 and TP2 when placed)."""
     roles = {
         derive_algo_client_id(plan_hash=plan.trade_plan.plan_hash, role=role.value): role.value
         for role in (OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT_1, OrderRole.TAKE_PROFIT_2)
     }
     echoes: list[dict[str, Any]] = []
-    for snapshot in await guarded.snapshot_open_algo_orders(symbol=SYMBOL):
+    for snapshot in await ctx.guarded.snapshot_open_algo_orders(symbol=SYMBOL):
         ctx.recorder.record_exchange_record(snapshot)
         echoes.append(
             _jsonable(
@@ -2381,38 +2460,24 @@ async def _attach_after_fill(
             )
         )
     ctx.recorder.details["leg_echoes"] = echoes
-    _instruct(
-        ctx,
-        "Protective legs are left in place; close the Demo position and cancel leftover "
-        "orders in the Binance Demo UI.",
-    )
-    if attach.is_no_trade:
-        ctx.recorder.add_step(
-            "attach_protectives",
-            STEP_FAILED,
-            f"{attach.reason_code}: {attach.failure_detail or 'leg not confirmed'}",
-        )
-        _instruct(
-            ctx, "A position exists without confirmed protection: close it NOW in the Demo UI."
-        )
-        return OUTCOME_FAILED
-    ctx.recorder.add_step(
-        "attach_protectives",
-        STEP_PASSED,
-        f"SL, TP1 (fraction {TP1_QUANTITY_FRACTION}) and TP2 confirmed: "
-        f"{', '.join(attach.placed_legs)}",
-    )
-    return OUTCOME_COMPLETE
 
 
-async def _fill_flow(
-    ctx: RunContext,
-    plan: DerivedPlan,
-    constraints: ConstraintSnapshot,
-    safe_mode: SafeModeController,
-    entry_probe: OrderProbe,
-) -> str:
-    guarded = ctx.guarded
+def _tp_unavailable_reason(ctx: RunContext) -> str:
+    """The reason of the last TP_UNAVAILABLE critical alert (fixed project text)."""
+    alerts = ctx.recorder.details.get("critical_alerts", [])
+    reasons = [a["reason"] for a in alerts if a.get("event") == ALERT_TP_UNAVAILABLE]
+    return str(reasons[-1]) if reasons else "no reason was recorded"
+
+
+async def _fill_flow(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderProbe) -> str:
+    """The fill scenario, driven end to end by the protection coordinator (plan 19-16).
+
+    After `execute_approved_plan` handed the GTD entry to the coordinator, this loop only steps
+    it: the coordinator detects the fill by REST, places the closePosition stop after it, confirms
+    the stop by REST, ends the entry remainder, then places TP1 and TP2 from the real position
+    (or goes TP_UNAVAILABLE). Every final state is recorded as a step with an honest status; a
+    TP_UNAVAILABLE caused by the INCOMPLETE plan snapshot is a known gap, never a pass.
+    """
     if ctx.mode is RunMode.DRY_RUN:
         ctx.recorder.add_step(
             "fill_wait", STEP_SKIPPED_DRY_RUN, "a dry run never fills; the entry is only simulated"
@@ -2423,35 +2488,106 @@ async def _fill_flow(
         outcome = await _far_cleanup(ctx, plan, entry_probe)
         return OUTCOME_COMPLETE_WITH_GAPS if outcome == OUTCOME_COMPLETE else outcome
 
-    entry_id = derive_client_order_id(
-        plan_hash=plan.trade_plan.plan_hash, role=OrderRole.ENTRY.value
-    )
-    probe = entry_probe
-    polls = 0
-    while probe.found and probe.status != "FILLED" and polls < FILL_MAX_POLLS:
-        await ctx.sleep(FILL_POLL_SECONDS)
-        polls += 1
-        probe = await guarded.query_order_by_client(symbol=SYMBOL, orig_client_order_id=entry_id)
-    filled = probe.status == "FILLED"
-    ctx.recorder.add_step(
+    recorder = ctx.recorder
+    state = await _drive_protection(ctx, plan)
+    cancelled = True
+    if state is ProtectionState.AWAITING_FILL:
+        # No fill within the bound: end the entry, then let the coordinator observe the end (or a
+        # fill that raced the cancel).
+        cancelled = await _cancel_everything(ctx, plan, entry=True, protectives=False)
+        state = await _drive_protection(ctx, plan)
+    view = _protection_view(ctx, plan)
+    _record_protection_flow(ctx, plan)
+    filled = view is not None and view.first_fill_at_utc is not None
+    transitions = " -> ".join(t["to"] for t in _protection_transitions(ctx, plan))
+    recorder.add_step(
         "fill_wait",
         STEP_PASSED if filled else STEP_NOT_REHEARSED,
-        f"entry status {probe.status!r} after {polls} polls",
+        f"protection path {transitions or 'none'}; final state "
+        f"{'none' if state is None else state.value}",
     )
-    cancelled = True
+
     if not filled:
-        # Cancel only the unfilled remainder; a partial fill keeps its stop and gets targets.
-        cancelled = await _cancel_everything(ctx, plan, entry=True, protectives=False)
-    positions = await guarded.snapshot_positions(symbol=SYMBOL)
-    held = [p for p in positions if p.position_amt > Decimal("0")]
-    if not held:
-        ctx.recorder.add_step(
+        recorder.add_step(
+            "protection_stop", STEP_NOT_REHEARSED, "the entry never filled; no stop was placed"
+        )
+        recorder.add_step(
             "attach_protectives", STEP_NOT_REHEARSED, "the entry never filled; nothing to attach"
         )
-        await _cancel_everything(ctx, plan, entry=False)
+        if state is not ProtectionState.ENTRY_ENDED_NO_FILL:
+            # The plan is neither filled nor observed as ended: do not claim a clean account.
+            _instruct(
+                ctx,
+                "The entry state is unknown: check the Binance Demo UI for a position and any "
+                "open order, and close them by hand.",
+            )
+            return OUTCOME_FAILED
         clean = await _confirm_clean(ctx)
         return OUTCOME_COMPLETE_WITH_GAPS if (cancelled and clean) else OUTCOME_FAILED
-    return await _attach_after_fill(ctx, plan, constraints, safe_mode, probe, held[0])
+
+    stop_confirmed = view is not None and view.stop_confirmed_at_utc is not None
+    recorder.add_step(
+        "protection_stop",
+        STEP_PASSED if stop_confirmed else STEP_FAILED,
+        "stop placed after the first fill and confirmed ACTIVE by REST"
+        if stop_confirmed
+        else "the stop was not confirmed by REST",
+    )
+    await _record_leg_echoes(ctx, plan)
+    closed_by_emergency = any(
+        t["to"] == ProtectionState.CLOSE_REQUIRED.value for t in _protection_transitions(ctx, plan)
+    )
+    if state is ProtectionState.COMPLETE:
+        recorder.add_step(
+            "attach_protectives",
+            STEP_PASSED,
+            f"SL, TP1 (fraction {TP1_QUANTITY_FRACTION}) and TP2 confirmed by REST",
+        )
+        _instruct(
+            ctx,
+            "Protective legs are left in place; close the Demo position and cancel leftover "
+            "orders in the Binance Demo UI.",
+        )
+        return OUTCOME_COMPLETE
+    if state is ProtectionState.TP_UNAVAILABLE:
+        reason = _tp_unavailable_reason(ctx)
+        _instruct(
+            ctx,
+            "The stop is in place but no take profit is: close the Demo position and cancel "
+            "leftover orders in the Binance Demo UI.",
+        )
+        if reason.startswith(_KNOWN_GAP_PREFIX):
+            recorder.add_step(
+                "attach_protectives",
+                STEP_NOT_REHEARSED,
+                f"known gap: {reason} (margin type, leverage and equity stay unknown until "
+                "Phases 21-22); the stop is kept and TP1 and TP2 were not placed",
+            )
+            return OUTCOME_COMPLETE_WITH_GAPS
+        recorder.add_step("attach_protectives", STEP_FAILED, f"TP_UNAVAILABLE: {reason}")
+        return OUTCOME_FAILED
+    if state is ProtectionState.FLAT and not closed_by_emergency:
+        recorder.add_step(
+            "attach_protectives",
+            STEP_NOT_REHEARSED,
+            "the position was already flat when the take profits were due",
+        )
+        _instruct(ctx, "Check the Binance Demo UI for leftover orders.")
+        return OUTCOME_COMPLETE_WITH_GAPS
+    detail = (
+        "the position was closed by the emergency market close"
+        if state is ProtectionState.FLAT
+        else f"protection ended in {'none' if state is None else state.value}"
+    )
+    recorder.add_step("attach_protectives", STEP_NOT_REHEARSED, detail)
+    recorder.add_step("protection_outcome", STEP_FAILED, detail)
+    if state is not ProtectionState.FLAT:
+        _instruct(
+            ctx, "A position exists without confirmed protection: close it NOW in the Demo UI."
+        )
+    else:
+        _instruct(ctx, "Check the Binance Demo UI: the position was closed by market.")
+    return OUTCOME_FAILED
 
 
 async def run_order_scenario(ctx: RunContext, kind: str) -> str:
@@ -2567,7 +2703,7 @@ async def run_order_scenario(ctx: RunContext, kind: str) -> str:
                 intent_store=intent_store,
                 live_context=live_context,
             )
-            result = await _after_placement(ctx, plan, constraints, safe_mode, kind, outcome)
+            result = await _after_placement(ctx, plan, kind, outcome)
         finally:
             if not controller.is_disabled:
                 controller.disable(operator_id=OPERATOR_ID, now_utc=ctx.clock())
@@ -2591,45 +2727,40 @@ def constraint_values_of_plan(plan: DerivedPlan) -> dict[str, Decimal]:
     }
 
 
-async def _after_placement(
-    ctx: RunContext,
-    plan: DerivedPlan,
-    constraints: ConstraintSnapshot,
-    safe_mode: SafeModeController,
-    kind: str,
-    outcome: Any,
-) -> str:
+async def _after_placement(ctx: RunContext, plan: DerivedPlan, kind: str, outcome: Any) -> str:
     recorder = ctx.recorder
     guarded = ctx.guarded
     if outcome.is_no_trade:
         recorder.add_step(
-            "place_entry_and_stop", STEP_FAILED, f"execute_approved_plan: {outcome.reason_code}"
+            "place_entry", STEP_FAILED, f"execute_approved_plan: {outcome.reason_code}"
         )
         if guarded.mutating_attempts == 0:
             raise RehearsalAbort(f"no order was attempted: {outcome.reason_code}")
-        await _cancel_everything(ctx, plan, entry=True)
+        await _cancel_everything(ctx, plan, entry=True, protectives=False)
         _instruct(ctx, "Check the Binance Demo UI for any leftover order or position.")
         return OUTCOME_FAILED
     if ctx.mode is RunMode.DRY_RUN:
         recorder.add_step(
-            "place_entry_and_stop",
+            "place_entry",
             STEP_SKIPPED_DRY_RUN,
             f"simulated only, {len(recorder.planned_requests)} planned request(s), no order sent",
         )
     else:
         recorder.add_step(
-            "place_entry_and_stop", STEP_PASSED, "entry LIMIT and SL placed through the manager"
+            "place_entry",
+            STEP_PASSED,
+            "entry LIMIT (GTD) placed through the manager; the stop follows the first fill (D-10)",
         )
-    entry_probe, stop_probe = await _entry_and_stop_probes(ctx, plan)
+    entry_probe = await _entry_probe(ctx, plan)
     recorder.add_step(
         "readback",
         STEP_PASSED,
-        f"entry status {entry_probe.status!r}, stop status {stop_probe.algo_status!r}"
+        f"entry status {entry_probe.status!r}; no stop at entry time (D-10)"
         + (" (simulated)" if ctx.mode is RunMode.DRY_RUN else ""),
     )
     if kind == "far":
         return await _far_cleanup(ctx, plan, entry_probe)
-    return await _fill_flow(ctx, plan, constraints, safe_mode, entry_probe)
+    return await _fill_flow(ctx, plan, entry_probe)
 
 
 async def run_rehearsal(ctx: RunContext) -> str:
@@ -2759,6 +2890,7 @@ def main(
     token_factory: Callable[[], str] | None = None,
     scenario_runner: Callable[[RunContext], Awaitable[str]] | None = None,
     execution_limits: ExecutionLimits | None = None,
+    snapshot_live_inputs: Mapping[str, Any] | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -2824,6 +2956,7 @@ def main(
             token_factory=token_factory if token_factory is not None else issue_one_time_token,
             execution_limits=execution_limits,
             drift_limits=drift_limits,
+            snapshot_live_inputs=snapshot_live_inputs,
         )
         run_ctx = ctx
 

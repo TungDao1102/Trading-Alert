@@ -454,7 +454,10 @@ async def test_replayed_fills_never_place_a_second_stop() -> None:
     await rig.coordinator.step()
     rig.coordinator.fill_sink(routed)
     await rig.coordinator.step()
-    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+    # Plan 19-16: the third step is the PROTECTED step, which adds the two take-profit legs.
+    placed = [c["kwargs"]["client_algo_id"] for c in rig.fake.calls_to("place_algo_protective")]
+    assert placed.count(rig.stop_id) == 1
+    assert len(placed) == 3
     assert len(rig.fake.calls_to("cancel_normal_order")) == 1
 
 

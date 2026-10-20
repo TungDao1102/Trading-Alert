@@ -56,6 +56,7 @@ from src.adapters.binance_usdm import (
 from src.domain.exchange_errors import ExchangeErrorCategory
 from structlog.testing import capture_logs
 
+from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 from tests.support.limits import (
     TEST_ONLY_RATE_LIMIT_418_NO_RETRY_AFTER_WAIT_SECONDS as WAIT_418,
 )
@@ -187,6 +188,7 @@ class RecordingRest:
     """Each SDK REST method records its args and kwargs and raises the next scripted error.
 
     `absent` names SDK methods that answer every call with -2013 (order does not exist).
+    `absent_after` names SDK methods that answer normally for that many calls and then -2013.
     `side_effects` runs once, inside the next call of the named method, before it answers.
     """
 
@@ -196,6 +198,7 @@ class RecordingRest:
         self.args: dict[str, list[tuple[Any, ...]]] = {}
         self.script: dict[str, list[BaseException]] = {}
         self.absent: set[str] = set()
+        self.absent_after: dict[str, int] = {}
         self.side_effects: dict[str, Callable[[], None]] = {}
 
     def fail(self, name: str, *excs: BaseException) -> None:
@@ -218,7 +221,7 @@ class RecordingRest:
             queue = self.script.get(name)
             if queue:
                 raise queue.pop(0)
-            if name in self.absent:
+            if name in self.absent or self.calls[name] > self.absent_after.get(name, 1 << 30):
                 raise BadRequestError("Order does not exist.", -2013)
             return _Response(_payloads(kwargs)[name])
 
@@ -974,25 +977,20 @@ def test_drift_time_source_shares_gate(
 
 
 def _attach_inputs() -> dict[str, Any]:
-    from tests.test_execution_attach import (
-        _build_constraint_snapshot,
-        _build_current_position_view,
-        _build_fill_events,
-        _build_protective_template,
-        _load_input,
-        _parse_utc,
+    """The plan 19-16 attach inputs: a resting entry (BTCUSDT LONG, COMPLETE snapshot), the REST
+    position 0.010 and a time inside the snapshot TTL. TEST_ONLY numbers."""
+    from decimal import Decimal
+
+    from tests.support.protection_doubles import (
+        TEST_ONLY_REGISTERED_AT,
+        resting_entry_for_tests,
     )
 
-    case_input = _load_input()
     return {
-        "fill_events": _build_fill_events(case_input),
-        "current_position_view": _build_current_position_view(case_input),
-        "protective_template": _build_protective_template(case_input),
-        "constraint_snapshot": _build_constraint_snapshot(case_input),
-        "position_mode": case_input["position_mode"],
-        "candidate_position_side": case_input["candidate_position_side"],
-        "plan_hash": case_input["plan_hash"],
-        "now_utc": _parse_utc(case_input["now_utc"]),
+        "entry": resting_entry_for_tests(),
+        "position_quantity": Decimal("0.010"),
+        "live_lot_filters": None,
+        "now_utc": TEST_ONLY_REGISTERED_AT + timedelta(minutes=1),
     }
 
 
@@ -1021,8 +1019,8 @@ def _place_answers_418(gate: RestRateLimitGate, rest: RecordingRest) -> None:
 
 
 def _confirmation_query_refused(gate: RestRateLimitGate, rest: RecordingRest) -> None:
-    # The stop is placed; another holder of the one gate then meets a 429, so the
-    # query-by-ID of the next leg is refused by the pause before it is sent.
+    # TP1 is placed; another holder of the one gate then meets a 429, so the confirmation
+    # query-by-ID of TP1 is refused by the pause before it is sent.
     rest.side_effects["new_algo_order"] = lambda: _pause_before(gate, rest)
 
 
@@ -1032,15 +1030,15 @@ PROTECTIVE_CASES: list[
 ] = [
     ("paused_before_attach", _pause_before, "RateLimitPauseActive", "STOP_LOSS", 0, 0),
     ("banned_before_attach", _ban_before, "RateLimitBanActive", "STOP_LOSS", 0, 0),
-    ("new_algo_order_429", _place_answers_429, "TooManyRequestsError", "STOP_LOSS", 1, 1),
-    ("new_algo_order_418", _place_answers_418, "RateLimitBanError", "STOP_LOSS", 1, 1),
+    ("new_algo_order_429", _place_answers_429, "TooManyRequestsError", "TAKE_PROFIT_1", 1, 2),
+    ("new_algo_order_418", _place_answers_418, "RateLimitBanError", "TAKE_PROFIT_1", 1, 2),
     (
         "confirmation_query_paused",
         _confirmation_query_refused,
         "RateLimitPauseActive",
         "TAKE_PROFIT_1",
         1,
-        1,
+        2,
     ),
 ]
 
@@ -1063,13 +1061,16 @@ def test_protective_blocked_by_pause_or_ban_surfaces_unprotected_position(
     clock = VirtualClock()
     adapter, rest, sleep, gate = _adapter(clock=clock)
     assert gate is not None
-    rest.absent.add("query_algo_order")  # no leg exists yet: the manager places it
+    # Plan 19-16: attach adopts the REST-confirmed stop (the first query answers NEW) and then
+    # places the take profits; no take-profit leg exists yet (every later query answers -2013).
+    rest.absent_after["query_algo_order"] = 1
     setup(gate, rest)
     safe_mode = _RecordingSafeMode()
     outcome = _run(
         attach_protectives_to_fill(
             adapter=adapter,  # type: ignore[arg-type]
             safe_mode_controller=safe_mode,
+            intent_store=InMemoryExecutionIntentStore(),
             **_attach_inputs(),
         )
     )

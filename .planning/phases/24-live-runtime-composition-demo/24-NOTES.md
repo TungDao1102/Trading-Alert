@@ -17,3 +17,22 @@ Input for `/gsd-discuss-phase 24` and the planner (items 2 and 3 also matter to 
 
 - Phase 18 gave the signed adapter, the public market-data class, the listenKey port, the probe adapter and the supervisor one shared `RestRateLimitGate` (a 418 or 429 blocks all of them). Known holders that still do their own handling: the data jobs, the Phase 16 paper runtime and two scripts (the written-down known gap in `tests/test_phase18_gate.py`).
 - Phase 24 composes the live process. Decide there, with a test, that every REST holder in the live process takes the same gate (or record why a holder is outside it, for example a read-only job that runs in a different process). A 418 ban from one holder must not be ignored by another in the same process.
+
+## From Phase 19 (2026-10-20)
+
+Source: `19-execution-plan-binding-price-check/` (19-11, 19-14, 19-15 and 19-16 SUMMARY files) and the Q5 draft `19-DEC-Q5-DRAFT.md`. Input for `/gsd-discuss-phase 24`. Not a decision record.
+
+## 4. Nothing drives the protection coordinator or feeds it fills
+
+- `ProtectionCoordinator` (`src/execution/protection.py`) is stepped only by tests and `scripts/demo_rehearsal.py`. In `src` no scheduler calls its step, and no code turns user-data stream fills into the coordinator's input. `execute_approved_plan` only registers a `RestingEntry` with `live_context.protection_registry`.
+- Phase 24 composes it: build the registry and the coordinator, step them on a bounded cadence, feed them from the Phase 18 user-data router, and test that an entry fill leads to a REST-confirmed stop without any manual call. Until then a filled entry has no stop in any real process.
+
+## 5. The alert sink and the closers must be real
+
+- Pass a real `CriticalAlertSink` (Phase 20 builds it, Phase 23 words the messages) and the real `EmergencyCloser` into the coordinator. A composition that leaves the rehearsal sink in place sends nothing to the operator.
+- No placement is ever re-sent (owner decision Q5, 2026-10-20). The composition must not add a retry wrapper around `place_entry`, `place_algo_protective` or `place_market_close`; the AST guards in `tests/test_execution_manager.py` and `tests/test_binance_usdm_source_guard.py` must stay green.
+- `resolve_unresolved_intents` at startup (G4-029) now also meets the Q5 rule: an entry left `UNKNOWN` must not be closed as `REJECTED` only because a probe says not found. The closing rule is a Phase 20 decision.
+
+## 6. Live constraint inputs decide whether any TP is ever placed
+
+- `attach_protectives_to_fill` places TP1 and TP2 only if `snapshot_is_valid_for_live` holds. With real data margin type, leverage and equity have no source before Phases 21 and 22, so every TP placement is refused into `TP_UNAVAILABLE` (stop kept, SAFE_MODE, alert). The Demo rehearsal records this as a known gap (COMPLETE_WITH_GAPS, attestation item 1 NOT_OBSERVED). The live risk-input producer of criterion 1 (constraints, equity, daily loss, open algo count) is what removes it.

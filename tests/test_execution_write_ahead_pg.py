@@ -1,14 +1,19 @@
 """Write-ahead proof on PostgreSQL: rows precede every exchange call (Phase 17-11, SC3).
 
-D-14 / F-703: every leg is committed before its order leaves.
+D-14 / F-703: every leg is committed before its order leaves. Plan 19-15 (D-10) splits the
+sequence between two owners.
 
+The manager (`execute_approved_plan`):
   1. approval consumed + ENTRY INTENDED
   2. ENTRY SENT, then `place_entry`
-  3. ENTRY ACKED / REJECTED / UNKNOWN
-  4. STOP_LOSS INTENDED then SENT, then `place_algo_protective`
-  5. SL outcome and ENTRY outcome
+  3. ENTRY ACKED / REJECTED / UNKNOWN, then the hand-off to the protection registry
+  4. ENTRY outcome
 
-A crash at ANY step (a `BaseException` the manager never catches) leaves a readable row,
+The protection coordinator (`src/execution/protection.py`, after the first fill):
+  5. STOP_LOSS INTENDED then SENT, then `place_algo_protective`
+  6. STOP_LOSS ACKED after the REST confirmation of the stop
+
+A crash at ANY manager step (a `BaseException` the manager never catches) leaves a readable row,
 and a restarted manager on a fresh engine returns the stored outcome or
 RECONCILIATION_REQUIRED and never sends a second entry (D-26, T-17-28).
 
@@ -75,8 +80,8 @@ class _ObservingAdapter(BinanceSemanticsFakeAdapter):
     as an ambiguous or failed placement. Observations are asserted by the test afterwards.
     """
 
-    def __init__(self, probe_engine: Engine) -> None:
-        super().__init__()
+    def __init__(self, probe_engine: Engine, *, enforce_flat_stop_rejection: bool = False) -> None:
+        super().__init__(enforce_flat_stop_rejection=enforce_flat_stop_rejection)
         self._probe_engine = probe_engine
         self.seen_at_place_entry: list[dict[str, str]] = []
         self.seen_at_place_algo: list[dict[str, str]] = []
@@ -95,7 +100,9 @@ class _ObservingAdapter(BinanceSemanticsFakeAdapter):
 # --------------------------------------------------------------------------- #
 
 
-async def test_rows_are_committed_before_each_order_call(pg_db: str) -> None:
+async def test_rows_are_committed_before_the_entry_call_and_no_stop_row_exists(
+    pg_db: str,
+) -> None:
     with _store_on(pg_db) as (engine, store), _store_on(pg_db) as (probe_engine, _unused):
         _seed_parent_chain(engine)
         adapter = _ObservingAdapter(probe_engine)
@@ -105,11 +112,72 @@ async def test_rows_are_committed_before_each_order_call(pg_db: str) -> None:
         assert outcome == ExecutionOutcome(is_no_trade=False, reason_code="OK")
         # place_entry: ENTRY already SENT, no protective row yet.
         assert adapter.seen_at_place_entry == [{"ENTRY": "SENT"}]
-        # place_algo_protective: ENTRY ACKED and STOP_LOSS already SENT.
-        assert adapter.seen_at_place_algo == [{"ENTRY": "ACKED", "STOP_LOSS": "SENT"}]
+        # D-10: the manager places no protective order and writes no STOP_LOSS row.
+        assert adapter.seen_at_place_algo == []
+        assert adapter.calls_to("place_algo_protective") == []
 
-        assert _statuses(engine) == {"ENTRY": "ACKED", "STOP_LOSS": "ACKED"}
+        assert _statuses(engine) == {"ENTRY": "ACKED"}
         assert _outcome_columns(engine) == (True, False, "OK")
+
+
+async def test_the_coordinator_writes_the_stop_loss_intent_ahead_of_the_stop(pg_db: str) -> None:
+    """D-14 now lives in the coordinator: after the first fill the STOP_LOSS row is committed
+    INTENDED then SENT BEFORE `place_algo_protective`, and ACKED only after the REST query of
+    the stop answers ACTIVE. The manager hands the entry over through the real coordinator."""
+    from src.execution.protection import ProtectionCoordinator, ProtectionState
+
+    from tests.support.execution_limits import test_only_execution_limits
+    from tests.support.protection_doubles import (
+        RecordingAlerts,
+        RecordingSafeMode,
+        ScriptedEmergencyCloser,
+    )
+    from tests.support.stream_sinks import RecordingJournal
+    from tests.support.virtual_time import VirtualTime
+    from tests.test_execution_manager import _build_live_context
+
+    with _store_on(pg_db) as (engine, store), _store_on(pg_db) as (probe_engine, _unused):
+        _seed_parent_chain(engine)
+        adapter = _ObservingAdapter(probe_engine, enforce_flat_stop_rejection=True)
+        clock = VirtualTime()
+        coordinator = ProtectionCoordinator(
+            adapter=adapter,
+            intent_store=store,
+            journal=RecordingJournal(),
+            safe_mode_controller=RecordingSafeMode(),
+            alert_sink=RecordingAlerts(),
+            emergency_closer=ScriptedEmergencyCloser(),
+            limits=test_only_execution_limits(),
+            clock=clock,
+        )
+        live = _build_live_context(CASE, protection_registry=coordinator)
+
+        outcome = await _run_plan(adapter, intent_store=store, live_context=live)
+
+        assert outcome == ExecutionOutcome(is_no_trade=False, reason_code="OK")
+        assert _statuses(engine) == {"ENTRY": "ACKED"}
+        before = coordinator.protection_of(PLAN_HASH)
+        assert before is not None and before.state is ProtectionState.AWAITING_FILL
+        assert adapter.calls_to("place_algo_protective") == []  # nothing before a fill
+
+        adapter.fill(ENTRY_CLIENT_ID)  # the whole entry fills on the exchange
+        await coordinator.step()
+
+        # The stop went out with STOP_LOSS already SENT in the committed rows.
+        assert adapter.seen_at_place_algo == [{"ENTRY": "ACKED", "STOP_LOSS": "SENT"}]
+        placed = adapter.calls_to("place_algo_protective")
+        assert len(placed) == 1
+        assert placed[0]["kwargs"]["client_algo_id"] == SL_ALGO_ID
+        assert placed[0]["kwargs"]["close_position"] is True
+        # The placement step leaves the row SENT: a placement answer alone never protects (D-11).
+        assert _statuses(engine) == {"ENTRY": "ACKED", "STOP_LOSS": "SENT"}
+        # ACKED only after the REST query of the stop answers ACTIVE (the next step).
+        await coordinator.step()
+        assert adapter.calls_to("query_algo_order_by_client")
+        assert _statuses(engine) == {"ENTRY": "ACKED", "STOP_LOSS": "ACKED"}
+        after = coordinator.protection_of(PLAN_HASH)
+        assert after is not None
+        assert after.state in (ProtectionState.PROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN)
         with engine.connect() as conn:
             stop_loss = (
                 conn.execute(
@@ -129,21 +197,19 @@ async def test_rows_are_committed_before_each_order_call(pg_db: str) -> None:
         assert stop_loss["plan_hash"] == PLAN_HASH
         assert stop_loss["trade_plan_id"] == CASE["trade_plan_id"]
         assert stop_loss["outcome_recorded"] is False
-        assert stop_loss["sent_at_utc"] == NOW_UTC
+        assert stop_loss["sent_at_utc"] == clock.now()
 
 
 # --------------------------------------------------------------------------- #
 # Crash injection after every write-ahead step, then restart on a fresh engine.
 # --------------------------------------------------------------------------- #
 
-# step -> (rows left behind, place_entry calls made before the crash)
+# step -> (rows left behind, place_entry calls made before the crash). Plan 19-15: the manager
+# writes only the ENTRY steps; the STOP_LOSS steps belong to the coordinator (test below).
 _CRASH_MATRIX: list[tuple[str, dict[str, str], int]] = [
     ("consume", {"ENTRY": "INTENDED"}, 0),
     ("entry_sent", {"ENTRY": "SENT"}, 0),
     ("entry_result", {"ENTRY": "ACKED"}, 1),
-    ("sl_intent", {"ENTRY": "ACKED", "STOP_LOSS": "INTENDED"}, 1),
-    ("sl_sent", {"ENTRY": "ACKED", "STOP_LOSS": "SENT"}, 1),
-    ("sl_result", {"ENTRY": "ACKED", "STOP_LOSS": "ACKED"}, 1),
 ]
 
 
@@ -193,7 +259,7 @@ async def test_crash_after_finalize_restarts_to_the_stored_outcome(pg_db: str) -
         assert second == ExecutionOutcome(is_no_trade=False, reason_code="OK")
         assert len(adapter.calls) == calls_before_restart
         assert len(adapter.calls_to("place_entry")) == 1
-        assert _statuses(engine2) == {"ENTRY": "ACKED", "STOP_LOSS": "ACKED"}
+        assert _statuses(engine2) == {"ENTRY": "ACKED"}
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +274,7 @@ async def test_restart_after_a_complete_run_returns_the_stored_outcome(pg_db: st
         _seed_parent_chain(engine)
         first = await _run_plan(adapter, intent_store=store)
         assert first == ExecutionOutcome(is_no_trade=False, reason_code="OK")
-        assert _statuses(engine) == {"ENTRY": "ACKED", "STOP_LOSS": "ACKED"}
+        assert _statuses(engine) == {"ENTRY": "ACKED"}
 
     adapter.fill(ENTRY_CLIENT_ID)
     calls_before_restart = len(adapter.calls)
@@ -218,7 +284,7 @@ async def test_restart_after_a_complete_run_returns_the_stored_outcome(pg_db: st
         assert second == first
         assert len(adapter.calls) == calls_before_restart
         assert len(adapter.calls_to("place_entry")) == 1
-        assert _statuses(engine2) == {"ENTRY": "ACKED", "STOP_LOSS": "ACKED"}
+        assert _statuses(engine2) == {"ENTRY": "ACKED"}
 
 
 # --------------------------------------------------------------------------- #

@@ -211,6 +211,26 @@ Production code also emits the following plain strings as `reason_code` values o
 | `WARMUP_INSUFFICIENT` | `src/core/types.py` (`REASON_WARMUP_INSUFFICIENT`) | Feature validity reason: not enough closed candles | feature validity string, not a rejection reason |
 | `GAP_IN_SOURCE` | `src/core/types.py` (`REASON_GAP_IN_SOURCE`) | Feature validity reason: gap in the candle source | feature validity string, not a rejection reason |
 | `INVALID_INPUT` | `src/core/types.py` (`REASON_INVALID_INPUT`) | Feature validity reason: invalid input | feature validity string, not a rejection reason |
+| `PLAN_SIGNAL_MISMATCH` | `src/execution/binding.py` | The persisted Signal is not the one the plan was built from, or its strategy version or parameter set differs from the approval's; nothing is placed | proposed canonical, promote in Phase 24 |
+| `PLAN_SYMBOL_MISMATCH` | `src/execution/binding.py` | The plan constraint snapshot's plan id or symbol, or the caller's symbol, disagrees with the persisted Signal; the symbol is never taken from the caller | proposed canonical, promote in Phase 24 |
+| `PLAN_SIDE_MISMATCH` | `src/execution/binding.py` | The direction of the Signal disagrees with the side implied by the hash-bound geometry (stop below the zone is LONG, above is SHORT) or with the caller | proposed canonical, promote in Phase 24 |
+| `QUANTITY_ABOVE_APPROVED` | `src/execution/binding.py` | The placement quantity is above the approved `quantity_after_rounding`; it is refused, never clipped or raised | proposed canonical, promote in Phase 24 |
+| `GEOMETRY_INVALID_AFTER_SNAP` | `src/execution/binding.py` | After the entry limit and the stop trigger are snapped to the tick grid the stop is no longer strictly outside the entry zone | proposed canonical, promote in Phase 24 |
+| `WORKING_TYPE_NOT_MARK_PRICE` | `src/execution/binding.py` | The plan constraint snapshot's working type is not `MARK_PRICE` (D037) | proposed canonical, promote in Phase 24 |
+| `PLAN_STATUS_INVALID` | `src/execution/pre_placement.py` | `TradePlan.status` is EXPIRED, INVALIDATED or SUPERSEDED at placement time (an executed APPROVED plan is never refused by this check) | proposed canonical, promote in Phase 24 |
+| `PLAN_INVALIDATED_BEFORE_PLACEMENT` | `src/execution/pre_placement.py` | The Signal carries an invalidation time or the latest closed strategy bar closed beyond the plan's invalidation level before the entry was placed; deliberately distinct from `RejectionReason.INVALIDATED` (planner geometry, D-08, G4-017) and not an alias of it | proposed canonical, promote in Phase 24 |
+| `INVALIDATION_INPUT_UNAVAILABLE` | `src/execution/pre_placement.py` | The closed-bar close needed for the invalidation check was not provided, or the plan's invalidation rule cannot be read, so the plan is refused (fail closed) | proposed canonical, promote in Phase 24 |
+| `VALIDITY_TOO_SHORT` | `src/execution/pre_placement.py` | The remaining validity, measured to the floored `goodTillDate` second, is below the owner minimum or the exchange GTD floor | proposed canonical, promote in Phase 24 |
+| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the four execution limits in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused | proposed canonical, promote in Phase 24 |
+| `SYMBOL_HAS_POSITION` | `src/execution/pre_placement.py` | The exchange already reports a position on the plan's symbol | proposed canonical, promote in Phase 24 |
+| `SYMBOL_HAS_OPEN_ORDER` | `src/execution/pre_placement.py` | The exchange already reports an open order on the plan's symbol | proposed canonical, promote in Phase 24 |
+| `UNPROTECTED_POSITION_EXISTS` | `src/execution/pre_placement.py` | An account-wide flag says a position without a confirmed stop exists (a protection state that blocks new entries); checked before the same-symbol rules | proposed canonical, promote in Phase 20 |
+| `SYMBOL_STATE_UNAVAILABLE` | `src/execution/pre_placement.py` | The exchange open-order state could not be read (fail closed) | proposed canonical, promote in Phase 24 |
+| `MARK_PRICE_UNAVAILABLE` | `src/execution/pre_placement.py` | The mark price is missing, older than the owner maximum age or not valid for the check | proposed canonical, promote in Phase 24 |
+| `MARK_PRICE_CROSSED_STOP` | `src/execution/pre_placement.py` | The mark price is already at or beyond the stop trigger on the losing side | proposed canonical, promote in Phase 24 |
+| `MARK_PRICE_OUTSIDE_ZONE` | `src/execution/pre_placement.py` | The mark price has left the entry zone, so the approved entry is no longer valid | proposed canonical, promote in Phase 24 |
+| `HEDGE_MODE_UNSUPPORTED` | `src/execution/pre_placement.py` | The account is in Hedge position mode; V1 places only One-way orders | proposed canonical, promote in Phase 24 |
+| `ENTRY_REFUSED_BEFORE_SEND` | `src/execution/manager.py` | The entry was refused before anything reached the exchange (REST gate pause or ban, entries blocked by the clock-drift guard, missing signed-call policy); no probe, no SAFE_MODE | proposed canonical, promote in Phase 24 |
 
 ### 9.4 SAFE_MODE entry reasons
 
@@ -218,15 +238,18 @@ Reason strings passed to `SafeModeController.enter_safe_mode(reason=...)` or rec
 
 | Reason | Emitted in |
 |--------|------------|
-| `ENTRY_WITHOUT_PROTECTIVE` | `src/execution/manager.py`, `src/ops/drills.py` |
+| `ENTRY_WITHOUT_PROTECTIVE` | `src/execution/manager.py`, `src/execution/protection.py`, `src/ops/drills.py` |
 | `ENTRY_STATE_UNKNOWN` | `src/execution/manager.py` |
 | `UNRESOLVED_EXECUTION_INTENT` | `src/execution/intent_recovery.py` (restart recovery: an execution intent could not be resolved by exchange query, so new entries stay blocked until Phase 20 reconciliation) |
 | `ORPHAN_PROTECTIVE` | `src/ops/drills.py`, `src/reconcile/compare.py` (divergence kind) |
 | `API_DEGRADATION` | `src/ops/drills.py` |
 | `STALE_FEED` | `src/ops/drills.py` |
-| `DB_FAILURE` | `src/execution/manager.py`, `src/execution/intent_recovery.py`, `src/ops/drills.py` |
+| `DB_FAILURE` | `src/execution/manager.py`, `src/execution/protection.py`, `src/execution/emergency_close.py`, `src/execution/intent_recovery.py`, `src/ops/drills.py` |
 | `MANUAL_CLOSE` | `src/execution/manager.py`, `src/ops/drills.py` |
 | `REGISTRY_DIFF` | `src/paper/freeze.py` (halt reason on a parameter registry diff) |
+| `CLOSE_REQUIRED` | `src/execution/protection.py` (a protection branch decided that a filled entry must be closed with a reduce-only order: the stop is unconfirmed at the deadline, was definitively rejected, or the entry cancel stayed slow; SAFE_MODE is entered before the emergency closer is asked) |
+| `EMERGENCY_CLOSE_FAILED` | `src/execution/emergency_close.py` (the automatic reduce-only MARKET close did not end flat) |
+| `PROTECTION_HANDOFF_FAILED` | `src/execution/manager.py` (the entry was placed but could not be handed to the protection coordinator, so no stop will be placed automatically) |
 
 Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and `SKIPPED_USER` in different modules. Use the canonical enum names above.
 

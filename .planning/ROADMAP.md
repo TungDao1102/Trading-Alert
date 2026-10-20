@@ -971,7 +971,7 @@ This absorbs former Phase 15 (live-price check).
 - [G4-020] The planner has no tick size, so a stop within one tick of the zone edge could be snapped by the risk layer; assert SL and entry geometry after tick snap (source: .planning/phases/15-strategy-geometry-correction/15-13-SUMMARY.md:90; decision: D054, accepted limitation)
 - [G4-036] An executed TradePlan stays APPROVED and `expiry_utc` governs only an unfilled entry; nothing may move an executed plan to EXPIRED, so the criterion 2 plan-status check must not contradict this (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:19-20, docs/DECISIONS.md D051 item (i); decision: D051)
 
-**Plans:** 10/17 plans executed
+**Plans:** 16/17 plans executed
 
 Plans:
 - [x] 19-01-PLAN.md - Execution-limits file and loader: four NOT_CONFIGURED keys, live path refuses while unset (D-07, D-13)
@@ -984,12 +984,12 @@ Plans:
 - [x] 19-08-PLAN.md - Adapter MARKET reduce-only close, pre-send refusal marker, error facts, live lot filters (D-15, D-21)
 - [x] 19-09-PLAN.md - Store contract: sized realized risk and TP intent quantity; live-outcome read-back (D-20, D-22)
 - [x] 19-10-PLAN.md - Fake exchange v2: positions, partial fills, -4509, MARKET close, scripted race gates
-- [ ] 19-11-PLAN.md - Protection coordinator tracer: fill-driven closePosition stop, REST confirmation (D-10, D-11, D-12)
-- [ ] 19-12-PLAN.md - Automatic reduce-only MARKET emergency close with splitting and query-before-resend (D-15, D-16, D-17)
-- [ ] 19-13-PLAN.md - Manager pre-placement gates and the live context; rehearsal call site (criteria 1 and 2)
-- [ ] 19-14-PLAN.md - Coordinator failure branches B1-B5, deadlines, CLOSE_REQUIRED (D-12, D-13, criterion 3)
-- [ ] 19-15-PLAN.md - Manager fill-driven placement: GTD entry, hand-off, taxonomy on the entry path, legacy tests rewritten (D-10, D-21)
-- [ ] 19-16-PLAN.md - TP legs after the entry is terminal; attach rewritten; rehearsal fill flow (criterion 4, D-17..D-20)
+- [x] 19-11-PLAN.md - Protection coordinator tracer: fill-driven closePosition stop, REST confirmation (D-10, D-11, D-12)
+- [x] 19-12-PLAN.md - Automatic reduce-only MARKET emergency close with splitting and query-before-resend (D-15, D-16, D-17)
+- [x] 19-13-PLAN.md - Manager pre-placement gates and the live context; rehearsal call site (criteria 1 and 2)
+- [x] 19-14-PLAN.md - Coordinator failure branches B1-B5, deadlines, CLOSE_REQUIRED (D-12, D-13, criterion 3)
+- [x] 19-15-PLAN.md - Manager fill-driven placement: GTD entry, hand-off, taxonomy on the entry path, legacy tests rewritten (D-10, D-21)
+- [x] 19-16-PLAN.md - TP legs after the entry is terminal; attach rewritten; rehearsal fill flow (criterion 4, D-17..D-20)
 - [ ] 19-17-PLAN.md - Phase gate, GLOSSARY codes, owner-gap register, EXEC-07 note
 
 ### Phase 20: Reconcile + SAFE_MODE Hardening + Alerts
@@ -1059,6 +1059,8 @@ This was former Phase 12. Today `AccountState.equity` and `daily_loss_quote` are
 
 **Audit refs**: F-012, F-013, F-963, F-407, F-955, F-908, F-014
 
+Input: .planning/phases/21-account-equity-daily-loss/21-NOTES.md
+
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [G4-039] Phases 21 and 22 replace the UNKNOWN margin type, leverage and equity in the plan constraint snapshot so that it can become COMPLETE (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 - [G2-042] Daily loss (D033) counts commissions, but whether Binance `realizedPnl` excludes commission is unverified: `LIVE_NET_PNL_SEMANTICS_VERIFIED` is False, so live R stays INCOMPLETE; the verification itself is owned by Phase 24 and this phase depends on its outcome (source: src/analytics/live_outcomes.py:77, .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208; decision: none required)
@@ -1085,6 +1087,8 @@ This was former Phases 13 and 14.
 4. Position mode is one-way single-asset only. Any other mode results in NO_TRADE (F-965, F-020).
 
 **Audit refs**: F-011, F-964, F-966, F-965, F-020, F-019
+
+Input: .planning/phases/22-leverage-margin-liquidation-guard/22-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [G3-001] The Change-Position-Mode wording was not fetched in Phase 11 and docs/SOURCES.md still carries it unconfirmed; re-confirm it on the official page before criterion 4 relies on the one-way check (source: .planning/phases/11-decision-alignment/11-05-SUMMARY.md:125-126, docs/SOURCES.md:46; decision: D044)
@@ -1119,6 +1123,8 @@ This was former Phase 16.
 5. **Findings from the live Telegram test (2026-10-04, Phase 8 behaviour):** a decided message keeps its button and the bot answers every later tap (replays are idempotent: 3 taps gave 1 transition, but the keyboard must be removed and later taps refused); `actor_id` is empty on the decided approval, so the journal does not say who decided; APPROVE moves straight to APPROVED with no CONFIRM step (D041); the application has no error handler, so callbacks queued during downtime raise `BadRequest: Query is too old` at `query.answer()` and must be handled; the messages show no money amounts and the display note says Asia/Ho_Chi_Minh while the times are UTC; SIMULATE/APPROVE/SKIP are separate keyboards, so one message carries one button (decide whether one message should carry APPROVE and SKIP together).
 
 **Audit refs**: F-508, F-707, F-405, F-509, F-127, F-015, F-016, D041
+
+Input: .planning/phases/23-telegram-approval-hardening-money/23-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [G4-032] After a plan expires, a redelivered APPROVE is answered APPROVAL_EXPIRED even if the plan was executed; if the message should show "already executed", the composition must read the stored outcome via `PgExecutionStateStore.get_entry`, and criterion 4 tests should cover it (source: .planning/phases/17-operational-persistence-layer/17-14-SUMMARY.md:159; decision: none required)
@@ -1160,6 +1166,8 @@ Plans:
 5. **Findings from the live Binance Demo probe (2026-10-04, key verified for trading):** `BinanceUsdmAdapter(sdk_client)` already works against `demo-fapi.binance.com` (place, query, cancel of a LIMIT order; algo place/query/cancel); a `closePosition=true` SL/TP is rejected with `-4509` while no position is open and accepted once the position is filled, so protective legs must be placed after the entry fills; `query_algo_order_by_client` still reports `NEW` for about a second after a cancel (open-algo list already empty), so the reconciler and sweeper must not read that as a failed cancel; `snapshot_positions` returned `entry_price` `84816.40000000001` (float noise at the SDK boundary, check the Decimal conversion); the adapter has no market-order or close-position helper (the probe used marketable LIMIT orders).
 
 **Audit refs**: F-201, F-956, F-202, F-104, F-124, D042
+
+Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
 - [D055] The -4509 finding in criterion 5 (protective legs placed after the entry fills) is a recorded observation, not a chosen execution model; criteria 1 and 2 are NOT amended and depend on the D055 outcome (the Phase 18 probe, then a user decision); no LIVE execution until D055 is closed with a verified execution policy (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
@@ -1317,7 +1325,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 16. Paper Runtime Composition + SHADOW Approval Mode | 63/65 | In Progress|  |
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
-| 19. Execution Plan Binding + Pre-Placement Checks | 10/17 | In Progress | - |
+| 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |

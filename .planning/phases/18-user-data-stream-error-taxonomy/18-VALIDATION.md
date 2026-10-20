@@ -188,7 +188,7 @@ Left for the user at plan acceptance (the planner does not tick these):
 - [x] Feedback latency within one test file per task
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved by the owner (Tung Dao) on 2026-10-20, written by Claude at the owner's direct instruction in the session. Scope: this validation strategy and the 2026-10-19 audit (88 per-task rows, 0 gaps). It does not approve or assert the manual-only items, the OPS-02 key and IP attestation (Phases 24 to 26), or the D055 decision, which stay open as listed in `18-VERIFICATION.md`.
 
 ## Validation Audit 2026-10-19
 

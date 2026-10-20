@@ -30,6 +30,7 @@ from src.adapters.binance_usdm import (
     CommissionRates,
     EntryPlacementResult,
     Kline,
+    MarketCloseResult,
     MarkKline,
     OpenAlgoOrderSnapshot,
     OpenOrderSnapshot,
@@ -42,6 +43,7 @@ from src.adapters.telegram_callbacks import on_callback
 from src.approval.mapping import derive_short_id
 from src.backtest.semantics import TP1_QUANTITY_FRACTION
 from src.domain.enums import ApprovalResult
+from src.domain.lot_filters import LotFilters
 from src.execution.enablement import LiveEnablementController
 from src.execution.execution_limits import ExecutionLimits
 from src.ops.health import ALL_CHECK_NAMES
@@ -56,7 +58,13 @@ AUTH_CHAT = 424242
 OTHER_CHAT = 777000
 MARK = Decimal("60000.0")
 
-MUTATING = ("place_entry", "place_algo_protective", "cancel_normal_order", "cancel_algo_order")
+MUTATING = (
+    "place_entry",
+    "place_algo_protective",
+    "cancel_normal_order",
+    "cancel_algo_order",
+    "place_market_close",
+)
 
 
 def environ() -> dict[str, str]:
@@ -96,6 +104,11 @@ def btc_filters(**overrides: Any) -> SymbolFilters:
         "percent_price_multiplier_up": Decimal("1.05"),
         "percent_price_multiplier_down": Decimal("0.95"),
         "percent_price_multiplier_decimals": 4,
+        # Plan 19-16: the exchange always publishes MARKET_LOT_SIZE; with it known, the only
+        # unknowns of the plan snapshot are margin type, leverage and equity (Phases 21-22).
+        "market_lot_min_quantity": Decimal("0.001"),
+        "market_lot_max_quantity": Decimal("120"),
+        "market_lot_step_size": Decimal("0.001"),
     }
     fields.update(overrides)
     return SymbolFilters(**fields)
@@ -379,6 +392,7 @@ class FakeDemoAdapter:
         quantity: Decimal,
         price: Decimal,
         new_client_order_id: str,
+        good_till_date: int | None = None,
     ) -> EntryPlacementResult:
         self._enter(
             "place_entry",
@@ -389,6 +403,7 @@ class FakeDemoAdapter:
             quantity=quantity,
             price=price,
             new_client_order_id=new_client_order_id,
+            good_till_date=good_till_date,
         )
         order_id = self._new_id()
         status = "FILLED" if (self.fill_on_place or self.flip_to_filled_after_place) else "NEW"
@@ -473,8 +488,59 @@ class FakeDemoAdapter:
     async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> None:
         self._enter("cancel_normal_order", symbol=symbol, orig_client_order_id=orig_client_order_id)
         row = self.orders.get(orig_client_order_id)
-        if row is not None:
+        if row is not None and row["status"] == "NEW":  # a FILLED order is not cancelled
             row["status"] = "CANCELED"
+
+    async def symbol_lot_filters(self, *, symbol: str) -> LotFilters:
+        self._enter("symbol_lot_filters", symbol=symbol)
+        return LotFilters(
+            symbol=symbol,
+            price_tick_size=Decimal("0.1"),
+            lot_min_quantity=Decimal("0.001"),
+            lot_max_quantity=Decimal("1000"),
+            lot_step_size=Decimal("0.001"),
+            market_lot_min_quantity=Decimal("0.001"),
+            market_lot_max_quantity=Decimal("120"),
+            market_lot_step_size=Decimal("0.001"),
+            min_notional=Decimal("100"),
+        )
+
+    async def place_market_close(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+        new_client_order_id: str,
+    ) -> MarketCloseResult:
+        self._enter(
+            "place_market_close",
+            symbol=symbol,
+            side=side,
+            position_side=position_side,
+            quantity=quantity,
+            new_client_order_id=new_client_order_id,
+        )
+        order_id = self._new_id()
+        self.position_amt = max(self.position_amt - quantity, Decimal("0"))
+        self.orders[new_client_order_id] = {
+            "order_id": order_id,
+            "status": "FILLED",
+            "qty": quantity,
+            "price": MARK,
+        }
+        return MarketCloseResult(
+            symbol=symbol,
+            client_order_id=new_client_order_id,
+            exchange_order_id=order_id,
+            side=side,
+            position_side=position_side,
+            status="FILLED",
+            executed_quantity=quantity,
+            average_price=MARK,
+            update_time_utc=SERVER_NOW,
+        )
 
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None:
         self._enter("cancel_algo_order", symbol=symbol, client_algo_id=client_algo_id)
@@ -621,6 +687,7 @@ def run_flow(
     dry_script: bool = True,
     execution_limits: ExecutionLimits | None = None,
     committed_limits: bool = False,
+    snapshot_live_inputs: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any], FakeDemoAdapter, FakeApprovalChannel]:
     exchange = adapter if adapter is not None else FakeDemoAdapter()
     if exchange.gate_mark_price is None and scenario in ("far", "fill"):
@@ -661,6 +728,7 @@ def run_flow(
         sleep=no_sleep,
         token_factory=counter_tokens(),
         execution_limits=limits,
+        snapshot_live_inputs=snapshot_live_inputs,
     )
     files = sorted(tmp_path.glob("*.json"))
     data: dict[str, Any] = json.loads(files[-1].read_text(encoding="utf-8")) if files else {}
@@ -980,54 +1048,84 @@ def test_approvals_are_only_ever_created_pending() -> None:
 
 
 def test_far_scenario_sequence_and_cleanup(tmp_path: Path) -> None:
+    """Plan 19-15 (D-10): the manager places only the GTD entry; the far scenario then cancels
+    the entry by id. There is no stop at entry time, so no algo order is placed, probed or
+    cancelled."""
     code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True)
     assert code == dr.EXIT_OK
-    assert adapter.mutating_calls() == [
-        "place_entry",
-        "place_algo_protective",
-        "cancel_normal_order",
-        "cancel_algo_order",
-        "cancel_algo_order",
-        "cancel_algo_order",
-    ]
+    assert adapter.mutating_calls() == ["place_entry", "cancel_normal_order"]
     assert adapter.calls.index("get_position_mode") < adapter.calls.index("place_entry")
-    probe_idx = adapter.calls.index("query_algo_order_by_client")
-    assert probe_idx < adapter.calls.index("place_algo_protective")
+    assert "place_algo_protective" not in adapter.calls
+    assert "query_algo_order_by_client" not in adapter.calls
+    assert "cancel_algo_order" not in adapter.calls
     entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
     assert entry_kwargs["quantity"] == Decimal("0.004")
     assert entry_kwargs["price"] == Decimal("58500.0")
     assert entry_kwargs["side"] == "BUY" and entry_kwargs["position_side"] == "BOTH"
-    sl_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_algo_protective")
-    assert sl_kwargs["type"] == "STOP_MARKET" and sl_kwargs["close_position"] is True
-    assert sl_kwargs["algo_type"] == "CONDITIONAL"
+    assert entry_kwargs["time_in_force"] == "GTD"
+    assert isinstance(entry_kwargs["good_till_date"], int)
+    assert entry_kwargs["good_till_date"] % 1000 == 0  # whole seconds, in epoch milliseconds
     kinds = [o["type"] for o in data["exchange_orders"]]
-    assert kinds == ["EntryPlacementResult", "AlgoPlacementResult"]
+    assert kinds == ["EntryPlacementResult"]
     assert data["exchange_orders"][0]["exchange_order_id"].startswith("ORD-")
-    assert data["exchange_orders"][1]["algo_id"].startswith("ORD-")
+    assert step(data, "place_entry")["status"] == "PASSED"
+    assert "place_entry_and_stop" not in [s["name"] for s in data["steps"]]
+    readback = step(data, "readback")
+    assert readback["status"] == "PASSED"
+    assert "no stop at entry time (D-10)" in readback["detail"]
+    assert "'NEW'" in readback["detail"]
+    assert "no protective leg exists" in step(data, "cleanup")["detail"]
     assert step(data, "account_clean")["status"] == "PASSED"
     assert data["details"]["enablement"]["enabled_in_run"] is True
     assert data["details"]["enablement"]["disabled_after_run"] is True
     assert chan.closed is True
 
 
-def test_far_scenario_entry_no_longer_new_leaves_the_stop_in_place(tmp_path: Path) -> None:
+def test_far_scenario_entry_no_longer_new_leaves_the_position_for_the_operator(
+    tmp_path: Path,
+) -> None:
     adapter = FakeDemoAdapter()
     adapter.flip_to_filled_after_place = True
     code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
     assert code == dr.EXIT_FAILED
     assert "cancel_algo_order" not in adapter.calls
     assert "cancel_normal_order" not in adapter.calls
+    assert "place_algo_protective" not in adapter.calls  # no stop exists to leave in place
     assert step(data, "cleanup")["status"] == "FAILED"
+    assert "nothing was cancelled" in step(data, "cleanup")["detail"]
     assert any(
         "close the Demo position" in text for text in data["details"]["operator_instructions"]
     )
     assert data["outcome"] == "FAILED"
 
 
-def test_fill_scenario_attaches_sl_tp1_tp2_with_half_quantity(tmp_path: Path) -> None:
+# Plan 19-16: TEST_ONLY live inputs that make the plan snapshot COMPLETE. The real rehearsal has no
+# source for margin type, leverage and equity until Phases 21-22, so its snapshot stays INCOMPLETE.
+COMPLETE_SNAPSHOT_INPUTS: dict[str, Any] = {
+    "margin_type": "ISOLATED",
+    "leverage": 3,
+    "equity_used": Decimal("1000"),
+}
+
+
+def _to_states(data: dict[str, Any]) -> list[str]:
+    return [t["to"] for t in data["details"]["protection_flow"]["transitions"]]
+
+
+def test_fill_scenario_completes_through_the_coordinator_with_a_complete_snapshot(
+    tmp_path: Path,
+) -> None:
+    """The fill scenario no longer builds a FillEvent from a position view: the coordinator
+    detects the fill by REST, places the stop after it, confirms it, then adds TP1 and TP2."""
     adapter = FakeDemoAdapter()
     adapter.fill_on_place = True
-    code, data, _, _ = run_flow(tmp_path, scenario="fill", adapter=adapter, execute=True)
+    code, data, _, _ = run_flow(
+        tmp_path,
+        scenario="fill",
+        adapter=adapter,
+        execute=True,
+        snapshot_live_inputs=COMPLETE_SNAPSHOT_INPUTS,
+    )
     assert code == dr.EXIT_OK
     placed = [kw for name, kw in adapter.kwargs_log if name == "place_algo_protective"]
     by_type = {(kw["type"], kw["close_position"]): kw for kw in placed}
@@ -1038,8 +1136,11 @@ def test_fill_scenario_attaches_sl_tp1_tp2_with_half_quantity(tmp_path: Path) ->
     assert tp1["reduce_only"] is True
     assert tp1["quantity"] == Decimal("0.002")  # floor(0.004 * 0.5 / 0.001) * 0.001
     assert tp2["quantity"] is None and tp2["reduce_only"] in (None, False)
-    assert len(placed) == 3  # the entry-time stop was adopted, never duplicated
+    assert len(placed) == 3  # SL, TP1, TP2 once each, all placed after the fill (D-10)
+    assert adapter.calls.index("place_entry") < adapter.calls.index("place_algo_protective")
+    assert [kw["type"] for kw in placed][0] == "STOP_MARKET", "the stop comes first"
     assert "cancel_algo_order" not in adapter.calls
+    assert "place_market_close" not in adapter.calls
     echoes = data["details"]["leg_echoes"]
     assert sorted(e["order_type"] for e in echoes) == [
         "STOP_MARKET",
@@ -1047,21 +1148,106 @@ def test_fill_scenario_attaches_sl_tp1_tp2_with_half_quantity(tmp_path: Path) ->
         "TAKE_PROFIT_MARKET",
     ]
     assert any("close the Demo position" in t for t in data["details"]["operator_instructions"])
+    assert step(data, "fill_wait")["status"] == "PASSED"
+    assert step(data, "protection_stop")["status"] == "PASSED"
     assert step(data, "attach_protectives")["status"] == "PASSED"
-    fill_event = data["details"]["fill_event"]
-    assert fill_event["exchange_trade_id"].startswith("position-view:")
+    assert data["details"]["protection_flow"]["final_state"] == "COMPLETE"
+    assert _to_states(data) == ["AWAITING_FILL", "UNPROTECTED", "PROTECTED", "COMPLETE"]
+    assert data["details"]["live_context"]["plan_snapshot_status"] == "COMPLETE"
+    assert "position-view:" not in json.dumps(data)  # no REST-synthetic trade id any more
+    assert "fill_event" not in data["details"]
+    assert data["outcome"] == "COMPLETE"
     assert data["attestation_map"]["1"]["status"] == "OBSERVED"
     assert data["attestation_map"]["2"]["status"] == "OBSERVED_ACCEPTANCE_ONLY"
 
 
-def test_fill_scenario_unfilled_entry_cancels_and_skips_attach(tmp_path: Path) -> None:
+def test_fill_scenario_with_the_incomplete_snapshot_is_tp_unavailable_a_known_gap(
+    tmp_path: Path,
+) -> None:
+    """With real data the snapshot is INCOMPLETE (margin type, leverage and equity unknown), so
+    the stop is placed and kept and no take profit is placed: recorded as a gap, never a pass."""
+    adapter = FakeDemoAdapter()
+    adapter.fill_on_place = True
+    code, data, _, _ = run_flow(tmp_path, scenario="fill", adapter=adapter, execute=True)
+    assert code == dr.EXIT_OK
+    placed = [kw for name, kw in adapter.kwargs_log if name == "place_algo_protective"]
+    assert [(kw["type"], kw["close_position"]) for kw in placed] == [("STOP_MARKET", True)]
+    assert "place_market_close" not in adapter.calls
+    assert "cancel_algo_order" not in adapter.calls
+    assert step(data, "fill_wait")["status"] == "PASSED"
+    assert step(data, "protection_stop")["status"] == "PASSED"
+    attach = step(data, "attach_protectives")
+    assert attach["status"] == "NOT_REHEARSED"
+    assert "known gap" in attach["detail"] and "INCOMPLETE" in attach["detail"]
+    assert data["details"]["protection_flow"]["final_state"] == "TP_UNAVAILABLE"
+    assert _to_states(data) == ["AWAITING_FILL", "UNPROTECTED", "PROTECTED", "TP_UNAVAILABLE"]
+    assert data["details"]["live_context"]["plan_snapshot_status"] == "INCOMPLETE"
+    alerts = data["details"]["critical_alerts"]
+    assert [a["event"] for a in alerts] == ["TP_UNAVAILABLE"]
+    assert any("close the Demo position" in t for t in data["details"]["operator_instructions"])
+    assert data["outcome"] == "COMPLETE_WITH_GAPS"
+    assert data["attestation_map"]["1"]["status"] == "NOT_OBSERVED"
+
+
+def test_fill_scenario_unfilled_entry_ends_no_fill_after_the_cancel(tmp_path: Path) -> None:
     adapter = FakeDemoAdapter()
     code, data, _, _ = run_flow(tmp_path, scenario="fill", adapter=adapter, execute=True)
     assert code == dr.EXIT_OK
     assert "cancel_normal_order" in adapter.calls
+    assert "place_algo_protective" not in adapter.calls  # nothing is placed before a fill
+    assert "cancel_algo_order" not in adapter.calls
+    assert step(data, "fill_wait")["status"] == "NOT_REHEARSED"
     assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
+    assert data["details"]["protection_flow"]["final_state"] == "ENTRY_ENDED_NO_FILL"
+    assert _to_states(data) == ["AWAITING_FILL", "ENTRY_ENDED_NO_FILL"]
+    assert step(data, "account_clean")["status"] == "PASSED"
     assert data["outcome"] == "COMPLETE_WITH_GAPS"
     assert data["attestation_map"]["1"]["status"] == "NOT_OBSERVED"
+
+
+def test_fill_scenario_with_a_rejected_stop_closes_by_market_and_fails(tmp_path: Path) -> None:
+    """B5: a definitively rejected stop after a fill is never resent; the coordinator closes the
+    position through the guarded adapter (a mutating method) and the run is FAILED."""
+    from binance_sdk_derivatives_trading_usds_futures import BadRequestError
+
+    adapter = FakeDemoAdapter()
+    adapter.fill_on_place = True
+    adapter.raise_on["place_algo_protective"] = BadRequestError(
+        error_message="Order would immediately trigger.", status_code=-2021
+    )
+    code, data, _, _ = run_flow(
+        tmp_path,
+        scenario="fill",
+        adapter=adapter,
+        execute=True,
+        snapshot_live_inputs=COMPLETE_SNAPSHOT_INPUTS,
+    )
+    assert code == dr.EXIT_FAILED
+    assert data["outcome"] == "FAILED"
+    assert adapter.calls.count("place_algo_protective") == 1, "a rejected stop is never resent"
+    assert "place_market_close" in adapter.calls
+    assert adapter.position_amt == Decimal("0")
+    assert step(data, "protection_stop")["status"] == "FAILED"
+    assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
+    assert data["details"]["protection_flow"]["final_state"] == "FLAT"
+    assert "CLOSE_REQUIRED" in _to_states(data)
+    assert [a["event"] for a in data["details"]["critical_alerts"]] == ["CLOSE_REQUIRED"]
+    assert [o["type"] for o in data["exchange_orders"]] == [
+        "EntryPlacementResult",
+        "MarketCloseResult",
+    ]
+
+
+def test_the_dry_run_fill_scenario_attaches_nothing(tmp_path: Path) -> None:
+    code, data, adapter, _ = run_flow(tmp_path, scenario="fill")
+    assert code == dr.EXIT_OK
+    assert adapter.mutating_calls() == []
+    assert step(data, "fill_wait")["status"] == "SKIPPED_DRY_RUN"
+    assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
+    assert "dry run" in step(data, "attach_protectives")["detail"]
+    assert "protection_flow" not in data["details"]
+    assert data["exchange_orders"] == []
+    assert "place_market_close" not in [p["method"] for p in data["planned_requests"]]
 
 
 def test_exchange_failure_is_recorded_honestly(tmp_path: Path) -> None:
@@ -1154,9 +1340,13 @@ def test_evidence_is_deterministic(tmp_path: Path) -> None:
     assert data["exchange_orders"] == []
     assert [p["method"] for p in data["planned_requests"]][:2] == [
         "place_entry",
-        "place_algo_protective",
+        "cancel_normal_order",
     ]
-    assert step(data, "place_entry_and_stop")["status"] == "SKIPPED_DRY_RUN"
+    assert "place_algo_protective" not in [p["method"] for p in data["planned_requests"]]
+    planned_entry = data["planned_requests"][0]["request"]
+    assert planned_entry["time_in_force"] == "GTD"
+    assert isinstance(planned_entry["good_till_date"], int)
+    assert step(data, "place_entry")["status"] == "SKIPPED_DRY_RUN"
 
 
 # --------------------------------------------------------------------------- #

@@ -10,16 +10,16 @@ deterministic.
 The four behaviors pinned here:
 
   1. Happy path: approved in-date plan with PASS risk verdict yields
-     exactly one `place_entry` call (LIMIT, GTC, quantized qty,
-     zone-derived limit price, x- EN id) followed by one
-     `place_algo_protective` call (CONDITIONAL STOP_MARKET SL,
-     close_position True, no quantity, xa- SL id).
+     exactly one `place_entry` call (LIMIT, GTD with goodTillDate from the plan
+     expiry, quantized qty, zone-derived limit price, x- EN id) and NO protective
+     call: the stop is placed after the first fill by the protection coordinator
+     (plan 19-15, D-10), so the manager hands the ACKED entry to the registry.
   2. Stale/expired plan yields no adapter calls and an UNAPPROVABLE
      outcome with reason code.
   3. Risk NO_TRADE verdict yields no adapter calls and the risk reason
      code preserved byte-identically.
   4. Ambiguous `place_entry` response triggers `query_order_by_client`
-     first; retry occurs only when the probe confirms absence.
+     once; the entry is never re-sent (Q5).
 
 The tests load the golden fixture pair
 (`tests/fixtures/phase9/placement_sequences/{input,expected}.json`) and
@@ -29,6 +29,8 @@ sequence byte-for-byte.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -224,6 +226,17 @@ class FakeExecutionAdapter:
             return self.query_responses.pop(0)
         return self._query_response
 
+    @staticmethod
+    def error_facts(exc: BaseException) -> Any:
+        """Same facts as the real adapter (plan 19-15, D-21): class, int code, Retry-After."""
+        import inspect
+
+        from src.adapters.binance_errors import error_facts_from_exception
+        from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+        inspect.signature(BinanceUsdmAdapter.error_facts).bind(exc)
+        return error_facts_from_exception(exc)
+
     async def get_position_mode(self) -> Any:
         from src.adapters.binance_usdm import PositionModeResult
 
@@ -264,18 +277,30 @@ class RecordingSafeModeController:
 
 
 class StubProtectionRegistry:
-    """`ProtectionRegistry` stub: `blocks_new_entries` answers a fixed value (plan 19-13)."""
+    """`ProtectionRegistry` stub: `blocks_new_entries` answers a fixed value (plan 19-13).
 
-    def __init__(self, *, blocks: bool = False) -> None:
+    Plan 19-15: the manager hands every ACKED entry over through `register_resting_entry`; the
+    stub records the `RestingEntry` objects and can be told to raise (a failed hand-off).
+    """
+
+    def __init__(
+        self, *, blocks: bool = False, register_exception: BaseException | None = None
+    ) -> None:
         self.blocks = blocks
         self.block_checks = 0
+        self.entries: list[Any] = []
+        self.register_exception = register_exception
+        self.register_attempts = 0
 
     def blocks_new_entries(self) -> bool:
         self.block_checks += 1
         return self.blocks
 
-    def register_resting_entry(self, entry: Any) -> None:  # pragma: no cover - unused here
-        raise AssertionError("the manager must not register an entry in plan 19-13")
+    def register_resting_entry(self, entry: Any) -> None:
+        self.register_attempts += 1
+        if self.register_exception is not None:
+            raise self.register_exception
+        self.entries.append(entry)
 
     def protection_of(self, plan_hash: str) -> Any:  # pragma: no cover - unused here
         return None
@@ -620,59 +645,42 @@ def _build_risk_kwargs(case_input: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
-    """Beh. 1: an approved in-date plan with PASS risk verdict yields
-    exactly one `place_entry` call (LIMIT, GTC, quantized qty,
-    zone-derived limit price, x- EN id) followed by one
-    `place_algo_protective` call (CONDITIONAL STOP_MARKET SL,
-    close_position True, no quantity, xa- SL id).
+async def test_happy_path_places_only_the_gtd_entry_and_hands_it_to_the_registry() -> None:
+    """Beh. 1 (plan 19-15, D-10): an approved in-date plan with PASS risk verdict yields exactly
+    one `place_entry` call (LIMIT, GTD, goodTillDate = the plan expiry floored to the second,
+    quantized qty, zone-derived limit price, x- EN id), NO protective call, and one
+    `RestingEntry` handed to the protection registry.
     """
-    from src.execution.manager import execute_approved_plan
+    from src.execution.pre_placement import good_till_date_ms
 
     case_input = _load_input()
     expected = _load_expected()
 
     adapter = FakeExecutionAdapter()
-    callback = _build_callback(case_input)
-    approval = _build_approval(case_input)
-    risk_kwargs = _build_risk_kwargs(case_input)
-
-    outcome = await execute_approved_plan(
-        callback=callback,
-        approval=approval,
-        authorized_chat_id=case_input["chat_id"],
-        expiry_utc=_parse_utc(case_input["expiry_utc"]),
-        approval_strategy_version=case_input["strategy_version"],
-        approval_parameter_set_id=case_input["parameter_set_id"],
-        approval_parameter_set_hash=case_input["parameter_set_hash"],
-        now_utc=_parse_utc(case_input["now_utc"]),
-        adapter=adapter,
-        risk_kwargs=risk_kwargs,
-        **_live_wiring(),
+    registry = StubProtectionRegistry()
+    outcome = await _run_plan(
+        adapter, live_context=_build_live_context(case_input, protection_registry=registry)
     )
 
-    # Outcome is a PASS with the expected reason code.
     assert outcome.is_no_trade is False, f"expected PASS, got NO_TRADE: {outcome.reason_code}"
     assert outcome.reason_code == expected["outcome_reason_code"]
 
-    # 1 entry + SL probe-by-id (CR-04/CR-05) + 1 SL placement.
     method_sequence = [c["method"] for c in adapter.calls]
     assert method_sequence == expected["method_sequence"], (
         f"adapter call sequence mismatch: got {method_sequence}, "
         f"expected {expected['method_sequence']}"
     )
+    assert "place_algo_protective" not in method_sequence
+    assert "query_algo_order_by_client" not in method_sequence
 
-    # Entry call: LIMIT, GTC, x- EN id, quantized qty, zone-mid price.
     entry_call = next(c for c in adapter.calls if c["method"] == "place_entry")
     entry_kwargs = entry_call["kwargs"]
     assert entry_kwargs["symbol"] == case_input["symbol"]
     assert entry_kwargs["side"] == case_input["side"]
     assert entry_kwargs["position_side"] == case_input["position_side"]
-    assert entry_kwargs["time_in_force"] == "GTC"
-    # Quantity comes from the risk verdict (sized.quantity), not the
-    # fixture's quantity_after_rounding placeholder. The risk pipeline
-    # computes the actual quantity from equity/risk_rate/SL distance.
-    assert entry_kwargs["quantity"] > Decimal("0")
+    assert entry_kwargs["time_in_force"] == "GTD"
+    assert entry_kwargs["good_till_date"] == good_till_date_ms(_parse_utc(case_input["expiry_utc"]))
+    # Quantity comes from the risk verdict (sized.quantity), not the fixture placeholder.
     # Hand-derived (plan 12-08): sizing entry 102, stop 98, cost
     # 102*0.0006 + 98*0.0008 = 0.1396, floor(10 / 4.1396) at step 0.001.
     assert entry_kwargs["quantity"] == Decimal("2.415")
@@ -681,21 +689,32 @@ async def test_happy_path_places_one_entry_and_one_sl_leg() -> None:
     )
     assert entry_kwargs["new_client_order_id"] == expected["entry_client_order_id"]
 
-    # SL call: CONDITIONAL, STOP_MARKET, close_position True, xa- SL id.
-    sl_call = next(c for c in adapter.calls if c["method"] == "place_algo_protective")
-    assert sl_call["method"] == "place_algo_protective"
-    sl_kwargs = sl_call["kwargs"]
-    assert sl_kwargs["symbol"] == case_input["symbol"]
-    assert sl_kwargs["side"] == case_input["sl_side"]
-    assert sl_kwargs["algo_type"] == "CONDITIONAL"
-    assert sl_kwargs["type"] == "STOP_MARKET"
-    assert sl_kwargs["close_position"] is True
-    assert sl_kwargs["quantity"] is None
-    assert sl_kwargs["trigger_price"] == _coerce_decimal(
+    # The hand-off: one RestingEntry built from the bound plan and the snapped prices.
+    assert len(registry.entries) == 1
+    resting = registry.entries[0]
+    assert resting.symbol == case_input["symbol"]
+    assert resting.side == case_input["candidate_position_side"]
+    assert resting.entry_side == case_input["side"]
+    assert resting.exit_side == case_input["sl_side"]
+    assert resting.entry_client_order_id == expected["entry_client_order_id"]
+    assert resting.entry_quantity == Decimal("2.415")
+    assert resting.plan_hash == expected["plan_hash"]
+    assert resting.approval_id == case_input["approval_id"]
+    assert resting.trade_plan_id == case_input["trade_plan_id"]
+    assert resting.sl_trigger_price == _coerce_decimal(
         case_input["stop_loss_price"], "stop_loss_price"
     )
-    assert sl_kwargs["working_type"] == "MARK_PRICE"
-    assert sl_kwargs["client_algo_id"] == expected["sl_algo_client_id"]
+    from src.execution.binding import take_profit_levels
+
+    tp1, tp2 = take_profit_levels(_build_approved_plan(case_input))
+    assert (resting.tp1_trigger_price, resting.tp2_trigger_price) == (tp1, tp2)
+    assert resting.working_type == "MARK_PRICE"
+    assert resting.position_mode == "ONE_WAY"
+    assert resting.tp1_quantity_fraction == _coerce_decimal(
+        case_input["live"]["tp1_quantity_fraction"], "tp1_quantity_fraction"
+    )
+    assert resting.snapshot_ttl == timedelta(seconds=int(case_input["ttl_seconds"]))
+    assert resting.registered_at_utc == _parse_utc(case_input["now_utc"])
 
 
 # --------------------------------------------------------------------------- #
@@ -798,10 +817,10 @@ async def test_risk_no_trade_yields_no_adapter_calls_and_preserves_reason_code()
 # --------------------------------------------------------------------------- #
 
 
-async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
-    """Beh. 4: an ambiguous `place_entry` response triggers
-    `query_order_by_client` first; retry occurs only when the probe
-    confirms absence.
+async def test_ambiguous_entry_response_is_probed_and_never_resent() -> None:
+    """Beh. 4: an ambiguous `place_entry` response triggers one
+    `query_order_by_client`; the probe decides between hand-off and UNKNOWN
+    and never leads to a second `place_entry` (Q5).
     """
     from src.execution.manager import execute_approved_plan
 
@@ -839,8 +858,8 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
         **_live_wiring(),
     )
 
-    # The manager should have called query_order_by_client before any
-    # retry. Since the probe found the order, no retry is needed.
+    # The manager probes once after the ambiguous failure. The probe found the order,
+    # so it is handed off; in no case is the entry sent again.
     method_sequence = [c["method"] for c in adapter.calls]
     assert "query_order_by_client" in method_sequence, (
         f"ambiguous response must trigger query_order_by_client, got {method_sequence}"
@@ -849,9 +868,9 @@ async def test_ambiguous_entry_response_triggers_query_before_retry() -> None:
     entry_idx = method_sequence.index("place_entry")
     query_idx = method_sequence.index("query_order_by_client")
     assert query_idx > entry_idx, f"query must come after initial place_entry: {method_sequence}"
-    # No retry place_entry after the query (probe found the order).
+    # No second place_entry after the query.
     entry_count = method_sequence.count("place_entry")
-    assert entry_count == 1, f"probe found order → no retry, got {entry_count} place_entry calls"
+    assert entry_count == 1, f"the entry is never re-sent, got {entry_count} place_entry calls"
 
 
 # --------------------------------------------------------------------------- #
@@ -926,6 +945,13 @@ async def _run_plan(
     return await execute_approved_plan(**kwargs)
 
 
+def _status_unknown() -> BaseException:
+    """An SDK 5xx: STATUS_UNKNOWN on a placement, an ambiguous placement failure."""
+    from binance_common.errors import ServerError
+
+    return ServerError(error_message="status unknown", status_code=503)
+
+
 def _probe(found: bool) -> Any:
     from src.adapters.binance_usdm import OrderProbe
 
@@ -938,25 +964,31 @@ def _probe(found: bool) -> Any:
     )
 
 
-async def test_definitive_absence_allows_exactly_one_retry() -> None:
-    """CR-09: an ambiguous entry followed by a DEFINITIVE `found=False`
-    probe retries once; the retry's ack proceeds to the SL."""
+async def test_definitive_absence_after_an_ambiguous_error_is_unknown_not_a_resend() -> None:
+    """Q5: an ambiguous entry followed by a `found=False` probe is NOT proof of absence (the
+    id is unique among open orders only), so the entry is never re-sent: the intent is UNKNOWN,
+    SAFE_MODE `ENTRY_STATE_UNKNOWN` is entered and the outcome is RECONCILIATION_REQUIRED."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
     adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.append(TimeoutError("status unknown"))
+    adapter.entry_exceptions.append(_status_unknown())
     adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
 
-    outcome = await _run_plan(adapter)
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode, intent_store=store)
 
-    assert outcome.is_no_trade is False
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert [c["method"] for c in adapter.calls] == [
         *PRE_PLACEMENT_READS,
         "get_position_mode",
         "place_entry",
         "query_order_by_client",
-        "place_entry",
-        "query_algo_order_by_client",
-        "place_algo_protective",
     ]
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
 
 
 async def test_probe_failure_fails_closed_to_safe_mode_without_retry_or_sl() -> None:
@@ -993,21 +1025,346 @@ async def test_indeterminate_probe_is_unknown_not_absent() -> None:
     assert safe_mode_controller.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
 
 
-async def test_repeated_definitive_absence_is_bounded_no_trade() -> None:
-    """CR-09: at most two entry attempts; both absent → NO_TRADE, no SL."""
+# Q5 (owner decision 2026-10-20): each approval sends exactly ONE `place_entry` POST.
+_Q5_AMBIGUOUS_FAILURES = ("server_5xx", "timeout", "none_response", "unknown_error")
+_Q5_PROBE_ANSWERS = ("found", "absent", "probe_raises", "indeterminate")
+_Q5_CASES: list[tuple[str, str]] = [
+    ("pre_send_refusal", "no_probe"),
+    ("definitive_rejection", "no_probe"),
+    *[(failure, probe) for failure in _Q5_AMBIGUOUS_FAILURES for probe in _Q5_PROBE_ANSWERS],
+]
+
+
+def _q5_seed(adapter: FakeExecutionAdapter, failure: str, probe: str) -> None:
+    """Queue the failure and the probe answer of one Q5 case; fresh objects on every call."""
+    from binance_common.errors import BadRequestError
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+
+    if failure == "pre_send_refusal":
+        adapter.entry_exceptions.append(RestGateRefusal("RATE_LIMIT_PAUSE_429", 7))
+    elif failure == "definitive_rejection":
+        adapter.entry_exceptions.append(
+            BadRequestError(error_message="rejected", status_code=-1106)
+        )
+    elif failure == "server_5xx":
+        adapter.entry_exceptions.append(_status_unknown())
+    elif failure == "timeout":
+        adapter.entry_exceptions.append(TimeoutError("read timeout"))
+    elif failure == "none_response":
+        adapter._entry_response = None  # the constructor replaces None with a default dict
+    elif failure == "unknown_error":
+        adapter.entry_exceptions.append(RuntimeError("unmapped"))
+    else:  # pragma: no cover - guards the table itself
+        raise AssertionError(failure)
+    if probe == "found":
+        adapter.query_responses.append(_probe(found=True))
+    elif probe == "absent":
+        adapter.query_responses.append(_probe(found=False))
+    elif probe == "probe_raises":
+        adapter.query_exceptions.append(RuntimeError("probe failed"))
+    elif probe not in ("indeterminate", "no_probe"):  # pragma: no cover
+        raise AssertionError(probe)
+
+
+@pytest.mark.parametrize(
+    ("failure", "probe"), _Q5_CASES, ids=[f"{failure}-{probe}" for failure, probe in _Q5_CASES]
+)
+async def test_q5_place_entry_is_sent_once_for_every_error_kind(failure: str, probe: str) -> None:
+    """Q5: `place_entry` is called exactly once per approval, for every failure kind and every
+    probe answer. `newClientOrderId` is unique only among OPEN orders, Binance documents no
+    idempotency and no immediate query visibility, and `-1007` reads "Send status unknown;
+    execution status unknown". So `found=False` right after an ambiguous error does not prove
+    the order is absent: the result is UNKNOWN + SAFE_MODE + RECONCILIATION_REQUIRED, never
+    REJECTED. A resting GTD entry that nobody tracks would fill with no stop, because the
+    coordinator places the stop only after a fill (D-10)."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
     adapter = FakeExecutionAdapter()
-    adapter.entry_exceptions.extend([RuntimeError("-2019"), RuntimeError("-2019")])
-    adapter.query_responses.extend([_probe(found=False), _probe(found=False)])
-    safe_mode_controller = RecordingSafeModeController()
+    _q5_seed(adapter, failure, probe)
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
 
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
 
-    assert outcome.is_no_trade is True
-    assert outcome.reason_code == "EXCHANGE_CONSTRAINT"
     methods = [c["method"] for c in adapter.calls]
-    assert methods.count("place_entry") == 2
+    assert methods.count("place_entry") == 1
+    assert methods.count("query_order_by_client") == (0 if probe == "no_probe" else 1)
     assert "place_algo_protective" not in methods
-    assert safe_mode_controller.entered_reasons == []
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None
+    if failure in ("pre_send_refusal", "definitive_rejection"):
+        reason = (
+            "ENTRY_REFUSED_BEFORE_SEND" if failure == "pre_send_refusal" else "EXCHANGE_CONSTRAINT"
+        )
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason)
+        assert entry.intent_status == ExecutionIntentStatus.REJECTED
+        assert safe_mode.entered_reasons == []
+        assert registry.register_attempts == 0
+    elif probe == "found":
+        assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+        assert entry.intent_status == ExecutionIntentStatus.ACKED
+        assert safe_mode.entered_reasons == []
+        assert len(registry.entries) == 1
+    else:
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+        assert entry.intent_status == ExecutionIntentStatus.UNKNOWN
+        assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+        assert registry.register_attempts == 0
+
+
+_ENTRY_PLACEMENT_FUNCTION = "_place_entry_no_blind_retry"
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_LOOP_NODES = (ast.For, ast.AsyncFor, ast.While, *_COMPREHENSIONS)
+
+
+def _entry_resend_constructs(source: str) -> list[str]:
+    """Everything in `source` that could send the entry placement a second time.
+
+    Reports a loop or comprehension in the placement function, a call to itself (recursion),
+    a tenacity or retry helper, a `.place_entry(...)` call outside that function, more than
+    one such call, and any loop that contains a call to `.place_entry` or to the function.
+    A missing function is reported too, so renaming it cannot hide a resend.
+    """
+    tree = ast.parse(source)
+    found: list[str] = []
+    functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        and node.name == _ENTRY_PLACEMENT_FUNCTION
+    ]
+    if not functions:
+        found.append(f"{_ENTRY_PLACEMENT_FUNCTION}: not defined")
+    inside_ids: set[int] = set()
+    for function in functions:
+        for inner in ast.walk(function):
+            inside_ids.add(id(inner))
+            if isinstance(inner, _LOOP_NODES):
+                found.append(f"{function.name}:{inner.lineno}: loop {type(inner).__name__}")
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == function.name
+            ):
+                found.append(f"{function.name}:{inner.lineno}: calls itself")
+            if isinstance(inner, ast.Name) and inner.id == "tenacity":
+                found.append(f"{function.name}:{inner.lineno}: uses tenacity")
+            if isinstance(inner, ast.Attribute) and inner.attr in {
+                "AsyncRetrying",
+                "Retrying",
+                "retry",
+            }:
+                found.append(f"{function.name}:{inner.lineno}: uses a retry helper")
+
+    def _sends(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "place_entry") or (
+            isinstance(func, ast.Name) and func.id == _ENTRY_PLACEMENT_FUNCTION
+        )
+
+    sends = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "place_entry"
+    ]
+    if len(sends) != 1:
+        found.append(f"module: {len(sends)} .place_entry( calls, expected exactly 1")
+    found.extend(
+        f"module:{node.lineno}: .place_entry( outside {_ENTRY_PLACEMENT_FUNCTION}"
+        for node in sends
+        if id(node) not in inside_ids
+    )
+    for loop in (n for n in ast.walk(tree) if isinstance(n, _LOOP_NODES)):
+        if any(_sends(inner) for inner in ast.walk(loop)):
+            found.append(f"module:{loop.lineno}: a loop contains a placement call")
+    return sorted(found)
+
+
+def test_q5_entry_placement_has_no_resend_construct() -> None:
+    """Q5: no loop, recursion, retry helper or attempt-count knob can resend the entry."""
+    from src.execution import manager
+
+    source = inspect.getsource(manager)
+    assert _entry_resend_constructs(source) == []
+    assert [name for name in vars(manager) if "MAX_ATTEMPTS" in name] == []
+    # The guard is not vacuous: the old loop shape is reported.
+    old_shape = (
+        "async def _place_entry_no_blind_retry(adapter, kwargs):\n"
+        "    for _ in range(2):\n"
+        "        response = await adapter.place_entry(**kwargs)\n"
+        "    return response\n"
+    )
+    reported = _entry_resend_constructs(old_shape)
+    assert any("loop For" in line for line in reported)
+    assert any("a loop contains a placement call" in line for line in reported)
+    assert _entry_resend_constructs("x = 1\n") == [
+        f"{_ENTRY_PLACEMENT_FUNCTION}: not defined",
+        "module: 0 .place_entry( calls, expected exactly 1",
+    ]
+
+
+def _refusals() -> list[tuple[str, BaseException]]:
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+    from src.adapters.binance_usdm import DriftBlockReason, EntriesBlocked, SignedCallPolicyMissing
+
+    return [
+        ("rest_gate_refusal", RestGateRefusal("RATE_LIMIT_PAUSE_429", 7)),
+        ("entries_blocked_refusal", EntriesBlocked(DriftBlockReason.NEVER_MEASURED)),
+        ("signed_call_policy_missing_refusal", SignedCallPolicyMissing()),
+    ]
+
+
+@pytest.mark.parametrize(("label", "refusal"), _refusals(), ids=[r[0] for r in _refusals()])
+async def test_refusal_before_send_is_no_trade_without_probe_retry_or_safe_mode(
+    label: str, refusal: BaseException
+) -> None:
+    """D-21, src/WR-02, T-19-40: a PreSendRefusal of `place_entry` sent nothing, so there is
+    nothing to probe, nothing to retry and no reason for SAFE_MODE; the ENTRY intent is REJECTED."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(refusal)
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_REFUSED_BEFORE_SEND"), label
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert "query_order_by_client" not in methods
+    assert "cancel_normal_order" not in methods
+    assert safe_mode.entered_reasons == []
+    assert registry.register_attempts == 0
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None
+    assert entry.intent_status == ExecutionIntentStatus.REJECTED
+    assert entry.outcome is not None
+    assert entry.outcome.reason_code == "ENTRY_REFUSED_BEFORE_SEND"
+
+
+@pytest.mark.parametrize("code", [-1106, -4016, -4024])
+async def test_a_definitive_rejection_is_no_trade_without_probe_or_second_attempt(
+    code: int,
+) -> None:
+    """REJECTED_DEFINITIVE on a placement (for example -1106, -4016, -4024): the exchange said
+    no, so there is no probe, no second attempt, the intent is REJECTED and no SAFE_MODE."""
+    from binance_common.errors import BadRequestError
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(BadRequestError(error_message="rejected", status_code=code))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "EXCHANGE_CONSTRAINT")
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert "query_order_by_client" not in methods
+    assert safe_mode.entered_reasons == []
+    assert registry.register_attempts == 0
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.REJECTED
+
+
+async def test_an_unknown_exchange_error_found_by_the_probe_is_handed_off() -> None:
+    """UNKNOWN_EXCHANGE_ERROR (a non-SDK exception): probe first; an order that was found is
+    the entry (EXISTS) and is handed to the protection registry."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(RuntimeError("something nobody mapped"))
+    adapter.query_responses.append(_probe(found=True))
+    safe_mode = RecordingSafeModeController()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 1
+    assert len(registry.entries) == 1
+    assert safe_mode.entered_reasons == []
+
+
+async def test_an_unknown_exchange_error_absent_by_the_probe_is_unknown_and_never_resent() -> None:
+    """UNKNOWN_EXCHANGE_ERROR with a `found=False` probe: NO second attempt (Q5), intent
+    UNKNOWN, SAFE_MODE(ENTRY_STATE_UNKNOWN), RECONCILIATION_REQUIRED, nothing handed off."""
+    from src.domain.enums import ExecutionIntentStatus
+
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(RuntimeError("something nobody mapped"))
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+    store = InMemoryExecutionIntentStore()
+
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    methods = [c["method"] for c in adapter.calls]
+    assert methods.count("place_entry") == 1
+    assert methods.count("query_order_by_client") == 1
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
+    assert registry.register_attempts == 0
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.intent_status == ExecutionIntentStatus.UNKNOWN
+
+
+async def test_a_failing_error_facts_is_treated_as_an_unknown_exchange_error() -> None:
+    """Fail closed: when the adapter cannot classify the exception the failure is ambiguous,
+    probed once and never re-sent (Q5): UNKNOWN + SAFE_MODE(ENTRY_STATE_UNKNOWN)."""
+
+    class _NoFacts(FakeExecutionAdapter):
+        @staticmethod
+        def error_facts(exc: BaseException) -> Any:
+            raise RuntimeError("cannot classify")
+
+    adapter = _NoFacts()
+    adapter.entry_exceptions.append(_status_unknown())
+    adapter.query_responses.append(_probe(found=False))
+    safe_mode = RecordingSafeModeController()
+
+    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert [c["method"] for c in adapter.calls].count("place_entry") == 1
+    assert safe_mode.entered_reasons == ["ENTRY_STATE_UNKNOWN"]
 
 
 async def test_real_adapter_place_entry_makes_a_single_attempt() -> None:
@@ -1096,9 +1453,8 @@ async def test_golden_fixture_adapter_call_sequence_matches_expected() -> None:
     entry_call = next(c for c in adapter.calls if c["method"] == "place_entry")
     assert entry_call["kwargs"]["new_client_order_id"] == expected["entry_client_order_id"]
 
-    # SL algo_client_id matches the deterministic derivation.
-    sl_call = next(c for c in adapter.calls if c["method"] == "place_algo_protective")
-    assert sl_call["kwargs"]["client_algo_id"] == expected["sl_algo_client_id"]
+    # No protective call: the stop belongs to the protection coordinator (plan 19-15, D-10).
+    assert "place_algo_protective" not in method_sequence
 
 
 def test_execute_approved_plan_is_a_coroutine_function() -> None:
@@ -1166,23 +1522,32 @@ def test_execution_core_has_no_float_in_placement_math() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 09-REVIEW CR-05 — the entry-time SL result is checked; failure fails closed.
+# Plan 19-15 (D-10, T-19-39) — the hand-off to the protection registry fails closed.
 # --------------------------------------------------------------------------- #
 
 
-async def test_rejected_sl_cancels_entry_and_forces_safe_mode() -> None:
-    """CR-05: an acknowledged entry whose SL is REJECTED is not OK — the
-    entry is canceled by its deterministic id (journal-first), SAFE_MODE
-    is entered, and the outcome is ENTRY_WITHOUT_PROTECTIVE."""
-    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+async def test_a_failed_hand_off_cancels_the_entry_and_requires_reconciliation() -> None:
+    """T-19-39 (replaces the CR-05 rejected-SL test): when the registry cannot take the entry,
+    SAFE_MODE(PROTECTION_HANDOFF_FAILED) is entered, the entry is cancelled by its deterministic
+    id (journal-first) and the outcome is RECONCILIATION_REQUIRED."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry(register_exception=RuntimeError("registry down"))
+    adapter = FakeExecutionAdapter()
     safe_mode_controller = RecordingSafeModeController()
     journal = FakeJournal()
+    store = InMemoryExecutionIntentStore()
 
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller, journal=journal)
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=safe_mode_controller,
+        journal=journal,
+        intent_store=store,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
 
-    assert outcome.is_no_trade is True
-    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
-    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert safe_mode_controller.entered_reasons == ["PROTECTION_HANDOFF_FAILED"]
+    assert registry.register_attempts == 1
     cancel_calls = [c for c in adapter.calls if c["method"] == "cancel_normal_order"]
     assert cancel_calls == [
         {
@@ -1195,25 +1560,72 @@ async def test_rejected_sl_cancels_entry_and_forces_safe_mode() -> None:
     ]
     phases = [json.loads(e.payload_json)["phase"] for e in journal.events]
     assert phases == ["pre_cancel", "post_cancel"]
+    assert "place_algo_protective" not in [c["method"] for c in adapter.calls]
+    entry = store.get_entry(approval_id=case_input["approval_id"])
+    assert entry is not None and entry.outcome is not None
+    assert entry.outcome.reason_code == "RECONCILIATION_REQUIRED"
 
 
-async def test_raising_sl_after_entry_ack_fails_closed() -> None:
-    """CR-05: an SL placement EXCEPTION after the entry was acknowledged
-    never escapes with a resting, unprotected entry on the book."""
+async def test_a_resting_entry_that_cannot_be_built_is_refused_before_anything_is_sent() -> None:
+    """Gate 5g: a plan the coordinator would refuse by construction (a TP1 share of the whole
+    position) is NO_TRADE PROTECTION_INPUTS_INVALID before the approval is consumed, never an
+    entry that is placed and cancelled afterwards."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    live = _build_live_context(
+        case_input, protection_registry=registry, tp1_quantity_fraction=Decimal("1")
+    )
+    outcome = await _run_plan(adapter, intent_store=store, live_context=live)
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "PROTECTION_INPUTS_INVALID")
+    assert "place_entry" not in [c["method"] for c in adapter.calls]
+    assert registry.register_attempts == 0
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
 
-    class _SlRaises(FakeExecutionAdapter):
-        async def place_algo_protective(self, **kwargs: Any) -> Any:
-            await super().place_algo_protective(**kwargs)
-            raise TimeoutError("SL placement timeout")
 
-    adapter = _SlRaises()
-    safe_mode_controller = RecordingSafeModeController()
+async def test_no_outcome_of_the_manager_places_a_protective_stop() -> None:
+    """D-10: `execute_approved_plan` never calls `place_algo_protective` or probes an algo order,
+    whatever the entry or the hand-off did (replaces the two entry-time stop tests)."""
+    from src.adapters.binance_usdm import OrderProbe
 
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode_controller)
+    forbidden = {"place_algo_protective", "query_algo_order_by_client"}
 
-    assert outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
-    assert safe_mode_controller.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
-    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+    async def methods_of(adapter: FakeExecutionAdapter, **overrides: Any) -> list[str]:
+        await _run_plan(adapter, **overrides)
+        return [c["method"] for c in adapter.calls]
+
+    acked = FakeExecutionAdapter()
+    found = FakeExecutionAdapter()
+    found.entry_exceptions.append(TimeoutError("status unknown"))
+    found._query_response = OrderProbe(
+        client_order_id=_load_expected()["entry_client_order_id"],
+        found=True,
+        order_id="12345",
+        status="NEW",
+        update_time_utc=None,
+    )
+    absent = FakeExecutionAdapter()
+    absent.entry_exceptions.append(TimeoutError("status unknown"))
+    absent.query_exceptions.append(RuntimeError("probe failed"))
+    case_input = _load_input()
+    handoff_failed = FakeExecutionAdapter()
+    for adapter, overrides in (
+        (acked, {}),
+        (found, {}),
+        (absent, {}),
+        (
+            handoff_failed,
+            {
+                "live_context": _build_live_context(
+                    case_input,
+                    protection_registry=StubProtectionRegistry(register_exception=ValueError("x")),
+                )
+            },
+        ),
+    ):
+        methods = await methods_of(adapter, **overrides)
+        assert forbidden.isdisjoint(methods), methods
 
 
 # --------------------------------------------------------------------------- #
@@ -1810,9 +2222,10 @@ async def test_store_unavailable_at_entry_mark_sent_places_nothing() -> None:
     assert _placement_calls(adapter) == []
 
 
-async def test_successful_run_stores_entry_and_stop_loss_rows() -> None:
+async def test_successful_run_stores_only_the_entry_row() -> None:
+    """D-10: the manager writes the ENTRY row (ACKED, outcome OK) and no STOP_LOSS row; the
+    STOP_LOSS intent is written by the protection coordinator after the first fill."""
     from src.domain.enums import ExecutionIntentStatus
-    from src.execution.order_ids import derive_algo_client_id
 
     case_input = _load_input()
     store = InMemoryExecutionIntentStore()
@@ -1821,77 +2234,75 @@ async def test_successful_run_stores_entry_and_stop_loss_rows() -> None:
 
     entry = store.get_intent(approval_id=case_input["approval_id"], role="ENTRY")
     stop_loss = store.get_intent(approval_id=case_input["approval_id"], role="STOP_LOSS")
-    assert entry is not None and stop_loss is not None
+    assert entry is not None
     assert entry.intent_status == ExecutionIntentStatus.ACKED
     assert entry.outcome is not None
     assert (entry.outcome.is_no_trade, entry.outcome.reason_code) == (False, "OK")
-    assert stop_loss.intent_status == ExecutionIntentStatus.ACKED
-    assert stop_loss.algo_client_id == derive_algo_client_id(
-        plan_hash=case_input["plan_hash"], role="STOP_LOSS"
-    )
-    assert stop_loss.client_order_id is None
-    assert stop_loss.intended_quantity is None
-    assert stop_loss.side == "SELL"
-    assert stop_loss.outcome is None
+    assert stop_loss is None
 
 
-async def test_store_down_after_entry_ack_enters_safe_mode_and_still_places_the_sl() -> None:
-    """Planner decision for D051: protection outranks the audit row (D034)."""
-    from src.execution.order_ids import derive_algo_client_id
+async def test_store_down_after_entry_ack_enters_safe_mode_and_still_hands_the_entry_off() -> None:
+    """Planner decision for D051: protection outranks the audit row (D034). A failing
+    finalize (the last store write) leaves the hand-off done and the outcome unreadable."""
     from src.persistence.errors import StoreUnavailable
 
     from tests.support.intent_store_fakes import FailingIntentStore
 
     case_input = _load_input()
+    registry = StubProtectionRegistry()
     adapter = FakeExecutionAdapter()
     safe_mode = RecordingSafeModeController()
     outcome = await _run_plan(
         adapter,
         safe_mode_controller=safe_mode,
-        intent_store=FailingIntentStore("record_protective_intent", StoreUnavailable("down")),
+        intent_store=FailingIntentStore("finalize_entry_outcome", StoreUnavailable("down")),
+        live_context=_build_live_context(case_input, protection_registry=registry),
     )
 
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert safe_mode.entered_reasons == ["DB_FAILURE"]
-    sl_calls = [c for c in adapter.calls if c["method"] == "place_algo_protective"]
-    assert len(sl_calls) == 1
-    assert sl_calls[0]["kwargs"]["client_algo_id"] == derive_algo_client_id(
-        plan_hash=case_input["plan_hash"], role="STOP_LOSS"
-    )
+    assert len(registry.entries) == 1
+    assert "place_algo_protective" not in [c["method"] for c in adapter.calls]
     assert "cancel_normal_order" not in [c["method"] for c in adapter.calls]
 
 
-async def test_store_down_when_recording_the_entry_ack_still_places_the_sl() -> None:
+async def test_store_down_when_recording_the_entry_ack_still_hands_the_entry_off() -> None:
     from src.persistence.errors import StoreUnavailable
 
     from tests.support.intent_store_fakes import FailingIntentStore
 
+    case_input = _load_input()
+    registry = StubProtectionRegistry()
     adapter = FakeExecutionAdapter()
     safe_mode = RecordingSafeModeController()
     outcome = await _run_plan(
         adapter,
         safe_mode_controller=safe_mode,
         intent_store=FailingIntentStore("record_result", StoreUnavailable("down"), role="ENTRY"),
+        live_context=_build_live_context(case_input, protection_registry=registry),
     )
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert safe_mode.entered_reasons == ["DB_FAILURE"]
-    assert len([c for c in adapter.calls if c["method"] == "place_algo_protective"]) == 1
+    assert len(registry.entries) == 1
 
 
-async def test_store_down_and_sl_unconfirmed_still_cancels_the_entry() -> None:
+async def test_store_down_and_a_failed_hand_off_still_cancels_the_entry() -> None:
     from src.persistence.errors import StoreUnavailable
 
     from tests.support.intent_store_fakes import FailingIntentStore
 
-    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+    case_input = _load_input()
+    registry = StubProtectionRegistry(register_exception=RuntimeError("registry down"))
+    adapter = FakeExecutionAdapter()
     safe_mode = RecordingSafeModeController()
     outcome = await _run_plan(
         adapter,
         safe_mode_controller=safe_mode,
-        intent_store=FailingIntentStore("record_protective_intent", StoreUnavailable("down")),
+        intent_store=FailingIntentStore("record_result", StoreUnavailable("down"), role="ENTRY"),
+        live_context=_build_live_context(case_input, protection_registry=registry),
     )
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
-    assert safe_mode.entered_reasons == ["DB_FAILURE", "ENTRY_WITHOUT_PROTECTIVE"]
+    assert safe_mode.entered_reasons == ["DB_FAILURE", "PROTECTION_HANDOFF_FAILED"]
     assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
 
 
@@ -1926,52 +2337,31 @@ def _real_controller_with_down_journal() -> tuple[Any, _StoreDownJournal]:
     return SafeModeController(adapter=_NoOpTruth(), journal=journal), journal
 
 
-async def test_cr01_db_outage_after_entry_ack_still_places_the_sl_with_real_controller() -> None:
+async def test_cr01_db_outage_after_entry_ack_still_hands_the_entry_off_real_controller() -> None:
     """17-REVIEW CR-01: the real controller journals through the same failing store.
 
     The controller sets its flag before journaling, so the journal error must not
-    abort the manager before the stop loss is placed.
+    abort the manager before the entry is handed to the protection registry.
     """
-    from src.execution.order_ids import derive_algo_client_id
     from src.persistence.errors import StoreUnavailable
 
     from tests.support.intent_store_fakes import FailingIntentStore
 
     case_input = _load_input()
+    registry = StubProtectionRegistry()
     adapter = FakeExecutionAdapter()
     controller, journal = _real_controller_with_down_journal()
     outcome = await _run_plan(
         adapter,
         safe_mode_controller=controller,
         intent_store=FailingIntentStore("record_result", StoreUnavailable("down"), role="ENTRY"),
+        live_context=_build_live_context(case_input, protection_registry=registry),
     )
 
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert controller.in_safe_mode is True
     assert journal.attempts >= 1  # the audit row WAS attempted and lost
-    sl_calls = [c for c in adapter.calls if c["method"] == "place_algo_protective"]
-    assert len(sl_calls) == 1
-    assert sl_calls[0]["kwargs"]["client_algo_id"] == derive_algo_client_id(
-        plan_hash=case_input["plan_hash"], role="STOP_LOSS"
-    )
-
-
-async def test_cr01_db_outage_at_sl_intent_still_places_the_sl_with_real_controller() -> None:
-    from src.persistence.errors import StoreUnavailable
-
-    from tests.support.intent_store_fakes import FailingIntentStore
-
-    adapter = FakeExecutionAdapter()
-    controller, _journal = _real_controller_with_down_journal()
-    outcome = await _run_plan(
-        adapter,
-        safe_mode_controller=controller,
-        intent_store=FailingIntentStore("record_protective_intent", StoreUnavailable("down")),
-    )
-
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
-    assert controller.in_safe_mode is True
-    assert len([c for c in adapter.calls if c["method"] == "place_algo_protective"]) == 1
+    assert len(registry.entries) == 1
 
 
 async def test_cr01_failing_journal_at_entry_state_unknown_still_records_and_finalizes() -> None:
@@ -1999,38 +2389,24 @@ async def test_cr01_failing_journal_at_entry_state_unknown_still_records_and_fin
     assert "place_algo_protective" not in [c["method"] for c in adapter.calls]
 
 
-async def test_cr01_failing_journal_at_entry_without_protective_still_cancels_the_entry() -> None:
-    """17-REVIEW CR-01 (call site ENTRY_WITHOUT_PROTECTIVE): the unprotected entry must
-    still be cancelled when the SAFE_MODE audit row cannot be written."""
-    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
+async def test_cr01_failing_journal_at_a_failed_hand_off_still_cancels_the_entry() -> None:
+    """17-REVIEW CR-01 (call site PROTECTION_HANDOFF_FAILED): the entry must still be
+    cancelled when the SAFE_MODE audit row cannot be written."""
+    case_input = _load_input()
+    registry = StubProtectionRegistry(register_exception=RuntimeError("registry down"))
+    adapter = FakeExecutionAdapter()
     controller, journal = _real_controller_with_down_journal()
 
-    outcome = await _run_plan(adapter, safe_mode_controller=controller)
+    outcome = await _run_plan(
+        adapter,
+        safe_mode_controller=controller,
+        live_context=_build_live_context(case_input, protection_registry=registry),
+    )
 
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert controller.in_safe_mode is True
     assert journal.attempts >= 1
     assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
-
-
-async def test_unconfirmed_sl_leaves_the_stop_loss_row_unknown() -> None:
-    from src.domain.enums import ExecutionIntentStatus
-
-    case_input = _load_input()
-    store = InMemoryExecutionIntentStore()
-    adapter = FakeExecutionAdapter(algo_response={"algo_status": "REJECTED"})
-    safe_mode = RecordingSafeModeController()
-    outcome = await _run_plan(adapter, safe_mode_controller=safe_mode, intent_store=store)
-
-    assert (outcome.is_no_trade, outcome.reason_code) == (True, "ENTRY_WITHOUT_PROTECTIVE")
-    assert safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
-    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
-    stop_loss = store.get_intent(approval_id=case_input["approval_id"], role="STOP_LOSS")
-    assert stop_loss is not None
-    assert stop_loss.intent_status == ExecutionIntentStatus.UNKNOWN
-    entry = store.get_entry(approval_id=case_input["approval_id"])
-    assert entry is not None and entry.outcome is not None
-    assert entry.outcome.reason_code == "ENTRY_WITHOUT_PROTECTIVE"
 
 
 async def test_a_simulated_crash_propagates_unchanged() -> None:
@@ -2038,7 +2414,9 @@ async def test_a_simulated_crash_propagates_unchanged() -> None:
 
     from tests.support.intent_store_fakes import CrashAfter, SimulatedCrash
 
-    for step in ("consume", "entry_sent", "entry_result", "sl_intent", "sl_sent", "sl_result"):
+    # Plan 19-15: the manager writes only the ENTRY steps; the STOP_LOSS steps moved to the
+    # protection coordinator (tests/test_protection_coordinator.py).
+    for step in ("consume", "entry_sent", "entry_result", "finalize"):
         store = CrashAfter(InMemoryExecutionIntentStore(), step=step)
         with pytest.raises(SimulatedCrash):
             await _run_plan(FakeExecutionAdapter(), intent_store=store)
@@ -2054,9 +2432,6 @@ async def test_restart_after_a_crash_never_resends_the_entry() -> None:
         ("consume", 0),
         ("entry_sent", 0),
         ("entry_result", 1),
-        ("sl_intent", 1),
-        ("sl_sent", 1),
-        ("sl_result", 1),
     ):
         inner = InMemoryExecutionIntentStore()
         adapter = FakeExecutionAdapter()
@@ -2599,8 +2974,9 @@ async def test_an_unsizeable_tp1_refuses_the_plan_with_no_single_tp_fallback(
     assert (outcome.is_no_trade, outcome.reason_code) == (True, reason)
     assert adapter.calls == []
     assert store.get_entry(approval_id=case_input["approval_id"]) is None
-    # The entry itself is sizeable: with TP1 sized at the whole position the plan places.
-    whole = _build_live_context(case_input, tp1_quantity_fraction=Decimal("1"))
+    # The entry itself is sizeable: with TP1 sized at 90% of the position the plan places (a
+    # share of 1 cannot be handed to the protection coordinator, gate 5g).
+    whole = _build_live_context(case_input, tp1_quantity_fraction=Decimal("0.9"))
     placed = await _run_plan(
         FakeExecutionAdapter(case_input=case_input),
         case_input=case_input,
