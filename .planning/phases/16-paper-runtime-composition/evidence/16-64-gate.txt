@@ -1,0 +1,76 @@
+16-64 final gate repeated before the soak image (R7 of decisions/16-DEC-V260.md: the image must contain the TP2 positivity guard 6f599dd)
+run on 2026-10-20 on a clean tracked tree (untracked .gsd/ and .planning/milestone.lock and the modified .planning/config.json pre-exist; they were not staged, edited or reverted and are not part of the repository state under test)
+branch: develop
+environment: Windows 10, .venv Python 3.13, TRADING_CI_STRICT unset, TEST_DATABASE_URL set (native PostgreSQL 17 service on this machine; the PostgreSQL tests ran, none of them is among the skips; tests/test_paper_shadow_pg.py and tests/test_paper_shadow_runtime_pg.py were also run alone afterwards: 7 passed, 0 skipped)
+tree under test: HEAD 7238d066df7cb0e932415ca20752a75b7194db08 (the plan commit of 16-64, docs only)
+commit under test (IMAGE_COMMIT, the last commit that changes code, tests, configuration or deployment files): 6f73e5bb87167f386b22a64a00effa56ca4ef0bf
+  git log -1 --format=%H -- src scripts tests config deploy Dockerfile .dockerignore docker-compose.yml params pyproject.toml uv.lock alembic.ini docs/research/universe
+    6f73e5bb87167f386b22a64a00effa56ca4ef0bf  fix(18): tests-A/WR-07 close the bypasses of the AST guards and add a negative control for each
+  git diff --quiet 6f73e5b HEAD -- (the same paths): exit 0, so the tested tree and IMAGE_COMMIT have the same code, tests and image build context
+  the 17 commits in 6f73e5b..7238d06 change only .planning/ and docs/research/experiments/research-run-1-v2-3-0/ (240 research records of b17312a); neither is in the image (the Dockerfile copies src, scripts, alembic.ini, docs/research/universe, params and config/paper only)
+
+range check (Task 1)
+git merge-base --is-ancestor 6f599dd HEAD -> exit 0; git merge-base --is-ancestor 6f599dd 6f73e5b -> exit 0 (the TP2 guard is in IMAGE_COMMIT)
+git merge-base --is-ancestor efae1f3 HEAD -> exit 0 (the previous IMAGE_COMMIT is an ancestor)
+git diff --stat efae1f3..HEAD -- src scripts config deploy Dockerfile .dockerignore docker-compose.yml params pyproject.toml uv.lock alembic.ini docs/research/universe
+  16 files changed, 539 insertions(+), 111 deletions(-); config/, deploy/, params/, Dockerfile, .dockerignore, docker-compose.yml, pyproject.toml, uv.lock, alembic.ini and docs/research/universe: unchanged
+  by origin:
+    plan 16-60 (c96fa0d, research warm-up, simulator 2.2.0): src/data/case_input.py, src/research/run.py, src/backtest/semantics.py, scripts/decision_alignment/protocol.py
+    plan 16-61 (d5067a3, runner hardening, sixth authorization key): src/backtest/experiment.py, src/research/authorization.py, src/research/manifest.py, src/research/run.py
+    plan 16-63 (6f599dd, TP2 positivity guard, simulator 2.3.0, protocol v2.6.0): src/core/planner.py, src/backtest/semantics.py, scripts/decision_alignment/protocol.py
+    Phase 18 (merge dde100b of phase-18-smoke, the 18-26 taxonomy commits 3ee5b84 and 3e901e7, bdb8e92, 90574c8, and the review fixes 1291caa, ef90072, d9bc922, fa04481, f5d9203, f8ed918, f41cb79, 6b42f02, ed749e1): src/adapters/binance_usdm.py, src/adapters/binance_userdata.py, src/adapters/binance_userdata_router.py, src/adapters/binance_userdata_supervisor.py, src/domain/exchange_errors.py, src/reconcile/sweeper.py, scripts/demo_probe.py, scripts/demo_rehearsal.py
+  the paper runtime reaches the guard through src/paper/loop.py (from src.core.planner import plan); src/paper imports none of the Phase 18 modules listed above (it uses src.adapters.binance_public, paper_ws and the telegram adapters)
+  note: the texts of plans 16-60 and 16-61 say the soak IMAGE_COMMIT never contains their code; that held for efae1f3 and no longer holds: IMAGE_COMMIT 6f73e5b contains the research code of 16-60, 16-61 and 16-63 and the Phase 18 code (the paper runtime does not import the research runner)
+
+exit=0 .venv/Scripts/python -m pytest -m "not docker" -q -rs -p no:cacheprovider
+  10412 tests ran: 10393 passed, 19 skipped, 0 failed, 0 errors (counted from the progress lines; the quiet configuration prints no final count line). 2026-10-20T01:31:33Z to 01:55:10Z. PTBDeprecationWarning (retry_after) from the telegram package, unrelated.
+  skip reasons (19):
+    SKIPPED [1] tests\test_analytics_files.py:974: symlinks unavailable on this platform: OSError
+    SKIPPED [1] tests\test_bootstrap.py:947: NTFS cannot represent POSIX modes
+    SKIPPED [4] tests\test_deploy_heartbeat.py:401: file modes do not exist on Windows
+    SKIPPED [12] tests\infra_helpers.py:50: required tool not found on PATH: shellcheck
+    SKIPPED [1] tests\test_user_data_smoke_dry_run.py:383: symlinks are not available on this platform
+  count note: evidence/16-63-final-gate.txt records 10394 passed and 19 skipped (10413) at f8453f9; a --collect-only of `-m "not docker"` collects 10412 both at HEAD and in a clean worktree at 03e29ee (per-file counts identical), so the run here is the full collection; the one-test difference against the 16-63 count was not traced further.
+  during the first minute of the run a planning file not read by any test (16-43-PLAN.md) was briefly modified in the working tree and then restored to HEAD; no test reads it (git grep over tests/).
+exit=0 .venv/Scripts/python -m ruff check
+  All checks passed!
+exit=0 .venv/Scripts/python -m ruff format --check
+  631 files already formatted
+exit=0 .venv/Scripts/python -m mypy src
+  Success: no issues found in 202 source files
+exit=0 uv lock --check
+  Resolved 60 packages in 3ms
+
+user-owned inputs unchanged since the review base c654524:
+git diff --name-only c654524 HEAD -- params/ docs/research/preregistration/research-run-1-manifest.json docs/research/preregistration/research-run-1-grid-*.json docs/research/preregistration/research-run-1-authorization-*.json config/paper/paper-runtime-v1.toml
+  (no output: nothing changed; the owner-signed authorization files research-run-1-v2-2-0-authorization-*.json of 16-61 and research-run-1-v2-3-0-authorization-*.json of 16-63 are additions that this glob does not match)
+
+configuration in force: config/paper/paper-runtime-v2.toml
+git log --format=%H -- config/paper/paper-runtime-v2.toml
+  63ffa580b0ca2667eaf0a8c2cd88ab32b461a832
+  (exactly one commit, the one of plan 16-56; unchanged since 16-62)
+
+docker (Docker Desktop, engine 29.5.3, turned back on by the owner; reported separately, not part of the five gate lines)
+  pytest -m docker -q -rs -p no:cacheprovider: exit 0, 28 tests: 17 passed, 11 skipped, 0 failed (2026-10-20T02:03:19Z to 02:10:12Z)
+    passed: tests/test_docker_backup_remote.py 14 of 14 (real rclone image against an rclone serve s3 double, local only, the src/ops code of the tree under test); tests/test_docker_image.py 3 of 4
+    caveat: the 3 passed image tests ran against the local trading-alert:dev image sha256:3000642a2aef94dda4c0035445cbbda76c1c624e22cc62d5bfb14c786406cd29 built 2026-10-02, not against an image of IMAGE_COMMIT (the tests use the fixed :dev tag; it was not retagged)
+    skipped (11): image trading-alert-ops:dev not found on the docker daemon (test_docker_backup_drill.py 5, test_docker_cutover.py 5, test_docker_image.py 1); the ops image could not be built here (below)
+  local image build at IMAGE_COMMIT (a local check only; the authoritative build is plan 16-43 on the soak host, RUNBOOK 20.6):
+    clean detached worktree at 6f73e5b (git status --porcelain --untracked-files=all empty), removed afterwards
+    deploy/soak-image.sh --dry-run: exit 0 (prints the compose build, the in-image check and the record; writes nothing)
+    deploy/soak-image.sh: exit 1 before any build: docker compose interpolation needs POSTGRES_USER from the env file (".env"); the RUNBOOK recipe therefore needs the soak env file, which holds secrets, so it was not run further here
+    plain docker build --target runtime -t trading-alert:6f73e5bb87167f386b22a64a00effa56ca4ef0bf . : exit 0, image id sha256:3e787ea08263304ec8d3af32d1ec6459eb44e07d37abae2754f923c18ba1c692 (local only, not recorded in any .deploy file, not the soak image)
+      in-image check as soak-image.sh runs it (docker run --rm --network none ... -m scripts.check_image_paths --root /app): exit 0, "parameter set trend-pullback/research-run-1-a01: loaded, hash matches the allowlist entry", "runtime configuration /app/config/paper/paper-runtime-v2.toml: loaded", "in-image check passed"
+      inside the image: src.backtest.semantics.SIMULATOR_SEMANTICS_VERSION = 2.3.0 and src/core/planner.py carries the TP2 guard
+      byte check: sha256 of /app/src/core/planner.py in this image is 20b111b0...80f9, equal to `git show 6f73e5b:src/core/planner.py` with CRLF line ends (the blob itself, LF, is e6c5b4c4...844e): the Windows checkout (core.autocrlf=true) put CRLF files into the build context, so this local image and its id are not comparable with the soak-host build (Linux, LF); one more reason the local image is a check only
+    plain docker build --target ops: exit 1 (network on this machine): first run "curl: (6) Could not resolve host: www.postgresql.org", the one retry "curl: (60) SSL certificate problem: self-signed certificate in certificate chain" (PGDG key download); not retried again
+
+decision records: decisions/16-DEC-V260.md (R7 answered 2026-10-19, "option 1 đi"; section "R7 executed" appended by this plan)
+
+IMAGE_COMMIT=6f73e5bb87167f386b22a64a00effa56ca4ef0bf
+  the commit plan 16-43 checks out on the soak host and builds the soak image from (RUNBOOK 20.6); it supersedes efae1f3efe3211f75f94e165e5d1c9956b20a6f1 of evidence/16-62-gate.txt for the soak.
+  it contains the TP2 positivity guard 6f599dd (simulator semantics 2.3.0); every later commit up to and including the evidence commit of this plan changes documentation or planning files only.
+
+targeted re-review range (the outline requires it before anything is pushed or merged; it is not part of this plan):
+  c654524..6f73e5bb87167f386b22a64a00effa56ca4ef0bf
+  (it now also spans plans 16-60, 16-61 and 16-63 and the Phase 18 merge with its fixes; efae1f3..6f73e5b is the part added since the 16-62 range)
