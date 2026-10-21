@@ -62,3 +62,7 @@ One key per line, so the checks of plan 19-01 can parse the list.
 - `pre_placement.min_remaining_validity_seconds` - the minimum remaining validity a plan must still have at placement time, otherwise the placement is refused (seconds).
 - `pre_placement.max_mark_price_age_ms` - the maximum age of the mark price the pre-placement price check may use, otherwise the check fails closed (milliseconds).
 - `pre_placement.max_last_price_age_ms` - the maximum age of the last price (the `time` of the Symbol Price Ticker answer) the pre-placement last-price check may use, otherwise the check fails closed; a separate number from `pre_placement.max_mark_price_age_ms` because the last price only moves on a trade (milliseconds).
+
+### `[reconcile]` (Phase 20, D-25, T-H)
+
+- `reconcile.tick_interval_ms` - the cadence of the reconcile loop that replaces the hard-coded SAFE_MODE tick; it must be strictly below `protection.max_unprotected_ms` (milliseconds).

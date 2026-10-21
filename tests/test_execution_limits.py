@@ -330,6 +330,7 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         min_remaining_validity_seconds=None,
         max_mark_price_age_ms=None,
         max_last_price_age_ms=None,
+        reconcile_tick_interval_ms=None,
     )
     assert limits.unset_keys() == EXPECTED_UNSET
 
@@ -375,9 +376,9 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_the_not_configured_word() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
-    # Seven keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
-    # WR-03 the sixth, quick task 261020-l4p the seventh).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 14
+    # Eight keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the eighth).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 16
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:

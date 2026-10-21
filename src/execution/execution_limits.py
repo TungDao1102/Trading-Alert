@@ -13,7 +13,8 @@ by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended
 
 The file format (``config/execution/README.md``):
 
-* exactly the sections ``protection``, ``pre_placement`` and ``provenance``;
+* exactly the sections ``protection``, ``pre_placement``, ``reconcile`` and ``provenance``
+  (plan 20-01 adds ``reconcile``; D-25);
 * exactly the keys of ``EXECUTION_LIMIT_KEYS``; a missing or unknown key refuses to load;
 * each value is a positive integer (not a boolean, not a float, not zero) or exactly the
   string ``NOT_CONFIGURED`` (read as ``None``);
@@ -49,6 +50,25 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "max_mark_price_age_ms",
             "max_last_price_age_ms",
         ),
+        "reconcile": ("tick_interval_ms",),
+    }
+)
+
+# The dotted key -> the ExecutionLimits field name. This is the only place the mapping lives.
+# The seven Phase 19 keys keep the field name equal to the key text (their consumers read
+# ``limits.max_unprotected_ms`` and so on). Every Phase 20 key is ``<section>_<key>``, because
+# ``stale_feed.max_mark_price_age_ms`` shares its key text with
+# ``pre_placement.max_mark_price_age_ms`` (plan 20-01; D-25, T-H).
+EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
+    {
+        "protection.max_unprotected_ms": "max_unprotected_ms",
+        "protection.entry_terminal_timeout_ms": "entry_terminal_timeout_ms",
+        "protection.entry_unknown_grace_ms": "entry_unknown_grace_ms",
+        "protection.emergency_close_poll_timeout_ms": "emergency_close_poll_timeout_ms",
+        "pre_placement.min_remaining_validity_seconds": "min_remaining_validity_seconds",
+        "pre_placement.max_mark_price_age_ms": "max_mark_price_age_ms",
+        "pre_placement.max_last_price_age_ms": "max_last_price_age_ms",
+        "reconcile.tick_interval_ms": "reconcile_tick_interval_ms",
     }
 )
 
@@ -108,6 +128,9 @@ class ExecutionLimits:
     price the price check uses. ``max_last_price_age_ms`` (D-07, quick task 261020-l4p, the
     19-REVIEW WR-06 work item): the maximum age of the last price the last-price check uses; it
     is separate from the mark bound because the last price moves only on a trade.
+    ``reconcile_tick_interval_ms`` (plan 20-01, D-25, T-H): the cadence of the reconcile loop that
+    replaces the hard-coded SAFE_MODE tick; it must stay strictly below ``max_unprotected_ms``.
+    The Phase 20 fields are named ``<section>_<key>`` (``EXECUTION_LIMIT_FIELDS``).
     """
 
     max_unprotected_ms: int | None
@@ -117,6 +140,7 @@ class ExecutionLimits:
     min_remaining_validity_seconds: int | None
     max_mark_price_age_ms: int | None
     max_last_price_age_ms: int | None
+    reconcile_tick_interval_ms: int | None
 
     def unset_keys(self) -> tuple[str, ...]:
         """The dotted names of the keys still NOT_CONFIGURED, in the fixed file order."""
@@ -124,7 +148,7 @@ class ExecutionLimits:
             f"{section}.{key}"
             for section, keys in EXECUTION_LIMIT_KEYS.items()
             for key in keys
-            if getattr(self, key) is None
+            if getattr(self, EXECUTION_LIMIT_FIELDS[f"{section}.{key}"]) is None
         )
 
     def require_live_ready(self) -> None:
@@ -237,7 +261,11 @@ def parse_execution_limits(raw: Mapping[str, Any]) -> ExecutionLimits:
     if problems:
         raise ExecutionLimitsInvalid(problems)
 
-    flat: dict[str, Any] = {key: value for body in values.values() for key, value in body.items()}
+    flat: dict[str, Any] = {
+        EXECUTION_LIMIT_FIELDS[f"{section}.{key}"]: value
+        for section, body in values.items()
+        for key, value in body.items()
+    }
     return ExecutionLimits(**flat)
 
 
@@ -261,6 +289,7 @@ def load_execution_limits(path: Path | str) -> ExecutionLimits:
 __all__ = [
     "ALLOWED_PROVENANCE_LABELS",
     "ALLOWED_SECTIONS",
+    "EXECUTION_LIMIT_FIELDS",
     "EXECUTION_LIMIT_KEYS",
     "NOT_CONFIGURED_WORD",
     "PROJECT_PROVENANCE_LABELS",

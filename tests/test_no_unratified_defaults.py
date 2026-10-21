@@ -201,8 +201,9 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # 30 ratified Binance-limit names + 7 execution-limit names (the fifth,
     # entry_unknown_grace_ms, is the owner's 19-REVIEW WR-05 key; the sixth,
     # emergency_close_poll_timeout_ms, the owner's WR-03 key; the seventh,
-    # max_last_price_age_ms, the last-price check of quick task 261020-l4p).
-    assert len(GUARDED_NAMES) == 37
+    # max_last_price_age_ms, the last-price check of quick task 261020-l4p) + the first Phase 20
+    # key, tick_interval_ms (plan 20-01; the rest follow in the same plan).
+    assert len(GUARDED_NAMES) == 38
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
 
 

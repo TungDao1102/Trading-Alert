@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from src.execution.execution_limits import (
+    EXECUTION_LIMIT_FIELDS,
     EXECUTION_LIMIT_KEYS,
     NOT_CONFIGURED_WORD,
     ExecutionLimits,
@@ -34,6 +35,8 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     # Quick task 261020-l4p: a FAKE last-price age bound, deliberately below the mark bound so a
     # test can tell the two apart.
     "pre_placement.max_last_price_age_ms": 2468,
+    # Plan 20-01 (D-25): a FAKE reconcile cadence, deliberately below max_unprotected_ms (7777).
+    "reconcile.tick_interval_ms": 1234,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"
@@ -42,7 +45,8 @@ TEST_ONLY_PROVENANCE_LABEL = "DECISION"
 def test_only_execution_limits(**overrides: int | None) -> ExecutionLimits:
     """The TEST_ONLY limits; an override (by field name) may be None for "unset"."""
     fields: dict[str, int | None] = {
-        dotted.split(".", 1)[1]: value for dotted, value in TEST_ONLY_EXECUTION_LIMIT_VALUES.items()
+        EXECUTION_LIMIT_FIELDS[dotted]: value
+        for dotted, value in TEST_ONLY_EXECUTION_LIMIT_VALUES.items()
     }
     unknown = set(overrides) - set(fields)
     if unknown:
