@@ -29,6 +29,7 @@ from src.execution.order_ids import (
 from src.reconcile.compare import (
     CompareDiff,
     LocalAlgoIntent,
+    LocalOrderIntent,
     LocalPositionIntent,
     compare,
 )
@@ -226,7 +227,14 @@ def _clean_fixture() -> dict[str, Any]:
             LocalAlgoIntent(client_algo_id=aid, symbol=SYMBOL, order_role="STOP_LOSS", status="NEW")
         ],
         "local_open_positions": [
-            LocalPositionIntent(symbol=SYMBOL, position_side="BOTH", position_amt=Decimal("0.004"))
+            LocalPositionIntent(
+                symbol=SYMBOL,
+                position_side="BOTH",
+                position_amt=Decimal("0.004"),
+                plan_hash=PLAN_A,
+                expected_side="LONG",
+                max_abs_amount=Decimal("0.004"),
+            )
         ],
         "truth_algo_orders": [_truth_algo(aid)],
         "truth_positions": [_truth_position(SYMBOL, Decimal("0.004"))],
@@ -312,3 +320,321 @@ def test_compare_imports_only_stdlib_domain_and_the_pure_id_predicates() -> None
         "src.core",
     ]
     assert forbidden_imports(COMPARE_PATH, banned) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - positions: bound check, STOP requirement, ambiguity, Hedge rows, duplicates.
+#
+# D-01a: the signed amount is a BOUND check per symbol (sign = plan side, abs(exchange) <=
+# intended quantity). It is not exact reconciliation; see the over-fill test below.
+# --------------------------------------------------------------------------- #
+
+INTENDED = Decimal("0.004")
+
+
+def _owned_position(
+    *,
+    plan_hash: str | None = PLAN_A,
+    expected_side: str | None = "LONG",
+    max_abs_amount: Any = INTENDED,
+    amount: Any = INTENDED,
+    symbol: str = SYMBOL,
+) -> LocalPositionIntent:
+    return LocalPositionIntent(
+        symbol=symbol,
+        position_side="BOTH",
+        position_amt=amount,
+        plan_hash=plan_hash,
+        expected_side=expected_side,
+        max_abs_amount=max_abs_amount,
+    )
+
+
+def _scenario(
+    *,
+    exchange_amount: Any,
+    local_positions: Sequence[Any] | None = None,
+    truth_roles: Sequence[str] = ("STOP_LOSS",),
+    stop_status: str = "NEW",
+    position_side: str = "BOTH",
+    extra_truth_algos: Sequence[Any] = (),
+) -> CompareDiff:
+    """One symbol with an exchange position, a local SL intent and the named exchange legs."""
+    local_algos = [
+        LocalAlgoIntent(
+            client_algo_id=derive_algo_client_id(plan_hash=PLAN_A, role=role),
+            symbol=SYMBOL,
+            order_role=role,
+            status="NEW",
+        )
+        for role in ("STOP_LOSS", *[r for r in truth_roles if r != "STOP_LOSS"])
+    ]
+    truth_algos = [
+        _truth_algo(
+            derive_algo_client_id(plan_hash=PLAN_A, role=role),
+            algo_status=stop_status if role == "STOP_LOSS" else "NEW",
+        )
+        for role in truth_roles
+    ]
+    return _run(
+        local_open_algos=local_algos,
+        local_open_positions=(
+            [_owned_position()] if local_positions is None else list(local_positions)
+        ),
+        truth_algo_orders=[*truth_algos, *extra_truth_algos],
+        truth_positions=[_truth_position(SYMBOL, exchange_amount, position_side)],
+    )
+
+
+def test_a_protected_in_bound_long_position_agrees() -> None:
+    diff = _scenario(exchange_amount=INTENDED)
+    assert diff.divergences == ()
+    assert diff.agreement is True
+
+
+@pytest.mark.parametrize(
+    ("side", "amount", "expected"),
+    [
+        ("LONG", Decimal("0.004"), []),
+        ("LONG", Decimal("-0.004"), ["SIGN_FLIPPED_POSITION"]),
+        ("SHORT", Decimal("-0.004"), []),
+        ("SHORT", Decimal("0.004"), ["SIGN_FLIPPED_POSITION"]),
+    ],
+)
+def test_sign_must_match_the_plan_side_long_and_short(
+    side: str, amount: Decimal, expected: list[str]
+) -> None:
+    """D-01a: LONG needs a positive exchange amount, SHORT a negative one."""
+    diff = _scenario(
+        exchange_amount=amount,
+        local_positions=[_owned_position(expected_side=side)],
+    )
+    assert _kinds(diff) == expected
+
+
+def test_a_flipped_sign_that_also_exceeds_the_bound_is_sign_flipped_only() -> None:
+    """One kind per position, documented order: the sign check comes before the bound."""
+    diff = _scenario(exchange_amount=Decimal("-0.008"))
+    assert _kinds(diff) == ["SIGN_FLIPPED_POSITION"]
+    diff_short = _scenario(
+        exchange_amount=Decimal("0.008"),
+        local_positions=[_owned_position(expected_side="SHORT")],
+    )
+    assert _kinds(diff_short) == ["SIGN_FLIPPED_POSITION"]
+
+
+@pytest.mark.parametrize(
+    ("side", "amount", "expected"),
+    [
+        ("LONG", Decimal("0.004"), []),
+        ("LONG", Decimal("0.005"), ["DOUBLED_POSITION"]),
+        ("LONG", Decimal("0.008"), ["DOUBLED_POSITION"]),
+        ("SHORT", Decimal("-0.004"), []),
+        ("SHORT", Decimal("-0.005"), ["DOUBLED_POSITION"]),
+        ("SHORT", Decimal("-0.008"), ["DOUBLED_POSITION"]),
+    ],
+)
+def test_bound_is_abs_exchange_at_most_intended_quantity(
+    side: str, amount: Decimal, expected: list[str]
+) -> None:
+    """D-01a: equality agrees, strictly greater is DOUBLED_POSITION (Decimal comparison)."""
+    diff = _scenario(
+        exchange_amount=amount,
+        local_positions=[_owned_position(expected_side=side)],
+    )
+    assert _kinds(diff) == expected
+
+
+def test_bound_check_cannot_see_an_overfill_below_the_intended_quantity() -> None:
+    """D-01a limit [DESIGN]: +0.003 against an intended 0.004 is NOT detected.
+
+    The bound check only knows the intended quantity, not what was filled. An over-fill that
+    stays below the bound is invisible in Phase 20. Exact reconciliation against the fills
+    ledger attributed by client order id is a Phase 24 dependency (D-13 deferred).
+    """
+    diff = _scenario(exchange_amount=Decimal("0.003"))
+    assert diff.agreement is True
+    assert diff.divergences == ()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"plan_hash": None}, id="no-plan-hash"),
+        pytest.param({"plan_hash": ""}, id="empty-plan-hash"),
+        pytest.param({"expected_side": None}, id="no-expected-side"),
+        pytest.param({"expected_side": "BOTH"}, id="unknown-expected-side"),
+        pytest.param({"max_abs_amount": None}, id="max-none"),
+        pytest.param({"max_abs_amount": Decimal("0")}, id="max-zero"),
+        pytest.param({"max_abs_amount": Decimal("-0.004")}, id="max-negative"),
+        pytest.param({"max_abs_amount": "0.004"}, id="max-str"),
+        pytest.param({"max_abs_amount": 0.004}, id="max-float"),
+        pytest.param({"max_abs_amount": 4}, id="max-int"),
+        pytest.param({"max_abs_amount": Decimal("NaN")}, id="max-nan"),
+    ],
+)
+def test_missing_local_bound_data_fails_closed(overrides: dict[str, Any]) -> None:
+    """T-20-68: exposure that cannot be tied to a plan with a checkable side and bound is never
+    an agreement."""
+    diff = _scenario(exchange_amount=INTENDED, local_positions=[_owned_position(**overrides)])
+    assert diff.agreement is False
+    assert _kinds(diff) == ["AMBIGUOUS_POSITION_OWNER"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "local_open_orders",
+        "local_open_algos",
+        "local_open_positions",
+        "truth_normal_orders",
+        "truth_algo_orders",
+        "truth_positions",
+    ],
+)
+def test_none_source_is_refused_not_read_as_empty(source: str) -> None:
+    """A missing source must never read as 'nothing there' (F-711 family)."""
+    sources: dict[str, Any] = {
+        "local_open_orders": [],
+        "local_open_algos": [],
+        "local_open_positions": [],
+        "truth_normal_orders": [],
+        "truth_algo_orders": [],
+        "truth_positions": [],
+    }
+    sources[source] = None
+    with pytest.raises(TypeError, match=source):
+        compare(**sources)
+
+
+def test_two_local_plans_on_one_symbol_is_ambiguous_and_never_picks_one() -> None:
+    diff = _scenario(
+        exchange_amount=Decimal("0.008"),
+        local_positions=[_owned_position(plan_hash=PLAN_A), _owned_position(plan_hash=PLAN_B)],
+    )
+    assert _kinds(diff) == ["AMBIGUOUS_POSITION_OWNER"]
+
+
+def test_one_plan_hash_repeated_consistently_is_one_owner() -> None:
+    diff = _scenario(
+        exchange_amount=INTENDED,
+        local_positions=[_owned_position(), _owned_position()],
+    )
+    assert diff.divergences == ()
+
+
+def test_one_plan_hash_repeated_with_different_bounds_is_ambiguous() -> None:
+    diff = _scenario(
+        exchange_amount=INTENDED,
+        local_positions=[_owned_position(), _owned_position(max_abs_amount=Decimal("0.010"))],
+    )
+    assert _kinds(diff) == ["AMBIGUOUS_POSITION_OWNER"]
+
+
+def test_a_position_with_no_local_intent_is_still_unsynced_position() -> None:
+    diff = _run(truth_positions=[_truth_position(SYMBOL, INTENDED)])
+    assert "UNSYNCED_POSITION" in _kinds(diff)
+    assert "AMBIGUOUS_POSITION_OWNER" not in _kinds(diff)
+
+
+def test_a_flat_exchange_position_row_is_not_exposure() -> None:
+    diff = _run(truth_positions=[_truth_position(SYMBOL, Decimal("0"))])
+    assert diff.divergences == ()
+
+
+@pytest.mark.parametrize("hedge_side", ["LONG", "SHORT"])
+def test_hedge_rows_are_unsupported_position_side(hedge_side: str) -> None:
+    diff = _run(truth_positions=[_truth_position(SYMBOL, INTENDED, hedge_side)])
+    assert _kinds(diff) == ["UNSUPPORTED_POSITION_SIDE"]
+    assert diff.agreement is False
+
+
+def test_no_algo_order_at_all_is_position_without_stop() -> None:
+    diff = _scenario(exchange_amount=INTENDED, truth_roles=())
+    kinds = _kinds(diff)
+    assert "POSITION_WITHOUT_STOP" in kinds
+    assert "TP_ONLY_POSITION" not in kinds
+
+
+def test_only_take_profit_legs_is_tp_only_position_and_not_also_without_stop() -> None:
+    diff = _scenario(exchange_amount=INTENDED, truth_roles=("TAKE_PROFIT_1", "TAKE_PROFIT_2"))
+    kinds = _kinds(diff)
+    assert "TP_ONLY_POSITION" in kinds
+    assert "POSITION_WITHOUT_STOP" not in kinds
+
+
+@pytest.mark.parametrize("status", ["TRIGGERING", "TRIGGERED", "FINISHED", "CANCELED", "", "new"])
+def test_a_stop_that_is_not_active_class_is_position_without_stop(status: str) -> None:
+    diff = _scenario(exchange_amount=INTENDED, stop_status=status)
+    kinds = _kinds(diff)
+    assert "POSITION_WITHOUT_STOP" in kinds
+    assert "TP_ONLY_POSITION" not in kinds
+
+
+def test_a_foreign_active_stop_does_not_satisfy_the_stop_requirement() -> None:
+    diff = _scenario(
+        exchange_amount=INTENDED,
+        truth_roles=(),
+        extra_truth_algos=[_truth_algo("ui_stop_9")],
+    )
+    kinds = _kinds(diff)
+    assert "POSITION_WITHOUT_STOP" in kinds
+    assert "FOREIGN_ORDER" in kinds
+
+
+@pytest.mark.parametrize("kind", ["normal", "algo"])
+def test_a_duplicate_exchange_client_id_is_a_divergence(kind: str) -> None:
+    if kind == "normal":
+        cid = derive_client_order_id(plan_hash=PLAN_A, role="ENTRY")
+        local = [
+            LocalOrderIntent(client_order_id=cid, symbol=SYMBOL, order_role="ENTRY", status="NEW")
+        ]
+        diff = _run(
+            local_open_orders=local,
+            local_open_algos=[
+                LocalAlgoIntent(
+                    client_algo_id=derive_algo_client_id(plan_hash=PLAN_A, role="STOP_LOSS"),
+                    symbol=SYMBOL,
+                    order_role="STOP_LOSS",
+                    status="NEW",
+                )
+            ],
+            truth_algo_orders=[
+                _truth_algo(derive_algo_client_id(plan_hash=PLAN_A, role="STOP_LOSS"))
+            ],
+            truth_normal_orders=[_truth_order(cid), _truth_order(cid)],
+        )
+    else:
+        aid = derive_algo_client_id(plan_hash=PLAN_A, role="STOP_LOSS")
+        diff = _run(
+            local_open_algos=[
+                LocalAlgoIntent(
+                    client_algo_id=aid, symbol=SYMBOL, order_role="STOP_LOSS", status="NEW"
+                )
+            ],
+            local_open_positions=[_owned_position()],
+            truth_algo_orders=[_truth_algo(aid), _truth_algo(aid)],
+            truth_positions=[_truth_position(SYMBOL, INTENDED)],
+        )
+    duplicates = [d for d in diff.divergences if d.kind == "DUPLICATE_EXCHANGE_ID"]
+    assert len(duplicates) == 1
+    assert diff.agreement is False
+    if kind == "normal":
+        assert duplicates[0].client_order_id is not None
+    else:
+        assert duplicates[0].client_algo_id is not None
+
+
+@pytest.mark.parametrize("amount", ["0.004", 0.004, 1, None])
+def test_a_non_decimal_exchange_position_amount_raises_type_error(amount: object) -> None:
+    """Never converted through float or str: a non-Decimal amount is refused."""
+    with pytest.raises(TypeError, match="position_amt"):
+        _run(truth_positions=[_truth_position(SYMBOL, amount)])
+
+
+def test_compare_v2_has_no_float_constructor_and_no_wall_clock() -> None:
+    from tests.support.ast_guards import float_constructor_calls, wall_clock_calls
+
+    for path in (COMPARE_PATH, ORDER_IDS_PATH):
+        assert float_constructor_calls(path) == [], path
+        assert wall_clock_calls(path) == [], path
