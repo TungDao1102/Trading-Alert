@@ -1365,7 +1365,9 @@ _REQUIRED_PROTECTIVE_ROLES: frozenset[str] = frozenset(
     {OrderRole.STOP_LOSS.value, OrderRole.TAKE_PROFIT_1.value, OrderRole.TAKE_PROFIT_2.value}
 )
 
-_ENTRY_WITHOUT_PROTECTIVE: str = "ENTRY_WITHOUT_PROTECTIVE"
+# Phase 20 D-10: the code comes from the promoted RejectionReason member; the string value is
+# unchanged, so every journal row and SAFE_MODE reason keeps its bytes.
+_ENTRY_WITHOUT_PROTECTIVE: str = RejectionReason.ENTRY_WITHOUT_PROTECTIVE.value
 
 # Plain NO_TRADE reason when the hand-off record cannot be built from the approved plan (gate 5g).
 PROTECTION_INPUTS_INVALID: str = "PROTECTION_INPUTS_INVALID"

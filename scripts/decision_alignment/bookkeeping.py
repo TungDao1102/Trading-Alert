@@ -36,7 +36,6 @@ RETIRED_ALIASES: tuple[str, ...] = (
 # Plain-string codes emitted outside RejectionReason (GL-05).
 STRING_CODES: tuple[str, ...] = (
     "DISABLED",
-    "ENTRY_WITHOUT_PROTECTIVE",
     "NO_FILL",
     "HEALTH_CHECK_FAILED",
     "EXPIRED",

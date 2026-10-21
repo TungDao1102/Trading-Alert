@@ -149,7 +149,7 @@ INSUFFICIENT_EDGE
 
 ## 9. Canonical rejection reasons
 
-This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code referenced before Phase 12 (`RejectionReason.X` in `src/`, derived by scan, gate GL-02), the reserved `INSUFFICIENT_MARGIN`, and the two Phase 12 cost-guard codes `STOP_TOO_TIGHT` and `COST_TO_RISK_EXCEEDED` (D046). The block in 9.1 equals the `RejectionReason` enum (20 members, gate GL-03). The five synonyms that used to exist as members are retired and recorded in 9.2.
+This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code referenced before Phase 12 (`RejectionReason.X` in `src/`, derived by scan, gate GL-02), the reserved `INSUFFICIENT_MARGIN`, the two Phase 12 cost-guard codes `STOP_TOO_TIGHT` and `COST_TO_RISK_EXCEEDED` (D046), and `ENTRY_WITHOUT_PROTECTIVE`, promoted from the plain-string list in Phase 20 (D-10, D044 item 1). The block in 9.1 equals the `RejectionReason` enum (21 members, gate GL-03). The five synonyms that used to exist as members are retired and recorded in 9.2.
 
 ### 9.1 Canonical codes
 
@@ -174,7 +174,10 @@ UNCERTAIN_ACCOUNT_STATE
 INSUFFICIENT_MARGIN
 STOP_TOO_TIGHT
 COST_TO_RISK_EXCEEDED
+ENTRY_WITHOUT_PROTECTIVE
 ```
+
+`ENTRY_WITHOUT_PROTECTIVE` means an entry fill exists without a confirmed protective stop. It was a plain-string code before Phase 20 (D-10, D044 item 1); the string value is unchanged. The same string is also a reconciler divergence kind and a SAFE_MODE entry reason (9.4); those copies stay plain strings because they are divergence kinds and SAFE_MODE reasons, not rejection reasons.
 
 `INSUFFICIENT_MARGIN` is reserved: no code emits it yet; it is first emitted by the Phase 22 margin guard.
 
@@ -184,7 +187,7 @@ Phase 15 planner meanings (D054, D-27): the planner reuses three existing codes 
 
 ### 9.2 Retired aliases (removed in Phase 12)
 
-These five names were removed from `RejectionReason` and from `tests/test_domain_enums.py` in Phase 12 (D-09, D044 follow-up 1). New code must use the replacement. The table records the removal only: it declares no enum member, and gates GL-01 and GL-03 fail if a retired name re-enters the enum or the 9.1 block. The 9.1 block equals the `RejectionReason` enum (20 members, gate GL-03).
+These five names were removed from `RejectionReason` and from `tests/test_domain_enums.py` in Phase 12 (D-09, D044 follow-up 1). New code must use the replacement. The table records the removal only: it declares no enum member, and gates GL-01 and GL-03 fail if a retired name re-enters the enum or the 9.1 block. The 9.1 block equals the `RejectionReason` enum (21 members, gate GL-03).
 
 | Removed name | Use instead | Removed in |
 |--------------|-------------|------------|
@@ -198,12 +201,11 @@ These five names were removed from `RejectionReason` and from `tests/test_domain
 
 ### 9.3 Plain-string codes emitted outside RejectionReason
 
-Production code also emits the following plain strings as `reason_code` values or outcome labels. They are not `RejectionReason` members. Status for the rejection-style codes: proposed canonical, promote to the enum in the owning phase (Phases 20, 24 and 26). Derived from `src/` by reading the emitting code; the list is not exhaustive for divergence kinds.
+Production code also emits the following plain strings as `reason_code` values or outcome labels. They are not `RejectionReason` members. Status for the rejection-style codes: proposed canonical, promote to the enum in the owning phase (Phases 24 and 26; `ENTRY_WITHOUT_PROTECTIVE` was promoted in Phase 20 and now lives in 9.1). Derived from `src/` by reading the emitting code; the list is not exhaustive for divergence kinds.
 
 | Code | Emitted in | Meaning | Status |
 |------|------------|---------|--------|
 | `DISABLED` | `src/execution/enablement.py` (`_DISABLED`), `src/execution/manager.py` (fallback `reason_code`) | Live order enablement is off, no order placed | proposed canonical, promote in Phase 26 |
-| `ENTRY_WITHOUT_PROTECTIVE` | `src/execution/manager.py`, `src/execution/fill_monitor.py`, `src/reconcile/compare.py`, `src/ops/health.py` | An entry fill exists without a protective order; also a reconciler divergence kind and a SAFE_MODE entry reason (9.4) | proposed canonical, promote in Phase 20 |
 | `NO_FILL` | `src/execution/manager.py` (no-trade result reason) | Entry order produced no fill | proposed canonical, promote in Phase 24 |
 | `HEALTH_CHECK_FAILED` | `src/ops/health.py` (result `reason_code`, paired with `OK` on pass) | A health check reported failure, so trading is blocked | proposed canonical, promote in Phase 24 |
 | `EXPIRED` | `src/paper/journal.py` (paper journal outcome `reason_code`), `src/analytics/lifecycle.py` (`_EXPIRED_REASON`) | Signal or entry expired without a fill; this is a lifecycle outcome label, not a rejection reason (the rejection form is `APPROVAL_EXPIRED` or `STALE_SETUP`) | outcome label, not a rejection reason |
