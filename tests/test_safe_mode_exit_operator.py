@@ -15,8 +15,9 @@ Pins, on fakes only (nothing here is [DEMO] evidence):
   - the state format accepts five keys, reads the three-key row of plan 20-06 as last_exit_* None
     and refuses every other key set.
 
-Rows 6 (REST gate) and 7 (StreamState.LIVE) are NOT built here: they wait for owner decision O-B
-(plan 20-25).
+Rows 6 (REST gate open and restored) and 7 (StreamState.LIVE) were accepted by owner decision O-B
+"accept-both" (plan 20-25, 2026-10-21); their failure tests are in the last section of this file.
+Every other test here uses healthy fakes for them.
 """
 
 from __future__ import annotations
@@ -185,6 +186,16 @@ def _readiness() -> ExitReadiness:
     return CLEAN
 
 
+def _gate_healthy() -> tuple[str | None, str]:
+    """Row 6 healthy fake: no restriction and a durably restored gate (owner decision O-B)."""
+    return (None, "RESTORED_DURABLE")
+
+
+def _stream_live() -> str:
+    """Row 7 healthy fake: the user-data stream is LIVE (owner decision O-B)."""
+    return "LIVE"
+
+
 async def _exit(
     rig: Rig,
     *,
@@ -197,6 +208,8 @@ async def _exit(
         operator_id=operator_id,
         local_intent_fn=local_intent_fn,
         readiness=readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
         now_utc=now_utc,
     )
 
@@ -328,7 +341,14 @@ def test_exit_safe_mode_has_only_the_keyword_only_operator_signature() -> None:
 
     sig = inspect.signature(SafeModeController.exit_safe_mode)
     names = [p.name for p in sig.parameters.values() if p.name != "self"]
-    assert names == ["operator_id", "local_intent_fn", "readiness", "now_utc"]
+    assert names == [
+        "operator_id",
+        "local_intent_fn",
+        "readiness",
+        "gate_status",
+        "stream_state",
+        "now_utc",
+    ]
     assert all(
         p.kind is inspect.Parameter.KEYWORD_ONLY
         for p in sig.parameters.values()
@@ -522,7 +542,12 @@ async def test_row3_an_unreadable_binance_side_skips_the_compare() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.refusals == ("BINANCE_READ_FAILED",)
@@ -549,7 +574,12 @@ async def test_row4_a_compare_that_raises_is_never_clean() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.refusals == ("COMPARE_NOT_CLEAN",)
@@ -563,7 +593,12 @@ async def test_row4_a_compare_result_without_agreement_is_never_clean() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.refusals == ("COMPARE_NOT_CLEAN",)
@@ -732,7 +767,12 @@ async def test_an_exit_without_a_store_still_journals_and_flips() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.exited is True
@@ -1008,3 +1048,372 @@ async def test_an_entry_during_the_exit_reads_refuses_the_exit() -> None:
 
     assert decision == ExitDecision(exited=False, refusals=("COMPARE_NOT_CLEAN",))
     _assert_still_in_safe_mode(rig)
+
+
+# --------------------------------------------------------------------------- #
+# Owner decision O-B (plan 20-25, T-E rows 6 and 7): REST gate restored and open, stream LIVE
+# --------------------------------------------------------------------------- #
+
+
+def _gate_of(status: tuple[str | None, str] | Any) -> Any:
+    return lambda: status
+
+
+def _stream_of(state: Any) -> Any:
+    return lambda: state
+
+
+async def _exit_rows(
+    rig: Rig,
+    *,
+    gate_status: Any = _gate_healthy,
+    stream_state: Any = _stream_live,
+) -> ExitDecision:
+    return await rig.controller.exit_safe_mode(
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=gate_status,
+        stream_state=stream_state,
+        now_utc=T1,
+    )
+
+
+async def test_rows_6_and_7_healthy_gate_and_live_stream_exit() -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig)
+
+    assert decision == ExitDecision(exited=True, refusals=())
+    assert rig.controller.in_safe_mode is False
+
+
+@pytest.mark.parametrize("reason", ["RATE_LIMIT_PAUSE_429", "IP_BAN_418", "GATE_NOT_RESTORED"])
+async def test_row6_a_restricted_gate_refuses_gate_not_open(reason: str) -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, gate_status=_gate_of((reason, "RESTORED_DURABLE")))
+
+    assert decision == ExitDecision(exited=False, refusals=("GATE_NOT_OPEN",))
+    _assert_still_in_safe_mode(rig)
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["LEGACY_IN_MEMORY", "NOT_RESTORED", "RESTORED_UNKNOWN_STATE", "PERSISTENCE_FAILED"],
+)
+async def test_row6_an_open_gate_that_is_not_restored_refuses_gate_not_restored(
+    status: str,
+) -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, gate_status=_gate_of((None, status)))
+
+    assert decision == ExitDecision(exited=False, refusals=("GATE_NOT_RESTORED",))
+    _assert_still_in_safe_mode(rig)
+
+
+@pytest.mark.parametrize("status", ["RESTORED_DURABLE", "RESTORED_BARRIER"])
+async def test_row6_a_restored_status_with_no_restriction_passes(status: str) -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, gate_status=_gate_of((None, status)))
+
+    assert decision.exited is True
+
+
+async def test_row6_a_restricted_and_unrestored_gate_reports_both_codes() -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, gate_status=_gate_of(("GATE_STATE_UNKNOWN", "NOT_RESTORED")))
+
+    assert decision.refusals == ("GATE_NOT_OPEN", "GATE_NOT_RESTORED")
+
+
+async def test_row6_a_gate_status_that_raises_refuses_gate_not_restored() -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, gate_status=_raises(RuntimeError("gate lock broken")))
+
+    assert decision == ExitDecision(exited=False, refusals=("GATE_NOT_RESTORED",))
+    _assert_still_in_safe_mode(rig)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        None,
+        "RESTORED_DURABLE",
+        (None,),
+        (None, "RESTORED_DURABLE", "extra"),
+        (None, None),
+        (None, 3),
+        (None, "SOMETHING_NEW"),
+        (None, "restored_durable"),
+    ],
+    ids=[
+        "none",
+        "bare-string",
+        "one-item",
+        "three-items",
+        "status-none",
+        "status-int",
+        "unknown-status",
+        "lowercase-status",
+    ],
+)
+async def test_row6_a_malformed_or_unrecognised_gate_status_refuses_gate_not_restored(
+    malformed: Any,
+) -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, gate_status=_gate_of(malformed))
+
+    assert decision.exited is False
+    assert "GATE_NOT_RESTORED" in decision.refusals
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row6_a_missing_gate_status_is_a_type_error_at_call() -> None:
+    rig = _rig()
+
+    with pytest.raises(TypeError):
+        await rig.controller.exit_safe_mode(  # type: ignore[call-arg]
+            operator_id=OPERATOR,
+            local_intent_fn=_local,
+            readiness=_readiness,
+            stream_state=_stream_live,
+            now_utc=T1,
+        )
+
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row6_never_replaces_the_fresh_binance_reads_of_row_3() -> None:
+    """An open, restored gate says only "no restriction known": a failed read still refuses."""
+    rig = _rig(adapter=FakeAdapter(positions=RuntimeError("down")))
+
+    decision = await _exit_rows(rig, gate_status=_gate_of((None, "RESTORED_DURABLE")))
+
+    assert decision == ExitDecision(exited=False, refusals=("BINANCE_READ_FAILED",))
+    _assert_still_in_safe_mode(rig)
+
+
+@pytest.mark.parametrize("state", ["CONNECTING", "SYNCING", "UNKNOWN", "STOPPED"])
+async def test_row7_a_stream_that_is_not_live_refuses_stream_not_live(state: str) -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, stream_state=_stream_of(state))
+
+    assert decision == ExitDecision(exited=False, refusals=("STREAM_NOT_LIVE",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row7_a_stream_state_provider_that_raises_refuses_stream_not_live() -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, stream_state=_raises(RuntimeError("supervisor gone")))
+
+    assert decision == ExitDecision(exited=False, refusals=("STREAM_NOT_LIVE",))
+    _assert_still_in_safe_mode(rig)
+
+
+@pytest.mark.parametrize("state", [None, 1, True, b"LIVE", "live", " LIVE", ""])
+async def test_row7_anything_but_the_exact_live_string_refuses(state: Any) -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(rig, stream_state=_stream_of(state))
+
+    assert decision == ExitDecision(exited=False, refusals=("STREAM_NOT_LIVE",))
+
+
+async def test_row7_a_missing_stream_state_is_a_type_error_at_call() -> None:
+    rig = _rig()
+
+    with pytest.raises(TypeError):
+        await rig.controller.exit_safe_mode(  # type: ignore[call-arg]
+            operator_id=OPERATOR,
+            local_intent_fn=_local,
+            readiness=_readiness,
+            gate_status=_gate_healthy,
+            now_utc=T1,
+        )
+
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_rows_6_and_7_refusals_are_collected_in_one_pass_and_journaled() -> None:
+    rig = _rig()
+
+    decision = await _exit_rows(
+        rig,
+        gate_status=_gate_of(("IP_BAN_418", "RESTORED_DURABLE")),
+        stream_state=_stream_of("UNKNOWN"),
+    )
+
+    assert decision.refusals == ("GATE_NOT_OPEN", "STREAM_NOT_LIVE")
+    refused = rig.journal.of("SAFE_MODE_EXIT_REFUSED")
+    assert len(refused) == 1
+    assert json.loads(refused[0].payload_json)["refusals"] == ["GATE_NOT_OPEN", "STREAM_NOT_LIVE"]
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_rows_6_and_7_come_after_the_five_d15_rows() -> None:
+    rig = _rig(adapter=FakeAdapter(positions=RuntimeError("down")))
+
+    decision = await _exit_rows(
+        rig,
+        gate_status=_gate_of(("IP_BAN_418", "RESTORED_DURABLE")),
+        stream_state=_stream_of("STOPPED"),
+    )
+
+    assert decision.refusals == ("BINANCE_READ_FAILED", "GATE_NOT_OPEN", "STREAM_NOT_LIVE")
+
+
+def test_the_strings_used_equal_the_adapter_enum_values() -> None:
+    """safe_mode.py imports nothing from src.adapters; this parity test pins the strings."""
+    from src.adapters.binance_ratelimit_gate import GateRecoveryStatus
+    from src.adapters.binance_userdata_supervisor import StreamState
+    from src.reconcile.safe_mode import ACCEPTED_GATE_RECOVERY_STATES, STREAM_LIVE_STATE
+
+    assert {status.value for status in GateRecoveryStatus} >= ACCEPTED_GATE_RECOVERY_STATES
+    assert ACCEPTED_GATE_RECOVERY_STATES == frozenset({"RESTORED_DURABLE", "RESTORED_BARRIER"})
+    assert StreamState.LIVE.value == STREAM_LIVE_STATE == "LIVE"
+
+
+async def test_every_adapter_recovery_status_and_stream_state_is_judged_as_decided() -> None:
+    from src.adapters.binance_ratelimit_gate import GateRecoveryStatus
+    from src.adapters.binance_userdata_supervisor import StreamState
+
+    for status in GateRecoveryStatus:
+        decision = await _exit_rows(_rig(), gate_status=_gate_of((None, status.value)))
+        accepted = status in (
+            GateRecoveryStatus.RESTORED_DURABLE,
+            GateRecoveryStatus.RESTORED_BARRIER,
+        )
+        assert decision.exited is accepted, status
+    for state in StreamState:
+        decision = await _exit_rows(_rig(), stream_state=_stream_of(state))  # a StrEnum member
+        assert decision.exited is (state is StreamState.LIVE), state
+
+
+def test_safe_mode_module_imports_nothing_from_adapters() -> None:
+    tree = ast.parse(SAFE_MODE_SOURCE.read_text(encoding="utf-8"))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported.append(node.module)
+        elif isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+    assert [m for m in imported if m.startswith("src.adapters")] == []
+
+
+# -- the real gate as the row 6 provider: check() and restriction() semantics, tested --------- #
+
+
+class _GateClock:
+    def __init__(self) -> None:
+        self.now = T0
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def _real_gate(
+    tmp_path: Path, clock: _GateClock, *, restore: bool = True, store: bool = True
+) -> Any:
+    from src.adapters.binance_limits import RateLimitPolicy
+    from src.adapters.binance_ratelimit_gate import RestRateLimitGate
+    from src.ops.rest_gate_state import FileGateStateStore
+
+    policy = RateLimitPolicy(
+        no_retry_after_wait_418_seconds=3600,
+        no_retry_after_wait_429_seconds=60,
+        retry_after_cap_seconds=7200,
+    )
+    state_store = None
+    if store:
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        state_store = FileGateStateStore(tmp_path / "gate.json", clock=clock)
+        state_store.initialize(now_utc=clock(), operator_id="op-1")
+    gate = RestRateLimitGate(policy=policy, clock=clock, state_store=state_store)
+    if restore:
+        gate.restore()
+    return gate
+
+
+def _status_of(gate: Any) -> Any:
+    def provider() -> tuple[str | None, str]:
+        restriction = gate.restriction()
+        return (None if restriction is None else restriction.reason, gate.recovery_status().value)
+
+    return provider
+
+
+async def test_the_real_gate_restored_and_open_lets_the_exit_pass(tmp_path: Path) -> None:
+    gate = _real_gate(tmp_path, _GateClock())
+
+    decision = await _exit_rows(_rig(), gate_status=_status_of(gate))
+
+    assert decision.exited is True
+
+
+async def test_the_real_gate_before_restore_refuses_not_open_and_not_restored(
+    tmp_path: Path,
+) -> None:
+    gate = _real_gate(tmp_path, _GateClock(), restore=False)
+
+    decision = await _exit_rows(_rig(), gate_status=_status_of(gate))
+
+    assert decision.refusals == ("GATE_NOT_OPEN", "GATE_NOT_RESTORED")
+
+
+async def test_the_real_gate_without_a_state_store_is_legacy_and_refuses(tmp_path: Path) -> None:
+    gate = _real_gate(tmp_path, _GateClock(), store=False)
+    assert gate.restriction() is None  # None is not proof that REST is healthy
+
+    decision = await _exit_rows(_rig(), gate_status=_status_of(gate))
+
+    assert decision.refusals == ("GATE_NOT_RESTORED",)
+
+
+async def test_the_real_gate_with_a_known_pause_refuses_until_it_passes(tmp_path: Path) -> None:
+    from src.domain.exchange_errors import ExchangeErrorCategory
+
+    clock = _GateClock()
+    gate = _real_gate(tmp_path, clock)
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, 50)
+
+    refused = await _exit_rows(_rig(), gate_status=_status_of(gate))
+    assert refused.refusals == ("GATE_NOT_OPEN",)
+
+    clock.now = T0 + timedelta(seconds=51)
+    allowed = await _exit_rows(_rig(), gate_status=_status_of(gate))
+    assert allowed.exited is True
+
+
+async def test_the_real_gate_restriction_is_none_exactly_when_check_would_not_refuse(
+    tmp_path: Path,
+) -> None:
+    """The predicate row 6 uses (restriction) agrees with the call that refuses REST (check)."""
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+    from src.domain.exchange_errors import ExchangeErrorCategory
+
+    def check_refuses(gate: Any) -> bool:
+        try:
+            gate.check()
+        except RestGateRefusal:
+            return True
+        return False
+
+    clock = _GateClock()
+    unrestored = _real_gate(tmp_path / "a", clock, restore=False)
+    restored = _real_gate(tmp_path / "b", clock)
+    paused = _real_gate(tmp_path / "c", clock)
+    paused.record(ExchangeErrorCategory.RATE_LIMITED, 50)
+    banned = _real_gate(tmp_path / "d", clock)
+    banned.record(ExchangeErrorCategory.IP_BANNED, 120)
+
+    for gate, refuses in ((unrestored, True), (restored, False), (paused, True), (banned, True)):
+        assert check_refuses(gate) is refuses
+        assert (gate.restriction() is not None) is refuses

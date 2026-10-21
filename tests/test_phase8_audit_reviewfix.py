@@ -1031,6 +1031,8 @@ async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
         operator_id="operator-1",
         local_intent_fn=lambda: _LocalIntentStub([], [], []),
         readiness=lambda: ExitReadiness(0, 0, 0),
+        gate_status=lambda: (None, "RESTORED_DURABLE"),
+        stream_state=lambda: "LIVE",
         now_utc=NOW,
     )
     assert decision.exited is True
@@ -1054,6 +1056,8 @@ async def test_wr16_divergent_intent_fn_blocks_exit() -> None:
         operator_id="operator-1",
         local_intent_fn=lambda: _LocalIntentStub(divergent, [], []),
         readiness=lambda: ExitReadiness(0, 0, 0),
+        gate_status=lambda: (None, "RESTORED_DURABLE"),
+        stream_state=lambda: "LIVE",
         now_utc=NOW,
     )
     assert decision.exited is False

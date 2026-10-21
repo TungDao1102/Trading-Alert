@@ -144,6 +144,19 @@ class ExitRefusal(StrEnum):
     BLOCKING_PROTECTION_STATE = "BLOCKING_PROTECTION_STATE"
     PENDING_ACTION_PRESENT = "PENDING_ACTION_PRESENT"
     READINESS_UNREADABLE = "READINESS_UNREADABLE"
+    # Rows 6 and 7, accepted by owner decision O-B (plan 20-25).
+    GATE_NOT_OPEN = "GATE_NOT_OPEN"
+    GATE_NOT_RESTORED = "GATE_NOT_RESTORED"
+    STREAM_NOT_LIVE = "STREAM_NOT_LIVE"
+
+
+#: Row 6: the REST gate recovery states that count toward an exit (`GateRecoveryStatus` values).
+#: LEGACY_IN_MEMORY, NOT_RESTORED, RESTORED_UNKNOWN_STATE and PERSISTENCE_FAILED refuse. Compared
+#: by string value so this module imports nothing from `src.adapters`; a parity test pins them.
+ACCEPTED_GATE_RECOVERY_STATES: frozenset[str] = frozenset({"RESTORED_DURABLE", "RESTORED_BARRIER"})
+
+#: Row 7: the only user-data stream state that counts (`StreamState.LIVE.value`).
+STREAM_LIVE_STATE: str = "LIVE"
 
 
 @dataclass(frozen=True)
@@ -464,6 +477,8 @@ class SafeModeController:
         operator_id: str,
         local_intent_fn: Callable[[], LocalIntentLike],
         readiness: Callable[[], ExitReadiness],
+        gate_status: Callable[[], tuple[str | None, str]],
+        stream_state: Callable[[], str],
         now_utc: datetime,
     ) -> ExitDecision:
         """Leave SAFE_MODE only as an explicit, operator-attributed, fail-closed act (D-15).
@@ -471,8 +486,8 @@ class SafeModeController:
         A boolean flip, a restart, a timer, a recovered feed and a closed intent never exit
         SAFE_MODE; this call is the only way. There is no list argument a caller can leave empty
         (F-711): the only local input is `local_intent_fn`. The readiness list is closed
-        (20-REVIEW-RESOLUTIONS T-E, rows 1-5; rows 6 and 7 wait for owner decision O-B, plan
-        20-25):
+        (20-REVIEW-RESOLUTIONS T-E, rows 1-5 from D-15; rows 6 and 7 accepted by owner decision
+        O-B "accept-both", plan 20-25, 2026-10-21):
 
           1. `operator_id` is a non-empty string. It is audit metadata, NOT authentication; an
              allow-list must exist before any LIVE path opens (Phase 23/24).
@@ -484,6 +499,13 @@ class SafeModeController:
              divergence the reads predate, and refuses as `COMPARE_NOT_CLEAN`).
           5. `readiness()` read every count and all are zero: no unresolved intent, no UNPROTECTED /
              CLOSE_REQUIRED / CLOSE_FAILED plan, no PENDING protective action.
+          6. `gate_status()` returned `(restriction, recovery_status)` for the REST gate: the
+             restriction is None (else `GATE_NOT_OPEN`) AND the recovery status is one of
+             `ACCEPTED_GATE_RECOVERY_STATES` (else `GATE_NOT_RESTORED`; a provider that raises or
+             returns anything malformed also refuses `GATE_NOT_RESTORED`). An open gate means only
+             "no restriction currently known": it never replaces the fresh reads of row 3.
+          7. `stream_state()` is exactly `STREAM_LIVE_STATE` ("LIVE"); any other value, or a
+             provider that raises, refuses `STREAM_NOT_LIVE`.
 
         Every refusal found in one pass is returned and journaled as `SAFE_MODE_EXIT_REFUSED`
         (codes only, best-effort); the state does not change. On success the order is: journal
@@ -496,6 +518,11 @@ class SafeModeController:
             local_intent_fn: Zero-argument callable returning the local intent
                 (`.orders`, `.algos`, `.positions`) read at exit time.
             readiness: Zero-argument callable returning the row-5 counts.
+            gate_status: Zero-argument callable returning the REST gate's
+                `(restriction reason or None, recovery status string)`. Required: no default,
+                so no composition can forget it (row 6).
+            stream_state: Zero-argument callable returning the user-data stream's state string.
+                Required (row 7).
             now_utc: The current UTC-aware datetime (required; no wall-clock fallback).
 
         Returns:
@@ -541,6 +568,12 @@ class SafeModeController:
 
         # Row 5: the readiness counts.
         refusals.extend(_readiness_refusals(readiness))
+
+        # Row 6: the REST gate is open and its restart recovery is known (O-B).
+        refusals.extend(_gate_refusals(gate_status))
+
+        # Row 7: the user-data stream is LIVE (O-B).
+        refusals.extend(_stream_refusals(stream_state))
 
         if refusals:
             self._journal_exit_refused(refusals=refusals, now_utc=now_utc)
@@ -728,6 +761,44 @@ def _readiness_refusals(readiness: Callable[[], ExitReadiness]) -> list[str]:
     if _is_count(pending) and pending != 0:
         refusals.append(ExitRefusal.PENDING_ACTION_PRESENT.value)
     return refusals
+
+
+def _gate_refusals(gate_status: Callable[[], tuple[str | None, str]]) -> list[str]:
+    """The row-6 refusal codes (owner decision O-B).
+
+    `(restriction, status)`: a restriction that is not None refuses `GATE_NOT_OPEN`; a status
+    outside `ACCEPTED_GATE_RECOVERY_STATES` refuses `GATE_NOT_RESTORED`. A provider that raises or
+    returns anything but a 2-tuple of (str | None, str) refuses `GATE_NOT_RESTORED`: an unreadable
+    gate is never read as healthy.
+    """
+    try:
+        view = gate_status()
+        if not isinstance(view, tuple) or len(view) != 2:
+            return [ExitRefusal.GATE_NOT_RESTORED.value]
+        restriction, status = view
+        if not (restriction is None or isinstance(restriction, str)):
+            return [ExitRefusal.GATE_NOT_RESTORED.value]
+        if not isinstance(status, str):
+            return [ExitRefusal.GATE_NOT_RESTORED.value]
+    except Exception:
+        return [ExitRefusal.GATE_NOT_RESTORED.value]
+    refusals: list[str] = []
+    if restriction is not None:
+        refusals.append(ExitRefusal.GATE_NOT_OPEN.value)
+    if status not in ACCEPTED_GATE_RECOVERY_STATES:
+        refusals.append(ExitRefusal.GATE_NOT_RESTORED.value)
+    return refusals
+
+
+def _stream_refusals(stream_state: Callable[[], str]) -> list[str]:
+    """The row-7 refusal codes: only the exact string "LIVE" passes (owner decision O-B)."""
+    try:
+        state = stream_state()
+    except Exception:
+        return [ExitRefusal.STREAM_NOT_LIVE.value]
+    if isinstance(state, str) and state == STREAM_LIVE_STATE:
+        return []
+    return [ExitRefusal.STREAM_NOT_LIVE.value]
 
 
 #: Plan states that keep SAFE_MODE on (row 5): exposure that is not (or cannot be) protected.
