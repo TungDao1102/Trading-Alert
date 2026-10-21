@@ -13,7 +13,7 @@ only COMMITTED state is observed.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -21,10 +21,11 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from src.domain.enums import ExecutionIntentStatus, OrderRole
-from src.execution.intent_recovery import resolve_unresolved_intents
+from src.execution.intent_recovery import UnknownEntryResolver, resolve_unresolved_intents
 from src.execution.manager import ExecutionOutcome
 from src.execution.order_ids import derive_algo_client_id
 
+from tests.support.execution_limits import test_only_execution_limits as make_limits
 from tests.support.fake_binance_exchange import (
     HISTORY_RETENTION,
     STATUS_NEW,
@@ -32,6 +33,7 @@ from tests.support.fake_binance_exchange import (
     ExchangeOrderRecord,
 )
 from tests.support.intent_store_fakes import CrashAfter, SimulatedCrash
+from tests.support.reconcile_doubles import RecordingJournal
 from tests.test_execution_exactly_once_pg import (
     APPROVAL_ID,
     CASE,
@@ -226,7 +228,8 @@ async def test_crash_after_entry_sent_is_resolved_to_acked_and_never_resent(pg_d
         assert _scalar(engine2, "SELECT count(*) FROM execution_intents WHERE role = 'ENTRY'") == 1
 
 
-async def test_crash_after_entry_sent_with_the_order_absent_is_rejected(pg_db: str) -> None:
+async def test_crash_after_entry_sent_with_the_order_absent_stays_unknown(pg_db: str) -> None:
+    """D-11 / Q5: a SENT entry that is not found is NOT rejected; absence alone is no evidence."""
     adapter = BinanceSemanticsFakeAdapter(now_utc=NOW_UTC)
     safe_mode = RecordingSafeModeController()
 
@@ -243,15 +246,131 @@ async def test_crash_after_entry_sent_with_the_order_absent_is_rejected(pg_db: s
             now_utc=NOW_UTC,
         )
 
-        assert report.resolved == ((APPROVAL_ID, "ENTRY", ExecutionIntentStatus.REJECTED),)
-        assert safe_mode.entered == []
-        assert _statuses(engine2) == {"ENTRY": "REJECTED"}
+        assert report.resolved == ()
+        assert report.unresolved == ((APPROVAL_ID, "ENTRY", ExecutionIntentStatus.UNKNOWN),)
+        assert safe_mode.entered == [("UNRESOLVED_EXECUTION_INTENT", NOW_UTC)]
+        assert _statuses(engine2) == {"ENTRY": "UNKNOWN"}
+        assert _row(engine2, "ENTRY")["resolution_reason_code"] is None
         assert _place_counts(adapter) == (0, 0)
 
         # The approval stays consumed: a replay can never place the entry.
         second = await _run_plan(adapter, intent_store=restarted_store)
         assert second == RECONCILIATION_REQUIRED
         assert _place_counts(adapter) == (0, 0)
+
+
+async def test_crash_after_consume_with_the_order_absent_is_rejected_as_never_sent(
+    pg_db: str,
+) -> None:
+    """An INTENDED entry was never sent (mark_sent commits first): REJECTED / NEVER_SENT."""
+    adapter = BinanceSemanticsFakeAdapter(now_utc=NOW_UTC)
+    safe_mode = RecordingSafeModeController()
+
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        with pytest.raises(SimulatedCrash):
+            await _run_plan(adapter, intent_store=CrashAfter(store, step="consume"))
+        assert _statuses(engine) == {"ENTRY": "INTENDED"}
+
+    with _store_on(pg_db) as (engine2, restarted_store):
+        report = await resolve_unresolved_intents(
+            store=restarted_store,
+            adapter=adapter,
+            safe_mode_controller=safe_mode,
+            now_utc=NOW_UTC,
+        )
+
+        assert report.resolved == ((APPROVAL_ID, "ENTRY", ExecutionIntentStatus.REJECTED),)
+        assert safe_mode.entered == []
+        assert _statuses(engine2) == {"ENTRY": "REJECTED"}
+        row = _row(engine2, "ENTRY")
+        assert row["resolution_reason_code"] == "NEVER_SENT"
+        assert row["exchange_status"] is None
+        assert _place_counts(adapter) == (0, 0)
+
+
+async def _persist_unknown_entry(pg_db: str, adapter: BinanceSemanticsFakeAdapter) -> None:
+    """Crash after entry_sent, then a recovery pass whose probe fails: UNKNOWN is committed."""
+
+    class UnreachableAdapter(BinanceSemanticsFakeAdapter):
+        async def query_order_by_client(self, **kwargs: Any) -> Any:
+            raise RuntimeError("exchange unreachable")
+
+    with _store_on(pg_db) as (engine, store):
+        _seed_parent_chain(engine)
+        with pytest.raises(SimulatedCrash):
+            await _run_plan(adapter, intent_store=CrashAfter(store, step="entry_sent"))
+    with _store_on(pg_db) as (engine2, restarted_store):
+        await resolve_unresolved_intents(
+            store=restarted_store,
+            adapter=UnreachableAdapter(now_utc=NOW_UTC),
+            safe_mode_controller=RecordingSafeModeController(),
+            now_utc=NOW_UTC,
+        )
+        assert _statuses(engine2) == {"ENTRY": "UNKNOWN"}
+
+
+def _unknown_entry_resolver(
+    store: Any, adapter: BinanceSemanticsFakeAdapter, journal: RecordingJournal, good_till: datetime
+) -> UnknownEntryResolver:
+    return UnknownEntryResolver(
+        store=store,
+        adapter=adapter,
+        journal=journal,
+        safe_mode_controller=RecordingSafeModeController(),
+        limits=make_limits(),
+        entry_good_till=lambda _record: good_till,
+    )
+
+
+async def test_the_unknown_entry_protocol_closes_on_postgres(pg_db: str) -> None:
+    adapter = BinanceSemanticsFakeAdapter(now_utc=NOW_UTC)
+    await _persist_unknown_entry(pg_db, adapter)
+    good_till = NOW_UTC + timedelta(hours=1)
+    journal = RecordingJournal()
+    interval = timedelta(milliseconds=2345)
+    after_grace = good_till + timedelta(milliseconds=9191) + interval
+
+    with _store_on(pg_db) as (engine, store):
+        resolver = _unknown_entry_resolver(store, adapter, journal, good_till)
+        for index in range(3):
+            report = await resolver.step(now_utc=NOW_UTC + index * interval)
+            assert report.closed == ()
+        assert _statuses(engine) == {"ENTRY": "UNKNOWN"}
+
+        report = await resolver.step(now_utc=after_grace)
+
+        assert report.closed == (APPROVAL_ID,)
+        row = _row(engine, "ENTRY")
+        assert row["intent_status"] == "REJECTED"
+        assert row["resolution_reason_code"] == "RECONCILED_ABSENT"
+        assert row["exchange_status"] is None
+        assert row["exchange_order_id"] is None
+        assert [e.event_type for e in journal.events].count("UNKNOWN_EXIT_EVIDENCE") == 1
+        assert _place_counts(adapter) == (0, 0)
+
+
+async def test_the_unknown_entry_protocol_keeps_unknown_when_a_position_exists(
+    pg_db: str,
+) -> None:
+    adapter = BinanceSemanticsFakeAdapter(now_utc=NOW_UTC)
+    await _persist_unknown_entry(pg_db, adapter)
+    adapter.positions[CASE["symbol"]] = Decimal("0.001")
+    good_till = NOW_UTC + timedelta(hours=1)
+    journal = RecordingJournal()
+    interval = timedelta(milliseconds=2345)
+
+    with _store_on(pg_db) as (engine, store):
+        resolver = _unknown_entry_resolver(store, adapter, journal, good_till)
+        for index in range(2):
+            await resolver.step(now_utc=NOW_UTC + index * interval)
+
+        report = await resolver.step(now_utc=good_till + timedelta(milliseconds=9191) + interval)
+
+        assert report.closed == ()
+        assert report.kept == ((APPROVAL_ID, "EXPOSURE_PRESENT"),)
+        assert _statuses(engine) == {"ENTRY": "UNKNOWN"}
+        assert _row(engine, "ENTRY")["resolution_reason_code"] is None
 
 
 def _write_stop_intent(store: Any) -> None:
