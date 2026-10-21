@@ -18,16 +18,28 @@ no [DEMO] claim.
 
 from __future__ import annotations
 
+import ast
+import dataclasses
 import json
 from collections import deque
+from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
+from src.execution import protection as protection_module
 from src.execution.order_ids import derive_algo_client_id
 from src.execution.protection import PlanProtection, ProtectionState
 
-from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH, ProtectionRig, make_rig
+from tests.support.protection_doubles import (
+    TEST_ONLY_PLAN_HASH,
+    TEST_ONLY_REGISTERED_AT,
+    ProtectionRig,
+    complete_constraint_snapshot,
+    make_rig,
+    resting_entry_for_tests,
+)
 
 D = Decimal
 
@@ -378,3 +390,224 @@ async def test_an_unreadable_stop_answer_keeps_the_state_and_the_next_step_reads
     assert _view(rig).state is not state
     assert _stop_reads(rig) >= 2
     guard.assert_clean()
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: reconcile hooks (protections, notify_divergence, restore_complete).
+# --------------------------------------------------------------------------- #
+
+NOTIFIABLE_KINDS = [
+    "POSITION_WITHOUT_STOP",
+    "TP_ONLY_POSITION",
+    "SIGN_FLIPPED_POSITION",
+    "DOUBLED_POSITION",
+    "ENTRY_WITHOUT_PROTECTIVE",
+]
+
+
+def _position_reads(rig: ProtectionRig) -> int:
+    return len(rig.fake.calls_to("snapshot_positions"))
+
+
+def _divergence_notes(rig: ProtectionRig) -> list[dict[str, Any]]:
+    return [
+        json.loads(e.payload_json)
+        for e in rig.journal.calls
+        if e.event_type == "PROTECTION_DIVERGENCE_NOTIFIED"
+    ]
+
+
+async def _to_protected_entry_open(rig: ProtectionRig) -> None:
+    """First fill 0.004, the stop ACTIVE by REST, the entry open (its cancel keeps failing)."""
+    for _ in range(1000):
+        rig.fake.fail_next("cancel_normal_order", RuntimeError("scripted cancel failure"))
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    assert _view(rig).state is ProtectionState.PROTECTED_ENTRY_OPEN
+
+
+async def test_protections_is_a_read_only_sorted_view_of_every_tracked_plan() -> None:
+    rig, _ = await _checked_rig()
+    earlier = resting_entry_for_tests(
+        plan_hash="b2" * 32,
+        approval_id="approval-protection-0002",
+        trade_plan_id="plan-protection-0002",
+        symbol="ETHUSDT",
+        side="SHORT",
+        entry_side="SELL",
+        exit_side="BUY",
+        entry_quantity=D("0.250"),
+        registered_at_utc=TEST_ONLY_REGISTERED_AT - timedelta(minutes=1),
+        plan_constraint_snapshot=complete_constraint_snapshot(symbol="ETHUSDT"),
+    )
+    rig.coordinator.register_resting_entry(earlier)
+
+    views = rig.coordinator.protections()
+
+    assert isinstance(views, tuple)
+    assert [v.plan_hash for v in views] == ["b2" * 32, TEST_ONLY_PLAN_HASH]
+    first, second = views
+    assert (first.approval_id, first.side, first.entry_quantity) == (
+        "approval-protection-0002",
+        "SHORT",
+        D("0.250"),
+    )
+    assert first.entry_client_order_id == earlier.entry_client_order_id
+    assert (second.approval_id, second.side, second.entry_quantity) == (
+        rig.entry.approval_id,
+        "LONG",
+        D("0.010"),
+    )
+    assert second.entry_client_order_id == rig.entry.entry_client_order_id
+    assert second.state is ProtectionState.AWAITING_FILL
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        second.state = ProtectionState.FLAT  # type: ignore[misc]
+    # A view is a snapshot: the live record is untouched by it.
+    assert _view(rig).state is ProtectionState.AWAITING_FILL
+
+
+async def test_a_plan_view_defaults_the_new_fields_so_existing_constructors_still_work() -> None:
+    view = PlanProtection(
+        plan_hash="x",
+        symbol="BTCUSDT",
+        state=ProtectionState.FLAT,
+        first_fill_at_utc=None,
+        stop_confirmed_at_utc=None,
+        entry_terminal_at_utc=None,
+        last_reason=None,
+    )
+    assert (view.approval_id, view.side, view.entry_quantity, view.entry_client_order_id) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize("kind", NOTIFIABLE_KINDS)
+async def test_notify_divergence_journals_once_and_places_and_cancels_nothing(kind: str) -> None:
+    rig, guard = await _checked_rig()
+    await _to_protected(rig)
+    calls_before = len(rig.fake.calls)
+
+    accepted = rig.coordinator.notify_divergence(TEST_ONLY_PLAN_HASH, kind)
+
+    assert accepted is True
+    assert len(rig.fake.calls) == calls_before, "notify_divergence made an exchange call"
+    notes = _divergence_notes(rig)
+    assert len(notes) == 1
+    assert notes[0]["kind"] == kind
+    assert notes[0]["state"] == "PROTECTED"
+    assert guard.stop_placements == 1
+
+
+async def test_notify_divergence_makes_the_next_step_read_the_stop_and_the_position() -> None:
+    rig, guard = await _checked_rig()
+    await _to_protected_entry_open(rig)
+    await rig.coordinator.step()  # an ordinary step of this state: the stop is read, no position
+    stop_before, position_before = _stop_reads(rig), _position_reads(rig)
+    await rig.coordinator.step()
+    assert (_stop_reads(rig) - stop_before, _position_reads(rig) - position_before) == (1, 0)
+
+    assert rig.coordinator.notify_divergence(TEST_ONLY_PLAN_HASH, "POSITION_WITHOUT_STOP") is True
+    stop_before, position_before = _stop_reads(rig), _position_reads(rig)
+    await rig.coordinator.step()
+
+    assert _stop_reads(rig) - stop_before == 1
+    assert _position_reads(rig) - position_before >= 1
+    # One notice is one forced step: the request is consumed.
+    stop_before, position_before = _stop_reads(rig), _position_reads(rig)
+    await rig.coordinator.step()
+    assert (_stop_reads(rig) - stop_before, _position_reads(rig) - position_before) == (1, 0)
+    assert guard.stop_placements == 1
+    guard.assert_clean()
+
+
+async def test_a_notified_stop_divergence_follows_the_same_decision_path() -> None:
+    """The reconcile loop saw no stop: the coordinator reads it and decides by D077, not itself."""
+    rig, guard = await _checked_rig()
+    await _to_protected(rig)
+    rig.fake.cancel_algo(rig.stop_id)
+
+    assert rig.coordinator.notify_divergence(TEST_ONLY_PLAN_HASH, "POSITION_WITHOUT_STOP") is True
+    assert _view(rig).state is ProtectionState.PROTECTED, "notify decides nothing by itself"
+    assert _close_required_alerts(rig) == []
+    await rig.coordinator.step()
+
+    assert _transitions(rig)[-1] == ("PROTECTED", "CLOSE_REQUIRED", "B4_FILL_AFTER_STOP")
+    assert guard.stop_placements == 1
+    guard.assert_clean()
+
+
+async def test_notify_divergence_for_an_unknown_plan_returns_false_and_journals_nothing() -> None:
+    rig, _ = await _checked_rig()
+    journal_before = len(rig.journal.calls)
+
+    assert rig.coordinator.notify_divergence("c3" * 32, "POSITION_WITHOUT_STOP") is False
+
+    assert len(rig.journal.calls) == journal_before
+    assert _divergence_notes(rig) == []
+
+
+@pytest.mark.parametrize("plan_hash", [TEST_ONLY_PLAN_HASH, "c3" * 32])
+async def test_notify_divergence_with_an_unknown_kind_raises_and_leaves_no_trace(
+    plan_hash: str,
+) -> None:
+    rig, _ = await _checked_rig()
+    await _to_protected(rig)
+    journal_before = len(rig.journal.calls)
+
+    with pytest.raises(ValueError):
+        rig.coordinator.notify_divergence(plan_hash, "NOT_A_DIVERGENCE")
+    with pytest.raises(ValueError):
+        rig.coordinator.notify_divergence(plan_hash, "FOREIGN_ORDER")  # not a stop divergence
+
+    assert len(rig.journal.calls) == journal_before
+    stop_before = _stop_reads(rig)
+    await rig.coordinator.step()  # nothing was requested: only the ordinary step happens
+    assert _stop_reads(rig) - stop_before == 1
+
+
+async def test_restore_complete_is_true_for_a_fresh_coordinator() -> None:
+    rig, _ = await _checked_rig()
+    assert rig.coordinator.restore_complete is True
+
+
+def test_the_accepted_divergence_kinds_equal_the_reconcile_vocabulary() -> None:
+    """The coordinator keeps its own literals (execution must not import reconcile); pinned here."""
+    from src.execution import protection
+    from src.reconcile import compare
+
+    assert protection.NOTIFIABLE_DIVERGENCE_KINDS == frozenset(
+        {
+            compare.DIVERGENCE_KIND_POSITION_WITHOUT_STOP,
+            compare.DIVERGENCE_KIND_TP_ONLY_POSITION,
+            compare.DIVERGENCE_KIND_SIGN_FLIPPED_POSITION,
+            compare.DIVERGENCE_KIND_DOUBLED_POSITION,
+            compare.DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
+        }
+    )
+    assert set(NOTIFIABLE_KINDS) == protection.NOTIFIABLE_DIVERGENCE_KINDS
+
+
+def test_notify_divergence_never_calls_a_placement_cancel_or_close_method() -> None:
+    """AST guard (D-07, single decision path): the body can only mark a re-check and journal."""
+    source = Path(protection_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    method = next(
+        node
+        for cls in ast.walk(tree)
+        if isinstance(cls, ast.ClassDef) and cls.name == "ProtectionCoordinator"
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "notify_divergence"
+    )
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+    }
+    assert called, "the body should call something (the journal note)"
+    forbidden_prefixes = ("place_", "cancel_", "_place", "_cancel", "_sweep", "_enter_", "_attempt")
+    assert not {name for name in called if name.startswith(forbidden_prefixes)}
+    assert not any(isinstance(node, ast.Await) for node in ast.walk(method)), "it is synchronous"
