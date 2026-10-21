@@ -567,7 +567,9 @@ async def test_operator_close_flattens_through_the_coordinator() -> None:
     assert rig.fake.calls_to("cancel_algo_order") == []
     assert RIG_SL_ID in rig.fake.open_algos
     assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
-    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [("CLOSE_REQUIRED", "OPERATOR_CLOSE")]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("CLOSE_REQUIRED", "OPERATOR_CLOSE")
+    ]
 
     await rig.coordinator.step()  # two zero reads, the entry is terminal: FLAT, then the sweep
 

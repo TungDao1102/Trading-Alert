@@ -49,7 +49,7 @@ def _unverified_rows(rig: ProtectionRig) -> list[dict[str, Any]]:
 
 
 class _Behavior:
-    """Switches of the wrapped fake: a stop cancel that does not take, a stop that cannot be read."""
+    """Switches of the wrapped fake: a stop cancel that does not take, an unreadable stop."""
 
     def __init__(self) -> None:
         self.sticky_stop = False

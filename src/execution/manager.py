@@ -112,7 +112,7 @@ from src.execution.pre_placement import (
     evaluate_pre_placement,
     good_till_date_ms,
 )
-from src.execution.protection import RestingEntry
+from src.execution.protection import OperatorControlResult, ProtectionCoordinator, RestingEntry
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
 from src.ops.risk_first import AuditRecordLost, act_then_record, record_after
 from src.persistence.errors import (
@@ -2514,6 +2514,20 @@ async def emergency_manual_close(
         raise ExceptionGroup("emergency_manual_close: sequence incomplete", errors)
 
 
+async def operator_close_position(
+    *, coordinator: ProtectionCoordinator, plan_hash: str, operator_id: str
+) -> OperatorControlResult:
+    """EXEC-06 control: close a strategy position on an explicit operator action (D-26).
+
+    A thin wrapper: the close goes through the protection coordinator's own flow (plan moves to
+    CLOSE_REQUIRED with branch OPERATOR_CLOSE; reduce-only MARKET sized by the closer from a REST
+    read; FLAT only after two zero reads with the entry terminal; protective legs swept only
+    after FLAT), so a human close follows the same rules as the automatic one (D-06, D-16).
+    This function has no adapter call of its own and never names a quantity.
+    """
+    return await coordinator.operator_close(plan_hash=plan_hash, operator_id=operator_id)
+
+
 __all__ = [
     "APPROVED_QUANTITY_NOT_CONFIRMED",
     "POSITION_MODE_HEDGE",
@@ -2531,4 +2545,5 @@ __all__ = [
     "cancel_untriggered_protectives",
     "safe_mode_freeze",
     "emergency_manual_close",
+    "operator_close_position",
 ]
