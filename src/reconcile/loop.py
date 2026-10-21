@@ -56,8 +56,9 @@ from src.execution.execution_limits import (
     check_reconcile_cadence,
 )
 from src.execution.order_ids import plan_hash_prefix_of
-from src.reconcile.classify import DivergenceAction, classify
+from src.reconcile.classify import ALERT_STALE_DATA, DivergenceAction, classify
 from src.reconcile.compare import CompareDiff, Divergence, compare
+from src.reconcile.feed_freshness import FeedReading, FeedVerdict, assess_feeds
 from src.reconcile.local_intent import INACTIVE_STATE_NAMES, derive_local_intent
 
 # --------------------------------------------------------------------------- #
@@ -81,6 +82,13 @@ TICK_SKIPPED_OVERLAP: str = "SKIPPED_OVERLAP"
 #: Existing SAFE_MODE reasons (GLOSSARY 9.4) for the failed reads.
 SAFE_MODE_API_DEGRADATION: str = "API_DEGRADATION"
 SAFE_MODE_DB_FAILURE: str = "DB_FAILURE"
+#: SAFE_MODE reason of a stale mark price or a silent user-data feed (GLOSSARY 9.4, D-25).
+SAFE_MODE_STALE_FEED: str = "STALE_FEED"
+
+#: Alert reasons and the alert subject of the user-data feed (plan 20-16).
+ALERT_REASON_MARK_PRICE_STALE: str = "MARK_PRICE_STALE"
+ALERT_REASON_USER_DATA_SILENT: str = "USER_DATA_SILENT"
+ALERT_SUBJECT_USER_DATA: str = "USER_DATA"
 
 _ENTITY_TYPE = "ReconcileLoop"
 _ENTITY_ID = "reconcile_loop"
@@ -178,6 +186,12 @@ class UnknownEntryStepper(Protocol):
     async def step(self, *, now_utc: datetime) -> Any: ...
 
 
+class FeedSource(Protocol):
+    """The latest feed times (plan 20-16); Phase 24 binds it to the supervisor and mark prices."""
+
+    def read_feed(self) -> FeedReading: ...
+
+
 class _UnusableRows(Exception):
     """A snapshot answered with something that is not a list of rows."""
 
@@ -191,11 +205,13 @@ class _UnusableRows(Exception):
 class TickReport:
     """What one tick saw and did.
 
-    `agreement` is None when no compare ran. `delegated` holds `(plan_hash, kind)` pairs the
-    coordinator accepted; `undelegated` holds `(symbol, kind)` pairs of stop-related divergences
-    that reached no coordinator plan (several or no candidate, or an untracked plan): they were
-    alerted only. `swept` and `sweep_skipped` echo the sweeper outcome. `action_failures` names
-    the steps that failed after a read succeeded; `failed_source` names the read that failed.
+    `agreement` is None when no compare ran. `stale_symbols` and `user_data_silent` are the feed
+    verdict of the tick (plan 20-16; empty / False without a feed source). `delegated` holds
+    `(plan_hash, kind)` pairs the coordinator accepted; `undelegated` holds `(symbol, kind)`
+    pairs of stop-related divergences that reached no coordinator plan (several or no candidate,
+    or an untracked plan): they were alerted only. `swept` and `sweep_skipped` echo the sweeper
+    outcome. `action_failures` names the steps that failed after a read succeeded;
+    `failed_source` names the read that failed.
     """
 
     outcome: str
@@ -214,6 +230,8 @@ class TickReport:
     failed_source: str | None = None
     action_failures: tuple[str, ...] = ()
     unknown_entries: Any = None
+    stale_symbols: tuple[str, ...] = ()
+    user_data_silent: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -236,6 +254,8 @@ class ReconcileLoop:
         limits: the execution limits; `require_live_ready` must pass and the tick interval must
             be strictly below `max_unprotected_ms` (D-25).
         unknown_entries: optional `UnknownEntryResolver`, stepped once per tick (D-11).
+        feeds: optional `FeedSource`; when set, every tick judges the mark price of each tracked
+            symbol and the user-data feed (plan 20-16, D-25). None means no feed is judged.
 
     Raises:
         ValueError: `safe_mode` is not durable.
@@ -256,6 +276,7 @@ class ReconcileLoop:
         journal: JournalSink,
         limits: ExecutionLimits,
         unknown_entries: UnknownEntryStepper | None = None,
+        feeds: FeedSource | None = None,
     ) -> None:
         if not safe_mode.is_durable:
             raise ValueError(
@@ -276,6 +297,8 @@ class ReconcileLoop:
         self._alerts = alerts
         self._journal = journal
         self._unknown_entries = unknown_entries
+        self._feeds = feeds
+        self._limits = limits
         self._tick_interval_ms = tick_interval_ms
         self._lock = asyncio.Lock()
         self._journal_failures = 0
@@ -317,6 +340,13 @@ class ReconcileLoop:
             return TickReport(outcome=TICK_SKIPPED_RESTORE_PENDING, now_utc=now_utc)
 
         action_failures: list[str] = []
+        pre = self._check_feeds(now_utc, action_failures)
+        report = await self._read_and_act(now_utc, gate_status, pre, action_failures)
+        return _with_pre(report, pre)
+
+    async def _read_and_act(
+        self, now_utc: datetime, gate_status: str | None, pre: _Pre, action_failures: list[str]
+    ) -> TickReport:
         unknown_report = await self._step_unknown_entries(now_utc, action_failures)
 
         truth: dict[str, tuple[Any, ...]] = {}
@@ -357,7 +387,9 @@ class ReconcileLoop:
                 now_utc, "compare", exc, SAFE_MODE_API_DEGRADATION, action_failures
             )
 
-        return await self._act(now_utc, diff, plans, unknown_report, action_failures, gate_status)
+        return await self._act(
+            now_utc, diff, plans, unknown_report, action_failures, gate_status, pre
+        )
 
     def _gate_recovery_status(self) -> str | None:
         """The gate's restart-recovery verdict (plan 20-07), when the gate exposes one.
@@ -443,6 +475,7 @@ class ReconcileLoop:
         unknown_report: Any,
         failures: list[str],
         gate_status: str | None,
+        pre: _Pre,
     ) -> TickReport:
         # One entry per distinct reason, least urgent first: the controller keeps the LAST reason,
         # so the persisted reason is the most urgent one (stop-related exposure), and every
@@ -479,21 +512,25 @@ class ReconcileLoop:
             swept, sweep_skipped = await self._sweep(diff, now_utc, failures)
 
         counts: dict[str, int] = {}
-        for divergence in diff.divergences:
+        for divergence in pre.divergences + diff.divergences:
             counts[divergence.kind] = counts.get(divergence.kind, 0) + 1
         tick_payload: dict[str, Any] = {
             "outcome": TICK_COMPARED,
-            "divergence_count": len(diff.divergences),
+            "divergence_count": len(pre.divergences) + len(diff.divergences),
             "counts": counts,
-            "safe_mode_reasons": reasons,
+            "safe_mode_reasons": list(_merge_reasons(pre.safe_mode_reasons, reasons)),
             "delegated": len(delegated),
             "undelegated": len(undelegated),
-            "alerts_sent": alerts_sent,
-            "alerts_failed": alerts_failed,
+            "alerts_sent": alerts_sent + pre.alerts_sent,
+            "alerts_failed": alerts_failed + pre.alerts_failed,
             "swept": len(swept),
             "sweep_skipped": len(sweep_skipped),
             "action_failures": list(failures),
         }
+        if pre.stale_symbols:
+            tick_payload["stale_feed_symbols"] = list(pre.stale_symbols)
+        if pre.user_data_silent:
+            tick_payload["user_data_silent"] = True
         if gate_status is not None:
             tick_payload["gate_recovery_status"] = gate_status
         self._journal_row(RECONCILE_TICK, tick_payload, now_utc)
@@ -511,6 +548,75 @@ class ReconcileLoop:
             sweep_skipped=sweep_skipped,
             action_failures=tuple(failures),
             unknown_entries=unknown_report,
+        )
+
+    def _tracked_symbols(self) -> tuple[str, ...]:
+        """The symbols of the coordinator plans that are not FLAT / ENTRY_ENDED_NO_FILL.
+
+        A failed read gives no symbols: the local read of the same tick then fails too and enters
+        SAFE_MODE DB_FAILURE (fail closed); only the user-data feed is judged on its own.
+        """
+        try:
+            plans = tuple(self._protection.protections())
+        except Exception:
+            return ()
+        symbols = {
+            symbol
+            for plan in plans
+            if _state_name(plan) not in INACTIVE_STATE_NAMES
+            for symbol in (getattr(plan, "symbol", None),)
+            if isinstance(symbol, str) and symbol != ""
+        }
+        return tuple(sorted(symbols))
+
+    def _check_feeds(self, now_utc: datetime, failures: list[str]) -> _Pre:
+        """Judge the feeds (D-25): SAFE_MODE STALE_FEED and a STALE_DATA alert per stale feed.
+
+        Never an exit: a later fresh reading changes nothing in SAFE_MODE (D-15). A source that
+        raises, or a reading `assess_feeds` refuses, counts as stale for every tracked symbol and
+        for the user-data feed (fail closed); only the exception class name is journaled.
+        """
+        if self._feeds is None:
+            return _NO_PRE
+        tracked = self._tracked_symbols()
+        try:
+            verdict = assess_feeds(
+                self._feeds.read_feed(), symbols=tracked, now_utc=now_utc, limits=self._limits
+            )
+        except Exception as exc:
+            failures.append("feed_read")
+            self._journal_row(
+                RECONCILE_ACTION_FAILED,
+                {"action": "feed_read", "error_type": type(exc).__name__},
+                now_utc,
+            )
+            verdict = FeedVerdict(stale_symbols=tracked, user_data_silent=True)
+        if not verdict.any_stale:
+            return _NO_PRE
+        self._enter_safe_mode(SAFE_MODE_STALE_FEED, now_utc, failures)
+        sent = 0
+        failed = 0
+        alerts: list[tuple[str, str, str | None]] = [
+            (symbol, ALERT_REASON_MARK_PRICE_STALE, symbol) for symbol in verdict.stale_symbols
+        ]
+        if verdict.user_data_silent:
+            alerts.append((ALERT_SUBJECT_USER_DATA, ALERT_REASON_USER_DATA_SILENT, None))
+        for subject, reason, symbol in alerts:
+            delivered = self._alert(
+                event=ALERT_STALE_DATA,
+                subject=subject,
+                reason=reason,
+                symbol=symbol,
+                plan_hash=None,
+                now_utc=now_utc,
+            )
+            sent, failed = (sent + 1, failed) if delivered else (sent, failed + 1)
+        return _Pre(
+            safe_mode_reasons=(SAFE_MODE_STALE_FEED,),
+            alerts_sent=sent,
+            alerts_failed=failed,
+            stale_symbols=verdict.stale_symbols,
+            user_data_silent=verdict.user_data_silent,
         )
 
     def _enter_safe_mode(self, reason: str, now_utc: datetime, failures: list[str]) -> None:
@@ -540,22 +646,42 @@ class ReconcileLoop:
     def _send_alert(
         self, event: str, divergence: Divergence, plan_hash: str | None, now_utc: datetime
     ) -> bool:
+        return self._alert(
+            event=event,
+            subject=divergence.symbol,
+            reason=divergence.kind,
+            symbol=divergence.symbol,
+            plan_hash=plan_hash,
+            now_utc=now_utc,
+        )
+
+    def _alert(
+        self,
+        *,
+        event: str,
+        subject: str,
+        reason: str,
+        symbol: str | None,
+        plan_hash: str | None,
+        now_utc: datetime,
+    ) -> bool:
+        """One alert; a raising sink is journaled by exception class name, never re-raised."""
         try:
             self._alerts.alert(
                 event=event,
-                subject=divergence.symbol,
-                reason=divergence.kind,
+                subject=subject,
+                reason=reason,
                 now_utc=now_utc,
                 plan_hash=plan_hash,
-                symbol=divergence.symbol,
+                symbol=symbol,
             )
         except Exception as exc:
             self._journal_row(
                 ALERT_SINK_FAILED,
                 {
                     "event": event,
-                    "kind": divergence.kind,
-                    "symbol": divergence.symbol,
+                    "kind": reason,
+                    "symbol": symbol,
                     "error_type": type(exc).__name__,
                 },
                 now_utc,
@@ -629,6 +755,42 @@ class ReconcileLoop:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _Pre:
+    """What the steps before the truth reads did in one tick (feeds, plan 20-16).
+
+    They run before the reads so that a failed read cannot hide them; `_with_pre` folds them into
+    the final report whatever the outcome.
+    """
+
+    divergences: tuple[Divergence, ...] = ()
+    safe_mode_reasons: tuple[str, ...] = ()
+    alerts_sent: int = 0
+    alerts_failed: int = 0
+    stale_symbols: tuple[str, ...] = ()
+    user_data_silent: bool = False
+
+
+_NO_PRE = _Pre()
+
+
+def _merge_reasons(first: Sequence[str], second: Sequence[str]) -> tuple[str, ...]:
+    """The reasons of both steps in entry order, each once."""
+    return tuple(dict.fromkeys((*first, *second)))
+
+
+def _with_pre(report: TickReport, pre: _Pre) -> TickReport:
+    return dataclasses.replace(
+        report,
+        divergences=pre.divergences + report.divergences,
+        safe_mode_reasons=_merge_reasons(pre.safe_mode_reasons, report.safe_mode_reasons),
+        alerts_sent=report.alerts_sent + pre.alerts_sent,
+        alerts_failed=report.alerts_failed + pre.alerts_failed,
+        stale_symbols=pre.stale_symbols,
+        user_data_silent=pre.user_data_silent,
+    )
+
+
 def _require_utc(value: datetime) -> None:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("now_utc must be a timezone-aware UTC datetime")
@@ -677,11 +839,13 @@ __all__ = [
     "RECONCILE_TICK",
     "SAFE_MODE_API_DEGRADATION",
     "SAFE_MODE_DB_FAILURE",
+    "SAFE_MODE_STALE_FEED",
     "TICK_COMPARED",
     "TICK_READ_FAILED",
     "TICK_SKIPPED_GATE",
     "TICK_SKIPPED_OVERLAP",
     "TICK_SKIPPED_RESTORE_PENDING",
+    "FeedSource",
     "GateRestrictionSource",
     "JournalSink",
     "OrphanSweeperLike",
