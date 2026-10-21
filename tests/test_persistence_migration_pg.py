@@ -16,7 +16,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * Migration 0006 (Phase 19 review-fix batch 4, D078, 19-REVIEW WR-01) adds the nullable
     `approved_quantity` column and its named CHECK to `approvals`.
   * Migration 0007 (Phase 20, plan 20-03, T-B) adds the nullable `resolution_reason_code`
-    column and its named CHECK to `execution_intents`; the head test pins 0007.
+    column and its named CHECK to `execution_intents`.
+  * Migration 0008 (Phase 20, plan 20-14, D-19, Q4) adds the `pending_protective_actions` table;
+    the head test pins 0008.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ from src.domain.enums import (
     TradePlanStatus,
 )
 from src.domain.registry import WORKING_TYPE_VALUES
+from src.execution.pending_actions import PendingKind, PendingState
 from src.persistence.engine import make_sync_engine
 
 from tests.pg_support import alembic_head_revision, run_alembic
@@ -89,6 +92,10 @@ MIGRATION_0006 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0006_appro
 REVISION_0007 = "0007_intent_resolution_reason"
 MIGRATION_0007 = (
     REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0007_intent_resolution_reason.py"
+)
+REVISION_0008 = "0008_pending_protective_actions"
+MIGRATION_0008 = (
+    REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0008_pending_protective_actions.py"
 )
 _CHECK_VIOLATION = "23514"
 
@@ -171,6 +178,7 @@ PARTIAL_INDEX_PREDICATES = {
     "uq_orders_algo_client_id": "algo_client_idisnotnull",
     "uq_execution_intents_client_order_id": "client_order_idisnotnull",
     "uq_execution_intents_algo_client_id": "algo_client_idisnotnull",
+    "uq_pending_protective_actions_open": "state='pending'",
 }
 
 
@@ -207,6 +215,8 @@ ENUM_CHECKS: dict[str, set[str]] = {
     "ck_plan_constraint_snapshots_live_inputs_status": {m.value for m in LiveInputsStatus},
     "ck_plan_constraint_snapshots_working_type": set(WORKING_TYPE_VALUES),
     "ck_system_state_events_state_key": {m.value for m in SystemStateKey},
+    "ck_pending_protective_actions_kind": {m.value for m in PendingKind},
+    "ck_pending_protective_actions_state": {m.value for m in PendingState},
 }
 
 # every table the plan names for an enum CHECK
@@ -219,6 +229,7 @@ ENUM_CHECK_TABLES = {
     "execution_intents",
     "plan_constraint_snapshots",
     "system_state_events",
+    "pending_protective_actions",
 }
 
 
@@ -453,7 +464,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0007
+    assert alembic_head_revision() == REVISION_0008
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -898,5 +909,67 @@ def test_downgrade_0007_keeps_rows_and_removes_only_the_column_and_the_check(
         assert version == REVISION_0006
         assert intents == 1
         assert check == 0
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0008: pending_protective_actions (Phase 20, plan 20-14, D-19, Q4)
+# --------------------------------------------------------------------------------------
+def test_migration_0008_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0008, ("src", "tests")) == []
+
+
+def test_migration_0008_revises_0007() -> None:
+    text_of_migration = MIGRATION_0008.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0007}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0008}"' in text_of_migration
+
+
+def test_migration_0008_has_no_price_quantity_or_side_column() -> None:
+    """The table stores the intent, never a payload (D-19): no such column is declared."""
+    source = MIGRATION_0008.read_text(encoding="utf-8")
+    declared = re.findall(r'sa\.Column\(\s*"([a-z_]+)"', source)
+    assert declared, "no column declaration found"
+    for name in declared:
+        assert not re.search(r"price|quantity|side", name), name
+
+
+def test_downgrade_0008_drops_only_the_pending_table_and_upgrade_restores_it(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        assert "pending_protective_actions" in full_schema
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO pending_protective_actions (pending_id, plan_hash, "
+                    "trade_plan_id, approval_id, symbol, pending_kind, state, gate_reason, "
+                    "first_blocked_at_utc, last_blocked_at_utc, block_count) VALUES "
+                    "('ppa_1', 'p', 't', 'a', 'BTCUSDT', 'STOP_NOT_SENT', 'PENDING', "
+                    "'IP_BAN_418', :t0, :t0, 1)"
+                ),
+                {"t0": T0},
+            )
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0007)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema - {"pending_protective_actions"}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0007
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
     finally:
         engine.dispose()
