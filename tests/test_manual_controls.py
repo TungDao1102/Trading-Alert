@@ -749,9 +749,9 @@ async def _unprotected_never_confirmed(**overrides: Any) -> ProtectionRig:
     return rig
 
 
-async def _protected_entry_open() -> ProtectionRig:
+async def _protected_entry_open(**overrides: Any) -> ProtectionRig:
     """The stop is confirmed ACTIVE by REST and the entry remainder is still open."""
-    rig = await make_rig(real_closer=True)
+    rig = await make_rig(real_closer=True, **overrides)
     for _ in range(2):
         rig.fake.fail_next("cancel_normal_order", RuntimeError("scripted ambiguous failure"))
     rig.coordinator.fill_sink(rig.stream_fill(QUANTITY))
@@ -761,9 +761,9 @@ async def _protected_entry_open() -> ProtectionRig:
     return rig
 
 
-async def _stop_lost_unprotected() -> ProtectionRig:
+async def _stop_lost_unprotected(**overrides: Any) -> ProtectionRig:
     """A confirmed stop that was lost while the position cannot be read: UNPROTECTED, STOP_LOST."""
-    rig = await _protected_entry_open()
+    rig = await _protected_entry_open(**overrides)
     await rig.clock.advance(1.0)
     rig.fake.trigger_stop(rig.stop_id)
     for _ in range(500):
@@ -1190,3 +1190,176 @@ async def test_manager_operator_protect_position_is_a_thin_wrapper() -> None:
             break
     else:
         raise AssertionError("operator_protect_position not found")
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-17, Task 3 (D-26, EXEC-06, D-16): the five controls exist, are listed in one place, and
+# act during a journal outage. Evidence label: executed tests with fakes; nothing is [DEMO].
+# --------------------------------------------------------------------------- #
+
+EXEC06_NAMES = {
+    "cancel_pending_strategy_orders",
+    "disable_new_entries",
+    "close_strategy_positions",
+    "replace_protection",
+    "enter_safe_mode",
+}
+
+
+def _resolve(dotted: str) -> Any:
+    import importlib
+
+    parts = dotted.split(".")
+    for split in range(len(parts) - 1, 0, -1):
+        try:
+            target: Any = importlib.import_module(".".join(parts[:split]))
+        except ModuleNotFoundError:
+            continue
+        for name in parts[split:]:
+            target = getattr(target, name)
+        return target
+    raise AssertionError(f"cannot resolve {dotted}")
+
+
+def test_exec06_five_controls_exist() -> None:
+    from src.execution import manager
+
+    controls = manager.EXEC06_CONTROLS
+    assert set(controls) == EXEC06_NAMES
+    for name, dotted in controls.items():
+        assert callable(_resolve(dotted)), (name, dotted)
+    assert controls["close_strategy_positions"] == "src.execution.manager.operator_close_position"
+    assert controls["replace_protection"] == "src.execution.manager.operator_protect_position"
+    assert "EXEC06_CONTROLS" in manager.__all__
+
+
+def test_exec06_controls_that_take_an_operator_id_refuse_an_empty_one() -> None:
+    from src.execution.enablement import LiveEnablementController
+
+    controller = LiveEnablementController(journal=RecordingJournal())
+    with pytest.raises(ValueError):
+        controller.disable(operator_id="", now_utc=NOW_UTC)
+
+
+async def test_exec06_cancel_pending_orders_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.execution.manager import expire_pending_entry
+    from src.ops.spill import LocalSpill
+
+    fake = ScriptedFake()
+    await _resting_entry_with_legs(fake)
+    spill = LocalSpill(tmp_path / "spill")
+
+    await expire_pending_entry(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=fake,  # type: ignore[arg-type]
+        journal=RaisingJournal(),
+        now_utc=NOW_UTC,
+        trigger_reason="operator_close",
+        spill=spill,
+    )
+
+    assert ENTRY_ID not in fake.open_orders
+    assert {r.event.event_type for r in spill.pending()} == {"ENTRY_EXPIRY"}
+
+
+def test_exec06_disable_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.execution.enablement import LiveEnablementController
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    controller = LiveEnablementController(journal=RaisingJournal(), spill=spill)
+    controller._disabled = False  # noqa: SLF001 - the state a prior enable leaves behind
+
+    controller.disable(operator_id="op-1", now_utc=NOW_UTC)
+
+    assert controller.is_disabled is True
+    assert [r.event.event_type for r in spill.pending()] == ["LIVE_ORDERS_DISABLED"]
+
+
+def test_exec06_safe_mode_is_entered_during_a_journal_outage() -> None:
+    """The flag flips before the journal is touched. This control has no spill (finding): the
+    journal error propagates to the caller, who must treat it as an audit gap, not as "not in
+    SAFE_MODE"."""
+    from src.execution.manager import safe_mode_freeze
+    from src.reconcile.safe_mode import SafeModeController
+
+    controller = SafeModeController(adapter=ScriptedFake(), journal=RaisingJournal())  # type: ignore[arg-type]
+
+    with pytest.raises(Exception, match="PostgreSQL unavailable"):
+        safe_mode_freeze(safe_mode_controller=controller, reason="MANUAL_CLOSE", now_utc=NOW_UTC)
+
+    assert controller.in_safe_mode is True
+
+
+async def test_exec06_operator_close_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    rig = await _protected_rig(spill=spill)
+    rig.coordinator._journal = RaisingJournal()  # noqa: SLF001 - the database goes down now
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-7")
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert len(rig.fake.calls_to("place_market_close")) == 1, "the close is not held for the audit"
+    assert _state(rig) == "CLOSE_REQUIRED"
+    (record,) = [r for r in spill.pending() if r.event.event_type == "OPERATOR_CLOSE_REQUESTED"]
+    assert json.loads(record.event.payload_json)["operator_id"] == "op-7"
+
+
+async def test_exec06_operator_close_without_a_spill_still_acts_and_enters_db_failure() -> None:
+    rig = await _protected_rig()
+    rig.coordinator._journal = RaisingJournal()  # noqa: SLF001
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-7")
+
+    assert result.accepted is True
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+    assert "DB_FAILURE" in rig.safe_mode.entered_reasons
+
+
+async def test_exec06_operator_protect_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill
+
+    # The never-confirmed branch: the delegated coordinator step still runs.
+    spill = LocalSpill(tmp_path / "spill_step")
+    stepped = await _unprotected_never_confirmed(spill=spill)
+    stepped.coordinator._journal = RaisingJournal()  # noqa: SLF001
+    placements = len(stepped.fake.calls_to("place_algo_protective"))
+
+    result = await stepped.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-8")
+
+    assert (result.accepted, result.code) == (True, "COORDINATOR_STEPPED")
+    assert len(stepped.fake.calls_to("place_algo_protective")) == placements + 1
+    (row,) = [r for r in spill.pending() if r.event.event_type == "OPERATOR_PROTECT_STEPPED"]
+    assert json.loads(row.event.payload_json)["operator_id"] == "op-8"
+
+    # A refusal: nothing is sent and the refusal row reaches the spill.
+    refusal_spill = LocalSpill(tmp_path / "spill_refusal")
+    lost = await _stop_lost_unprotected(spill=refusal_spill)
+    lost.coordinator._journal = RaisingJournal()  # noqa: SLF001
+    calls = len(lost.fake.calls)
+
+    refused = await lost.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-8")
+
+    assert (refused.accepted, refused.code) == (False, "REPLACEMENT_FORBIDDEN_STOP_LOST")
+    assert len(lost.fake.calls) == calls
+    refusals = [r for r in refusal_spill.pending() if r.event.event_type == PROTECT_REFUSED]
+    assert len(refusals) == 1
+    assert json.loads(refusals[0].event.payload_json)["code"] == "REPLACEMENT_FORBIDDEN_STOP_LOST"
+
+
+def test_execute_approved_plan_is_untouched_by_the_operator_controls() -> None:
+    """The EXEC-06 additions sit after the manual-control block; the placement path is unchanged."""
+    tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+    names = {n.name for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)}
+    assert {"operator_close_position", "operator_protect_position"} <= names
+    for node in tree.body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute_approved_plan":
+            called = {
+                n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+                for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+            }
+            assert not called & {"operator_close", "operator_protect", "operator_close_position"}
