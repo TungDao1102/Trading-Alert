@@ -1,4 +1,12 @@
-"""DOMN-04 / D-20: legal-transition tables, enum parity and GLOSSARY parity (plan 17-03)."""
+"""DOMN-04 / D-20: legal-transition tables, enum parity and GLOSSARY parity (plan 17-03).
+
+Plan 20-02 adds a seventh kind, PROTECTION (T-A, D-29): its table is copied from the
+``ProtectionState`` docstring of ``src/execution/protection.py``. It is not persisted (no table,
+no trigger) and its GLOSSARY section 11 block waits for the owner's acceptance of the D055
+closure draft (19-OWNER-GAPS section 5), so it is exempt from the GLOSSARY parity tests below.
+The enum parity of its keys lives in ``tests/test_protection_transitions.py`` because the
+state enum is on the execution side and ``src/domain`` never imports ``src.execution``.
+"""
 
 from __future__ import annotations
 
@@ -98,6 +106,20 @@ EXPECTED: dict[TransitionKind, dict[str, set[str]]] = {
         "ACKED": set(),
         "REJECTED": set(),
     },
+    # Copied from the ProtectionState docstring (src/execution/protection.py), not from the table.
+    TransitionKind.PROTECTION: {
+        "AWAITING_FILL": {"UNPROTECTED", "ENTRY_ENDED_NO_FILL", "ENTRY_UNRESOLVED"},
+        "ENTRY_UNRESOLVED": {"UNPROTECTED", "ENTRY_ENDED_NO_FILL", "AWAITING_FILL"},
+        "UNPROTECTED": {"PROTECTED_ENTRY_OPEN", "PROTECTED", "CLOSE_REQUIRED", "FLAT"},
+        "PROTECTED_ENTRY_OPEN": {"PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED"},
+        "PROTECTED": {"COMPLETE", "TP_UNAVAILABLE", "FLAT"},
+        "COMPLETE": {"FLAT"},
+        "TP_UNAVAILABLE": {"FLAT"},
+        "CLOSE_REQUIRED": {"CLOSE_FAILED", "FLAT"},
+        "CLOSE_FAILED": {"CLOSE_REQUIRED", "FLAT"},
+        "FLAT": set(),
+        "ENTRY_ENDED_NO_FILL": set(),
+    },
 }
 
 EXPECTED_TERMINAL: dict[TransitionKind, set[str]] = {
@@ -107,9 +129,19 @@ EXPECTED_TERMINAL: dict[TransitionKind, set[str]] = {
     TransitionKind.POSITION: {"CLOSED"},
     TransitionKind.APPROVAL: {"APPROVED", "SKIPPED", "EXPIRED"},
     TransitionKind.EXECUTION_INTENT: {"ACKED", "REJECTED"},
+    TransitionKind.PROTECTION: {"FLAT", "ENTRY_ENDED_NO_FILL"},
 }
 
 KINDS = list(TransitionKind)
+
+# The kinds whose states are an enum of ``src.domain.enums`` (ENUM_FOR_KIND). PROTECTION is keyed
+# by the ProtectionState values, an execution-side enum pinned by test_protection_transitions.py.
+ENUM_KINDS = [kind for kind in KINDS if kind in ENUM_FOR_KIND]
+
+# Kinds without a GLOSSARY section 11 block yet: 19-OWNER-GAPS section 5 says the ProtectionState
+# block waits for the owner's acceptance of the D055 closure draft (O-01).
+GLOSSARY_DEFERRED_KINDS = {TransitionKind.PROTECTION}
+GLOSSARY_KINDS = [kind for kind in KINDS if kind not in GLOSSARY_DEFERRED_KINDS]
 
 
 def _values(enum_cls: type[Enum]) -> set[str]:
@@ -119,20 +151,28 @@ def _values(enum_cls: type[Enum]) -> set[str]:
 # --------------------------------------------------------------------------- tables
 
 
-def test_six_kinds_are_defined() -> None:
-    assert set(KINDS) == set(ENUM_FOR_KIND)
+def _states_of(kind: TransitionKind) -> set[str]:
+    """The state names of a machine: its enum values, or the table keys of PROTECTION."""
+    if kind in ENUM_FOR_KIND:
+        return _values(ENUM_FOR_KIND[kind])
+    return set(EXPECTED[kind])
+
+
+def test_seven_kinds_are_defined() -> None:
+    assert set(ENUM_KINDS) | {TransitionKind.PROTECTION} == set(KINDS)
+    assert len(KINDS) == 7
     assert set(LEGAL_TRANSITIONS) == set(KINDS)
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", ENUM_KINDS)
 def test_every_enum_member_has_a_table_entry(kind: TransitionKind) -> None:
     """A new enum value cannot ship without a transition decision (D-20)."""
     assert set(LEGAL_TRANSITIONS[kind]) == _values(ENUM_FOR_KIND[kind])
 
 
 @pytest.mark.parametrize("kind", KINDS)
-def test_successors_are_members_of_the_enum(kind: TransitionKind) -> None:
-    members = _values(ENUM_FOR_KIND[kind])
+def test_successors_are_members_of_the_machine(kind: TransitionKind) -> None:
+    members = _states_of(kind)
     for old, successors in LEGAL_TRANSITIONS[kind].items():
         assert successors <= members, f"{kind} {old} -> {successors - members}"
 
@@ -210,7 +250,7 @@ def test_unknown_states_raise() -> None:
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_exhaustive_cross_product(kind: TransitionKind) -> None:
-    states = sorted(_values(ENUM_FOR_KIND[kind]))
+    states = sorted(_states_of(kind))
     for old, new in itertools.product(states, states):
         legal = new in EXPECTED[kind][old]
         assert is_legal(kind, old, new) is legal, (kind, old, new)
@@ -279,10 +319,10 @@ SECTION_11_TITLES: dict[TransitionKind, str] = {
 
 def test_glossary_section_11_has_the_six_subsections() -> None:
     subsections = _subsections(_glossary_section(11), 11)
-    assert list(subsections) == [SECTION_11_TITLES[kind] for kind in KINDS]
+    assert list(subsections) == [SECTION_11_TITLES[kind] for kind in GLOSSARY_KINDS]
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", GLOSSARY_KINDS)
 def test_glossary_section_11_matches_the_python_tables(kind: TransitionKind) -> None:
     subsections = _subsections(_glossary_section(11), 11)
     parsed = _parse_transition_block(_first_block_lines(subsections[SECTION_11_TITLES[kind]]))

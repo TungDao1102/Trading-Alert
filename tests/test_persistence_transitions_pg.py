@@ -711,6 +711,11 @@ _ENUM_VALUES = {
 }
 
 
+# The kinds that have a table and a terminal-state trigger. PROTECTION (plan 20-02, T-A) has no
+# table and no trigger: the protection state is in-process and journaled, so it has no DB parity.
+PERSISTED_KINDS = tuple(kind for kind in TransitionKind if kind is not TransitionKind.PROTECTION)
+
+
 def _key_column(table: str) -> str:
     return {
         "signals": "signal_id",
@@ -722,12 +727,12 @@ def _key_column(table: str) -> str:
     }[table]
 
 
-@pytest.mark.parametrize("kind", list(TransitionKind), ids=lambda k: k.value)
+@pytest.mark.parametrize("kind", PERSISTED_KINDS, ids=lambda k: k.value)
 def test_every_enum_member_has_a_transition_table_entry(kind: TransitionKind) -> None:
     assert sorted(LEGAL_TRANSITIONS[kind]) == sorted(_ENUM_VALUES[kind])
 
 
-@pytest.mark.parametrize("kind", list(TransitionKind), ids=lambda k: k.value)
+@pytest.mark.parametrize("kind", PERSISTED_KINDS, ids=lambda k: k.value)
 def test_database_refuses_every_terminal_state_exit_and_accepts_every_legal_move(
     engine: Engine, kind: TransitionKind
 ) -> None:
