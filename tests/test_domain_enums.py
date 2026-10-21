@@ -511,3 +511,23 @@ def test_kill_gate_state_values_match_glossary_8_2() -> None:
     assert KillGateState.INSUFFICIENT_EDGE == "INSUFFICIENT_EDGE"
     with pytest.raises(ValueError):
         KillGateState("NOT_A_STATE")
+
+
+def test_entry_without_protective_is_one_vocabulary_in_three_roles() -> None:
+    """Phase 20 D-10 (G3-005): the rejection reason, the reconciler divergence kind and the
+    SAFE_MODE reason are the same string; the divergence-kind copies stay plain strings."""
+    from src.execution import manager
+    from src.execution.protection import SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE
+    from src.reconcile.compare import DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE
+
+    value = RejectionReason.ENTRY_WITHOUT_PROTECTIVE.value
+    assert value == "ENTRY_WITHOUT_PROTECTIVE"
+    assert manager._ENTRY_WITHOUT_PROTECTIVE == value
+    assert DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE == value
+    assert SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE == value
+    # The manager takes the code from the enum member (a plain-string literal would not fail the
+    # equalities above, so check the source binding too).
+    source = (_REPO_ROOT / "src" / "execution" / "manager.py").read_text(encoding="utf-8")
+    assert (
+        "_ENTRY_WITHOUT_PROTECTIVE: str = RejectionReason.ENTRY_WITHOUT_PROTECTIVE.value" in source
+    )
