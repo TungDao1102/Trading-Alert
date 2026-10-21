@@ -120,7 +120,7 @@ class SystemMode(str, Enum):
 
 
 class RejectionReason(str, Enum):
-    """GLOSSARY §9 — Canonical rejection reasons (20 members).
+    """GLOSSARY §9 — Canonical rejection reasons (21 members).
 
     Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and
     `SKIPPED_USER` in different modules. Use the canonical enum names
@@ -153,6 +153,11 @@ class RejectionReason(str, Enum):
     # Phase 12 D-08 cost-guard codes (GLOSSARY 9.1, D046): emitted before quantization.
     STOP_TOO_TIGHT = "STOP_TOO_TIGHT"
     COST_TO_RISK_EXCEEDED = "COST_TO_RISK_EXCEEDED"
+    # Phase 20 D-10 (G3-005, D044 item 1): promoted from the GLOSSARY 9.3 plain-string
+    # list. An entry fill exists without a confirmed protective stop. The same string is
+    # also a reconciler divergence kind and a SAFE_MODE entry reason (GLOSSARY 9.4); the
+    # value is unchanged, so every journal row keeps its bytes.
+    ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
 
 
 class DailyState(str, Enum):
