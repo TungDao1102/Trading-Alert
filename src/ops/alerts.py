@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import re
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -44,6 +44,7 @@ from src.adapters.telegram_notify import (
     TelegramTextBot,
     send_text,
 )
+from src.domain.enums import DailyState
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.ops.risk_first import AuditRecordLost, record_after
@@ -291,6 +292,31 @@ def _outcome_event(
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class RequeueReport:
+    """What `requeue_undelivered` did: alert ids queued, and ids of rows it could not read."""
+
+    requeued: tuple[str, ...]
+    invalid: tuple[str, ...]
+
+
+def _alert_of_row(row: JournalEvent) -> OperationalAlert:
+    """Rebuild an alert from its journal row; any malformed field raises."""
+    payload = json.loads(row.payload_json)
+    if not isinstance(payload, dict):
+        raise TypeError("alert payload is not an object")
+    return OperationalAlert(
+        event=payload["event"],
+        severity=AlertSeverity(payload["severity"]),
+        subject=payload["subject"],
+        reason=payload["reason"],
+        occurred_at_utc=row.occurred_at_utc,
+        plan_hash=payload.get("plan_hash"),
+        symbol=payload.get("symbol"),
+        alert_id=row.entity_id,
+    )
+
+
 @dataclass
 class _Episode:
     """One dedupe episode: the first alert of a (event, subject, reason) key and its repeats."""
@@ -391,6 +417,56 @@ class JournalFirstAlertSink:
             plan_hash=plan_hash,
             symbol=symbol,
         )
+
+    def requeue_undelivered(self, journal_rows: Iterable[JournalEvent]) -> RequeueReport:
+        """Queue again every journaled alert that has no `ALERT_DELIVERED` row (restart).
+
+        The caller reads the rows (correlation `operational_alerts`; the read itself belongs to
+        the composition, Phase 24). Rows of another correlation are ignored; a row that cannot
+        be rebuilt is reported in `invalid` and never queued. An alert already in the queue is
+        not queued twice. The dedupe episodes are rebuilt from the same rows, so a repeat of a
+        journaled alert inside its window stays suppressed after the restart. The delivery is
+        at least once: an alert whose `ALERT_DELIVERED` row was lost is sent again.
+        """
+        rows = sorted(
+            (r for r in journal_rows if r.correlation_id == ALERT_CORRELATION_ID),
+            key=lambda r: (r.occurred_at_utc, r.journal_event_id),
+        )
+        delivered = {r.entity_id for r in rows if r.event_type == EVENT_ALERT_DELIVERED}
+        queued_ids = {a.alert_id for a in self.queue}
+        requeued: list[str] = []
+        invalid: list[str] = []
+        episodes_by_id: dict[str, _Episode] = {}
+        for row in rows:
+            if row.event_type != EVENT_OPERATIONAL_ALERT:
+                continue
+            try:
+                alert = _alert_of_row(row)
+            except (ValueError, KeyError, TypeError):
+                invalid.append(row.journal_event_id)
+                continue
+            key = (alert.event, alert.subject, alert.reason)
+            known = self._episodes.get(key)
+            if known is None or known.started_at_utc < alert.occurred_at_utc:
+                known = _Episode(alert.alert_id, alert.occurred_at_utc, 0)
+                self._episodes[key] = known
+            episodes_by_id[known.alert_id] = known
+            if alert.alert_id not in delivered and alert.alert_id not in queued_ids:
+                self.queue.append(alert)
+                queued_ids.add(alert.alert_id)
+                requeued.append(alert.alert_id)
+        for row in rows:
+            if row.event_type != EVENT_ALERT_SUPPRESSED:
+                continue
+            episode = episodes_by_id.get(row.entity_id)
+            if episode is None:
+                continue
+            try:
+                count = int(json.loads(row.payload_json)["count"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            episode.suppressed = max(episode.suppressed, count)
+        return RequeueReport(requeued=tuple(requeued), invalid=tuple(invalid))
 
 
 # --------------------------------------------------------------------------- #
@@ -571,6 +647,47 @@ class TelegramAlertSender:
         return SendReport(delivered=delivered, failed=failed, audit_lost=audit_lost)
 
 
+class _AlertEmitter(Protocol):
+    def alert(
+        self,
+        *,
+        event: str,
+        subject: str,
+        reason: str,
+        now_utc: datetime,
+        plan_hash: str | None = None,
+        symbol: str | None = None,
+    ) -> None: ...
+
+
+_DAILY_STATE_EVENTS = MappingProxyType(
+    {
+        DailyState.DAILY_STOP: "DAILY_STOP",
+        DailyState.WARNING: "DAILY_LOSS_WARNING",
+    }
+)
+
+
+def emit_daily_state_alert(
+    sink: _AlertEmitter, *, state: DailyState, subject: str, now_utc: datetime
+) -> None:
+    """TEST TRIGGER for the Phase 21 daily states. It has no production caller.
+
+    DAILY_STOP emits `DAILY_STOP` (CRITICAL) and WARNING emits `DAILY_LOSS_WARNING` (WARNING).
+    The producers (the daily PnL state machine) belong to Phase 21; until they exist this
+    function is the contract plus a way for a test to push the alert through the sink. A test
+    that calls it is NOT evidence of end-to-end coverage (D-23, OPS-05 scope split), and
+    `tests/test_alerts.py` scans `src` to prove no module other than this one uses it.
+
+    Raises:
+        ValueError: `state` is not DAILY_STOP or WARNING.
+    """
+    event = _DAILY_STATE_EVENTS.get(state)
+    if event is None:
+        raise ValueError("state must be DailyState.DAILY_STOP or DailyState.WARNING")
+    sink.alert(event=event, subject=subject, reason=state.value, now_utc=now_utc)
+
+
 __all__ = [
     "ALERT_CORRELATION_ID",
     "ALERT_EVENTS",
@@ -582,8 +699,10 @@ __all__ = [
     "AlertSeverity",
     "AlertTextBot",
     "JournalFirstAlertSink",
+    "RequeueReport",
     "OperationalAlert",
     "SendReport",
     "TelegramAlertSender",
+    "emit_daily_state_alert",
     "render_alert_text",
 ]
