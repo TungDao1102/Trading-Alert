@@ -30,6 +30,8 @@ Actions:
 8. Only then consider resuming.
 ```
 
+SAFE_MODE is left only by the operator exit with its readiness rows (section 21.1), never by a restart, a timer or a recovered feed.
+
 ## 3. Position without confirmed stop
 
 ```text
@@ -112,7 +114,7 @@ Phase 17 (D051): a replayed or redelivered APPROVE returns the stored approval a
 Trigger when:
 
 ```text
-now - last_expected_closed_candle > configured freshness threshold
+now - last_expected_closed_candle > freshness threshold (a NOT_CONFIGURED key, see below)
 ```
 
 Action:
@@ -124,6 +126,8 @@ NO NEW ENTRY ORDERS
 → validate candle continuity
 → resume only after health check
 ```
+
+The freshness thresholds of the live execution path are not defaults in code: `stale_feed.max_mark_price_age_ms`, `stale_feed.max_user_data_silence_ms` and the reconcile cadence `reconcile.tick_interval_ms` are keys of `config/execution/execution-limits-v1.toml` and are `NOT_CONFIGURED` until the owner sets them after Demo evidence (O-G). While any key is `NOT_CONFIGURED` the live path refuses; do not invent a value. Since Phase 20 the reconcile tick enters SAFE_MODE `STALE_FEED` when the mark price of a tracked symbol or the user-data stream is stale; this is built and tested with fakes and is not wired into a running process until Phase 24.
 
 ## 8. WebSocket disconnect
 
@@ -907,3 +911,48 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 ```
 
 **Fail-open.** The sender never stops, restarts or touches the paper runtime: the only `docker` subcommand it runs is `exec` of the read-only liveness probe, and the paper units carry no dependency, restart or failure link to any other unit. Live delivery to the monitor, the systemd credential and the timer firing are operator verification on the soak host before plan 16-43.
+
+## 21. Reconcile loop, SAFE_MODE exit and recovery (Phase 20)
+
+Status: everything in this section is built and tested with fakes (a Binance-semantics fake exchange, in-memory and local PostgreSQL stores). Nothing is wired into a running process yet (composition is Phase 24), nothing was observed against Binance Demo, and the real-stack rehearsal is Phases 25 and 26. Reading this section is not a statement that live execution is safe or ready; D055 stays open and live placement stays disabled.
+
+### 21.1 Leaving SAFE_MODE (operator exit)
+
+SAFE_MODE is never left by a restart, a timer, a recovered feed, a closed intent or a flag flip. The only way out is `SafeModeController.exit_safe_mode`, an explicit, fail-closed, operator-attributed call. There is no command, Telegram surface or authentication for it yet: today only the restore drill calls it (Phase 23 / Phase 24 own the operator entry point; ssh access to the host is the access control). The `operator_id` is audit metadata (a non-blank text), not authentication, and an operator-id allow-list must exist before any LIVE path.
+
+The exit succeeds only when every readiness row holds in one call; every refusal found is returned and journaled as `SAFE_MODE_EXIT_REFUSED` (codes only) and the state does not change:
+
+1. the operator id is a non-blank text;
+2. the local intent source (the durable intents and the replayed protection journal) was read; a source that raises or is incomplete blocks the exit;
+3. positions, open orders and algo orders were read from Binance during this call (a failed read refuses `BINANCE_READ_FAILED`);
+4. the compare on those fresh reads agrees, and no SAFE_MODE entry landed while the reads were awaited (`COMPARE_NOT_CLEAN`);
+5. all readiness counts are read and zero: no unresolved execution intent, no plan in UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, no PENDING protective action;
+6. the REST gate has no restriction (`GATE_NOT_OPEN`) and its recovery status is `RESTORED_DURABLE` (`RESTORED_BARRIER` is accepted too but reserved; option a1 does not produce it) (`GATE_NOT_RESTORED`; the in-memory, not-restored, unknown-state and persistence-failed statuses all refuse);
+7. the user-data stream state is exactly `LIVE` (`STREAM_NOT_LIVE`).
+
+On success the order is: journal `SAFE_MODE_EXIT` with the operator id first, persist the exit state second, flip memory last. If the journal row was written and the state save then failed, the journal says EXIT while the durable state still says SAFE_MODE and a retry journals a second EXIT row: read the system-state row as the truth. An open gate means only "no restriction currently known"; it never replaces the fresh Binance reads of row 3.
+
+### 21.2 Spill directory and replay
+
+When the journal is down, records that must not be lost (operator audit rows, pending protective-action intents, the closer's pre-send attempt) are written to a local spill directory by `src/ops/spill.py`: one canonical JSON file per journal event id, written atomically. At start `run_startup_recovery` reads the spill once and replays it into the journal: an identical stored event is `already_present`; a conflicting or corrupt file is kept and enters SAFE_MODE `RESTORE_INCONSISTENT`; a failed journal write enters `DB_FAILURE` and keeps the file. Do not edit or delete spill files by hand. The spill is supplementary evidence of what this process did, never a substitute for Binance truth, and a missing or empty spill proves nothing. Where the directory lives on the host is a composition decision that is not made yet (TBD, Phase 24). The coordinator does not spill its own `PROTECTION_TRANSITION` rows when the journal is down; that limit is recorded in `20-DEFERRED.md` of Phase 20.
+
+### 21.3 REST gate restart recovery (owner decision O-C, option a1 with commands)
+
+The REST gate keeps its 418 ban and 429 pause deadlines in a state file (`src/ops/rest_gate_state.py`) and restores them at start. The first-install bootstrap call `FileGateStateStore.initialize(...)` must run once before the first start (the deploy bootstrap does not call it yet; Phase 24), and the state file path is a composition decision (TBD). Accepted consequence of option a1: if the initialized state file is missing, corrupt or cannot be read at start, the gate is in an unknown state and blocks every REST call, including emergency reduce-only closes, protective actions and reconciliation reads, until it is cleared (the assumed ban wait is 3 days, 259200 s); every restart before that keeps the block, and there is no bypass for any order category. The alert hook `REST_GATE_RECOVERY_REQUIRED` is not wired to the alert sink yet.
+
+Two operator commands exist (run on the host, over ssh):
+
+```text
+python -m src.ops.rest_gate_cli status --path STATE_FILE
+python -m src.ops.rest_gate_cli clear  --path STATE_FILE --operator-id ID --reason TEXT [--force]
+```
+
+`status` is read-only: it prints whether the file exists, parses and is initialized, the recorded ban and pause deadlines and the recovery status a restart would report. A recorded deadline cannot tell a real Binance ban from the assumed wait: check once by hand before clearing. `clear` needs an operator id and a reason, keeps the old file aside, writes a fresh initialized record with no deadline and takes effect at the NEXT restart; a deadline still in the future is refused unless `--force` is given. Stop the trading process first, because a running process can write its in-memory deadlines back over the cleared file. The operator id is audit metadata, not authentication.
+
+### 21.4 Orders and closes made by hand
+
+An order placed by hand in the Binance UI is an exchange order with no local intent: the reconcile tick reports it as a `FOREIGN_ORDER` divergence, enters SAFE_MODE (fail closed) and alerts. The system never cancels it and never guesses an owner. Look at it on the exchange, cancel it by hand if it is unwanted, and leave SAFE_MODE through section 21.1. A position closed by hand leaves protective legs behind or not (what Binance does with a `closePosition` leg when the position closes outside the system is `[NOT_TESTED]`, G4-035); the sweeper cancels an orphan only after two zero position reads (section 12), and a leg whose cancel cannot be proven keeps SAFE_MODE and is looked at again.
+
+### 21.5 Drills
+
+The eight drills in `src/ops/drills.py` (sections 3, 4, 5, 7, 9, 10 and 12, and the restore path) are fake-exchange rehearsals: they run the Phase 20 components against fakes and never touch Binance or Telegram. A passing drill shows that the code path behaves as designed with the fakes, not that a real host or exchange behaves that way. The rehearsal on a real stack is Phases 25 and 26 and is not done.

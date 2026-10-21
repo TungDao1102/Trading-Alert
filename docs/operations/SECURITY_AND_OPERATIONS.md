@@ -63,6 +63,29 @@ High priority:
 - API authentication failure;
 - daily loss WARNING and DAILY_STOP reached (D033).
 
+### 5.1 OPS-05 matrix (Phase 20)
+
+Phase 20 built the alert contract (`ALERT_EVENTS`: a closed set of events with a severity and a fixed template), a journal-first sink (the alert is journaled before it is queued; a repeat inside `alerts.dedupe_window_ms` is suppressed) and a Telegram sender with a bounded retry of the MESSAGE only (an order is never retried, Q5). The matrix below is `OPS05_MATRIX` in `src/ops/alerts.py`, one row per event, labelled `[DESIGN]`: each producer is a tested mechanism, not a running producer in a deployed process, because no composition root builds the sink, the SAFE_MODE observer or `LivePlacementContext.alert_sink` yet (Phase 24). The alert text is a fixed template; no exception text, URL or secret is copied into a message.
+
+| Alert | Source | Severity | Producer module | What Phase 20 delivers |
+|---|---|---|---|---|
+| `UNPROTECTED_POSITION` | OPS-05 | CRITICAL | `src/reconcile/classify.py` | Reconcile tick alerts a position without a stop, a TP-only position, an entry without a protective leg |
+| `CLOSE_REQUIRED` | OPS-05 | CRITICAL | `src/execution/protection.py` | The coordinator alerts once per plan when the position must be closed |
+| `PROTECTIVE_REJECTED` | OPS-05 | CRITICAL | `src/execution/protection.py` | A definitive stop rejection after a fill (B5) alerts with CLOSE_REQUIRED |
+| `DIVERGENCE` | OPS-05 | HIGH | `src/reconcile/classify.py` | Reconcile tick alerts a local versus exchange divergence |
+| `UNKNOWN_ORDER` | OPS-05 | HIGH | `src/reconcile/classify.py` | Reconcile tick alerts an untracked system order |
+| `FOREIGN_ORDER` | OPS-05 | HIGH | `src/reconcile/classify.py` | Reconcile tick alerts a foreign order, for example one placed by hand in the Binance UI |
+| `STALE_DATA` | OPS-05 | HIGH | `src/reconcile/loop.py` | Reconcile tick alerts a stale mark price, a silent user-data stream or a halted stream |
+| `AUTH_FAILURE` | OPS-05 | HIGH | `src/reconcile/loop.py` | Produced only by the reconcile tick REST reads; the coordinator, the closer and the manager journal the error class and do not alert it |
+| `DUPLICATE_EXECUTION_ATTEMPT` | OPS-05 | HIGH | `src/execution/manager.py` | An already consumed approval (stored outcome or lost consume race) alerts through the optional `LivePlacementContext.alert_sink`; nothing is re-sent |
+| `DAILY_STOP` | OPS-05 | CRITICAL | Phase 21 | Contract and test trigger only (`emit_daily_state_alert`); not end to end. The producer is Phase 21 |
+| `DAILY_LOSS_WARNING` | OPS-05 | WARNING | Phase 21 | Contract and test trigger only; not end to end. The producer is Phase 21 |
+| `ENTRY_STATE_UNKNOWN` | D-24 (entry path) | CRITICAL | `src/execution/manager.py` | SAFE_MODE entry of the entry path alerts through the `on_enter` observer |
+| `PROTECTION_HANDOFF_FAILED` | D-24 (entry path) | CRITICAL | `src/execution/manager.py` | SAFE_MODE entry of the entry path alerts through the `on_enter` observer |
+| `DB_FAILURE` | D-24 (entry path) | HIGH | `src/execution/manager.py` | SAFE_MODE entry after a store failure alerts through the `on_enter` observer |
+
+OPS-05 is therefore not complete end to end: the `DAILY_STOP` and daily-loss WARNING producers are Phase 21 (D033), and the wiring of every other producer into a running process is Phase 24. Other events of the closed set (`TP_UNAVAILABLE`, `EMERGENCY_CLOSE_FAILED`, `EMERGENCY_CLOSE_NOT_SENT`, `MANUAL_CLOSE_ORPHAN_UNVERIFIED`, `SAFE_MODE_ENTERED`) keep their existing producers. Section 7 is not changed by this note.
+
 ## 6. Logging
 
 Structured logs should contain:
