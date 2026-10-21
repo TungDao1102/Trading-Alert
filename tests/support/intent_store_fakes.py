@@ -37,7 +37,12 @@ from typing import Any
 
 from src.domain.enums import ExecutionIntentStatus, OrderRole
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
-from src.execution.intent_store import ExecutionIntentStore, IntentRecord, RecordedOutcome
+from src.execution.intent_store import (
+    ExecutionIntentStore,
+    IntentRecord,
+    RecordedOutcome,
+    required_source_status,
+)
 from src.persistence.errors import IntentStateConflict
 
 _UNRESOLVED: frozenset[ExecutionIntentStatus] = frozenset(
@@ -198,6 +203,36 @@ class InMemoryExecutionIntentStore:
                 updated_at_utc=now_utc,
             )
 
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        required = required_source_status(reason_code)  # ValueError before any state is read
+        target = ExecutionIntentStatus.REJECTED
+        with self._lock:
+            row = self._require(approval_id, role)
+            if row.intent_status == target and row.resolution_reason_code == reason_code:
+                return  # identical repeat: idempotent no-op
+            if row.intent_status != required:
+                raise IntentStateConflict(
+                    f"{reason_code} needs status {required.value}, "
+                    f"row for role {role} is {row.intent_status.value}"
+                )
+            self._check(row, target)
+            self._rows[(approval_id, role)] = replace(
+                row,
+                intent_status=target,
+                resolution_reason_code=reason_code,
+                exchange_order_id=None,
+                exchange_status=None,
+                resolved_at_utc=now_utc,
+                updated_at_utc=now_utc,
+            )
+
     def finalize_entry_outcome(
         self,
         *,
@@ -291,6 +326,16 @@ class AlwaysWinsIntentStore:
     ) -> None:
         return None
 
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        return None
+
     def finalize_entry_outcome(
         self,
         *,
@@ -319,6 +364,7 @@ CRASH_STEPS: tuple[str, ...] = (
     "sl_sent",
     "sl_result",
     "finalize",
+    "reconcile",
 )
 
 
@@ -425,6 +471,19 @@ class CrashAfter:
         )
         self._maybe_crash("entry_result" if role == OrderRole.ENTRY.value else "sl_result")
 
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        self._inner.finalize_reconciled_resolution(
+            approval_id=approval_id, role=role, reason_code=reason_code, now_utc=now_utc
+        )
+        self._maybe_crash("reconcile")
+
     def finalize_entry_outcome(
         self,
         *,
@@ -491,6 +550,91 @@ class BarrierBeforeConsume:
             sized_realized_risk=sized_realized_risk,
         )
 
+    # `runtime_checkable` isinstance looks attributes up statically (Python 3.12+), so
+    # `__getattr__` alone does not make this wrapper an `ExecutionIntentStore`. These explicit
+    # delegates do (plan 20-03); `__getattr__` still serves the test-side extras (`get_intent`).
+    def get_entry(self, *, approval_id: str) -> IntentRecord | None:
+        return self._inner.get_entry(approval_id=approval_id)
+
+    def list_unresolved_intents(self) -> Sequence[IntentRecord]:
+        return self._inner.list_unresolved_intents()
+
+    def record_protective_intent(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        trade_plan_id: str,
+        plan_hash: str,
+        algo_client_id: str,
+        symbol: str,
+        side: str,
+        intended_price: Decimal,
+        now_utc: datetime,
+        intended_quantity: Decimal | None = None,
+    ) -> bool:
+        return self._inner.record_protective_intent(
+            approval_id=approval_id,
+            role=role,
+            trade_plan_id=trade_plan_id,
+            plan_hash=plan_hash,
+            algo_client_id=algo_client_id,
+            symbol=symbol,
+            side=side,
+            intended_price=intended_price,
+            now_utc=now_utc,
+            intended_quantity=intended_quantity,
+        )
+
+    def mark_sent(self, *, approval_id: str, role: str, now_utc: datetime) -> None:
+        self._inner.mark_sent(approval_id=approval_id, role=role, now_utc=now_utc)
+
+    def record_result(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        status: ExecutionIntentStatus,
+        exchange_order_id: str | None,
+        exchange_status: str | None,
+        now_utc: datetime,
+    ) -> None:
+        self._inner.record_result(
+            approval_id=approval_id,
+            role=role,
+            status=status,
+            exchange_order_id=exchange_order_id,
+            exchange_status=exchange_status,
+            now_utc=now_utc,
+        )
+
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        self._inner.finalize_reconciled_resolution(
+            approval_id=approval_id, role=role, reason_code=reason_code, now_utc=now_utc
+        )
+
+    def finalize_entry_outcome(
+        self,
+        *,
+        approval_id: str,
+        is_no_trade: bool,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        self._inner.finalize_entry_outcome(
+            approval_id=approval_id,
+            is_no_trade=is_no_trade,
+            reason_code=reason_code,
+            now_utc=now_utc,
+        )
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
@@ -503,6 +647,7 @@ _FAILABLE_METHODS: frozenset[str] = frozenset(
         "record_protective_intent",
         "mark_sent",
         "record_result",
+        "finalize_reconciled_resolution",
         "finalize_entry_outcome",
     }
 )
@@ -623,6 +768,19 @@ class FailingIntentStore:
             exchange_order_id=exchange_order_id,
             exchange_status=exchange_status,
             now_utc=now_utc,
+        )
+
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        self._maybe_fail("finalize_reconciled_resolution", role)
+        self._inner.finalize_reconciled_resolution(
+            approval_id=approval_id, role=role, reason_code=reason_code, now_utc=now_utc
         )
 
     def finalize_entry_outcome(

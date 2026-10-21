@@ -47,7 +47,7 @@ from src.domain.enums import (
     OrderRole,
 )
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
-from src.execution.intent_store import IntentRecord, RecordedOutcome
+from src.execution.intent_store import IntentRecord, RecordedOutcome, required_source_status
 from src.persistence.errors import (
     ApprovedQuantityInconsistent,
     ApprovedQuantityMissing,
@@ -103,6 +103,7 @@ def _to_record(row: ExecutionIntentRow) -> IntentRecord:
         resolved_at_utc=row.resolved_at_utc,
         updated_at_utc=row.updated_at_utc,
         sized_realized_risk=row.sized_realized_risk,
+        resolution_reason_code=row.resolution_reason_code,
     )
 
 
@@ -363,6 +364,77 @@ class PgExecutionStateStore:
             },
             now_utc=now_utc,
         )
+
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        """Close one row as REJECTED by a reconciliation conclusion (Phase 20, T-B, D-11).
+
+        The only writer of `resolution_reason_code`. The source status is read `FOR UPDATE` and
+        judged under the lock: RECONCILED_ABSENT needs UNKNOWN, NEVER_SENT needs INTENDED
+        (`required_source_status`); `assert_transition` still runs for the move to REJECTED.
+        `exchange_status` and `exchange_order_id` are written NULL, `resolved_at_utc` is
+        `now_utc`. An identical repeat is a no-op; anything else is `IntentStateConflict`, and
+        a code outside the closed set is a `ValueError` before any database access.
+        """
+        required = required_source_status(reason_code)
+        target = ExecutionIntentStatus.REJECTED
+        try:
+            with self._db.transaction() as session:
+                current = session.execute(
+                    select(
+                        ExecutionIntentRow.intent_status,
+                        ExecutionIntentRow.resolution_reason_code,
+                    )
+                    .where(
+                        ExecutionIntentRow.approval_id == approval_id,
+                        ExecutionIntentRow.role == role,
+                    )
+                    .with_for_update()
+                ).one_or_none()
+                if current is None:
+                    raise IntentStateConflict(f"no intent row for role {role}")
+                if (
+                    current.intent_status == target.value
+                    and current.resolution_reason_code == reason_code
+                ):
+                    return  # identical repeat: idempotent no-op
+                if current.intent_status != required.value:
+                    raise IntentStateConflict(
+                        f"{reason_code} needs status {required.value}, "
+                        f"row for role {role} is {current.intent_status}"
+                    )
+                try:
+                    assert_transition(
+                        TransitionKind.EXECUTION_INTENT, current.intent_status, target
+                    )
+                except IllegalTransition as exc:
+                    raise IntentStateConflict(
+                        f"illegal intent transition {current.intent_status} -> {target.value} "
+                        f"for role {role}"
+                    ) from exc
+                session.execute(
+                    update(ExecutionIntentRow)
+                    .where(
+                        ExecutionIntentRow.approval_id == approval_id,
+                        ExecutionIntentRow.role == role,
+                    )
+                    .values(
+                        intent_status=target.value,
+                        resolution_reason_code=reason_code,
+                        exchange_order_id=None,
+                        exchange_status=None,
+                        resolved_at_utc=now_utc,
+                        updated_at_utc=now_utc,
+                    )
+                )
+        except IntegrityError as exc:
+            raise _translate_integrity(exc, what=f"finalize {reason_code}") from exc
 
     def finalize_entry_outcome(
         self,
