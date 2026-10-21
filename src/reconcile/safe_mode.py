@@ -174,6 +174,9 @@ class SafeModeController:
         self._in_safe_mode: bool = False
         self._entered_at_utc: datetime | None = None
         self._entered_reason: str | None = None
+        # True from the moment the in-memory state changed until the store accepted it, so a
+        # failed save (or a failed journal write before it) is retried by the next enter call.
+        self._persist_pending: bool = False
 
     @classmethod
     def load(
@@ -205,9 +208,27 @@ class SafeModeController:
             ValueError: `now_utc` is naive or not UTC (a caller bug, not a store failure).
         """
         _require_utc(now_utc)
-        controller = cls.rehydrate(
-            adapter=adapter, journal=journal, compare_fn=compare_fn, state=state_store.load()
-        )
+        try:
+            state = state_store.load()
+            controller = cls.rehydrate(
+                adapter=adapter, journal=journal, compare_fn=compare_fn, state=state
+            )
+        except Exception as exc:
+            controller = cls(
+                adapter=adapter, journal=journal, compare_fn=compare_fn, state_store=state_store
+            )
+            controller._in_safe_mode = True
+            controller._entered_at_utc = now_utc
+            controller._entered_reason = SAFE_MODE_STATE_UNREADABLE
+            try:
+                controller._record_event(
+                    event_type=SAFE_MODE_STATE_UNREADABLE,
+                    payload={"error_type": type(exc).__name__},
+                    now_utc=now_utc,
+                )
+            except Exception:  # noqa: S110 - best-effort audit; the fail-closed state is set
+                pass
+            return controller
         controller._state_store = state_store
         return controller
 
@@ -309,22 +330,28 @@ class SafeModeController:
             ValueError: `reason` is empty or not text (nothing changes), or `now_utc` is naive or
                 not UTC.
         """
+        if not isinstance(reason, str) or reason == "":
+            raise ValueError("reason must be a non-empty string")
         effective_now = now_utc if now_utc is not None else datetime.now(UTC)
         _require_utc(effective_now)
         if self._in_safe_mode:
             # Already in SAFE_MODE — update reason if it changed.
             if self._entered_reason != reason:
                 self._entered_reason = reason
+                self._persist_pending = self._state_store is not None
                 self._journal_safe_mode_event(
                     event_type="SAFE_MODE_REENTER",
                     reason=reason,
                     now_utc=effective_now,
                 )
                 self._persist(now_utc=effective_now)
+            elif self._persist_pending:
+                self._persist(now_utc=effective_now)
             return
         self._in_safe_mode = True
         self._entered_at_utc = effective_now
         self._entered_reason = reason
+        self._persist_pending = self._state_store is not None
         self._journal_safe_mode_event(
             event_type="SAFE_MODE_ENTER",
             reason=reason,
@@ -442,7 +469,9 @@ class SafeModeController:
         """Save `state_snapshot()` to the attached store; a failure propagates (fail closed)."""
         if self._state_store is None:
             return
+        # `_persist_pending` stays True when `save` raises, so the next enter call retries it.
         self._state_store.save(self.state_snapshot(), now_utc=now_utc)
+        self._persist_pending = False
 
     def _journal_safe_mode_event(self, *, event_type: str, reason: str, now_utc: datetime) -> None:
         """Record one SAFE_MODE transition as a JournalEvent.
