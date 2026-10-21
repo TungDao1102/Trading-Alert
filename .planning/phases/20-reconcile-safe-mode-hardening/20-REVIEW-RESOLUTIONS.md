@@ -7,6 +7,10 @@ until the owner confirms it; `docs/DECISIONS.md`, `.planning/ROADMAP.md` and
 **Precedence:** `20-CONTEXT.md` still wins on anything it states and this file does not correct.
 Where this file corrects CONTEXT (items marked CORRECTION) the planner follows this file and the
 CONTEXT line is updated in the same plan.
+**Revised 2026-10-21 (plan revision 2):** finding 9, the T-A re-placement table and the O-A row are
+restated after the owner chose direction 1 for the D-26/D077 conflict (no operator re-placement in
+the confirmed-then-lost branch; plan 20-17). The basis of the never-confirmed same-id re-place is
+stated as implemented behavior with a D034 clause-(1) basis, not as an owner approval.
 
 ## Evidence labels
 
@@ -32,7 +36,7 @@ LIVE stays blocked: `LIVE_ORDERS_DISABLED` (`src/execution/enablement.py`), unse
 | 6 | A transition guard already exists for intent status: `assert_transition(kind, old, new)`, `is_legal`, `IllegalTransition` (DOMN-04). It treats an unchanged state as illegal and leaves the no-op to the caller. | `src/domain/transitions.py:259` |
 | 7 | D-23 already lists `auth failure` and `a duplicate execution attempt`. No producer for either was found in `src`. | `20-CONTEXT.md` D-23 |
 | 8 | WORDING, not an open policy conflict. D077 is Accepted (2026-10-20, owner): a stop that REST confirmed ACTIVE and that is later lost is never re-placed. `.planning/REQUIREMENTS.md` RISK-03 and ROADMAP Phase 20 criterion 2 still say the system re-places a missing stop automatically; they were not updated. | DECISIONS D077, REQUIREMENTS RISK-03, ROADMAP Phase 20 |
-| 9 | The code DOES have a second, legitimate re-placement branch: a stop that was never confirmed and that REST proved absent is re-placed under the same client id before `max_unprotected_ms` (B2/B3), then CLOSE_REQUIRED at the deadline. An existing ACTIVE stop is adopted. | `src/execution/protection.py:33-35`, `:1013-1015`, `:1096-1098` |
+| 9 | The code DOES have a second re-placement branch: a stop that was never confirmed and that REST proved absent is re-placed under the same client id before `max_unprotected_ms` (B2/B3); at the deadline, exposure after a positive fill that is not proven flat goes CLOSE_REQUIRED. An existing ACTIVE stop is adopted. It is implemented behavior (plan 19-14 judgement call, tested by `test_branch_ambiguous_stop_is_replaced_only_after_a_definitive_absence_probe`; 19-NOTES only says "keep querying the stop") whose policy basis is D034 clause (1) ("missing SL is re-placed"). It is NOT an owner approval of a retry; the owner confirms or rejects it at O-A. | `src/execution/protection.py:33-35`, `:1013-1015`, `:1096-1098`; `19-14-SUMMARY.md` key decisions |
 
 ## Revised task list
 
@@ -57,19 +61,24 @@ Each task has its own focused tests. Ids are working names; the planner assigns 
 - Each transition that clears a critical state records its evidence and provenance.
 - Replay after a restart passes through the same guard (D-08). A valid journal replays; an invalid
   or corrupt replay fails closed (SAFE_MODE), never silently discards a transition.
-- Stop re-placement is NOT removed from the wording. The audit (finding 9) found three cases and
-  the criterion text must state each one:
+- Stop re-placement is NOT removed from the wording. The audit (finding 9) found these cases and
+  the criterion text must state each one with its own basis:
 
   | Case | Behavior | Basis |
   |---|---|---|
-  | Stop never confirmed, REST proved it absent, still inside `max_unprotected_ms` | re-placed under the same client id (never blindly); an existing ACTIVE stop is adopted | `protection.py` B2/B3 `[DOC]` |
-  | Stop confirmed ACTIVE, later lost or not active | never re-placed; exposure means CLOSE_REQUIRED and a reduce-only MARKET close; unreadable or flat-with-entry-open means UNPROTECTED, escalating at `max_unprotected_ms` from `stop_lost_at` | D077 `[DOC]` |
-  | Stop still unconfirmed at the deadline | CLOSE_REQUIRED | B2/B3 `[DOC]` |
+  | Stop never confirmed, REST proved it absent (definitive query by its deterministic id), still inside `max_unprotected_ms` | re-placed under the same client id (never blindly); an existing ACTIVE stop is adopted | implemented: `protection.py` B2/B3, plan 19-14 judgement call, test `test_branch_ambiguous_stop_is_replaced_only_after_a_definitive_absence_probe` `[DOC]`; policy basis D034 clause (1); owner confirms or rejects at O-A |
+  | Stop rejected definitively (B5, for example -2021), or rejected / unacknowledged | never resent; CLOSE_REQUIRED, reduce-only close, then alert | D034 clause (2); `protection.py` B5 `[DOC]` |
+  | Stop confirmed ACTIVE, later lost or not active | never re-placed, neither automatically nor by an operator action; exposure means CLOSE_REQUIRED and a reduce-only MARKET close; unreadable or flat-with-entry-open means UNPROTECTED, escalating at `max_unprotected_ms` from `stop_lost_at` | D077 (item (4) overrides D034 clause (1) for this branch only) `[DOC]`; owner direction 1 for D-26 (plan 20-17) |
+  | Stop still unconfirmed at the deadline, after a positive fill, with exposure unresolved or unprotected (not proven flat) | CLOSE_REQUIRED and a reduce-only close; exposure proven absent (two fresh zero reads, entry terminal) ends FLAT and no close order is sent for a non-existent position | B2/B3 `[DOC]` |
 
   The re-placed stop is built from the plan, so it keeps the plan stop and never widens risk; that
-  part of RISK-03 holds for the first case only. Check once whether D034 intends the in-deadline
-  re-placement; D077 item (4) says D034 "stays unchanged for a failed initial protective placement"
-  without naming it. Do not assume a fourth branch exists.
+  part of RISK-03 holds for the first case only. D077 item (4) says D034 "stays unchanged for a
+  failed initial protective placement"; the same-id re-place of the first case is listed in the O-A
+  proposal as its own item for the owner to confirm or reject, and no document may call it owner
+  approved before that answer. Do not assume a further branch exists. The EXEC-06 "re-place
+  protection" control (plan 20-17) has no placement of its own: it can only trigger the first case
+  through the coordinator's own step and refuses the confirmed-then-lost branch, CLOSE_REQUIRED and
+  an unknown stop history.
 - The wording change is a documentation checkpoint (O-A). It does not block the plan. It is not
   evidence that D055 is closed (D055 stays Accepted for the invariant and probe plan with the
   execution model OPEN until Probe 1) and it is not Demo validation or LIVE approval.
@@ -242,7 +251,7 @@ retry expectation, focused test. A test-only trigger is not end-to-end productio
 
 | # | Decision | Needed from owner | Blocks |
 |---|---|---|---|
-| O-A | ALIGN ROADMAP criterion 2 and REQUIREMENTS RISK-03 wording with D077 and the three-case table in T-A. The policy itself is decided (D077). Proposed text goes in as text plus a `checkpoint:human-verify`; ROADMAP and REQUIREMENTS are not edited before the owner accepts. Not D055 closure, not Demo validation, not LIVE approval | yes (documentation) | criterion 2 counting as done; does NOT block the plan |
+| O-A | ALIGN ROADMAP criterion 2 and REQUIREMENTS RISK-03 wording with D077 and the table in T-A (no operator re-placement in the confirmed-then-lost branch; the deadline case narrowed to exposure not proven flat). The policy itself is decided (D077). Proposed text goes in as text plus a `checkpoint:human-verify`; ROADMAP, REQUIREMENTS and the other generic re-placement claims found by a repo-wide docs search are not edited before the owner accepts. The never-confirmed same-id re-place (B2/B3, implemented, D034 clause-(1) basis) is a separate item the owner confirms or rejects. Not D055 closure, not Demo validation, not LIVE approval | yes (documentation) | criterion 2 counting as done; does NOT block the plan |
 | O-B | A5: REST gate open and `StreamState.LIVE` as SAFE_MODE exit conditions | yes | implementing T-E conditions 6 and 7 |
 | O-C | Gate persistence (T-D): persisted deadlines (preferred) or a tested startup barrier with an owner number | yes | implementing T-D, and A5 condition 6 |
 | O-D | Symbol invariant policy (T-F), narrow scope, SAFE_MODE with its own reason | yes | implementing T-F |
