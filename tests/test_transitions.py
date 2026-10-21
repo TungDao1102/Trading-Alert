@@ -112,9 +112,12 @@ EXPECTED: dict[TransitionKind, dict[str, set[str]]] = {
         "ENTRY_UNRESOLVED": {"UNPROTECTED", "ENTRY_ENDED_NO_FILL", "AWAITING_FILL"},
         "UNPROTECTED": {"PROTECTED_ENTRY_OPEN", "PROTECTED", "CLOSE_REQUIRED", "FLAT"},
         "PROTECTED_ENTRY_OPEN": {"PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED", "FLAT"},
-        "PROTECTED": {"COMPLETE", "TP_UNAVAILABLE", "FLAT"},
-        "COMPLETE": {"FLAT"},
-        "TP_UNAVAILABLE": {"FLAT"},
+        # Plan 20-09 (D-07, D077): stop supervision after PROTECTED adds the edges to
+        # CLOSE_REQUIRED (a lost stop with exposure) and UNPROTECTED (a lost stop, position
+        # unreadable) from the three supervised states.
+        "PROTECTED": {"COMPLETE", "TP_UNAVAILABLE", "FLAT", "CLOSE_REQUIRED", "UNPROTECTED"},
+        "COMPLETE": {"FLAT", "CLOSE_REQUIRED", "UNPROTECTED"},
+        "TP_UNAVAILABLE": {"FLAT", "CLOSE_REQUIRED", "UNPROTECTED"},
         "CLOSE_REQUIRED": {"CLOSE_FAILED", "FLAT"},
         "CLOSE_FAILED": {"CLOSE_REQUIRED", "FLAT"},
         "FLAT": set(),
