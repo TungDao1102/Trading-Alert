@@ -11,8 +11,9 @@ Three duck-typed journals with the one surface every controller uses, `record(ev
 None of them touches a database or the network.
 
 Plan 20-12 adds the doubles of the reconcile loop: `RecordingAlertSink`, `FakeGate`,
-`FakeProtectionView`, `FakeReconcileAdapter`, `InMemorySafeModeStore` and four row builders
-(`make_position`, `make_open_order`, `make_algo_order`, `make_plan_protection`). The adapter
+`FakeProtectionView`, `FakeReconcileAdapter`, `InMemorySafeModeStore`, `FakeIntentStore` and five row builders
+(`make_position`, `make_open_order`, `make_algo_order`, `make_plan_protection`,
+`make_intent_record`). The adapter
 double raises on any method whose name starts with `place_` or `new_` and records the attempt,
 so a loop that tried to place an order would fail the test by construction.
 """
@@ -315,6 +316,58 @@ class FakeReconcileAdapter:
         raise AttributeError(name)
 
 
+class FakeIntentStore:
+    """`list_unresolved_intents()` over fixed rows; `raises` makes the read fail."""
+
+    def __init__(self, rows: Iterable[Any] = (), *, raises: BaseException | None = None) -> None:
+        self.rows = tuple(rows)
+        self.raises = raises
+        self.calls = 0
+
+    def list_unresolved_intents(self) -> tuple[Any, ...]:
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.rows
+
+
+def make_intent_record(
+    plan_hash: str,
+    role: str,
+    *,
+    status: str = "SENT",
+    symbol: str = "BTCUSDT",
+) -> Any:
+    """An unresolved `IntentRecord` row whose ids are the deterministic ones of the plan."""
+    from src.domain.enums import ExecutionIntentStatus, OrderRole
+    from src.execution.intent_store import IntentRecord
+    from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
+
+    is_entry = role == OrderRole.ENTRY.value
+    return IntentRecord(
+        approval_id=f"approval-{plan_hash[:8]}",
+        role=role,
+        trade_plan_id=f"trade-plan-{plan_hash[:8]}",
+        plan_hash=plan_hash,
+        client_order_id=derive_client_order_id(plan_hash=plan_hash, role=role)
+        if is_entry
+        else None,
+        algo_client_id=None if is_entry else derive_algo_client_id(plan_hash=plan_hash, role=role),
+        symbol=symbol,
+        side="BUY" if is_entry else "SELL",
+        intended_quantity=Decimal("0.004"),
+        intended_price=Decimal("100"),
+        intent_status=ExecutionIntentStatus(status),
+        exchange_order_id=None,
+        exchange_status=None,
+        outcome=None,
+        intended_at_utc=_T0,
+        sent_at_utc=None if status == "INTENDED" else _T0,
+        resolved_at_utc=None,
+        updated_at_utc=_T0,
+    )
+
+
 def make_position(
     symbol: str, amount: str | Decimal, *, position_side: str = "BOTH"
 ) -> PositionSnapshot:
@@ -430,6 +483,7 @@ def make_plan_protection(
 __all__ = [
     "AlertCall",
     "FakeGate",
+    "FakeIntentStore",
     "FakeProtectionView",
     "FakeReconcileAdapter",
     "FlakyJournal",
@@ -438,6 +492,7 @@ __all__ = [
     "RecordingAlertSink",
     "RecordingJournal",
     "make_algo_order",
+    "make_intent_record",
     "make_open_order",
     "make_plan_protection",
     "make_position",
