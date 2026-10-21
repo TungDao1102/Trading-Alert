@@ -157,6 +157,8 @@ def test_an_empty_table_loads_as_none_and_gives_the_default_controller(pg_db: st
             "in_safe_mode": False,
             "entered_at_utc": None,
             "entered_reason": None,
+            "last_exit_operator_id": None,
+            "last_exit_at_utc": None,
         }
     finally:
         dispose()

@@ -1,4 +1,4 @@
-"""Operator-attributed, fail-closed SAFE_MODE exit (Phase 20, plan 20-15, D-15, F-711, T-E rows 1-5).
+"""Operator-attributed, fail-closed SAFE_MODE exit (Phase 20, plan 20-15, D-15, F-711, T-E 1-5).
 
 Pins, on fakes only (nothing here is [DEMO] evidence):
 
