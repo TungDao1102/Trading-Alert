@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from src.domain.enums import RejectionReason, SystemStateKey
 from src.persistence.engine import make_sync_engine
@@ -201,7 +201,9 @@ def test_a_stored_state_the_controller_cannot_parse_starts_in_safe_mode_unreadab
 
 
 def test_an_unreachable_database_starts_the_controller_in_safe_mode_unreadable() -> None:
-    engine = make_sync_engine(UNREACHABLE_URL)
+    # `make_sync_engine` probes the server at creation and would raise here; a lazy engine lets
+    # the store itself hit the refused connection, as a database lost after startup would.
+    engine = create_engine(UNREACHABLE_URL, connect_args={"connect_timeout": 2})
     try:
         db = OperationalDatabase(engine)
         store = PgSafeModeStateStore(PgSystemStateStore(db, PgJournalStore(db)))
