@@ -26,6 +26,7 @@ with "act first, journal afterwards". Behaviors (a journal outage is the only fa
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -72,6 +73,17 @@ class RecordingCancelAdapter:
 
     async def cancel_algo_order(self, **kwargs: Any) -> None:
         self.calls.append(("cancel_algo_order", kwargs))
+
+    # A healthy, flat exchange (plan 20-11, D-09 / D-17): the post-cancel queries read CANCELED
+    # and the position reads are flat. These are reads, so they are not part of `calls`.
+    async def query_order_by_client(self, **kwargs: Any) -> Any:
+        return SimpleNamespace(found=True, status="CANCELED")
+
+    async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
+        return SimpleNamespace(found=True, algo_status="CANCELED")
+
+    async def snapshot_positions(self, **kwargs: Any) -> list[Any]:
+        return []
 
 
 def _passing_health_verdict() -> Any:

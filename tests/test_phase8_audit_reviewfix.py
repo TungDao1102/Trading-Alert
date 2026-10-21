@@ -193,9 +193,16 @@ class _FakeSweepAdapter:
         self.found = found
         self.cancel_exc = cancel_exc
         self.cancels: list[tuple[str, str]] = []
+        self._queries: dict[str, int] = {}
 
     async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any:
-        return SimpleNamespace(found=self.found, algo_status="WORKING", update_time_utc=NOW)
+        # Plan 20-11 (D-17): the sweeper queries once before the cancel (the orphan is still
+        # there) and once after it (the cancel is verified). The first answer is the old
+        # fixture value; every later one shows the order canceled, as a healthy exchange does.
+        n = self._queries.get(client_algo_id, 0) + 1
+        self._queries[client_algo_id] = n
+        status = "WORKING" if n == 1 else "CANCELED"
+        return SimpleNamespace(found=self.found, algo_status=status, update_time_utc=NOW)
 
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None:
         self.cancels.append((symbol, client_algo_id))

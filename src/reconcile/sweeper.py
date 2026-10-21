@@ -10,10 +10,24 @@ OR position-plus-order-truth agreement.
 The sweeper is journal-first (D-05 extended): the pre-image is
 journaled BEFORE the cancel call, the post-image is journaled AFTER.
 A cancel that fails to journal the pre-image is rejected (the audit
-trail is the safety net).
+trail is the safety net). It is not one of the four risk-reducing controls of D-16: an
+orphan reduce-only / closePosition leg cannot open exposure, so it keeps its journal-first
+pre-image.
+
+Phase 20 plan 20-11: a cancel is not counted until a query shows it (D-17, F-502). After the
+cancel the algo order is queried by its client id (`confirm_algo_cancel`); the post-image is
+journaled, and the orphan counted as swept, only for CANCELED or GONE_NOT_CANCELED (nothing
+rests under the id any more). Any other verdict journals `cancel_unverified`, and the orphan is
+reported as skipped, so the next tick looks again. Every skipped cancel also leaves a best-effort
+`SWEEP_SKIPPED` row (IN-14, D-03): symbol, algo id and a reason code, never exception text.
+
+A manual close outside the system (G4-035) can end two ways and the sweeper relies on neither:
+the exchange auto-cancels the closePosition legs when the position goes flat (the probe finds
+nothing, `already_gone`), or the legs stay as orphans (two zero reads, a verified cancel).
 
 The module is dependency-free: stdlib + `src/domain/*` + sibling
-modules only. No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
+modules + `src/execution/cancel_verification.py` (a read-only query helper with no
+placement method) only. No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 The adapter is consumed via Protocol-typed surfaces; only
 `src/adapters/binance_usdm.py` imports the SDK.
 """
@@ -27,6 +41,12 @@ from typing import Any, Protocol
 
 from src.domain.algo_status import classify_algo_status
 from src.domain.journal import JournalEvent, content_hash_event_id
+from src.execution.cancel_verification import (
+    PROVEN_GONE,
+    CancelDetail,
+    CancelVerdict,
+    confirm_algo_cancel,
+)
 
 # --------------------------------------------------------------------------- #
 # Adapter + journal protocols — the minimum surface the sweeper needs.
@@ -204,6 +224,12 @@ class OrphanSweeper:
                         reason=skip_reason,
                     )
                 )
+                self._record_skip_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason_code=_REASON_TRANSIENT_GAP,
+                    now_utc=effective_now,
+                )
                 continue
 
             # Query-by-ID first (T-8-32): verify the algo still
@@ -229,6 +255,12 @@ class OrphanSweeper:
                         client_algo_id=client_algo_id,
                         reason=f"probe_failed: {type(exc).__name__}",
                     )
+                )
+                self._record_skip_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason_code=f"probe_failed: {type(exc).__name__}",
+                    now_utc=effective_now,
                 )
                 continue
             if not getattr(probe, "found", False):
@@ -273,10 +305,48 @@ class OrphanSweeper:
                         reason=f"cancel_failed: {type(exc).__name__}",
                     )
                 )
+                self._record_skip_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason_code=f"cancel_failed: {type(exc).__name__}",
+                    now_utc=effective_now,
+                )
                 continue
 
-            # The cancel succeeded: the algo order is gone whatever happens to the
-            # post-image write, so the orphan is counted as cancelled either way.
+            # The cancel call returned, which proves nothing (-2011 maps to the same None,
+            # D-17, F-502): ask the exchange. Only a query that shows the order canceled, or
+            # no longer resting, counts the orphan as swept.
+            detail = CancelDetail()
+            verdict = await confirm_algo_cancel(
+                self._adapter, client_algo_id=client_algo_id, detail=detail
+            )
+            if verdict not in PROVEN_GONE:
+                self._record_failure_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason=f"cancel_unverified: {verdict.value}",
+                    now_utc=effective_now,
+                    phase="cancel_unverified",
+                    verdict=verdict,
+                    detail=detail,
+                )
+                skipped.append(
+                    SweepSkip(
+                        symbol=symbol,
+                        client_algo_id=client_algo_id,
+                        reason=f"cancel_unverified: {verdict.value}",
+                    )
+                )
+                self._record_skip_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason_code=f"cancel_unverified: {verdict.value}",
+                    now_utc=effective_now,
+                )
+                continue
+
+            # The algo order is gone whatever happens to the post-image write, so the
+            # orphan is counted as cancelled either way.
             cancelled.append((symbol, client_algo_id))
             try:
                 # Journal the post-image AFTER the cancel.
@@ -284,6 +354,7 @@ class OrphanSweeper:
                     symbol=symbol,
                     client_algo_id=client_algo_id,
                     now_utc=effective_now,
+                    verdict=verdict,
                 )
                 self._journal.record(post_event)
             except Exception as exc:
@@ -310,6 +381,9 @@ class OrphanSweeper:
         client_algo_id: str,
         reason: str,
         now_utc: datetime,
+        phase: str = "sweep_failed",
+        verdict: CancelVerdict | None = None,
+        detail: CancelDetail | None = None,
     ) -> None:
         """Journal a failure event; a journal error must not end the sweep.
 
@@ -323,6 +397,47 @@ class OrphanSweeper:
                     client_algo_id=client_algo_id,
                     reason=reason,
                     now_utc=now_utc,
+                    phase=phase,
+                    verdict=verdict,
+                    detail=detail,
+                )
+            )
+        except Exception:  # best effort by design, see the docstring
+            return
+
+    def _record_skip_best_effort(
+        self,
+        *,
+        symbol: str,
+        client_algo_id: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        """Journal one `SWEEP_SKIPPED` row for a cancel the sweeper did not make (IN-14, D-03).
+
+        The payload holds the symbol, the algo id and a reason code (an exception CLASS name at
+        most, never its text). A journal failure is swallowed: the skip is already in
+        `SweepOutcome` and must not end the sweep.
+        """
+        payload_json = _build_payload_json(
+            {"symbol": symbol, "client_algo_id": client_algo_id, "reason": reason_code}
+        )
+        try:
+            self._journal.record(
+                JournalEvent(
+                    journal_event_id=content_hash_event_id(
+                        prefix="sweep_skipped",
+                        event_type=EVENT_SWEEP_SKIPPED,
+                        entity_id=client_algo_id,
+                        occurred_at_utc=now_utc,
+                        payload_json=payload_json,
+                    ),
+                    occurred_at_utc=now_utc,
+                    event_type=EVENT_SWEEP_SKIPPED,
+                    entity_type="OpenAlgoOrder",
+                    entity_id=client_algo_id,
+                    correlation_id="reconcile_orphan_sweep",
+                    payload_json=payload_json,
                 )
             )
         except Exception:  # best effort by design, see the docstring
@@ -370,14 +485,22 @@ class OrphanSweeper:
         reason: str,
         now_utc: datetime,
         phase: str = "sweep_failed",
+        verdict: CancelVerdict | None = None,
+        detail: CancelDetail | None = None,
     ) -> JournalEvent:
-        payload = {
+        payload: dict[str, Any] = {
             "symbol": symbol,
             "client_algo_id": client_algo_id,
             "cancelled": False,
             "reason": reason,
             "phase": phase,
         }
+        if verdict is not None:
+            payload["verdict"] = verdict.value
+        if detail is not None and detail.observed_status is not None:
+            payload["observed_status"] = detail.observed_status
+        if detail is not None and detail.error_type is not None:
+            payload["error_type"] = detail.error_type
         payload_json = _build_payload_json(payload)
         return JournalEvent(
             journal_event_id=content_hash_event_id(
@@ -401,15 +524,22 @@ class OrphanSweeper:
         symbol: str,
         client_algo_id: str,
         now_utc: datetime,
+        verdict: CancelVerdict | None = None,
     ) -> JournalEvent:
-        """Build the post-cancel JournalEvent carrying the cancel outcome."""
-        payload = {
+        """Build the post-cancel JournalEvent carrying the cancel outcome.
+
+        `verdict` (plan 20-11) is the post-cancel query result, CANCELED or GONE_NOT_CANCELED;
+        it is left out of the payload when None, which keeps older ids unchanged.
+        """
+        payload: dict[str, Any] = {
             "symbol": symbol,
             "client_algo_id": client_algo_id,
             "cancelled": True,
             "cancelled_at_utc": _iso(now_utc),
             "phase": "post_cancel",
         }
+        if verdict is not None:
+            payload["verdict"] = verdict.value
         payload_json = _build_payload_json(payload)
         return JournalEvent(
             journal_event_id=content_hash_event_id(
@@ -433,6 +563,9 @@ class OrphanSweeper:
 # --------------------------------------------------------------------------- #
 
 _ZERO_TIMEDELTA = timedelta(0)
+
+EVENT_SWEEP_SKIPPED = "SWEEP_SKIPPED"
+_REASON_TRANSIENT_GAP = "transient_position_gap"
 
 
 def _is_awaitable(value: Any) -> bool:
@@ -475,6 +608,7 @@ def _build_payload_json(payload: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "EVENT_SWEEP_SKIPPED",
     "OrphanSweeper",
     "SweepOutcome",
     "SweepSkip",

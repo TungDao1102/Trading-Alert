@@ -1027,14 +1027,14 @@ def _status_unknown() -> BaseException:
     return ServerError(error_message="status unknown", status_code=503)
 
 
-def _probe(found: bool) -> Any:
+def _probe(found: bool, status: str = "NEW") -> Any:
     from src.adapters.binance_usdm import OrderProbe
 
     return OrderProbe(
         client_order_id=_load_expected()["entry_client_order_id"],
         found=found,
         order_id="12345" if found else None,
-        status="NEW" if found else None,
+        status=status if found else None,
         update_time_utc=None,
     )
 
@@ -1789,6 +1789,8 @@ async def test_a_failed_hand_off_cancels_the_entry_and_requires_reconciliation()
     case_input = _load_input()
     registry = StubProtectionRegistry(register_exception=RuntimeError("registry down"))
     adapter = FakeExecutionAdapter()
+    # Plan 20-11 (D-17): the cancel is verified by a query; a healthy exchange shows CANCELED.
+    adapter._query_response = _probe(found=True, status="CANCELED")  # type: ignore[attr-defined]
     safe_mode_controller = RecordingSafeModeController()
     journal = FakeJournal()
     store = InMemoryExecutionIntentStore()
@@ -2667,7 +2669,11 @@ async def test_store_down_and_a_failed_hand_off_still_cancels_the_entry() -> Non
     )
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert safe_mode.entered_reasons == ["DB_FAILURE", "PROTECTION_HANDOFF_FAILED"]
-    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+    # The cancel is the last order action; plan 20-11 (D-17) adds the verifying query after it.
+    assert [c["method"] for c in adapter.calls][-2:] == [
+        "cancel_normal_order",
+        "query_order_by_client",
+    ]
 
 
 class _StoreDownJournal:
@@ -2770,7 +2776,11 @@ async def test_cr01_failing_journal_at_a_failed_hand_off_still_cancels_the_entry
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert controller.in_safe_mode is True
     assert journal.attempts >= 1
-    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+    # The cancel is the last order action; plan 20-11 (D-17) adds the verifying query after it.
+    assert [c["method"] for c in adapter.calls][-2:] == [
+        "cancel_normal_order",
+        "query_order_by_client",
+    ]
 
 
 async def test_a_simulated_crash_propagates_unchanged() -> None:
