@@ -12,6 +12,11 @@ process; here it is driven by tests with fakes. One tick:
      and the report, so LEGACY_IN_MEMORY (no persistence wired) is visible.
   2. stops with RECONCILE_SKIPPED_RESTORE_PENDING while the coordinator's tracked plans are not
      rebuilt (`restore_complete`), so a half-restored view is never read as "no plans".
+     Right after steps 1 and 2 (so only while the gate allows sending) the tick hands open pending
+     risk-reducing work to the injected `risk_reducer` (plan 20-21, D-20, Q4; owner decision O-E:
+     reserved priority means queue ORDER only). It is ordering, never a bypass of a 429/418
+     pause, it reserves no request weight, the loop sends nothing itself and nothing promises that
+     a request goes out at once. The close and the remaining-entry cancel go before a stop.
   3. judges the optional feeds (plan 20-16, D-25): a missing or stale mark price for a tracked
      symbol, or user-data silence, enters SAFE_MODE STALE_FEED and alerts STALE_DATA; a feed that
      recovers never exits SAFE_MODE. Steps 1 and 2 come first, so under a gate restriction or a
@@ -28,6 +33,9 @@ process; here it is driven by tests with fakes. One tick:
   6. enters SAFE_MODE once per distinct reason, delegates stop-related exposure to the
      coordinator (`notify_divergence`, one decision path), alerts, and finally sweeps ORPHAN
      protectives only; it journals one RECONCILE_TICK row.
+  7. last, as background work (plan 20-21, D-21): refreshes the last validated lot filters of every
+     tracked symbol when due (`refresh_if_due`). It re-checks the gate first, is skipped while a
+     pending risk-reducing row is still open, and a refresh failure never fails the tick.
 
 Fail closed: a failed truth read, a failed local read or a compare error is never agreement. The
 tick enters SAFE_MODE (API_DEGRADATION for the exchange reads and compare, DB_FAILURE for the
@@ -55,7 +63,7 @@ import asyncio
 import dataclasses
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -97,6 +105,41 @@ RECONCILE_READ_FAILED: str = "RECONCILE_READ_FAILED"
 ALERT_SINK_FAILED: str = "ALERT_SINK_FAILED"
 #: A step after a successful read failed (SAFE_MODE entry, delegation, sweep, UNKNOWN step).
 RECONCILE_ACTION_FAILED: str = "RECONCILE_ACTION_FAILED"
+
+#: Open pending risk-reducing actions were handed to the injected `risk_reducer` first (plan 20-21,
+#: D-20, Q4). Queue order only: the payload names the kinds, never an order id or a quantity.
+RECONCILE_RISK_REDUCING_FIRST: str = "RECONCILE_RISK_REDUCING_FIRST"
+#: The background phase (lot-filter refresh, D-21) did not run in this tick; the payload names why.
+RECONCILE_BACKGROUND_SKIPPED: str = "RECONCILE_BACKGROUND_SKIPPED"
+
+#: Why a background phase was skipped (the `reason` of RECONCILE_BACKGROUND_SKIPPED).
+BACKGROUND_SKIP_GATE_RESTRICTED: str = "GATE_RESTRICTED"
+BACKGROUND_SKIP_OPEN_PENDING: str = "OPEN_PENDING_ACTIONS"
+BACKGROUND_SKIP_PENDING_UNREADABLE: str = "PENDING_UNREADABLE"
+
+#: The phase names of `TickReport.order`, in the order a full tick runs them.
+PHASE_GATE: str = "gate"
+PHASE_RESTORE: str = "restore"
+PHASE_RISK_REDUCING: str = "risk_reducing"
+PHASE_FEEDS: str = "feeds"
+PHASE_STREAM: str = "stream"
+PHASE_UNKNOWN_ENTRIES: str = "unknown_entries"
+PHASE_READS: str = "reads"
+PHASE_LOCAL: str = "local"
+PHASE_COMPARE: str = "compare"
+PHASE_ACT: str = "act"
+PHASE_SWEEP: str = "sweep"
+PHASE_BACKGROUND: str = "background"
+
+#: Q4 order of the open pending kinds: the emergency close first, then the remaining entry cancel,
+#: then a stop (a queued old stop is never sent when the policy already requires a close). These
+#: are the string values of `src.execution.pending_actions.PendingKind` (matched by value because
+#: this module imports no store); a parity test pins them.
+RISK_REDUCING_KIND_ORDER: tuple[str, ...] = (
+    "CLOSE_NOT_SENT",
+    "PROTECTION_ENTRY_CANCEL_NOT_SENT",
+    "STOP_NOT_SENT",
+)
 
 TICK_COMPARED: str = "COMPARED"
 TICK_SKIPPED_GATE: str = "SKIPPED_GATE"
@@ -271,6 +314,25 @@ class FeedSource(Protocol):
     def read_feed(self) -> FeedReading: ...
 
 
+class LotFilterRefresher(Protocol):
+    """`LotFilterSource.refresh_if_due`: re-reads and stores a symbol's lot filters when due.
+
+    It never raises into the tick by contract (plan 20-18); the loop guards it anyway.
+    """
+
+    async def refresh_if_due(self, symbol: str, *, now_utc: datetime) -> bool: ...
+
+
+class OpenPendingSource(Protocol):
+    """`PendingActionStore.list_open()`: the PENDING rows of refused protective actions (20-14)."""
+
+    def list_open(self) -> Sequence[Any]: ...
+
+
+#: The injected risk-reducing work (Phase 24 binds the coordinator and closer steps to it).
+RiskReducer = Callable[[], Awaitable[None]]
+
+
 class _UnusableRows(Exception):
     """A snapshot answered with something that is not a list of rows."""
 
@@ -290,7 +352,9 @@ class TickReport:
     pairs of stop-related divergences that reached no coordinator plan (several or no candidate,
     or an untracked plan): they were alerted only. `swept` and `sweep_skipped` echo the sweeper
     outcome. `action_failures` names the steps that failed after a read succeeded;
-    `failed_source` names the read that failed.
+    `failed_source` names the read that failed. `order` lists the phases that ran, in execution
+    order (plan 20-21; names are the `PHASE_*` constants): a tick stopped by the gate is just
+    ("gate",), and a clean tick with a lot-filter refresher ends with "background".
     """
 
     outcome: str
@@ -311,6 +375,7 @@ class TickReport:
     unknown_entries: Any = None
     stale_symbols: tuple[str, ...] = ()
     user_data_silent: bool = False
+    order: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -338,6 +403,14 @@ class ReconcileLoop:
         stream: optional `StreamDivergenceSource`; when set, every tick acts on the stream's
             SINK_FAILURE items and on a supervisor halt and queries the ids other items name
             (plan 20-16, D-04). None means the stream is not looked at.
+        lot_filters: optional `LotFilterRefresher` (plan 20-21, D-21); when set, the LAST thing a
+            compared tick does is to call `refresh_if_due` once per tracked symbol (background
+            work). A refresh that returns False or raises never fails the tick.
+        pending_actions: optional `OpenPendingSource` (plan 20-21, D-20); when set, an open
+            pending risk-reducing row hands the tick to `risk_reducer` first and keeps the
+            background phase from running while any row is still open.
+        risk_reducer: optional awaitable callable; Phase 24 binds the coordinator and closer steps
+            to it. The loop only awaits it; it places and cancels nothing itself.
 
     Raises:
         ValueError: `safe_mode` is not durable.
@@ -360,6 +433,9 @@ class ReconcileLoop:
         unknown_entries: UnknownEntryStepper | None = None,
         feeds: FeedSource | None = None,
         stream: StreamDivergenceSource | None = None,
+        lot_filters: LotFilterRefresher | None = None,
+        pending_actions: OpenPendingSource | None = None,
+        risk_reducer: RiskReducer | None = None,
     ) -> None:
         if not safe_mode.is_durable:
             raise ValueError(
@@ -382,6 +458,10 @@ class ReconcileLoop:
         self._unknown_entries = unknown_entries
         self._feeds = feeds
         self._stream = stream
+        self._lot_filters = lot_filters
+        self._pending_actions = pending_actions
+        self._risk_reducer = risk_reducer
+        self._order: list[str] = []
         self._limits = limits
         self._tick_interval_ms = tick_interval_ms
         self._lock = asyncio.Lock()
@@ -407,35 +487,53 @@ class ReconcileLoop:
         if self._lock.locked():
             return TickReport(outcome=TICK_SKIPPED_OVERLAP, now_utc=now_utc)
         async with self._lock:
+            # `_order` is per tick: the lock above makes one tick at a time the only writer.
+            self._order = []
             gate_status = self._gate_recovery_status()
             report = await self._run(now_utc, gate_status)
-            return dataclasses.replace(report, gate_recovery_status=gate_status)
+            return dataclasses.replace(
+                report, gate_recovery_status=gate_status, order=tuple(self._order)
+            )
+
+    def _phase(self, name: str) -> None:
+        """Record that a phase of this tick ran (the phases show in `TickReport.order`)."""
+        self._order.append(name)
 
     # ------------------------------------------------------------------ #
     # Steps.
     # ------------------------------------------------------------------ #
 
     async def _run(self, now_utc: datetime, gate_status: str | None) -> TickReport:
+        self._phase(PHASE_GATE)
         gate_report = self._check_gate(now_utc, gate_status)
         if gate_report is not None:
             return gate_report
+        self._phase(PHASE_RESTORE)
         if not self._restore_complete():
             self._journal_row(RECONCILE_SKIPPED_RESTORE_PENDING, {}, now_utc)
             return TickReport(outcome=TICK_SKIPPED_RESTORE_PENDING, now_utc=now_utc)
 
         action_failures: list[str] = []
-        pre = _combine(
-            self._check_feeds(now_utc, action_failures),
-            await self._check_stream(now_utc, action_failures),
-        )
+        await self._risk_reducing_first(now_utc, action_failures)
+        if self._feeds is not None:
+            self._phase(PHASE_FEEDS)
+        feeds_pre = self._check_feeds(now_utc, action_failures)
+        if self._stream is not None:
+            self._phase(PHASE_STREAM)
+        pre = _combine(feeds_pre, await self._check_stream(now_utc, action_failures))
         report = await self._read_and_act(now_utc, gate_status, pre, action_failures)
+        if report.outcome == TICK_COMPARED:
+            await self._background(now_utc)
         return _with_pre(report, pre)
 
     async def _read_and_act(
         self, now_utc: datetime, gate_status: str | None, pre: _Pre, action_failures: list[str]
     ) -> TickReport:
+        if self._unknown_entries is not None:
+            self._phase(PHASE_UNKNOWN_ENTRIES)
         unknown_report = await self._step_unknown_entries(now_utc, action_failures)
 
+        self._phase(PHASE_READS)
         truth: dict[str, tuple[Any, ...]] = {}
         readers = (
             ("open_normal_orders", self._adapter.snapshot_open_normal_orders),
@@ -451,6 +549,7 @@ class ReconcileLoop:
             except Exception as exc:
                 return self._exchange_read_failed(now_utc, source, exc, action_failures)
 
+        self._phase(PHASE_LOCAL)
         try:
             plans = tuple(self._protection.protections())
             unresolved = tuple(self._intent_store.list_unresolved_intents())
@@ -460,6 +559,7 @@ class ReconcileLoop:
                 now_utc, "local_intent", exc, SAFE_MODE_DB_FAILURE, action_failures
             )
 
+        self._phase(PHASE_COMPARE)
         try:
             diff = compare(
                 **local.compare_kwargs(),
@@ -620,6 +720,7 @@ class ReconcileLoop:
         gate_status: str | None,
         pre: _Pre,
     ) -> TickReport:
+        self._phase(PHASE_ACT)
         # One entry per distinct reason, least urgent first: the controller keeps the LAST reason,
         # so the persisted reason is the most urgent one (stop-related exposure), and every
         # reason is still in the journal.
@@ -652,6 +753,7 @@ class ReconcileLoop:
         swept: tuple[tuple[str, str], ...] = ()
         sweep_skipped: tuple[tuple[str, str], ...] = ()
         if diff.orphan_protectives:
+            self._phase(PHASE_SWEEP)
             swept, sweep_skipped = await self._sweep(diff, now_utc, failures)
 
         counts: dict[str, int] = {}
@@ -692,6 +794,127 @@ class ReconcileLoop:
             action_failures=tuple(failures),
             unknown_entries=unknown_report,
         )
+
+    async def _risk_reducing_first(self, now_utc: datetime, failures: list[str]) -> None:
+        """Hand open pending risk-reducing work to the injected `risk_reducer` first (D-20, Q4).
+
+        Runs right after the gate and restore checks, so it only ever runs when the gate allows
+        sending: a pause is never bypassed. It is queue ORDER only (owner decision O-E,
+        accept-queue-order): it reserves no request weight, sends nothing itself and does not
+        promise that anything is sent at once; the reducer's own calls still go through the gate
+        and may be refused again. The emergency close and the remaining-entry cancel come before
+        a stop (`RISK_REDUCING_KIND_ORDER`), so a queued old stop is not sent ahead of a close the
+        current policy already requires. No claim is made that a position always has a stop under
+        every rate-limit condition (Q4).
+
+        An unreadable pending store enters SAFE_MODE DB_FAILURE and the reducer is still awaited
+        (fail toward reducing risk). A raising reducer is journaled by exception class name and
+        the tick goes on. Without a wired store (or without open rows) nothing happens here.
+        """
+        if self._pending_actions is None:
+            return
+        rows: tuple[Any, ...] = ()
+        unreadable = False
+        try:
+            rows = tuple(self._pending_actions.list_open())
+        except Exception as exc:
+            unreadable = True
+            failures.append("pending_actions_read")
+            self._journal_row(
+                RECONCILE_READ_FAILED,
+                {"source": "pending_actions", "error_type": type(exc).__name__},
+                now_utc,
+            )
+            self._enter_safe_mode(SAFE_MODE_DB_FAILURE, now_utc, failures)
+        if not rows and not unreadable:
+            return
+        self._phase(PHASE_RISK_REDUCING)
+        payload: dict[str, Any] = {"reducer_bound": self._risk_reducer is not None}
+        if unreadable:
+            payload["kinds"] = []
+            payload["pending_unreadable"] = True
+        else:
+            payload["kinds"] = list(_ordered_kinds(rows))
+            payload["open_count"] = len(rows)
+        self._journal_row(RECONCILE_RISK_REDUCING_FIRST, payload, now_utc)
+        if self._risk_reducer is None:
+            return
+        try:
+            await self._risk_reducer()
+        except Exception as exc:
+            failures.append("risk_reducer")
+            self._journal_row(
+                RECONCILE_ACTION_FAILED,
+                {"action": "risk_reducer", "error_type": type(exc).__name__},
+                now_utc,
+            )
+
+    def _gate_allows_sending(self) -> bool:
+        """True only when the gate answers 'no restriction'; an unreadable gate is a restriction."""
+        try:
+            return self._gate.restriction() is None
+        except Exception:
+            return False
+
+    async def _background(self, now_utc: datetime) -> None:
+        """Background work, LAST in a compared tick (plan 20-21, D-21): the lot-filter refresh.
+
+        Runs `refresh_if_due` once per tracked symbol so that the stored-filter fallback of the
+        emergency close stays fresh. It makes REST reads, so it re-asks the gate before the phase
+        and before each symbol (a pause that began during the tick is never bypassed) and it is
+        skipped, with RECONCILE_BACKGROUND_SKIPPED, while any pending risk-reducing row is open
+        or unreadable: safety work does not compete with a refresh. A refresh that returns False
+        or raises never fails the tick and adds no SAFE_MODE reason (only the exception class
+        name is journaled).
+        """
+        if self._lot_filters is None:
+            return
+        symbols = self._tracked_symbols()
+        if not symbols:
+            return
+        if not self._gate_allows_sending():
+            self._journal_row(
+                RECONCILE_BACKGROUND_SKIPPED, {"reason": BACKGROUND_SKIP_GATE_RESTRICTED}, now_utc
+            )
+            return
+        if self._pending_actions is not None:
+            try:
+                open_rows = len(tuple(self._pending_actions.list_open()))
+            except Exception:
+                self._journal_row(
+                    RECONCILE_BACKGROUND_SKIPPED,
+                    {"reason": BACKGROUND_SKIP_PENDING_UNREADABLE},
+                    now_utc,
+                )
+                return
+            if open_rows > 0:
+                self._journal_row(
+                    RECONCILE_BACKGROUND_SKIPPED,
+                    {"reason": BACKGROUND_SKIP_OPEN_PENDING, "open_count": open_rows},
+                    now_utc,
+                )
+                return
+        self._phase(PHASE_BACKGROUND)
+        for symbol in symbols:
+            if not self._gate_allows_sending():
+                self._journal_row(
+                    RECONCILE_BACKGROUND_SKIPPED,
+                    {"reason": BACKGROUND_SKIP_GATE_RESTRICTED, "symbol": symbol},
+                    now_utc,
+                )
+                return
+            try:
+                await self._lot_filters.refresh_if_due(symbol, now_utc=now_utc)
+            except Exception as exc:
+                self._journal_row(
+                    RECONCILE_ACTION_FAILED,
+                    {
+                        "action": "lot_filter_refresh",
+                        "symbol": symbol,
+                        "error_type": type(exc).__name__,
+                    },
+                    now_utc,
+                )
 
     def _tracked_symbols(self) -> tuple[str, ...]:
         """The symbols of the coordinator plans that are not FLAT / ENTRY_ENDED_NO_FILL.
@@ -1082,6 +1305,25 @@ def _combine(first: _Pre, second: _Pre) -> _Pre:
     )
 
 
+def _ordered_kinds(rows: Sequence[Any]) -> tuple[str, ...]:
+    """The distinct kinds of the open pending rows in Q4 order (close, entry cancel, stop).
+
+    A kind outside `RISK_REDUCING_KIND_ORDER` (or not text) sorts last, by value.
+    """
+    kinds: set[str] = set()
+    for row in rows:
+        kind = getattr(row, "kind", None)
+        value = getattr(kind, "value", kind)
+        kinds.add(value if isinstance(value, str) and value != "" else _UNKNOWN_REASON)
+
+    def rank(value: str) -> tuple[int, str]:
+        if value in RISK_REDUCING_KIND_ORDER:
+            return (RISK_REDUCING_KIND_ORDER.index(value), value)
+        return (len(RISK_REDUCING_KIND_ORDER), value)
+
+    return tuple(sorted(kinds, key=rank))
+
+
 def _stream_kind(item: Any) -> str:
     """The string value of a drained item's `kind` ('' when it has none)."""
     kind = getattr(item, "kind", None)
@@ -1164,7 +1406,25 @@ def _owner_of(divergence: Divergence, plans: Sequence[Any]) -> str | None:
 
 __all__ = [
     "ALERT_SINK_FAILED",
+    "BACKGROUND_SKIP_GATE_RESTRICTED",
+    "BACKGROUND_SKIP_OPEN_PENDING",
+    "BACKGROUND_SKIP_PENDING_UNREADABLE",
+    "PHASE_ACT",
+    "PHASE_BACKGROUND",
+    "PHASE_COMPARE",
+    "PHASE_FEEDS",
+    "PHASE_GATE",
+    "PHASE_LOCAL",
+    "PHASE_READS",
+    "PHASE_RESTORE",
+    "PHASE_RISK_REDUCING",
+    "PHASE_STREAM",
+    "PHASE_SWEEP",
+    "PHASE_UNKNOWN_ENTRIES",
+    "RISK_REDUCING_KIND_ORDER",
     "RECONCILE_ACTION_FAILED",
+    "RECONCILE_BACKGROUND_SKIPPED",
+    "RECONCILE_RISK_REDUCING_FIRST",
     "RECONCILE_READ_FAILED",
     "RECONCILE_SKIPPED_GATE",
     "RECONCILE_SKIPPED_RESTORE_PENDING",
@@ -1187,11 +1447,14 @@ __all__ = [
     "FeedSource",
     "GateRestrictionSource",
     "JournalSink",
+    "LotFilterRefresher",
+    "OpenPendingSource",
     "OrphanSweeperLike",
     "ProtectionView",
     "ReconcileAdapter",
     "ReconcileAlertSink",
     "ReconcileLoop",
+    "RiskReducer",
     "SafeModeGate",
     "StreamDivergenceSource",
     "TickReport",
