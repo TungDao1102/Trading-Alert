@@ -138,6 +138,7 @@ from src.domain.exchange_errors import (
     classify,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
+from src.domain.transitions import PROTECTION_INITIAL_STATE, TransitionKind, is_legal
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
@@ -150,6 +151,8 @@ POSITION_MODE_HEDGE = "HEDGE"
 SAFE_MODE_DB_FAILURE = "DB_FAILURE"
 SAFE_MODE_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
+# Plan 20-02 (D-29, T-A): a state change the PROTECTION table refuses (fail closed).
+SAFE_MODE_PROTECTION_STATE_INVALID = "PROTECTION_STATE_INVALID"
 ALERT_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 ALERT_TP_UNAVAILABLE = "TP_UNAVAILABLE"
 
@@ -167,6 +170,7 @@ BRANCH_NO_POSITION_BUT_EXPOSED = "NO_POSITION_ON_STOP_BUT_EXPOSED"
 BRANCH_B4_STOP_LOST_UNRESOLVED = "B4_STOP_LOST_UNRESOLVED"
 
 EVENT_PROTECTION_TRANSITION = "PROTECTION_TRANSITION"
+EVENT_PROTECTION_TRANSITION_REJECTED = "PROTECTION_TRANSITION_REJECTED"
 EVENT_FILL_QUANTITY_UNKNOWN = "PROTECTION_FILL_QUANTITY_UNKNOWN"
 EVENT_UNKNOWN_FILL = "PROTECTION_UNKNOWN_FILL"
 EVENT_REST_FAILED = "PROTECTION_REST_FAILED"
@@ -197,6 +201,7 @@ FILLED_ENTRY_STATUSES: frozenset[str] = frozenset({"PARTIALLY_FILLED", "FILLED"}
 _ZERO = Decimal("0")
 _CORRELATION_PREFIX = "protection_"
 _TRANSITION_ID_PREFIX = "ptr"
+_REJECTED_ID_PREFIX = "ptx"
 _NO_STATE = "NONE"
 
 # Reasons journaled on a transition (fixed project text, never exchange text).
@@ -1647,9 +1652,24 @@ class ProtectionCoordinator:
 
     def _transition(
         self, tracked: _Tracked, new_state: ProtectionState, reason: str, now: datetime
-    ) -> None:
+    ) -> bool:
+        """The one place a protection state changes (D-29, T-A). True when ``new_state`` holds.
+
+        An equal-state request is an idempotent no-op decided before the guard: no ``seq`` bump,
+        no journal row. Any other move must be an edge of the PROTECTION table of
+        ``src.domain.transitions`` (a plan that has no state yet may only enter
+        ``PROTECTION_INITIAL_STATE``). A refused move changes nothing (``state``, ``seq`` and
+        ``last_reason`` stay), journals one ``PROTECTION_TRANSITION_REJECTED`` row and enters
+        SAFE_MODE with ``PROTECTION_STATE_INVALID``; it returns False. Callers keep their own
+        fail-closed handling and may ignore the result.
+        """
+        if tracked.state is new_state:
+            return True
         entry = tracked.entry
         previous = _NO_STATE if tracked.state is None else tracked.state.value
+        if not self._edge_is_legal(tracked, new_state):
+            self._reject_transition(tracked, previous, new_state, reason, now)
+            return False
         tracked.seq += 1
         tracked.state = new_state
         tracked.last_reason = reason
@@ -1684,6 +1704,60 @@ class ProtectionCoordinator:
             ),
             now,
         )
+        return True
+
+    @staticmethod
+    def _edge_is_legal(tracked: _Tracked, new_state: ProtectionState) -> bool:
+        """The PROTECTION table decides (a missing state may only enter the initial state)."""
+        if tracked.state is None:
+            return new_state.value == PROTECTION_INITIAL_STATE
+        return is_legal(TransitionKind.PROTECTION, tracked.state, new_state)
+
+    def _reject_transition(
+        self,
+        tracked: _Tracked,
+        previous: str,
+        new_state: ProtectionState,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        """Journal a refused move (state and seq untouched) and enter SAFE_MODE (fail closed)."""
+        entry = tracked.entry
+        body = json.dumps(
+            {
+                "approval_id": entry.approval_id,
+                "from": previous,
+                "reason": reason,
+                "seq": tracked.seq,
+                "symbol": entry.symbol,
+                "to": new_state.value,
+                "trade_plan_id": entry.trade_plan_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._record_journal(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix=_REJECTED_ID_PREFIX,
+                    event_type=EVENT_PROTECTION_TRANSITION_REJECTED,
+                    entity_id=entry.plan_hash,
+                    occurred_at_utc=now,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now,
+                event_type=EVENT_PROTECTION_TRANSITION_REJECTED,
+                entity_type="ProtectionState",
+                entity_id=entry.plan_hash,
+                correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+                payload_json=body,
+            ),
+            now,
+        )
+        try:
+            self._safe_mode.enter_safe_mode(reason=SAFE_MODE_PROTECTION_STATE_INVALID, now_utc=now)
+        except Exception:  # noqa: BLE001, S110 - the refusal and its journal row already exist
+            pass
 
     def _journal_note(
         self, tracked: _Tracked, event_type: str, payload: dict[str, str], now: datetime
@@ -1798,6 +1872,7 @@ __all__ = [
     "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
     "EVENT_PROTECTION_TRANSITION",
+    "EVENT_PROTECTION_TRANSITION_REJECTED",
     "EVENT_REST_FAILED",
     "EVENT_STEP_ERROR",
     "EVENT_STOP_NOT_SENT",
@@ -1811,6 +1886,7 @@ __all__ = [
     "SAFE_MODE_CLOSE_REQUIRED",
     "SAFE_MODE_DB_FAILURE",
     "SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE",
+    "SAFE_MODE_PROTECTION_STATE_INVALID",
     "TERMINAL_ENTRY_STATUSES",
     "UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS",
     "CriticalAlertSink",

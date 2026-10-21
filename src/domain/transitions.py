@@ -21,6 +21,15 @@ Rules:
   evidence source is deferred to Phase 18 and 20, when the first callers exist.
 - ``APPROVED -> SUPERSEDED`` for a TradePlan is deliberately illegal (D051 item (i)):
   ``SUPERSEDED`` means replaced before the human decided.
+
+``TransitionKind.PROTECTION`` (plan 20-02, D-29, T-A) is the seventh machine. Its source is the
+``ProtectionState`` docstring in ``src/execution/protection.py``, not a GLOSSARY block: it is
+keyed by the eleven ``ProtectionState`` string values because this package must not import
+``src.execution`` (a parity test on the execution side pins the keys). It is not persisted (no
+table, no trigger), it is enforced by ``ProtectionCoordinator._transition``, and its GLOSSARY
+section 11 block waits for the owner's acceptance of the D055 closure draft (O-01, 19-OWNER-GAPS
+section 5). The table only says which edges exist; the extra clearing rules that need evidence
+(D077) live next to the guard, in ``src/execution/protection_replay.py``.
 """
 
 from __future__ import annotations
@@ -48,6 +57,7 @@ class TransitionKind(str, Enum):
     POSITION = "POSITION"
     APPROVAL = "APPROVAL"
     EXECUTION_INTENT = "EXECUTION_INTENT"
+    PROTECTION = "PROTECTION"
 
 
 class IllegalTransition(ValueError):
@@ -223,6 +233,29 @@ _EXECUTION_INTENT = _table(
     }
 )
 
+# Transcribed from the ProtectionState docstring (src/execution/protection.py). ``FLAT`` and
+# ``ENTRY_ENDED_NO_FILL`` have no successors. The module docstring of the coordinator says
+# ``AWAITING_FILL`` is where ``ENTRY_UNRESOLVED`` is entered from (an ENTRY_STATE_UNKNOWN entry
+# never found by its GTD time plus the grace), so that edge is part of the docstring's intent.
+_PROTECTION = _table(
+    {
+        "AWAITING_FILL": ("UNPROTECTED", "ENTRY_ENDED_NO_FILL", "ENTRY_UNRESOLVED"),
+        "ENTRY_UNRESOLVED": ("UNPROTECTED", "ENTRY_ENDED_NO_FILL", "AWAITING_FILL"),
+        "UNPROTECTED": ("PROTECTED_ENTRY_OPEN", "PROTECTED", "CLOSE_REQUIRED", "FLAT"),
+        "PROTECTED_ENTRY_OPEN": ("PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED"),
+        "PROTECTED": ("COMPLETE", "TP_UNAVAILABLE", "FLAT"),
+        "COMPLETE": ("FLAT",),
+        "TP_UNAVAILABLE": ("FLAT",),
+        "CLOSE_REQUIRED": ("CLOSE_FAILED", "FLAT"),
+        "CLOSE_FAILED": ("CLOSE_REQUIRED", "FLAT"),
+        "FLAT": (),
+        "ENTRY_ENDED_NO_FILL": (),
+    }
+)
+
+# The only state a plan may be first registered in (the "NONE" state has no table row).
+PROTECTION_INITIAL_STATE = "AWAITING_FILL"
+
 LEGAL_TRANSITIONS: Mapping[TransitionKind, Mapping[str, frozenset[str]]] = MappingProxyType(
     {
         TransitionKind.SIGNAL: _SIGNAL,
@@ -231,6 +264,7 @@ LEGAL_TRANSITIONS: Mapping[TransitionKind, Mapping[str, frozenset[str]]] = Mappi
         TransitionKind.POSITION: _POSITION,
         TransitionKind.APPROVAL: _APPROVAL,
         TransitionKind.EXECUTION_INTENT: _EXECUTION_INTENT,
+        TransitionKind.PROTECTION: _PROTECTION,
     }
 )
 
