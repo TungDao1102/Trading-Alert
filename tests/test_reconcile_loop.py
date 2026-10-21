@@ -733,7 +733,10 @@ async def test_a_failed_truth_read_enters_api_degradation_and_compares_nothing(
     assert report.divergences == ()
     assert rig.safe_mode.enter_calls == ["API_DEGRADATION"]
     assert rig.event_types() == [RECONCILE_READ_FAILED]
+    # Plan 20-16: the row now carries the classified category; this adapter double has no
+    # `error_facts`, so the failure is unclassified (read as API_DEGRADATION, fail closed).
     assert json.loads(rig.journal.events[0].payload_json) == {
+        "category": "UNCLASSIFIED",
         "error_type": "RuntimeError",
         "source": source,
     }

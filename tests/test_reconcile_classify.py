@@ -71,7 +71,8 @@ EXPECTED_POLICY: dict[str, tuple[DivergenceAction, str]] = {
     "AMBIGUOUS_POSITION_OWNER": (DivergenceAction.ALERT_ONLY, "DIVERGENCE"),
     "UNSUPPORTED_POSITION_SIDE": (DivergenceAction.ALERT_ONLY, "DIVERGENCE"),
     "STREAM_SINK_FAILURE": (DivergenceAction.ALERT_ONLY, "DIVERGENCE"),
-    "STREAM_TASK_DIED": (DivergenceAction.ALERT_ONLY, "DIVERGENCE"),
+    # Plan 20-16: a halted user-data stream is stale data, not a book divergence.
+    "STREAM_TASK_DIED": (DivergenceAction.ALERT_ONLY, "STALE_DATA"),
 }
 
 
