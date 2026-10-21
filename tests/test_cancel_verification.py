@@ -297,3 +297,360 @@ def test_cancel_verification_reads_no_wall_clock_and_builds_no_float() -> None:
     path = SRC_ROOT / "execution" / "cancel_verification.py"
     assert wall_clock_calls(path) == []
     assert float_constructor_calls(path) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the sweeper journals every skip and verifies every orphan cancel.
+# --------------------------------------------------------------------------- #
+
+SWEEP_NOW = datetime(2026, 10, 21, 11, 0, tzinfo=UTC)
+
+
+class _StickyCancelFake(BinanceSemanticsFakeAdapter):
+    """A cancel of these algo ids is accepted but changes nothing (the leg keeps resting)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sticky: set[str] = set()
+
+    async def cancel_algo_order(self, **kwargs: Any) -> Any:
+        if kwargs["client_algo_id"] in self.sticky:
+            self._bind_real("cancel_algo_order", kwargs)
+            self._record_call("cancel_algo_order", kwargs)
+            return None
+        return await super().cancel_algo_order(**kwargs)
+
+
+async def _place_leg(fake: BinanceSemanticsFakeAdapter, client_algo_id: str) -> None:
+    stop = client_algo_id == SL_ID
+    await fake.place_algo_protective(
+        symbol=SYMBOL,
+        side="SELL",
+        algo_type="CONDITIONAL",
+        type="STOP_MARKET" if stop else "TAKE_PROFIT_MARKET",
+        position_side="BOTH",
+        trigger_price=Decimal("59000") if stop else Decimal("61000"),
+        close_position=stop,
+        quantity=None if stop else QUANTITY / 2,
+        working_type="MARK_PRICE",
+        client_algo_id=client_algo_id,
+        reduce_only=None if stop else True,
+    )
+
+
+def _orphan_diff(*algo_ids: str) -> Any:
+    from src.reconcile.compare import CompareDiff, OrphanProtective
+
+    return CompareDiff(
+        agreement=False,
+        divergences=(),
+        orphan_protectives=tuple(
+            OrphanProtective(symbol=SYMBOL, client_algo_id=a, order_role="STOP_LOSS")
+            for a in algo_ids
+        ),
+    )
+
+
+def _flat_verifier(fake: BinanceSemanticsFakeAdapter) -> Any:
+    def read(*, symbol: str) -> Decimal:
+        return fake.positions.get(symbol, Decimal("0"))
+
+    return read
+
+
+def _sweeper(fake: Any, journal: Any) -> Any:
+    from src.reconcile.sweeper import OrphanSweeper
+
+    return OrphanSweeper(adapter=fake, journal=journal, now_utc=SWEEP_NOW)
+
+
+def _rows(journal: RecordingJournal, event_type: str) -> list[dict[str, Any]]:
+    return [json.loads(e.payload_json) for e in journal.events if e.event_type == event_type]
+
+
+async def test_a_transient_position_gap_skip_leaves_a_sweep_skipped_row() -> None:
+    """IN-14, D-03: a skipped cancel is traced. The row has a reason code, no read values."""
+    fake = BinanceSemanticsFakeAdapter()
+    await _place_leg(fake, SL_ID)
+    reads = iter([Decimal("0.010"), Decimal("0")])
+    journal = RecordingJournal()
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID), position_verifier=lambda *, symbol: next(reads)
+    )
+
+    assert outcome.swept_count == 0 and len(outcome.skipped) == 1
+    assert fake.calls_to("cancel_algo_order") == []
+    (row,) = _rows(journal, "SWEEP_SKIPPED")
+    assert row == {"symbol": SYMBOL, "client_algo_id": SL_ID, "reason": "transient_position_gap"}
+    # The existing rule still holds: a skipped cancel writes no ORPHAN_SWEEP row.
+    assert _rows(journal, "ORPHAN_SWEEP") == []
+
+
+async def test_a_failing_sweep_skipped_row_does_not_raise_or_end_the_sweep() -> None:
+    from tests.support.reconcile_doubles import RaisingJournal
+
+    fake = BinanceSemanticsFakeAdapter()
+    await _place_leg(fake, SL_ID)
+    await _place_leg(fake, TP1_ID)
+    journal = RaisingJournal()
+    reads = iter([Decimal("0.010"), Decimal("0"), Decimal("0.010"), Decimal("0")])
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID, TP1_ID), position_verifier=lambda *, symbol: next(reads)
+    )
+
+    assert [s.client_algo_id for s in outcome.skipped] == [SL_ID, TP1_ID]  # both were tried
+    assert journal.attempts == 2  # one best-effort SWEEP_SKIPPED row each, failures swallowed
+
+
+async def test_a_failed_probe_and_a_failed_cancel_are_also_traced() -> None:
+    fake = BinanceSemanticsFakeAdapter()
+    await _place_leg(fake, SL_ID)
+    fake.fail_next("query_algo_order_by_client", RuntimeError("https://x/?signature=ab"))
+    journal = RecordingJournal()
+
+    def zero(*, symbol: str) -> Decimal:
+        return Decimal("0")
+
+    await _sweeper(fake, journal).sweep(_orphan_diff(SL_ID), position_verifier=zero)
+    fake.fail_next("cancel_algo_order", RuntimeError("https://x/?signature=cd"))
+    await _sweeper(fake, journal).sweep(_orphan_diff(SL_ID), position_verifier=zero)
+
+    reasons = [r["reason"] for r in _rows(journal, "SWEEP_SKIPPED")]
+    assert reasons == ["probe_failed: RuntimeError", "cancel_failed: RuntimeError"]
+    assert all("signature" not in e.payload_json for e in journal.events)
+
+
+async def test_an_orphan_cancel_is_verified_and_only_then_swept() -> None:
+    from src.execution.cancel_verification import CancelVerdict
+
+    fake = BinanceSemanticsFakeAdapter()
+    await _place_leg(fake, SL_ID)
+    journal = RecordingJournal()
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID), position_verifier=_flat_verifier(fake)
+    )
+
+    assert outcome.cancelled == ((SYMBOL, SL_ID),) and outcome.skipped == ()
+    assert len(fake.calls_to("query_algo_order_by_client")) == 2  # the probe and the verification
+    phases = [json.loads(e.payload_json)["phase"] for e in journal.events]
+    assert phases == ["pre_cancel", "post_cancel"]
+    assert json.loads(journal.events[-1].payload_json)["verdict"] == CancelVerdict.CANCELED.value
+    assert _rows(journal, "SWEEP_SKIPPED") == []
+
+
+async def test_an_orphan_cancel_that_does_not_take_effect_is_reported_unswept() -> None:
+    fake = _StickyCancelFake()
+    await _place_leg(fake, SL_ID)
+    fake.sticky = {SL_ID}
+    journal = RecordingJournal()
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID), position_verifier=_flat_verifier(fake)
+    )
+
+    assert outcome.swept_count == 0 and outcome.cancelled == ()
+    assert [s.reason for s in outcome.skipped] == ["cancel_unverified: STILL_OPEN"]
+    payloads = [
+        json.loads(e.payload_json) for e in journal.events if e.event_type == "ORPHAN_SWEEP"
+    ]
+    phases = [p["phase"] for p in payloads]
+    assert "post_cancel" not in phases and "cancel_unverified" in phases
+    (unverified,) = [p for p in payloads if p["phase"] == "cancel_unverified"]
+    assert unverified["verdict"] == "STILL_OPEN" and unverified["observed_status"] == "NEW"
+    assert [r["reason"] for r in _rows(journal, "SWEEP_SKIPPED")] == [
+        "cancel_unverified: STILL_OPEN"
+    ]
+
+
+async def test_an_orphan_cancel_that_cannot_be_verified_is_reported_unswept() -> None:
+    fake = BinanceSemanticsFakeAdapter()
+    await _place_leg(fake, SL_ID)
+    journal = RecordingJournal()
+    # The probe before the cancel works; the verification query after it raises.
+    original = fake.query_algo_order_by_client
+    seen = {"n": 0}
+
+    async def flaky(**kwargs: Any) -> Any:
+        seen["n"] += 1
+        if seen["n"] == 2:
+            raise ConnectionError("https://x/?signature=ef")
+        return await original(**kwargs)
+
+    fake.query_algo_order_by_client = flaky  # type: ignore[method-assign]
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID), position_verifier=_flat_verifier(fake)
+    )
+
+    assert outcome.cancelled == ()
+    assert [s.reason for s in outcome.skipped] == ["cancel_unverified: UNKNOWN"]
+    assert all("signature" not in e.payload_json for e in journal.events)
+    assert any(
+        json.loads(e.payload_json).get("error_type") == "ConnectionError" for e in journal.events
+    )
+
+
+# --- cancel_untriggered_protectives returns the verdicts ---------------------
+
+
+async def test_cancel_untriggered_protectives_returns_a_verdict_per_leg() -> None:
+    from src.execution.cancel_verification import CancelVerdict
+    from src.execution.manager import cancel_untriggered_protectives
+
+    fake = BinanceSemanticsFakeAdapter()
+    for leg in (SL_ID, TP1_ID, TP2_ID):
+        await _place_leg(fake, leg)
+    journal = RecordingJournal()
+
+    verdicts = await cancel_untriggered_protectives(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=fake,  # type: ignore[arg-type]
+        journal=journal,
+        now_utc=NOW_UTC,
+    )
+
+    assert verdicts == {
+        "STOP_LOSS": CancelVerdict.CANCELED,
+        "TAKE_PROFIT_1": CancelVerdict.CANCELED,
+        "TAKE_PROFIT_2": CancelVerdict.CANCELED,
+    }
+    assert [json.loads(e.payload_json)["phase"] for e in journal.events].count("post_cancel") == 3
+
+
+async def test_a_lost_stop_on_an_open_position_is_reported_to_the_caller() -> None:
+    """A STOP_LOSS verdict GONE_NOT_CANCELED while the position is open is a stop-lost signal.
+
+    The function only reports (the coordinator sweep logs it); it also journals the leg as
+    `cancel_unverified`, never as `post_cancel`.
+    """
+    from src.execution.cancel_verification import CancelVerdict
+    from src.execution.manager import cancel_untriggered_protectives
+
+    fake = BinanceSemanticsFakeAdapter()
+    await _resting_entry(fake)
+    fake.fill(ENTRY_ID)
+    await _place_leg(fake, TP1_ID)  # the stop is not there
+    journal = RecordingJournal()
+
+    verdicts = await cancel_untriggered_protectives(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=fake,  # type: ignore[arg-type]
+        journal=journal,
+        now_utc=NOW_UTC,
+    )
+
+    assert fake.positions[SYMBOL] == QUANTITY  # the position is open
+    assert verdicts["STOP_LOSS"] is CancelVerdict.GONE_NOT_CANCELED
+    assert verdicts["TAKE_PROFIT_1"] is CancelVerdict.CANCELED
+    sl_phases = [
+        json.loads(e.payload_json)["phase"] for e in journal.events if e.entity_id == SL_ID
+    ]
+    assert sl_phases == ["pre_cancel", "cancel_unverified"]
+
+
+async def test_a_failing_leg_cancel_raises_the_group_and_the_other_legs_are_still_verified() -> (
+    None
+):
+    from src.execution.manager import cancel_untriggered_protectives
+
+    fake = BinanceSemanticsFakeAdapter()
+    for leg in (SL_ID, TP1_ID, TP2_ID):
+        await _place_leg(fake, leg)
+    fake.fail_next("cancel_algo_order", RuntimeError("network"))
+    journal = RecordingJournal()
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await cancel_untriggered_protectives(
+            plan_hash=PLAN_HASH,
+            symbol=SYMBOL,
+            adapter=fake,  # type: ignore[arg-type]
+            journal=journal,
+            now_utc=NOW_UTC,
+        )
+
+    assert [type(e) for e in excinfo.value.exceptions] == [RuntimeError]
+    assert len(fake.calls_to("query_algo_order_by_client")) == 2  # TP1 and TP2 only
+    assert set(fake.open_algos) == {SL_ID}
+
+
+# --- G4-035: a manual close outside the system, both outcomes (D-28) ----------
+
+
+async def _manually_closed_position_with_legs(fake: BinanceSemanticsFakeAdapter) -> None:
+    await _resting_entry(fake)
+    fake.fill(ENTRY_ID)
+    for leg in (SL_ID, TP1_ID, TP2_ID):
+        await _place_leg(fake, leg)
+    fake.positions[SYMBOL] = Decimal("0")  # the operator closed the position on the exchange
+    fake.calls.clear()
+
+
+async def test_manual_close_outside_system_auto_cancel() -> None:
+    """Outcome (a), D-28 [NOT_TESTED on Binance]: the exchange cancels the legs by itself.
+
+    The legs read absent (older than the 3-day lookup window), so the sweep finds nothing to
+    cancel: no cancel call, no cancel_unverified, no SWEEP_SKIPPED, nothing alarming.
+    """
+    from datetime import timedelta
+
+    fake = BinanceSemanticsFakeAdapter()
+    await _manually_closed_position_with_legs(fake)
+    for leg in (SL_ID, TP1_ID, TP2_ID):
+        fake.cancel_algo(leg)  # the exchange auto-cancels the legs when the position is flat
+    fake.now_utc = fake.now_utc + timedelta(days=4)
+    journal = RecordingJournal()
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID, TP1_ID, TP2_ID), position_verifier=_flat_verifier(fake)
+    )
+
+    assert outcome.swept_count == 0 and outcome.skipped == ()
+    assert outcome.already_gone == ((SYMBOL, SL_ID), (SYMBOL, TP1_ID), (SYMBOL, TP2_ID))
+    assert fake.calls_to("cancel_algo_order") == []
+    phases = {json.loads(e.payload_json)["phase"] for e in journal.events}
+    assert phases == {"already_gone"}
+    assert _rows(journal, "SWEEP_SKIPPED") == []
+
+
+async def test_manual_close_outside_system_auto_cancelled_legs_still_queryable_are_calm() -> None:
+    """Outcome (a) inside the lookup window: the canceled legs read CANCELED, the sweep is calm."""
+    fake = BinanceSemanticsFakeAdapter()
+    await _manually_closed_position_with_legs(fake)
+    for leg in (SL_ID, TP1_ID, TP2_ID):
+        fake.cancel_algo(leg)
+    journal = RecordingJournal()
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID, TP1_ID, TP2_ID), position_verifier=_flat_verifier(fake)
+    )
+
+    assert outcome.skipped == () and outcome.swept_count == 3
+    assert _rows(journal, "SWEEP_SKIPPED") == []
+    assert all(
+        json.loads(e.payload_json)["phase"] in {"pre_cancel", "post_cancel"} for e in journal.events
+    )
+
+
+async def test_manual_close_outside_system_orphan_swept() -> None:
+    """Outcome (b), D-28 [NOT_TESTED on Binance]: the legs stay as orphans.
+
+    Two zero position reads per orphan, a cancel, and a verifying query for each leg.
+    """
+    fake = BinanceSemanticsFakeAdapter()
+    await _manually_closed_position_with_legs(fake)
+    journal = RecordingJournal()
+
+    outcome = await _sweeper(fake, journal).sweep(
+        _orphan_diff(SL_ID, TP1_ID, TP2_ID), position_verifier=_flat_verifier(fake)
+    )
+
+    assert outcome.swept_count == 3 and outcome.skipped == ()
+    assert fake.open_algos == {}
+    assert len(fake.calls_to("cancel_algo_order")) == 3
+    assert len(fake.calls_to("query_algo_order_by_client")) == 6  # probe + verification, per leg
+    assert _rows(journal, "SWEEP_SKIPPED") == []
