@@ -34,9 +34,9 @@ never sent while the result of the previous one is not determined.
   without a stop.
 
 So the duplicate bound no longer rests on assumption A4 (reduce-only rejected on a flat or
-smaller position). The pending attempt is in-process state: after a restart only
-``discover_next_attempt_no`` protects the history, and an ambiguous attempt the exchange does
-not show is NOT remembered (rebuilding state after a restart is Phase 20/24).
+smaller position). The pending attempt is in-process state; after a restart
+``restore_pending`` rebuilds it from the journal and the spill (plan 20-19, below) and
+``discover_next_attempt_no`` still protects the history on the exchange side.
 
 Anything it cannot prove ends in SAFE_MODE (``EMERGENCY_CLOSE_FAILED``), a critical alert and a
 journal row, and returns False; a failed emergency close never declares the position safe
@@ -59,6 +59,13 @@ Decisions and open items:
   store attached the refusal is also kept as a durable ``CLOSE_NOT_SENT`` row (intent only, no
   side or quantity, spilled first); a later request that passes the gate, or a flat position,
   resolves it. The next call re-reads the position and sizes the part itself.
+* Restart (plan 20-19, D-08, WR-03): the pending attempt is rebuilt from the durable
+  ``EMERGENCY_CLOSE`` rows. ``pre_send`` is written ahead to the local spill (when one is
+  attached) before the journal, so a crash with the journal down still leaves the record.
+  ``pending_attempts_from_events`` reads the rows of the journal and the spill (pre_send,
+  ambiguous and post_send rows with no later terminal phase) and ``restore_pending`` adopts
+  the latest of them as an UNKNOWN pending attempt: nothing is sent until REST proves it
+  terminal and its number is never reissued.
 * A4 / A8 (assumptions): a reduce-only MARKET on a flat or smaller position answers -2022 or
   -2024, from the repo taxonomy and not verified on the live page. The closer treats both the
   same: it re-reads the position and never branches on the difference, never resends blindly.
@@ -72,7 +79,7 @@ read (D-21): only its type name and the facts the adapter extracts.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -124,6 +131,14 @@ PHASE_AMBIGUOUS = "ambiguous"
 PHASE_ENDED_UNFILLED = "ended_unfilled"
 # A query of the attempt id proved it FILLED (19-REVIEW WR-03: an ACK alone is not a fill).
 PHASE_FILLED = "filled"
+
+# Plan 20-19: the phases that end an attempt (a later row of the same attempt cannot exist)
+# and the phases that leave it open. ``failed`` and ``already_flat`` rows are notes of the
+# call, not of an attempt (they carry no attempt number).
+_ATTEMPT_ENDED_PHASES: frozenset[str] = frozenset(
+    {"filled", "ended_unfilled", "rejected", "not_sent"}
+)
+_ATTEMPT_OPEN_PHASES: frozenset[str] = frozenset({"pre_send", "ambiguous", "post_send"})
 
 # The failure code of a zero position read that a second, fresh read did not confirm (T-8-30
 # two consecutive zero reads, the rule of src/reconcile/sweeper.py; 19-REVIEW CR-03).
@@ -232,6 +247,89 @@ class _PendingAttempt:
         if self.unknown_code is None:
             self.unknown_code = code
             self.error_type = error_type
+
+
+@dataclass(frozen=True)
+class RestoredAttempt:
+    """A close attempt the durable rows show as sent and not proven terminal (plan 20-19).
+
+    ``seen`` is True when a ``post_send`` row shows the exchange acknowledged it.
+    """
+
+    attempt_no: int
+    client_order_id: str
+    side: str | None
+    quantity: Decimal | None
+    sent_at: datetime
+    seen: bool
+
+
+def plan_hash_of_close_event(event: JournalEvent) -> str | None:
+    """The plan hash of an ``EMERGENCY_CLOSE`` event (from its correlation id), else None."""
+    if event.event_type != EVENT_EMERGENCY_CLOSE:
+        return None
+    correlation = event.correlation_id
+    if not correlation.startswith(_CORRELATION_PREFIX):
+        return None
+    return correlation[len(_CORRELATION_PREFIX) :] or None
+
+
+def pending_attempts_from_events(events: Iterable[JournalEvent]) -> tuple[RestoredAttempt, ...]:
+    """The attempts of ONE plan that its ``EMERGENCY_CLOSE`` rows show as not terminal.
+
+    An attempt is open when it has a ``pre_send``, ``ambiguous`` or ``post_send`` row and no
+    ``filled``, ``ended_unfilled``, ``rejected`` or ``not_sent`` row. Rows without an attempt
+    number (``failed``, ``already_flat``) are skipped. Ordered by attempt number. A row that
+    names an attempt but is malformed raises ``ValueError``: dropping it could forget an
+    attempt that reached the exchange (the caller fails closed).
+    """
+    by_attempt: dict[int, list[tuple[datetime, str, dict[str, Any]]]] = {}
+    for event in events:
+        if event.event_type != EVENT_EMERGENCY_CLOSE:
+            continue
+        try:
+            body = json.loads(event.payload_json)
+        except ValueError as exc:
+            raise ValueError("an EMERGENCY_CLOSE row is not valid JSON") from exc
+        if not isinstance(body, dict) or "attempt_no" not in body:
+            continue
+        attempt_no = body["attempt_no"]
+        phase = body.get("phase")
+        if (
+            isinstance(attempt_no, bool)
+            or not isinstance(attempt_no, int)
+            or attempt_no < 1
+            or not isinstance(phase, str)
+            or not isinstance(body.get("client_order_id"), str)
+        ):
+            raise ValueError("an EMERGENCY_CLOSE attempt row is malformed")
+        by_attempt.setdefault(attempt_no, []).append((event.occurred_at_utc, phase, body))
+    open_attempts: list[RestoredAttempt] = []
+    for attempt_no in sorted(by_attempt):
+        rows = by_attempt[attempt_no]
+        phases = {phase for _, phase, _ in rows}
+        if phases & _ATTEMPT_ENDED_PHASES or not phases & _ATTEMPT_OPEN_PHASES:
+            continue
+        first_at = min(at for at, _, _ in rows)
+        pre = [body for _, phase, body in rows if phase == PHASE_PRE_SEND]
+        source = pre[0] if pre else rows[0][2]
+        side = source.get("side")
+        quantity = source.get("quantity")
+        try:
+            parsed_quantity = None if quantity is None else Decimal(str(quantity))
+        except ArithmeticError as exc:
+            raise ValueError("an EMERGENCY_CLOSE quantity is malformed") from exc
+        open_attempts.append(
+            RestoredAttempt(
+                attempt_no=attempt_no,
+                client_order_id=str(rows[0][2]["client_order_id"]),
+                side=side if isinstance(side, str) else None,
+                quantity=parsed_quantity,
+                sent_at=first_at,
+                seen="post_send" in phases,
+            )
+        )
+    return tuple(open_attempts)
 
 
 class CloseAttemptNotTerminal(ValueError):
@@ -356,6 +454,8 @@ class MarketEmergencyCloser(EmergencyCloser):
         # free attempt number). The same quantity is never sent again; a new one gets a
         # new number.
         self._filter_rejected: dict[str, tuple[Decimal, int]] = {}
+        # Plan 20-19 (D-16): where the pre_send record is written ahead of the journal.
+        self._spill = spill
 
     @property
     def last_result(self) -> EmergencyCloseResult | None:
@@ -364,6 +464,33 @@ class MarketEmergencyCloser(EmergencyCloser):
     # ------------------------------------------------------------------ #
     # The close.
     # ------------------------------------------------------------------ #
+
+    def restore_pending(self, *, plan_hash: str, attempts: Sequence[RestoredAttempt]) -> None:
+        """Adopt the latest not-terminal attempt of a plan after a restart (plan 20-19, WR-03).
+
+        The attempt (``pending_attempts_from_events``) is held as UNKNOWN pending
+        (``ATTEMPT_HISTORY_NOT_TERMINAL``): the next ``close_position`` queries its id first,
+        sends nothing while REST does not prove it terminal, journals the failure once, and a
+        FILLED answer lets a further part use the next attempt number, never this one again.
+        Only the highest attempt number can be open (a later attempt is sent only after the
+        earlier one was proven terminal), so earlier open-looking attempts are ignored. A plan
+        that already has a live pending attempt keeps it. Sends and cancels nothing.
+        """
+        if not isinstance(plan_hash, str) or plan_hash == "":
+            raise ValueError("plan_hash must be a non-empty string")
+        if not attempts or plan_hash in self._pending:
+            return
+        latest = max(attempts, key=lambda a: a.attempt_no)
+        adopted = _PendingAttempt(
+            attempt_no=latest.attempt_no,
+            client_order_id=latest.client_order_id,
+            side=latest.side,
+            quantity=latest.quantity,
+            sent_at=latest.sent_at,
+            seen=latest.seen,
+        )
+        adopted.mark_unknown(CODE_HISTORY_NOT_TERMINAL)
+        self._pending[plan_hash] = adopted
 
     async def close_position(self, *, entry: RestingEntry, reason: str) -> bool:
         """True only when REST shows the position of ``entry.symbol`` flat.
@@ -548,7 +675,9 @@ class MarketEmergencyCloser(EmergencyCloser):
         side: str,
         quantity: Decimal,
     ) -> _Outcome:
-        def journal(phase: str, error_type: str | None = None) -> None:
+        def journal(
+            phase: str, error_type: str | None = None, *, write_ahead: bool = False
+        ) -> None:
             self._journal_attempt(
                 entry,
                 phase,
@@ -558,9 +687,10 @@ class MarketEmergencyCloser(EmergencyCloser):
                 side,
                 quantity,
                 error_type=error_type,
+                write_ahead=write_ahead,
             )
 
-        journal(PHASE_PRE_SEND)
+        journal(PHASE_PRE_SEND, write_ahead=True)
         # Remembered BEFORE the send, so an interrupted call cannot forget an attempt that may
         # have reached the exchange; dropped only when nothing was placed.
         pending = _PendingAttempt(
@@ -902,6 +1032,7 @@ class MarketEmergencyCloser(EmergencyCloser):
         quantity: Decimal | None,
         *,
         error_type: str | None = None,
+        write_ahead: bool = False,
     ) -> None:
         """One attempt row; ``side`` and ``quantity`` are omitted for an attempt adopted from
         the exchange history, whose order this process did not send (WR-03)."""
@@ -919,7 +1050,7 @@ class MarketEmergencyCloser(EmergencyCloser):
             payload["quantity"] = str(quantity)
         if error_type is not None:
             payload["error_type"] = error_type
-        self._record(entry, client_order_id, payload)
+        self._record(entry, client_order_id, payload, write_ahead=write_ahead)
 
     def _journal_note(
         self,
@@ -946,9 +1077,20 @@ class MarketEmergencyCloser(EmergencyCloser):
         self._record(entry, entry.plan_hash, payload)
 
     def _record(
-        self, entry: RestingEntry, entity_id: str, payload: dict[str, str | int | None]
+        self,
+        entry: RestingEntry,
+        entity_id: str,
+        payload: dict[str, str | int | None],
+        *,
+        write_ahead: bool = False,
     ) -> None:
-        """Journal one event; a failing journal loses only the audit row (D034)."""
+        """Journal one event; a failing journal loses only the audit row (D034).
+
+        ``write_ahead`` (the pre_send row, plan 20-19, D-16) writes the event to the local
+        spill first: if the journal then fails, or the process dies before it answers, the
+        record survives for the restart. After a successful journal write the spill file is
+        removed when the spill can (a kept file is harmless: replay finds it already present).
+        """
         now = self._clock()
         meta = self._filters_meta.get(entry.plan_hash)
         if meta is not None:
@@ -973,10 +1115,24 @@ class MarketEmergencyCloser(EmergencyCloser):
             approval_id=entry.approval_id,
             payload_json=body,
         )
+        token: object | None = None
+        if write_ahead and self._spill is not None:
+            try:
+                token = self._spill.write(event)
+            except Exception:  # noqa: BLE001 - the journal below is the other record
+                token = None
         try:
             self._journal.record(event)
         except Exception:  # noqa: BLE001 - protection outranks the audit row
             self._journal_failure(now)
+            return
+        if token is not None:
+            discard = getattr(self._spill, "discard", None)
+            if callable(discard):
+                try:
+                    discard(token)
+                except Exception:  # noqa: BLE001, S110 - a kept spill file is harmless
+                    pass
 
     def _journal_failure(self, now: datetime) -> None:
         if self._journal_failed:
@@ -1008,5 +1164,8 @@ __all__ = [
     "EmergencyCloseResult",
     "EmergencyCloseStatus",
     "MarketEmergencyCloser",
+    "RestoredAttempt",
     "discover_next_attempt_no",
+    "pending_attempts_from_events",
+    "plan_hash_of_close_event",
 ]
