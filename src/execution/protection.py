@@ -69,9 +69,10 @@ Open, recorded and NOT decided here: Q4 / Phase 18 src/WR-12 (a 418/429 pause re
 the cancel and the close with a pre-send refusal; no exemption is added, every refused call is
 journaled as not sent, the deadline keeps running and the escalation to CLOSE_REQUIRED /
 CLOSE_FAILED with SAFE_MODE and a critical alert is attempted on time, but "never naked" is NOT
-claimed for that window; the pending row does not protect the position), A3 (whether a closePosition stop is auto-cancelled when the position
-closes, probe 6) and A2 (a GTD expiry reported as EXPIRED and terminal). An exception's message
-text is never read (D-21): only its class and int code through the taxonomy.
+claimed for that window; the pending row does not protect the position), A3 (whether a
+closePosition stop is auto-cancelled when the position closes, probe 6) and A2 (a GTD expiry
+reported as EXPIRED and terminal). An exception's message text is never read (D-21): only its
+class and int code through the taxonomy.
 
 Plan 19-16 adds the take-profit step and the exit: from PROTECTED (entry terminal, stop confirmed
 by REST) the next step reads the REST position and calls ``attach_protectives_to_fill``, which
@@ -160,6 +161,7 @@ from src.domain.exchange_errors import (
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
 from src.domain.transitions import PROTECTION_INITIAL_STATE, TransitionKind, is_legal
+from src.execution.cancel_verification import PROVEN_GONE, CancelVerdict
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
@@ -211,6 +213,8 @@ BRANCH_NO_POSITION_BUT_EXPOSED = "NO_POSITION_ON_STOP_BUT_EXPOSED"
 # 19-REVIEW WR-04 (owner, D077): a lost stop whose plan did not reach a safe state (position zero
 # AND entry terminal) within max_unprotected_ms of the first detection of the loss.
 BRANCH_B4_STOP_LOST_UNRESOLVED = "B4_STOP_LOST_UNRESOLVED"
+# Plan 20-17 (D-26): an explicit operator close; the existing close flow runs unchanged.
+BRANCH_OPERATOR_CLOSE = "OPERATOR_CLOSE"
 
 EVENT_PROTECTION_TRANSITION = "PROTECTION_TRANSITION"
 EVENT_PROTECTION_TRANSITION_REJECTED = "PROTECTION_TRANSITION_REJECTED"
@@ -225,10 +229,37 @@ EVENT_ENTRY_CANCEL_NOT_SENT = "PROTECTION_ENTRY_CANCEL_NOT_SENT"
 EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
+# Plan 20-17: a sweep whose cancels did not all verify (a leg STILL_OPEN or UNKNOWN); retried.
+EVENT_SWEEP_UNVERIFIED = "PROTECTION_SWEEP_UNVERIFIED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
 # Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
 EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
+
+# Plan 20-17 (D-26): the audit rows of the two operator controls (ids, codes and states only).
+EVENT_OPERATOR_CLOSE_REQUESTED = "OPERATOR_CLOSE_REQUESTED"
+EVENT_OPERATOR_PROTECT_STEPPED = "OPERATOR_PROTECT_STEPPED"
+EVENT_OPERATOR_STOP_ADOPTED = "OPERATOR_STOP_ADOPTED"
+EVENT_OPERATOR_PROTECT_REFUSED = "OPERATOR_PROTECT_REFUSED"
+
+# Result codes of the operator controls. A refusal sends nothing.
+CODE_CLOSE_REQUESTED = "CLOSE_REQUESTED"
+CODE_UNKNOWN_PLAN = "UNKNOWN_PLAN"
+CODE_NOTHING_TO_CLOSE = "NOTHING_TO_CLOSE"
+CODE_CLOSE_ALREADY_REQUIRED = "CLOSE_ALREADY_REQUIRED"
+CODE_OPERATOR_ID_MISSING = "OPERATOR_ID_MISSING"
+CODE_COORDINATOR_STEPPED = "COORDINATOR_STEPPED"
+CODE_STOP_ADOPTED = "STOP_ADOPTED"
+CODE_NOTHING_TO_PROTECT = "NOTHING_TO_PROTECT"
+CODE_POSITION_UNREADABLE = "POSITION_UNREADABLE"
+CODE_NO_EXPOSURE = "NO_EXPOSURE"
+CODE_WRONG_SIDE = "WRONG_SIDE"
+CODE_STOP_UNREADABLE = "STOP_UNREADABLE"
+CODE_STOP_HISTORY_UNKNOWN = "STOP_HISTORY_UNKNOWN"
+# D077 (owner direction 1 for D-26): no stop is placed after a confirmed stop was lost, and none
+# is restored in CLOSE_REQUIRED / CLOSE_FAILED as a workaround for the D077 close.
+CODE_REPLACEMENT_FORBIDDEN_STOP_LOST = "REPLACEMENT_FORBIDDEN_STOP_LOST"
+CODE_REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED = "REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED"
 
 # The divergence kinds ``notify_divergence`` accepts: the stop-related kinds of
 # ``src/reconcile/compare.py``. Literals, not imports: ``src.execution`` must not import
@@ -316,6 +347,9 @@ class ProtectionState(str, Enum):
     (flat on two reads, entry terminal); no edge out of CLOSE_REQUIRED or CLOSE_FAILED to a
     protected state is added. The allowed moves are the PROTECTION table of
     ``src.domain.transitions``, enforced by ``ProtectionCoordinator._transition``.
+    Plan 20-17 (D-26) adds one reason, ``OPERATOR_CLOSE``: AWAITING_FILL, ENTRY_UNRESOLVED,
+    UNPROTECTED, PROTECTED_ENTRY_OPEN, PROTECTED, COMPLETE and TP_UNAVAILABLE -> CLOSE_REQUIRED
+    on an explicit operator close (the first two edges are new; the others existed).
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -446,6 +480,14 @@ class RestingEntry:
             _require_utc(self.entry_good_till_utc, "entry_good_till_utc")
         elif self.entry_state_unknown:
             raise ValueError("an ENTRY_STATE_UNKNOWN entry needs entry_good_till_utc")
+
+
+@dataclass(frozen=True)
+class OperatorControlResult:
+    """What an operator control answered (plan 20-17, D-26): a fixed ``code``, never text."""
+
+    accepted: bool
+    code: str
 
 
 @dataclass(frozen=True)
@@ -597,6 +639,10 @@ class _Tracked:
         self.unresolved_steps = 0
         # Plan 20-09 (D-07): set by ``notify_divergence``, consumed by the next step.
         self.recheck_requested = False
+        # Plan 20-17 (D-26): whether this process tracked the plan live, so its stop history
+        # (confirmed? lost?) is known. Plan 20-19 sets it False for a restored plan whose
+        # history the journal cannot establish; ``operator_protect`` then places nothing.
+        self.stop_history_known = True
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -631,6 +677,10 @@ def _refusal_reason(exc: BaseException) -> str:
 
 def _optional_text(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _state_text(state: ProtectionState | None) -> str:
+    return _NO_STATE if state is None else state.value
 
 
 class ProtectionCoordinator:
@@ -688,6 +738,8 @@ class ProtectionCoordinator:
         # Plan 20-14 (D-19, Q4): the durable intent of an action the REST gate refused.
         self._pending = pending_actions
         self._pending_recorder = BlockedRecorder(pending_actions, spill)
+        # Plan 20-17 (D-16): the audit rows of the operator controls fall back to this spill.
+        self._spill = spill
 
     # ------------------------------------------------------------------ #
     # Registry surface.
@@ -790,6 +842,237 @@ class ProtectionCoordinator:
             tracked, EVENT_DIVERGENCE_NOTIFIED, {"kind": kind, "state": state}, self._now()
         )
         return True
+
+    # ------------------------------------------------------------------ #
+    # Operator controls (plan 20-17, D-26, EXEC-06): a human action follows the same rules.
+    # ------------------------------------------------------------------ #
+
+    async def operator_close(self, *, plan_hash: str, operator_id: str) -> OperatorControlResult:
+        """Close a strategy position on an explicit operator action (EXEC-06, D-26).
+
+        Routes through the coordinator: the plan moves to CLOSE_REQUIRED with branch
+        ``OPERATOR_CLOSE`` and the existing close flow runs (reduce-only MARKET by the emergency
+        closer, which reads the quantity itself; the entry remainder cancelled; FLAT only after
+        two zero reads with the entry terminal; the protective legs swept only after FLAT).
+        Nothing is closed with a guessed quantity and no stop is cancelled here (D-06, D-09).
+
+        The action comes first and its audit row after (D-16): the row goes to the journal and,
+        when that fails, to the local spill. ``operator_id`` is audit metadata, not
+        authentication. Refusals send nothing: an empty operator id, an unknown plan, a plan that
+        is finished (FLAT, ENTRY_ENDED_NO_FILL) and a plan whose close is already required.
+        """
+        if not isinstance(operator_id, str) or operator_id == "":
+            return OperatorControlResult(False, CODE_OPERATOR_ID_MISSING)
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None:
+            return OperatorControlResult(False, CODE_UNKNOWN_PLAN)
+        async with self._step_lock:
+            state = tracked.state
+            if state is None or state in (
+                ProtectionState.FLAT,
+                ProtectionState.ENTRY_ENDED_NO_FILL,
+            ):
+                return OperatorControlResult(False, CODE_NOTHING_TO_CLOSE)
+            if state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
+                return OperatorControlResult(False, CODE_CLOSE_ALREADY_REQUIRED)
+            try:
+                await self._enter_close_required(tracked, BRANCH_OPERATOR_CLOSE)
+            finally:
+                self._journal_operator(
+                    tracked,
+                    EVENT_OPERATOR_CLOSE_REQUESTED,
+                    {"operator_id": operator_id, "state_before": state.value},
+                )
+        return OperatorControlResult(True, CODE_CLOSE_REQUESTED)
+
+    async def operator_protect(self, *, plan_hash: str, operator_id: str) -> OperatorControlResult:
+        """EXEC-06 "re-place protection" control, with NO placement code of its own (D-26, D077).
+
+        Owner direction 1 on the D-26 / D077 conflict. The control is an out-of-cadence trigger
+        of the coordinator's own rule, never a second placement path:
+
+        * the stop was confirmed ACTIVE and later lost (UNPROTECTED with ``stop_lost_at``,
+          CLOSE_REQUIRED / CLOSE_FAILED after B4), any other CLOSE_REQUIRED / CLOSE_FAILED plan,
+          and a plan whose stop history cannot be established are refused before any adapter call
+          (the human action D077 allows for the first is ``operator_close``);
+        * the position is then read fresh (unreadable, zero or the wrong side is refused);
+        * a plan whose stop was never confirmed (UNPROTECTED after a first fill) runs the
+          coordinator's own per-plan step once under the step lock: the stop is queried by its
+          deterministic id, placed again under the same id at ``entry.sl_trigger_price`` only
+          after a definitive absence, and escalated at ``max_unprotected_ms`` by that same step
+          (the window is not extended);
+        * in a confirmed state an ACTIVE stop is adopted with nothing placed; a stop that is no
+          longer ACTIVE is refused and left to the coordinator's D077 supervision.
+
+        Nothing here places, cancels or closes, and ``_transition`` is never called, so
+        UNPROTECTED and CLOSE_REQUIRED are never cleared by a human. ``operator_id`` is audit
+        metadata, not authentication; each outcome writes one audit row after the action
+        (journal, then the local spill).
+        """
+        if not isinstance(operator_id, str) or operator_id == "":
+            return OperatorControlResult(False, CODE_OPERATOR_ID_MISSING)
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None:
+            return OperatorControlResult(False, CODE_UNKNOWN_PLAN)
+        async with self._step_lock:
+            state = tracked.state
+            refusal = self._operator_protect_precheck(tracked)
+            if refusal is None:
+                refusal = await self._operator_protect_position_refusal(tracked)
+            if refusal is None and state is ProtectionState.UNPROTECTED:
+                return await self._operator_protect_step(tracked, operator_id)
+            if refusal is None:
+                refusal = await self._operator_protect_stop_refusal(tracked)
+            if refusal is None:
+                self._journal_operator(
+                    tracked,
+                    EVENT_OPERATOR_STOP_ADOPTED,
+                    {
+                        "code": CODE_STOP_ADOPTED,
+                        "operator_id": operator_id,
+                        "state": _state_text(state),
+                    },
+                )
+                return OperatorControlResult(True, CODE_STOP_ADOPTED)
+            self._journal_operator(
+                tracked,
+                EVENT_OPERATOR_PROTECT_REFUSED,
+                {"code": refusal, "operator_id": operator_id, "state": _state_text(state)},
+            )
+            return OperatorControlResult(False, refusal)
+
+    @staticmethod
+    def _operator_protect_precheck(tracked: _Tracked) -> str | None:
+        """The refusal code decided from the tracked record alone (no adapter call), else None."""
+        state = tracked.state
+        confirmed_states = (
+            ProtectionState.PROTECTED_ENTRY_OPEN,
+            ProtectionState.PROTECTED,
+            ProtectionState.COMPLETE,
+            ProtectionState.TP_UNAVAILABLE,
+        )
+        # Stop history first: a guess about it must never lead to a placement.
+        if not tracked.stop_history_known:
+            return CODE_STOP_HISTORY_UNKNOWN
+        if tracked.stop_lost_at is not None and tracked.stop_confirmed_at is None:
+            return CODE_STOP_HISTORY_UNKNOWN
+        if (
+            state is ProtectionState.UNPROTECTED
+            and tracked.stop_confirmed_at is not None
+            and tracked.stop_lost_at is None
+        ):
+            return CODE_STOP_HISTORY_UNKNOWN
+        if state in confirmed_states and tracked.stop_confirmed_at is None:
+            return CODE_STOP_HISTORY_UNKNOWN
+        if state in (
+            None,
+            ProtectionState.AWAITING_FILL,
+            ProtectionState.ENTRY_UNRESOLVED,
+            ProtectionState.FLAT,
+            ProtectionState.ENTRY_ENDED_NO_FILL,
+        ):
+            return CODE_NOTHING_TO_PROTECT
+        if state is ProtectionState.UNPROTECTED and tracked.stop_lost_at is not None:
+            return CODE_REPLACEMENT_FORBIDDEN_STOP_LOST
+        if state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
+            if (
+                tracked.close_branch in (BRANCH_B4_FILL_AFTER_STOP, BRANCH_B4_STOP_LOST_UNRESOLVED)
+                or tracked.stop_lost_at is not None
+            ):
+                return CODE_REPLACEMENT_FORBIDDEN_STOP_LOST
+            return CODE_REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED
+        return None
+
+    async def _operator_protect_position_refusal(self, tracked: _Tracked) -> str | None:
+        """One fresh position read: the refusal code when it is unreadable, zero or wrong-sided."""
+        amount = await self._position_amount(tracked)
+        if amount is None:
+            return CODE_POSITION_UNREADABLE
+        if amount == _ZERO:
+            return CODE_NO_EXPOSURE
+        if (amount > _ZERO) != (tracked.entry.side == "LONG"):
+            return CODE_WRONG_SIDE
+        return None
+
+    async def _operator_protect_step(
+        self, tracked: _Tracked, operator_id: str
+    ) -> OperatorControlResult:
+        """Run the coordinator's own per-plan step once (the caller holds the step lock)."""
+        state_before = _state_text(tracked.state)
+        try:
+            await self._step_plan(tracked, None)
+        finally:
+            self._journal_operator(
+                tracked,
+                EVENT_OPERATOR_PROTECT_STEPPED,
+                {
+                    "code": CODE_COORDINATOR_STEPPED,
+                    "operator_id": operator_id,
+                    "state_after": _state_text(tracked.state),
+                    "state_before": state_before,
+                },
+            )
+        return OperatorControlResult(True, CODE_COORDINATOR_STEPPED)
+
+    async def _operator_protect_stop_refusal(self, tracked: _Tracked) -> str | None:
+        """Read the stop (read-only): None when it reads ACTIVE, else the refusal code."""
+        answer = await self._guarded(
+            self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
+        )
+        reading = self._apply_stop_answer(tracked, answer)
+        if reading is _StopReading.ACTIVE:
+            return None
+        if reading is _StopReading.UNREADABLE:
+            return CODE_STOP_UNREADABLE
+        return CODE_REPLACEMENT_FORBIDDEN_STOP_LOST
+
+    def _journal_operator(
+        self, tracked: _Tracked, event_type: str, payload: dict[str, str]
+    ) -> None:
+        """Audit row of an operator control: journal first, the local spill when that fails.
+
+        Called after the action (D-16). Only when the journal AND the spill both fail is the
+        row lost, and then SAFE_MODE DB_FAILURE is entered once (fail closed).
+        """
+        entry = tracked.entry
+        now = self._now()
+        body = json.dumps(
+            {
+                **payload,
+                "plan_hash": entry.plan_hash,
+                "symbol": entry.symbol,
+                "trade_plan_id": entry.trade_plan_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        event = JournalEvent(
+            journal_event_id=content_hash_event_id(
+                prefix="pop",
+                event_type=event_type,
+                entity_id=entry.plan_hash,
+                occurred_at_utc=now,
+                payload_json=body,
+            ),
+            occurred_at_utc=now,
+            event_type=event_type,
+            entity_type="ProtectionState",
+            entity_id=entry.plan_hash,
+            correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+            payload_json=body,
+        )
+        try:
+            self._journal.record(event)
+            return
+        except Exception:  # noqa: BLE001 - the spill takes the row (D-16)
+            pass
+        if self._spill is not None:
+            try:
+                self._spill.write(event)
+                return
+            except Exception:  # noqa: BLE001 - both failed: fail closed below
+                pass
+        self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
 
     # ------------------------------------------------------------------ #
     # The router's fill sink: synchronous, non-blocking, infallible.
@@ -1959,13 +2242,20 @@ class ProtectionCoordinator:
             )
 
     async def _sweep(self, tracked: _Tracked) -> None:
-        """Cancel the plan's protective legs by deterministic id once the position is flat."""
+        """Cancel the plan's protective legs by deterministic id once the position is flat.
+
+        Plan 20-17 (20-11 follow-up): the sweep is done only when every leg verified in
+        ``PROVEN_GONE`` (CANCELED or GONE_NOT_CANCELED). A leg that verified STILL_OPEN or UNKNOWN,
+        or a result that is not a verdict map, keeps ``sweep_done`` False: one
+        ``PROTECTION_SWEEP_UNVERIFIED`` row names the verdict of each leg (names only) and the next
+        step sweeps again. The cancel is by deterministic id, so the retry is idempotent.
+        """
         # Imported here: ``manager`` imports ``live_context``, which imports this module.
         from src.execution.manager import cancel_untriggered_protectives
 
         entry = tracked.entry
         try:
-            await cancel_untriggered_protectives(
+            verdicts = await cancel_untriggered_protectives(
                 plan_hash=entry.plan_hash,
                 symbol=entry.symbol,
                 adapter=self._adapter,  # type: ignore[arg-type]
@@ -1977,7 +2267,55 @@ class ProtectionCoordinator:
                 tracked, EVENT_SWEEP_FAILED, {"error_type": type(exc).__name__}, self._now()
             )
             return
-        tracked.sweep_done = True
+        legs = self._sweep_leg_verdicts(verdicts)
+        if all(CancelVerdict(name) in PROVEN_GONE for name in legs.values()):
+            tracked.sweep_done = True
+            return
+        self._journal_sweep_unverified(tracked, legs)
+
+    @staticmethod
+    def _sweep_leg_verdicts(verdicts: object) -> dict[str, str]:
+        """The verdict name of each protective leg; anything unreadable counts as UNKNOWN."""
+        found = verdicts if isinstance(verdicts, dict) else {}
+        legs: dict[str, str] = {}
+        for role in (
+            OrderRole.STOP_LOSS.value,
+            OrderRole.TAKE_PROFIT_1.value,
+            OrderRole.TAKE_PROFIT_2.value,
+        ):
+            verdict = found.get(role)
+            legs[role] = (
+                verdict.value if isinstance(verdict, CancelVerdict) else CancelVerdict.UNKNOWN.value
+            )
+        return legs
+
+    def _journal_sweep_unverified(self, tracked: _Tracked, legs: dict[str, str]) -> None:
+        """One note naming each leg's verdict. The payload carries the legs as a nested map."""
+        entry = tracked.entry
+        now = self._now()
+        body = json.dumps(
+            {"legs": legs, "symbol": entry.symbol, "trade_plan_id": entry.trade_plan_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._record_journal(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="pnt",
+                    event_type=EVENT_SWEEP_UNVERIFIED,
+                    entity_id=entry.plan_hash,
+                    occurred_at_utc=now,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now,
+                event_type=EVENT_SWEEP_UNVERIFIED,
+                entity_type="ProtectionState",
+                entity_id=entry.plan_hash,
+                correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+                payload_json=body,
+            ),
+            now,
+        )
 
     # ------------------------------------------------------------------ #
     # Transitions, journal, store and SAFE_MODE helpers.
@@ -2228,6 +2566,7 @@ __all__ = [
     "BRANCH_B4_STOP_LOST_UNRESOLVED",
     "BRANCH_B5_STOP_REJECTED",
     "BRANCH_NO_POSITION_BUT_EXPOSED",
+    "BRANCH_OPERATOR_CLOSE",
     "DIVERGENCE_KIND_DOUBLED_POSITION",
     "DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE",
     "DIVERGENCE_KIND_POSITION_WITHOUT_STOP",
@@ -2241,6 +2580,10 @@ __all__ = [
     "EVENT_ENTRY_CANCEL_NOT_SENT",
     "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
+    "EVENT_OPERATOR_CLOSE_REQUESTED",
+    "EVENT_OPERATOR_PROTECT_REFUSED",
+    "EVENT_OPERATOR_PROTECT_STEPPED",
+    "EVENT_OPERATOR_STOP_ADOPTED",
     "EVENT_PROTECTION_TRANSITION",
     "EVENT_PROTECTION_TRANSITION_REJECTED",
     "EVENT_REST_FAILED",
@@ -2248,6 +2591,7 @@ __all__ = [
     "EVENT_STOP_NOT_SENT",
     "EVENT_STOP_PLACEMENT_FAILED",
     "EVENT_SWEEP_FAILED",
+    "EVENT_SWEEP_UNVERIFIED",
     "EVENT_TP_UNAVAILABLE",
     "EVENT_UNKNOWN_FILL",
     "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
@@ -2265,6 +2609,7 @@ __all__ = [
     "UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS",
     "CriticalAlertSink",
     "EmergencyCloser",
+    "OperatorControlResult",
     "PlanProtection",
     "ProtectionAdapter",
     "ProtectionCoordinator",

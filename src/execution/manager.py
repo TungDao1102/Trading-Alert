@@ -48,10 +48,11 @@ guard; the deterministic ids only let a probe find an order whose response was l
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from src.approval.binding import check_binding_full, check_binding_identity
@@ -112,7 +113,7 @@ from src.execution.pre_placement import (
     evaluate_pre_placement,
     good_till_date_ms,
 )
-from src.execution.protection import RestingEntry
+from src.execution.protection import OperatorControlResult, ProtectionCoordinator, RestingEntry
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
 from src.ops.risk_first import AuditRecordLost, act_then_record, record_after
 from src.persistence.errors import (
@@ -2514,8 +2515,52 @@ async def emergency_manual_close(
         raise ExceptionGroup("emergency_manual_close: sequence incomplete", errors)
 
 
+async def operator_close_position(
+    *, coordinator: ProtectionCoordinator, plan_hash: str, operator_id: str
+) -> OperatorControlResult:
+    """EXEC-06 control: close a strategy position on an explicit operator action (D-26).
+
+    A thin wrapper: the close goes through the protection coordinator's own flow (plan moves to
+    CLOSE_REQUIRED with branch OPERATOR_CLOSE; reduce-only MARKET sized by the closer from a REST
+    read; FLAT only after two zero reads with the entry terminal; protective legs swept only
+    after FLAT), so a human close follows the same rules as the automatic one (D-06, D-16).
+    This function has no adapter call of its own and never names a quantity.
+    """
+    return await coordinator.operator_close(plan_hash=plan_hash, operator_id=operator_id)
+
+
+async def operator_protect_position(
+    *, coordinator: ProtectionCoordinator, plan_hash: str, operator_id: str
+) -> OperatorControlResult:
+    """EXEC-06 control: re-place protection on an explicit operator action (D-26, D077).
+
+    A thin wrapper with NO placement of its own. The coordinator runs its own per-plan step once
+    for a plan whose stop was never confirmed (the same-id re-place at the plan stop price after
+    a definitive absence, escalation at ``max_unprotected_ms``), adopts an ACTIVE stop in a
+    confirmed state, and refuses with nothing sent after a confirmed stop was lost, in
+    CLOSE_REQUIRED / CLOSE_FAILED, on an unknown stop history and on an unreadable, zero or
+    wrong-sided position. The D077-compatible human action for the stop-lost branch is
+    ``operator_close_position``.
+    """
+    return await coordinator.operator_protect(plan_hash=plan_hash, operator_id=operator_id)
+
+
+# EXEC-06 (plan 20-17, D-26): the five manual emergency controls, control name -> dotted path of
+# the callable. One test imports each of them; a new control is added here and in that test.
+EXEC06_CONTROLS: Mapping[str, str] = MappingProxyType(
+    {
+        "cancel_pending_strategy_orders": "src.execution.manager.expire_pending_entry",
+        "disable_new_entries": "src.execution.enablement.LiveEnablementController.disable",
+        "close_strategy_positions": "src.execution.manager.operator_close_position",
+        "replace_protection": "src.execution.manager.operator_protect_position",
+        "enter_safe_mode": "src.execution.manager.safe_mode_freeze",
+    }
+)
+
+
 __all__ = [
     "APPROVED_QUANTITY_NOT_CONFIRMED",
+    "EXEC06_CONTROLS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
     "resolve_position_mode",
@@ -2531,4 +2576,6 @@ __all__ = [
     "cancel_untriggered_protectives",
     "safe_mode_freeze",
     "emergency_manual_close",
+    "operator_close_position",
+    "operator_protect_position",
 ]

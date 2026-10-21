@@ -239,8 +239,21 @@ _EXECUTION_INTENT = _table(
 # never found by its GTD time plus the grace), so that edge is part of the docstring's intent.
 _PROTECTION = _table(
     {
-        "AWAITING_FILL": ("UNPROTECTED", "ENTRY_ENDED_NO_FILL", "ENTRY_UNRESOLVED"),
-        "ENTRY_UNRESOLVED": ("UNPROTECTED", "ENTRY_ENDED_NO_FILL", "AWAITING_FILL"),
+        # Plan 20-17 (D-26): an operator close of a resting entry (reason OPERATOR_CLOSE) adds
+        # the edge to CLOSE_REQUIRED from the two states that hold no known exposure. The
+        # other five states with a position already had it.
+        "AWAITING_FILL": (
+            "UNPROTECTED",
+            "ENTRY_ENDED_NO_FILL",
+            "ENTRY_UNRESOLVED",
+            "CLOSE_REQUIRED",
+        ),
+        "ENTRY_UNRESOLVED": (
+            "UNPROTECTED",
+            "ENTRY_ENDED_NO_FILL",
+            "AWAITING_FILL",
+            "CLOSE_REQUIRED",
+        ),
         "UNPROTECTED": ("PROTECTED_ENTRY_OPEN", "PROTECTED", "CLOSE_REQUIRED", "FLAT"),
         # FLAT: audit finding of plan 20-02 (a lost stop that ends flat while the entry turns
         # terminal on the same step); the coordinator module docstring states it for WR-04.

@@ -108,8 +108,20 @@ EXPECTED: dict[TransitionKind, dict[str, set[str]]] = {
     },
     # Copied from the ProtectionState docstring (src/execution/protection.py), not from the table.
     TransitionKind.PROTECTION: {
-        "AWAITING_FILL": {"UNPROTECTED", "ENTRY_ENDED_NO_FILL", "ENTRY_UNRESOLVED"},
-        "ENTRY_UNRESOLVED": {"UNPROTECTED", "ENTRY_ENDED_NO_FILL", "AWAITING_FILL"},
+        # Plan 20-17 (D-26): an operator close of a resting entry (reason OPERATOR_CLOSE) adds
+        # the edge to CLOSE_REQUIRED from the two states that hold no known exposure.
+        "AWAITING_FILL": {
+            "UNPROTECTED",
+            "ENTRY_ENDED_NO_FILL",
+            "ENTRY_UNRESOLVED",
+            "CLOSE_REQUIRED",
+        },
+        "ENTRY_UNRESOLVED": {
+            "UNPROTECTED",
+            "ENTRY_ENDED_NO_FILL",
+            "AWAITING_FILL",
+            "CLOSE_REQUIRED",
+        },
         "UNPROTECTED": {"PROTECTED_ENTRY_OPEN", "PROTECTED", "CLOSE_REQUIRED", "FLAT"},
         "PROTECTED_ENTRY_OPEN": {"PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED", "FLAT"},
         # Plan 20-09 (D-07, D077): stop supervision after PROTECTED adds the edges to

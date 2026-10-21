@@ -25,8 +25,11 @@ from typing import Any
 
 import pytest
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
+from src.execution.protection import ProtectionState
 
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
+from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH as RIG_PLAN_HASH
+from tests.support.protection_doubles import ProtectionRig, make_rig
 from tests.support.reconcile_doubles import RaisingJournal, RecordingJournal
 
 NOW_UTC = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
@@ -510,3 +513,853 @@ def test_no_manual_control_moves_a_trade_plan_to_expired() -> None:
             params = set(inspect.signature(getattr(manager, node.name)).parameters)
             assert not any("plan_store" in p or "status" in p for p in params), node.name
     assert seen == controls
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-17, Task 1 (D-26, D-06, D-09, D034): operator_close_position flattens through the
+# coordinator's own close flow. Evidence label: executed tests with the Binance-semantics fake and
+# the real MarketEmergencyCloser; reduce-only MARKET behavior on Binance is [NOT_TESTED].
+# --------------------------------------------------------------------------- #
+
+RIG_SL_ID = derive_algo_client_id(plan_hash=RIG_PLAN_HASH, role="STOP_LOSS")
+RIG_TP1_ID = derive_algo_client_id(plan_hash=RIG_PLAN_HASH, role="TAKE_PROFIT_1")
+RIG_TP2_ID = derive_algo_client_id(plan_hash=RIG_PLAN_HASH, role="TAKE_PROFIT_2")
+
+
+def _state(rig: ProtectionRig) -> str:
+    view = rig.coordinator.protection_of(RIG_PLAN_HASH)
+    assert view is not None
+    return view.state.value
+
+
+def _last_reason(rig: ProtectionRig) -> str | None:
+    view = rig.coordinator.protection_of(RIG_PLAN_HASH)
+    assert view is not None
+    return view.last_reason
+
+
+def _rig_events(rig: ProtectionRig, event_type: str) -> list[dict[str, Any]]:
+    return [json.loads(e.payload_json) for e in rig.journal.calls if e.event_type == event_type]
+
+
+async def _protected_rig(**overrides: Any) -> ProtectionRig:
+    """A +0.004 LONG position, the stop confirmed ACTIVE, the entry remainder cancelled."""
+    rig = await make_rig(real_closer=True, **overrides)
+    rig.coordinator.fill_sink(rig.stream_fill(QUANTITY))
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    assert _state(rig) == "PROTECTED"
+    return rig
+
+
+async def test_operator_close_flattens_through_the_coordinator() -> None:
+    rig = await _protected_rig()
+    assert rig.fake.calls_to("cancel_algo_order") == []
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    assert _last_reason(rig) == "OPERATOR_CLOSE"
+    closes = rig.fake.calls_to("place_market_close")
+    assert len(closes) == 1
+    assert (closes[0]["kwargs"]["side"], closes[0]["kwargs"]["quantity"]) == ("SELL", QUANTITY)
+    # The stop is kept until the plan is FLAT (D-09): nothing protective is cancelled yet.
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert RIG_SL_ID in rig.fake.open_algos
+    assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("CLOSE_REQUIRED", "OPERATOR_CLOSE")
+    ]
+
+    await rig.coordinator.step()  # two zero reads, the entry is terminal: FLAT, then the sweep
+
+    assert _state(rig) == "FLAT"
+    swept = [c["kwargs"]["client_algo_id"] for c in rig.fake.calls_to("cancel_algo_order")]
+    assert swept == [RIG_SL_ID, RIG_TP1_ID, RIG_TP2_ID]
+    assert len(rig.fake.calls_to("place_market_close")) == 1, "no second close"
+    requested = _rig_events(rig, "OPERATOR_CLOSE_REQUESTED")
+    assert len(requested) == 1
+    assert requested[0]["operator_id"] == "op-1"
+    assert requested[0]["state_before"] == "PROTECTED"
+
+
+async def test_operator_close_of_a_resting_entry_cancels_it_and_ends_flat() -> None:
+    rig = await make_rig(real_closer=True)
+    assert _state(rig) == "AWAITING_FILL"
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    assert rig.fake.calls_to("place_market_close") == [], "no position, so no close order"
+    for _ in range(3):
+        await rig.coordinator.step()
+    assert _state(rig) == "FLAT"
+    assert rig.entry.entry_client_order_id not in rig.fake.open_orders
+
+
+async def test_operator_close_refuses_without_an_operator_id_and_sends_nothing() -> None:
+    rig = await _protected_rig()
+    calls_before = len(rig.fake.calls)
+    rows_before = len(rig.journal.calls)
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="")
+
+    assert (result.accepted, result.code) == (False, "OPERATOR_ID_MISSING")
+    assert _state(rig) == "PROTECTED"
+    assert len(rig.fake.calls) == calls_before
+    assert len(rig.journal.calls) == rows_before
+
+
+async def test_operator_close_refuses_an_unknown_plan() -> None:
+    rig = await _protected_rig()
+
+    result = await rig.coordinator.operator_close(plan_hash="f" * 64, operator_id="op-1")
+
+    assert (result.accepted, result.code) == (False, "UNKNOWN_PLAN")
+    assert rig.fake.calls_to("place_market_close") == []
+
+
+async def test_operator_close_has_nothing_to_close_for_a_flat_or_unfilled_ended_plan() -> None:
+    flat = await _protected_rig()
+    await flat.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    await flat.coordinator.step()
+    assert _state(flat) == "FLAT"
+    closes = len(flat.fake.calls_to("place_market_close"))
+    again = await flat.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    assert (again.accepted, again.code) == (False, "NOTHING_TO_CLOSE")
+    assert len(flat.fake.calls_to("place_market_close")) == closes
+
+    ended = await make_rig(real_closer=True)
+    ended.fake.cancel(ended.entry.entry_client_order_id)
+    await ended.coordinator.step()
+    assert _state(ended) == "ENTRY_ENDED_NO_FILL"
+    result = await ended.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    assert (result.accepted, result.code) == (False, "NOTHING_TO_CLOSE")
+
+
+async def test_operator_close_while_a_close_is_already_required_starts_nothing_new() -> None:
+    rig = await _protected_rig()
+    first = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    assert first.accepted is True
+    alerts = len(rig.alerts.alerts)
+
+    second = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-2")
+
+    assert (second.accepted, second.code) == (False, "CLOSE_ALREADY_REQUIRED")
+    assert len(rig.alerts.alerts) == alerts
+    assert len(_rig_events(rig, "OPERATOR_CLOSE_REQUESTED")) == 1
+
+
+async def test_operator_close_never_sends_a_guessed_quantity_when_the_position_is_unreadable() -> (
+    None
+):
+    rig = await _protected_rig()
+    for _ in range(50):
+        rig.fake.fail_next("snapshot_positions", RuntimeError("scripted read failure"))
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+
+    assert result.accepted is True, "the request is accepted; the close itself fails closed"
+    assert rig.fake.calls_to("place_market_close") == []
+    assert _state(rig) == "CLOSE_FAILED"
+    assert RIG_SL_ID in rig.fake.open_algos
+
+
+async def test_manager_operator_close_position_is_a_thin_wrapper() -> None:
+    from src.execution.manager import operator_close_position
+
+    rig = await _protected_rig()
+
+    result = await operator_close_position(
+        coordinator=rig.coordinator, plan_hash=RIG_PLAN_HASH, operator_id="op-1"
+    )
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "operator_close_position":
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            attrs = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+            assert "adapter" not in names | attrs
+            assert attrs == {"operator_close"}
+            break
+    else:
+        raise AssertionError("operator_close_position not found")
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-17, Task 2 (D-26, D-06, D077, RISK-03; owner direction 1 on the D-26/D077 conflict):
+# operator_protect_position has NO placement of its own. In the never-confirmed branch it runs the
+# coordinator's own per-plan step once; in a confirmed state it only adopts an ACTIVE stop; after a
+# confirmed stop was lost, in CLOSE_REQUIRED / CLOSE_FAILED and on an unknown stop history it
+# refuses with nothing sent. Evidence label: executed tests with the Binance-semantics fake; nothing
+# is [DEMO].
+# --------------------------------------------------------------------------- #
+
+RIG_ENTRY_STOP_PRICE = Decimal("59000.00")
+MAX_UNPROTECTED_MS = 7777
+ENTRY_TERMINAL_TIMEOUT_MS = 13333
+PROTECT_REFUSED = "OPERATOR_PROTECT_REFUSED"
+PROTECT_STEPPED = "OPERATOR_PROTECT_STEPPED"
+STOP_ADOPTED = "OPERATOR_STOP_ADOPTED"
+
+
+class PlacementSpy:
+    """Records every STOP_LOSS placement and flags any price other than entry.sl_trigger_price."""
+
+    def __init__(self, rig: ProtectionRig) -> None:
+        self.prices: list[Decimal] = []
+        self.violations: list[Decimal] = []
+        original = rig.fake.place_algo_protective
+
+        async def spy(**kwargs: Any) -> Any:
+            price = kwargs.get("trigger_price")
+            self.prices.append(price)
+            if price != RIG_ENTRY_STOP_PRICE:
+                self.violations.append(price)
+            return await original(**kwargs)
+
+        rig.fake.place_algo_protective = spy  # type: ignore[method-assign]
+
+
+def _tracked(rig: ProtectionRig) -> Any:
+    return rig.coordinator._tracked[RIG_PLAN_HASH]
+
+
+def _snapshot(rig: ProtectionRig) -> tuple[Any, ...]:
+    tracked = _tracked(rig)
+    return (tracked.state, tracked.seq, tracked.stop_lost_at, tracked.close_branch)
+
+
+def _methods_since(rig: ProtectionRig, count: int) -> list[str]:
+    return [c["method"] for c in rig.fake.calls[count:]]
+
+
+async def _unprotected_never_confirmed(**overrides: Any) -> ProtectionRig:
+    """First fill 0.004, the stop placement failed ambiguously: UNPROTECTED, never confirmed."""
+    rig = await make_rig(real_closer=True, **overrides)
+    rig.fake.fail_next("place_algo_protective", RuntimeError("scripted ambiguous failure"))
+    rig.coordinator.fill_sink(rig.stream_fill(QUANTITY))
+    await rig.coordinator.step()
+    assert _state(rig) == "UNPROTECTED"
+    assert _tracked(rig).stop_confirmed_at is None
+    return rig
+
+
+async def _protected_entry_open(**overrides: Any) -> ProtectionRig:
+    """The stop is confirmed ACTIVE by REST and the entry remainder is still open."""
+    rig = await make_rig(real_closer=True, **overrides)
+    for _ in range(2):
+        rig.fake.fail_next("cancel_normal_order", RuntimeError("scripted ambiguous failure"))
+    rig.coordinator.fill_sink(rig.stream_fill(QUANTITY))
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    assert _state(rig) == "PROTECTED_ENTRY_OPEN"
+    return rig
+
+
+async def _stop_lost_unprotected(**overrides: Any) -> ProtectionRig:
+    """A confirmed stop that was lost while the position cannot be read: UNPROTECTED, STOP_LOST."""
+    rig = await _protected_entry_open(**overrides)
+    await rig.clock.advance(1.0)
+    rig.fake.trigger_stop(rig.stop_id)
+    for _ in range(500):
+        rig.fake.fail_next("snapshot_positions", RuntimeError("scripted read failure"))
+    await rig.coordinator.step()
+    assert _state(rig) == "UNPROTECTED"
+    assert _last_reason(rig) == "STOP_LOST"
+    assert _tracked(rig).stop_lost_at is not None
+    return rig
+
+
+async def _assert_refused(
+    rig: ProtectionRig, code: str, *, operator_id: str = "op-9", allowed: tuple[str, ...] = ()
+) -> None:
+    """The operator_protect call is refused with `code`, sends nothing and changes nothing."""
+    calls = len(rig.fake.calls)
+    snapshot = _snapshot(rig)
+    rows = len(_rig_events(rig, PROTECT_REFUSED))
+    result = await rig.coordinator.operator_protect(
+        plan_hash=RIG_PLAN_HASH, operator_id=operator_id
+    )
+    assert (result.accepted, result.code) == (False, code)
+    assert set(_methods_since(rig, calls)) <= set(allowed)
+    assert _snapshot(rig) == snapshot
+    refused = _rig_events(rig, PROTECT_REFUSED)
+    assert len(refused) == rows + 1
+    assert refused[-1]["code"] == code
+    assert refused[-1]["operator_id"] == operator_id
+
+
+async def test_operator_protect_never_places_after_a_confirmed_stop_was_lost() -> None:
+    """UNPROTECTED STOP_LOST: zero adapter calls; the D077 deadline still escalates."""
+    rig = await _stop_lost_unprotected()
+    spy = PlacementSpy(rig)
+    lost_at = _tracked(rig).stop_lost_at
+
+    await _assert_refused(rig, "REPLACEMENT_FORBIDDEN_STOP_LOST")
+
+    assert spy.prices == []
+    assert _tracked(rig).stop_lost_at == lost_at
+    # The coordinator's own supervision is untouched: it escalates at stop_lost_at + the limit.
+    await rig.clock.advance((MAX_UNPROTECTED_MS - 1) / 1000)
+    await rig.coordinator.step()
+    assert _state(rig) == "UNPROTECTED"
+    await rig.clock.advance(0.001)
+    await rig.coordinator.step()
+    assert _state(rig) in ("CLOSE_REQUIRED", "CLOSE_FAILED")
+    assert _last_reason(rig) in ("B4_STOP_LOST_UNRESOLVED", "CLOSE_FAILED", "CLOSE_NOT_SENT")
+    assert spy.prices == []
+
+
+async def test_operator_protect_never_places_after_a_stop_lost_in_close_required() -> None:
+    """CLOSE_REQUIRED / CLOSE_FAILED from both B4 branches: refused, zero adapter calls."""
+    # B4_FILL_AFTER_STOP: the confirmed stop triggers, the still-open entry fills again.
+    fill_after = await _protected_entry_open()
+    spy = PlacementSpy(fill_after)
+    fill_after.fake.trigger_stop(fill_after.stop_id)
+    fill_after.fake.fill(fill_after.entry_id, quantity=Decimal("0.002"))
+    await fill_after.coordinator.step()
+    assert _state(fill_after) in ("CLOSE_REQUIRED", "CLOSE_FAILED")
+    assert _tracked(fill_after).close_branch == "B4_FILL_AFTER_STOP"
+    await _assert_refused(fill_after, "REPLACEMENT_FORBIDDEN_STOP_LOST")
+    assert spy.prices == []
+
+    # B4_STOP_LOST_UNRESOLVED: the loss was never resolved within the deadline.
+    unresolved = await _stop_lost_unprotected()
+    spy2 = PlacementSpy(unresolved)
+    await unresolved.clock.advance(MAX_UNPROTECTED_MS / 1000)
+    await unresolved.coordinator.step()
+    assert _state(unresolved) in ("CLOSE_REQUIRED", "CLOSE_FAILED")
+    assert _tracked(unresolved).close_branch == "B4_STOP_LOST_UNRESOLVED"
+    await _assert_refused(unresolved, "REPLACEMENT_FORBIDDEN_STOP_LOST")
+    assert spy2.prices == []
+
+
+async def test_operator_protect_refuses_every_other_close_required_branch() -> None:
+    """No stop is restored as a workaround for the D077 close (CLOSE_REQUIRED refusal)."""
+    code = "REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED"
+
+    # B5: the stop was rejected definitively.
+    b5 = await make_rig(real_closer=True)
+    b5.fake.reject_next_algo(-2021)
+    b5.coordinator.fill_sink(b5.stream_fill(QUANTITY))
+    await b5.coordinator.step()
+    assert _tracked(b5).close_branch == "B5_STOP_REJECTED"
+    await _assert_refused(b5, code)
+
+    # B2: the stop stayed unconfirmed to the deadline (a status that is not ACTIVE).
+    b2 = await make_rig(real_closer=True)
+    b2.coordinator.fill_sink(b2.stream_fill(QUANTITY))
+    await b2.coordinator.step()
+    b2.fake.open_algos[b2.stop_id].status = "TRIGGERING"
+    await b2.clock.advance(MAX_UNPROTECTED_MS / 1000)
+    await b2.coordinator.step()
+    assert _tracked(b2).close_branch == "B2_STOP_UNCONFIRMED"
+    await _assert_refused(b2, code)
+
+    # B1: the stop is good but the entry stayed open past its own deadline.
+    b1 = await _protected_entry_open()
+    for _ in range(5):
+        b1.fake.fail_next("cancel_normal_order", RuntimeError("scripted ambiguous failure"))
+    await b1.clock.advance(ENTRY_TERMINAL_TIMEOUT_MS / 1000)
+    await b1.coordinator.step()
+    assert _tracked(b1).close_branch == "B1_ENTRY_NOT_TERMINAL"
+    await _assert_refused(b1, code)
+
+    # OPERATOR_CLOSE: the operator's own close is not undone by a stop.
+    own = await _protected_rig()
+    await own.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    await _assert_refused(own, code)
+
+    # The remaining branch codes, set on a plan that is in CLOSE_REQUIRED.
+    for branch in ("B3_BOTH_AMBIGUOUS", "NO_POSITION_ON_STOP_BUT_EXPOSED"):
+        rig = await _protected_rig()
+        await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+        _tracked(rig).close_branch = branch
+        await _assert_refused(rig, code)
+
+
+async def test_operator_protect_refuses_unknown_stop_history() -> None:
+    """stop_history_known False, or fields that contradict each other: fail closed, no guess."""
+    rig = await _unprotected_never_confirmed()
+    spy = PlacementSpy(rig)
+    _tracked(rig).stop_history_known = False
+    await _assert_refused(rig, "STOP_HISTORY_UNKNOWN")
+
+    inconsistent = await _unprotected_never_confirmed()
+    _tracked(inconsistent).stop_lost_at = inconsistent.clock.now()  # lost, yet never confirmed
+    await _assert_refused(inconsistent, "STOP_HISTORY_UNKNOWN")
+
+    confirmed = await _protected_rig()
+    _tracked(confirmed).stop_history_known = False
+    await _assert_refused(confirmed, "STOP_HISTORY_UNKNOWN")
+    assert spy.prices == []
+
+
+async def test_operator_protect_delegates_to_the_coordinator_step() -> None:
+    """Never-confirmed UNPROTECTED: one fresh position read, then the coordinator's own step."""
+    rig = await _unprotected_never_confirmed()
+    spy = PlacementSpy(rig)
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+    calls = len(rig.fake.calls)
+
+    result = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-3")
+
+    assert (result.accepted, result.code) == (True, "COORDINATOR_STEPPED")
+    methods = _methods_since(rig, calls)
+    assert methods[0] == "snapshot_positions", "the position is read fresh first"
+    # The coordinator's B2/B3 rule: the stop is queried by its id, found absent, placed again
+    # under the SAME id at the plan stop price, and nothing else is sent.
+    assert len(rig.fake.calls_to("place_algo_protective")) == 2
+    placed = rig.fake.calls_to("place_algo_protective")[-1]["kwargs"]
+    assert placed["client_algo_id"] == rig.stop_id
+    assert placed["trigger_price"] == RIG_ENTRY_STOP_PRICE
+    assert spy.prices == [RIG_ENTRY_STOP_PRICE]
+    assert "place_market_close" not in methods
+    assert "cancel_algo_order" not in methods
+    assert _state(rig) == "UNPROTECTED", "a placement is never protection; only REST ACTIVE is"
+    row = _rig_events(rig, PROTECT_STEPPED)[-1]
+    assert row["operator_id"] == "op-3"
+    assert (row["state_before"], row["state_after"]) == ("UNPROTECTED", "UNPROTECTED")
+
+    # A second call: the stop now rests ACTIVE; nothing is placed and REST confirms it.
+    again = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-3")
+    assert (again.accepted, again.code) == (True, "COORDINATOR_STEPPED")
+    assert len(rig.fake.calls_to("place_algo_protective")) == 2
+    assert _state(rig) in ("PROTECTED", "PROTECTED_ENTRY_OPEN")
+    assert _tracked(rig).stop_confirmed_at is not None
+    assert spy.violations == []
+
+
+async def test_operator_protect_never_widens_the_stop() -> None:
+    """RISK-03: every placement any path can cause is at entry.sl_trigger_price."""
+    rig = await _unprotected_never_confirmed()
+    spy = PlacementSpy(rig)
+    # The mark moved far from the plan; the plan stop is still the only price ever used.
+    rig.fake.set_mark_price(SYMBOL, Decimal("50000"), rig.clock.now())
+
+    await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-3")
+    await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-3")
+
+    assert spy.prices == [RIG_ENTRY_STOP_PRICE]
+    assert spy.violations == []
+
+
+async def test_operator_protect_cannot_extend_max_unprotected_ms() -> None:
+    """Past the deadline the delegated step escalates and places nothing (a status not ACTIVE)."""
+    rig = await make_rig(real_closer=True)
+    rig.coordinator.fill_sink(rig.stream_fill(QUANTITY))
+    await rig.coordinator.step()
+    rig.fake.open_algos[rig.stop_id].status = "TRIGGERING"
+    spy = PlacementSpy(rig)
+    placements = len(rig.fake.calls_to("place_algo_protective"))
+
+    await rig.clock.advance((MAX_UNPROTECTED_MS - 1) / 1000)
+    early = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-3")
+    assert (early.accepted, early.code) == (True, "COORDINATOR_STEPPED")
+    assert _state(rig) == "UNPROTECTED"
+
+    await rig.clock.advance(0.001)
+    late = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-3")
+
+    assert (late.accepted, late.code) == (True, "COORDINATOR_STEPPED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    assert _last_reason(rig) == "B2_STOP_UNCONFIRMED"
+    assert len(rig.fake.calls_to("place_algo_protective")) == placements
+    assert spy.prices == []
+    row = _rig_events(rig, PROTECT_STEPPED)[-1]
+    assert (row["state_before"], row["state_after"]) == ("UNPROTECTED", "CLOSE_REQUIRED")
+
+
+async def test_operator_protect_position_problems_send_nothing() -> None:
+    """Unreadable -> POSITION_UNREADABLE, zero -> NO_EXPOSURE, wrong sign -> WRONG_SIDE."""
+    reads_only = ("snapshot_positions",)
+
+    unreadable = await _unprotected_never_confirmed()
+    unreadable.fake.fail_next("snapshot_positions", RuntimeError("scripted read failure"))
+    await _assert_refused(unreadable, "POSITION_UNREADABLE", allowed=reads_only)
+
+    zero = await _unprotected_never_confirmed()
+    zero.fake.positions[SYMBOL] = Decimal("0")
+    await _assert_refused(zero, "NO_EXPOSURE", allowed=reads_only)
+
+    wrong = await _unprotected_never_confirmed()
+    wrong.fake.positions[SYMBOL] = Decimal("-0.004")  # contradicts the LONG plan
+    await _assert_refused(wrong, "WRONG_SIDE", allowed=reads_only)
+
+    for rig in (unreadable, zero, wrong):
+        assert len(rig.fake.calls_to("place_algo_protective")) == 1
+        assert rig.fake.calls_to("place_market_close") == []
+
+
+async def test_operator_protect_adopts_an_active_stop_in_every_confirmed_state() -> None:
+    """PROTECTED_ENTRY_OPEN, PROTECTED, COMPLETE: STOP_ADOPTED, nothing placed, state unchanged."""
+    entry_open = await _protected_entry_open()
+    protected = await _protected_rig()
+    complete = await _protected_rig()
+    await complete.coordinator.step()  # PROTECTED -> COMPLETE (the take profits attach)
+    assert _state(complete) == "COMPLETE"
+
+    for rig, state in (
+        (entry_open, "PROTECTED_ENTRY_OPEN"),
+        (protected, "PROTECTED"),
+        (complete, "COMPLETE"),
+    ):
+        placements = len(rig.fake.calls_to("place_algo_protective"))
+        snapshot = _snapshot(rig)
+        calls = len(rig.fake.calls)
+
+        result = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-4")
+
+        assert (result.accepted, result.code) == (True, "STOP_ADOPTED"), state
+        assert _snapshot(rig) == snapshot
+        assert len(rig.fake.calls_to("place_algo_protective")) == placements
+        assert set(_methods_since(rig, calls)) <= {
+            "snapshot_positions",
+            "query_algo_order_by_client",
+        }
+        adopted = _rig_events(rig, STOP_ADOPTED)[-1]
+        assert (adopted["operator_id"], adopted["code"], adopted["state"]) == (
+            "op-4",
+            "STOP_ADOPTED",
+            state,
+        )
+
+
+async def test_operator_protect_refuses_a_confirmed_stop_that_is_no_longer_active() -> None:
+    """A confirmed stop that reads ABSENT or NOT_ACTIVE is lost: refused, left to D077."""
+    gone = await _protected_rig()
+    spy = PlacementSpy(gone)
+    del gone.fake.open_algos[gone.stop_id]  # the stop vanished from the book and the history
+    await _assert_refused(
+        gone,
+        "REPLACEMENT_FORBIDDEN_STOP_LOST",
+        allowed=("snapshot_positions", "query_algo_order_by_client"),
+    )
+
+    not_active = await _protected_rig()
+    not_active.fake.open_algos[not_active.stop_id].status = "TRIGGERING"
+    await _assert_refused(
+        not_active,
+        "REPLACEMENT_FORBIDDEN_STOP_LOST",
+        allowed=("snapshot_positions", "query_algo_order_by_client"),
+    )
+    assert spy.prices == []
+    # The state is untouched by the control; the coordinator's own step then applies D077.
+    await not_active.coordinator.step()
+    assert _state(not_active) == "CLOSE_REQUIRED"
+    assert _last_reason(not_active) == "B4_FILL_AFTER_STOP"
+
+
+async def test_operator_protect_stop_query_failing_is_stop_unreadable() -> None:
+    rig = await _protected_rig()
+    rig.fake.fail_next("query_algo_order_by_client", RuntimeError("scripted read failure"))
+
+    await _assert_refused(
+        rig, "STOP_UNREADABLE", allowed=("snapshot_positions", "query_algo_order_by_client")
+    )
+
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+
+
+async def test_operator_protect_has_nothing_to_protect_without_a_filled_position() -> None:
+    awaiting = await make_rig(real_closer=True)
+    await _assert_refused(awaiting, "NOTHING_TO_PROTECT")
+
+    ended = await make_rig(real_closer=True)
+    ended.fake.cancel(ended.entry.entry_client_order_id)
+    await ended.coordinator.step()
+    assert _state(ended) == "ENTRY_ENDED_NO_FILL"
+    await _assert_refused(ended, "NOTHING_TO_PROTECT")
+
+    flat = await _protected_rig()
+    await flat.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    await flat.coordinator.step()
+    assert _state(flat) == "FLAT"
+    await _assert_refused(flat, "NOTHING_TO_PROTECT")
+
+    unresolved = await make_rig(real_closer=True)
+    _tracked(unresolved).state = ProtectionState.ENTRY_UNRESOLVED
+    await _assert_refused(unresolved, "NOTHING_TO_PROTECT")
+
+
+async def test_operator_protect_refuses_an_empty_operator_id_and_an_unknown_plan() -> None:
+    rig = await _unprotected_never_confirmed()
+    calls = len(rig.fake.calls)
+    rows = len(rig.journal.calls)
+
+    missing = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="")
+    unknown = await rig.coordinator.operator_protect(plan_hash="f" * 64, operator_id="op-1")
+
+    assert (missing.accepted, missing.code) == (False, "OPERATOR_ID_MISSING")
+    assert (unknown.accepted, unknown.code) == (False, "UNKNOWN_PLAN")
+    assert len(rig.fake.calls) == calls
+    assert len(rig.journal.calls) == rows
+
+
+async def test_operator_protect_gate_refusal_in_the_delegated_step_is_the_coordinators_own() -> (
+    None
+):
+    """RestGateRefusal inside the step: journaled as not sent, PENDING row, no retry, no bypass."""
+    from src.adapters.binance_ratelimit_gate import RestGateRefusal
+
+    from tests.support.pending_action_fakes import InMemoryPendingActionStore
+
+    store = InMemoryPendingActionStore()
+    rig = await _unprotected_never_confirmed(pending_actions=store)
+    placements = len(rig.fake.calls_to("place_algo_protective"))
+    rig.fake.fail_next("place_algo_protective", RestGateRefusal("RATE_LIMIT_PAUSE_429", 60))
+
+    result = await rig.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-5")
+
+    assert (result.accepted, result.code) == (True, "COORDINATOR_STEPPED")
+    assert len(rig.fake.calls_to("place_algo_protective")) == placements + 1, "one try, no retry"
+    assert len(rig.journal.by_type("STOP_NOT_SENT")) == 1
+    assert [row.kind.value for row in store.list_open()] == ["STOP_NOT_SENT"]
+    assert _state(rig) == "UNPROTECTED"
+
+
+def test_operator_protect_has_no_placement_and_no_transition_of_its_own() -> None:
+    """operator_protect and its helpers never place, close, cancel or move a plan's state.
+
+    The only thing that can place is the coordinator's own per-plan step that
+    `_operator_protect_step` runs; none of these bodies names a placement, close, cancel or
+    `_transition` call.
+    """
+    path = Path(__file__).parent.parent / "src" / "execution" / "protection.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    forbidden = {
+        "place_algo_protective",
+        "_place_stop",
+        "_transition",
+        "_enter_close_required",
+        "_attempt_close",
+        "place_market_close",
+        "cancel_algo_order",
+        "cancel_normal_order",
+        "close_position",
+    }
+    own = {
+        "operator_protect",
+        "_operator_protect_precheck",
+        "_operator_protect_position_refusal",
+        "_operator_protect_step",
+        "_operator_protect_stop_refusal",
+    }
+    seen: set[str] = set()
+    called_by: dict[str, set[str]] = {}
+    for cls in tree.body:
+        if isinstance(cls, ast.ClassDef) and cls.name == "ProtectionCoordinator":
+            for node in cls.body:
+                if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name in own:
+                    seen.add(node.name)
+                    called_by[node.name] = {
+                        n.func.attr
+                        if isinstance(n.func, ast.Attribute)
+                        else getattr(n.func, "id", "")
+                        for n in ast.walk(node)
+                        if isinstance(n, ast.Call)
+                    }
+                    assert not called_by[node.name] & forbidden, node.name
+    assert seen == own
+    assert "_step_plan" in called_by["_operator_protect_step"]
+    assert "_operator_protect_step" in called_by["operator_protect"]
+
+
+async def test_manager_operator_protect_position_is_a_thin_wrapper() -> None:
+    from src.execution.manager import operator_protect_position
+
+    rig = await _protected_rig()
+
+    result = await operator_protect_position(
+        coordinator=rig.coordinator, plan_hash=RIG_PLAN_HASH, operator_id="op-6"
+    )
+
+    assert (result.accepted, result.code) == (True, "STOP_ADOPTED")
+    tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "operator_protect_position":
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            attrs = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+            assert "adapter" not in names | attrs
+            assert attrs == {"operator_protect"}
+            break
+    else:
+        raise AssertionError("operator_protect_position not found")
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-17, Task 3 (D-26, EXEC-06, D-16): the five controls exist, are listed in one place, and
+# act during a journal outage. Evidence label: executed tests with fakes; nothing is [DEMO].
+# --------------------------------------------------------------------------- #
+
+EXEC06_NAMES = {
+    "cancel_pending_strategy_orders",
+    "disable_new_entries",
+    "close_strategy_positions",
+    "replace_protection",
+    "enter_safe_mode",
+}
+
+
+def _resolve(dotted: str) -> Any:
+    import importlib
+
+    parts = dotted.split(".")
+    for split in range(len(parts) - 1, 0, -1):
+        try:
+            target: Any = importlib.import_module(".".join(parts[:split]))
+        except ModuleNotFoundError:
+            continue
+        for name in parts[split:]:
+            target = getattr(target, name)
+        return target
+    raise AssertionError(f"cannot resolve {dotted}")
+
+
+def test_exec06_five_controls_exist() -> None:
+    from src.execution import manager
+
+    controls = manager.EXEC06_CONTROLS
+    assert set(controls) == EXEC06_NAMES
+    for name, dotted in controls.items():
+        assert callable(_resolve(dotted)), (name, dotted)
+    assert controls["close_strategy_positions"] == "src.execution.manager.operator_close_position"
+    assert controls["replace_protection"] == "src.execution.manager.operator_protect_position"
+    assert "EXEC06_CONTROLS" in manager.__all__
+
+
+def test_exec06_controls_that_take_an_operator_id_refuse_an_empty_one() -> None:
+    from src.execution.enablement import LiveEnablementController
+
+    controller = LiveEnablementController(journal=RecordingJournal())
+    with pytest.raises(ValueError):
+        controller.disable(operator_id="", now_utc=NOW_UTC)
+
+
+async def test_exec06_cancel_pending_orders_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.execution.manager import expire_pending_entry
+    from src.ops.spill import LocalSpill
+
+    fake = ScriptedFake()
+    await _resting_entry_with_legs(fake)
+    spill = LocalSpill(tmp_path / "spill")
+
+    await expire_pending_entry(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=fake,  # type: ignore[arg-type]
+        journal=RaisingJournal(),
+        now_utc=NOW_UTC,
+        trigger_reason="operator_close",
+        spill=spill,
+    )
+
+    assert ENTRY_ID not in fake.open_orders
+    assert {r.event.event_type for r in spill.pending()} == {"ENTRY_EXPIRY"}
+
+
+def test_exec06_disable_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.execution.enablement import LiveEnablementController
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    controller = LiveEnablementController(journal=RaisingJournal(), spill=spill)
+    controller._disabled = False  # noqa: SLF001 - the state a prior enable leaves behind
+
+    controller.disable(operator_id="op-1", now_utc=NOW_UTC)
+
+    assert controller.is_disabled is True
+    assert [r.event.event_type for r in spill.pending()] == ["LIVE_ORDERS_DISABLED"]
+
+
+def test_exec06_safe_mode_is_entered_during_a_journal_outage() -> None:
+    """The flag flips before the journal is touched. This control has no spill (finding): the
+    journal error propagates to the caller, who must treat it as an audit gap, not as "not in
+    SAFE_MODE"."""
+    from src.execution.manager import safe_mode_freeze
+    from src.reconcile.safe_mode import SafeModeController
+
+    controller = SafeModeController(adapter=ScriptedFake(), journal=RaisingJournal())  # type: ignore[arg-type]
+
+    with pytest.raises(Exception, match="PostgreSQL unavailable"):
+        safe_mode_freeze(safe_mode_controller=controller, reason="MANUAL_CLOSE", now_utc=NOW_UTC)
+
+    assert controller.in_safe_mode is True
+
+
+async def test_exec06_operator_close_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    rig = await _protected_rig(spill=spill)
+    rig.coordinator._journal = RaisingJournal()  # noqa: SLF001 - the database goes down now
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-7")
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert len(rig.fake.calls_to("place_market_close")) == 1, "the close is not held for the audit"
+    assert _state(rig) == "CLOSE_REQUIRED"
+    (record,) = [r for r in spill.pending() if r.event.event_type == "OPERATOR_CLOSE_REQUESTED"]
+    assert json.loads(record.event.payload_json)["operator_id"] == "op-7"
+
+
+async def test_exec06_operator_close_without_a_spill_still_acts_and_enters_db_failure() -> None:
+    rig = await _protected_rig()
+    rig.coordinator._journal = RaisingJournal()  # noqa: SLF001
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-7")
+
+    assert result.accepted is True
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+    assert "DB_FAILURE" in rig.safe_mode.entered_reasons
+
+
+async def test_exec06_operator_protect_acts_during_a_journal_outage(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill
+
+    # The never-confirmed branch: the delegated coordinator step still runs.
+    spill = LocalSpill(tmp_path / "spill_step")
+    stepped = await _unprotected_never_confirmed(spill=spill)
+    stepped.coordinator._journal = RaisingJournal()  # noqa: SLF001
+    placements = len(stepped.fake.calls_to("place_algo_protective"))
+
+    result = await stepped.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-8")
+
+    assert (result.accepted, result.code) == (True, "COORDINATOR_STEPPED")
+    assert len(stepped.fake.calls_to("place_algo_protective")) == placements + 1
+    (row,) = [r for r in spill.pending() if r.event.event_type == "OPERATOR_PROTECT_STEPPED"]
+    assert json.loads(row.event.payload_json)["operator_id"] == "op-8"
+
+    # A refusal: nothing is sent and the refusal row reaches the spill.
+    refusal_spill = LocalSpill(tmp_path / "spill_refusal")
+    lost = await _stop_lost_unprotected(spill=refusal_spill)
+    lost.coordinator._journal = RaisingJournal()  # noqa: SLF001
+    calls = len(lost.fake.calls)
+
+    refused = await lost.coordinator.operator_protect(plan_hash=RIG_PLAN_HASH, operator_id="op-8")
+
+    assert (refused.accepted, refused.code) == (False, "REPLACEMENT_FORBIDDEN_STOP_LOST")
+    assert len(lost.fake.calls) == calls
+    refusals = [r for r in refusal_spill.pending() if r.event.event_type == PROTECT_REFUSED]
+    assert len(refusals) == 1
+    assert json.loads(refusals[0].event.payload_json)["code"] == "REPLACEMENT_FORBIDDEN_STOP_LOST"
+
+
+def test_execute_approved_plan_is_untouched_by_the_operator_controls() -> None:
+    """The EXEC-06 additions sit after the manual-control block; the placement path is unchanged."""
+    tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+    names = {n.name for n in tree.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)}
+    assert {"operator_close_position", "operator_protect_position"} <= names
+    for node in tree.body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute_approved_plan":
+            called = {
+                n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+                for n in ast.walk(node)
+                if isinstance(n, ast.Call)
+            }
+            assert not called & {"operator_close", "operator_protect", "operator_close_position"}
