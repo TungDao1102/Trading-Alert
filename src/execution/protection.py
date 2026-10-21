@@ -76,7 +76,8 @@ closer plan 19-12.
 
 Plan 20-09 (D-07, D077) closes the recorded open item "no stop supervision after PROTECTED": each
 step of PROTECTED, COMPLETE and TP_UNAVAILABLE first reads the stop by its deterministic id. ACTIVE
-(or an unreadable answer, journaled, state kept) lets the step carry on. A stop that reads ABSENT
+lets the step carry on; an unreadable answer is journaled and the state is kept until the next
+step reads again. A stop that reads ABSENT
 or NOT_ACTIVE there was confirmed earlier, so it is a lost stop and the existing D077 decision by
 the position runs (``_on_stop_lost``): exposure is CLOSE_REQUIRED (B4) and a reduce-only MARKET
 close, an unreadable position is UNPROTECTED (reason ``STOP_LOST_AFTER_PROTECTED``) with
@@ -1295,13 +1296,14 @@ class ProtectionCoordinator:
     async def _supervise_stop(self, tracked: _Tracked) -> bool:
         """Plan 20-09 (D-07): read the stop of a PROTECTED / COMPLETE / TP_UNAVAILABLE plan.
 
-        One REST query by the deterministic STOP_LOSS id on every step. True means the plan
-        carries on in its state (the stop reads ACTIVE, or the answer is unreadable: the failure
-        is journaled with its type name only and the next step reads again). False means the stop
-        is lost: it was confirmed earlier in these states, so ABSENT or NOT_ACTIVE is a loss, and
-        ``_on_stop_lost`` has decided by the position (D077): CLOSE_REQUIRED on exposure, FLAT on
-        two zero reads with the entry terminal, UNPROTECTED with ``stop_lost_at`` set once when
-        the position cannot be read. A lost stop is never re-placed here.
+        One REST query by the deterministic STOP_LOSS id on every step. True means the stop
+        reads ACTIVE and the caller carries on with the work of its state. False means the caller
+        does nothing more this step: either the stop is lost (it was confirmed earlier in these
+        states, so ABSENT or NOT_ACTIVE is a loss, and ``_on_stop_lost`` has decided by the
+        position, D077: CLOSE_REQUIRED on exposure, FLAT on two zero reads with the entry
+        terminal, UNPROTECTED with ``stop_lost_at`` set once when the position cannot be read), or
+        the answer is unreadable (the failure is journaled with its type name only, the state is
+        kept and the next step reads again). A lost stop is never re-placed here.
         """
         answer = await self._guarded(
             self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
@@ -1310,7 +1312,7 @@ class ProtectionCoordinator:
         if reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE):
             await self._on_stop_lost(tracked)
             return False
-        return True
+        return reading is _StopReading.ACTIVE
 
     @staticmethod
     async def _guarded(awaitable: Any) -> Any:
