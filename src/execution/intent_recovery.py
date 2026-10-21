@@ -3,20 +3,33 @@
 A process that dies between the write-ahead steps leaves intents INTENDED or SENT whose
 exchange state is unknown. On restart this module LEARNS, it never ACTS:
 
-  1. every INTENDED / SENT intent is first recorded UNKNOWN (the honest state: the order
-     may or may not exist);
+  1. every SENT intent is first recorded UNKNOWN (the honest state: the order may or may not
+     exist); an INTENDED ENTRY (never sent: `mark_sent` commits before `place_entry`) is probed
+     first, see below;
   2. every unresolved intent is probed by its deterministic client id only
      (`query_order_by_client` for the ENTRY leg, `query_algo_order_by_client` for the
-     protective legs) and resolved:
+     protective legs) and resolved (Phase 20, plan 20-10, D-11, Q5, research F5):
 
        found                                       -> ACKED (with the exchange order id)
-       definitively absent AND intended < window   -> REJECTED
+       ENTRY, INTENDED, absent                     -> REJECTED, reason NEVER_SENT (one probe;
+                                                      INTENDED -> REJECTED is a legal move)
+       ENTRY, SENT or UNKNOWN, absent              -> stays UNKNOWN. Absence alone is not
+                                                      evidence: `newClientOrderId` is unique only
+                                                      among OPEN orders (docs/integration/
+                                                      BINANCE.md 6.1). `UnknownEntryResolver`
+                                                      below closes it, and only on evidence.
+       protective leg, absent, intended < window,
+         and its plan's ENTRY is REJECTED          -> REJECTED
+       protective leg of a plan whose ENTRY is
+         not REJECTED (or unreadable)              -> stays UNKNOWN for the coordinator rebuild
+                                                      (F5): recovery never terminates a stop the
+                                                      coordinator must re-place
        probe error, indeterminate answer, or an
-       absent order older than the window          -> stays UNKNOWN
+       absent leg older than the window            -> stays UNKNOWN
 
   3. when any intent stays UNKNOWN, SAFE_MODE is entered once with reason
      `UNRESOLVED_EXECUTION_INTENT` (GLOSSARY 9.4), so no new entry is placed. Leaving
-     SAFE_MODE stays with the Phase 20 reconciler (D-14).
+     SAFE_MODE stays with the Phase 20 reconciler (D-14); closing an intent never exits it (D-15).
 
 Placement is structurally impossible here: the adapter parameter is the two-method
 `IntentProbeAdapter` Protocol below, which has no order-placement method, and a retried
@@ -25,8 +38,12 @@ send after a restart is exactly the double entry the write-ahead rows exist to p
 
 The 3-day default window comes from Binance Query Order retention: an order that was
 canceled or expired without a fill and is older than 3 days is no longer returned, so
-"not found" is a definitive absence only for younger intents. It is a keyword argument so
-a documented change in the exchange rule is a one-line edit at the call site.
+"not found" is a definitive absence only for younger intents. It now applies only to the
+protective legs of a plan whose ENTRY is REJECTED. It is a keyword argument so a documented
+change in the exchange rule is a one-line edit at the call site.
+
+A GTD expiry is not proof that an order is terminal: Phase 19 assumption A2 stays
+[NOT_TESTED]. Evidence labels: Binance id visibility is [DOC], nothing here is [DEMO].
 
 Imports: stdlib, `src.domain`, `src.execution` and the pure-Python `src.persistence.errors`
 (the same typed failures the manager catches); no SQLAlchemy. The resolver is a tested
@@ -47,6 +64,7 @@ from src.domain.journal import JournalEvent, content_hash_event_id
 from src.domain.stream_records import EvidenceSource, ExitEvidence, exit_evidence_event
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import (
+    RESOLUTION_NEVER_SENT,
     RESOLUTION_RECONCILED_ABSENT,
     ExecutionIntentStore,
     IntentRecord,
@@ -80,6 +98,10 @@ KEPT_GTD_GRACE_NOT_PASSED = "GTD_GRACE_NOT_PASSED"
 KEPT_EXPOSURE_PRESENT = "EXPOSURE_PRESENT"
 KEPT_OPEN_ORDER_PRESENT = "OPEN_ORDER_PRESENT"
 KEPT_READ_INDETERMINATE = "READ_INDETERMINATE"
+KEPT_READ_FAILED = "READ_FAILED"
+KEPT_GTD_UNKNOWN = "GTD_UNKNOWN"
+KEPT_JOURNAL_FAILED = "JOURNAL_FAILED"
+KEPT_STORE_FAILED = "STORE_FAILED"
 
 # (approval_id, role, final status): the deterministic report row.
 IntentOutcome = tuple[str, str, ExecutionIntentStatus]
@@ -195,6 +217,70 @@ def _record(
     return True
 
 
+def _protective_leg_may_be_rejected(
+    store: ExecutionIntentStore,
+    record: IntentRecord,
+    *,
+    now_utc: datetime,
+    lookup_window: timedelta,
+) -> bool:
+    """True only for a young protective leg whose plan's ENTRY is REJECTED (research F5).
+
+    The ENTRY intent of a live plan is not REJECTED, and then the coordinator rebuilds the stop:
+    recovery must never terminate it. An unreadable ENTRY row counts as "not REJECTED".
+    """
+    if record.role == _ENTRY_ROLE:
+        return False
+    if now_utc - record.intended_at_utc >= lookup_window:
+        return False
+    try:
+        entry = store.get_entry(approval_id=record.approval_id)
+    except PersistenceError:
+        return False
+    return entry is not None and entry.intent_status == ExecutionIntentStatus.REJECTED
+
+
+async def _resolve_intended_entry(
+    *,
+    store: ExecutionIntentStore,
+    adapter: IntentProbeAdapter,
+    record: IntentRecord,
+    now_utc: datetime,
+) -> ExecutionIntentStatus:
+    """An INTENDED ENTRY was never sent (T-C): one probe, then NEVER_SENT / ACKED / UNKNOWN."""
+    answer = await _probe(adapter, record)
+    if answer.found is False:
+        try:
+            store.finalize_reconciled_resolution(
+                approval_id=record.approval_id,
+                role=record.role,
+                reason_code=RESOLUTION_NEVER_SENT,
+                now_utc=now_utc,
+            )
+        except PersistenceError:
+            return record.intent_status
+        return ExecutionIntentStatus.REJECTED
+    if not _record(
+        store,
+        record,
+        ExecutionIntentStatus.UNKNOWN,
+        exchange_order_id=None,
+        exchange_status=None,
+        now_utc=now_utc,
+    ):
+        return record.intent_status
+    if answer.found is True and _record(
+        store,
+        record,
+        ExecutionIntentStatus.ACKED,
+        exchange_order_id=answer.exchange_order_id,
+        exchange_status=answer.exchange_status,
+        now_utc=now_utc,
+    ):
+        return ExecutionIntentStatus.ACKED
+    return ExecutionIntentStatus.UNKNOWN
+
+
 async def _resolve_one(
     *,
     store: ExecutionIntentStore,
@@ -205,6 +291,10 @@ async def _resolve_one(
 ) -> ExecutionIntentStatus:
     """Resolve one intent; returns its status as stored afterwards."""
     status = record.intent_status
+    if record.role == _ENTRY_ROLE and status == ExecutionIntentStatus.INTENDED:
+        return await _resolve_intended_entry(
+            store=store, adapter=adapter, record=record, now_utc=now_utc
+        )
     if status in (ExecutionIntentStatus.INTENDED, ExecutionIntentStatus.SENT):
         # The process died with this leg in flight: the honest state is UNKNOWN.
         if not _record(
@@ -221,11 +311,14 @@ async def _resolve_one(
     answer = await _probe(adapter, record)
     if answer.found is True:
         target = ExecutionIntentStatus.ACKED
-    elif answer.found is False and now_utc - record.intended_at_utc < lookup_window:
-        target = ExecutionIntentStatus.REJECTED  # definitive absence of a young intent
+    elif answer.found is False and _protective_leg_may_be_rejected(
+        store, record, now_utc=now_utc, lookup_window=lookup_window
+    ):
+        target = ExecutionIntentStatus.REJECTED  # a leg of a plan whose ENTRY was rejected
     else:
-        # Probe failed, answer indeterminate, or the exchange no longer retains the
-        # order: absence is not provable, so the intent stays UNKNOWN (T-17-33).
+        # Probe failed, answer indeterminate, an ENTRY that is merely not found (D-11, Q5), a
+        # leg of a live plan (F5), or an order the exchange no longer retains: absence is not
+        # provable, so the intent stays UNKNOWN (T-17-33).
         return status
 
     if _record(
@@ -476,43 +569,84 @@ class UnknownEntryResolver:
             return _KEPT, KEPT_NOT_DUE
         state.last_probe_at = now_utc
 
-        answer = await _probe(self._adapter, record)
+        answer = await _probe(self._adapter, record)  # never raises
         if answer.found is None:
-            state.clean = 0
-            self._journal_kept(record, KEPT_PROBE_INDETERMINATE, now_utc)
-            return _KEPT, KEPT_PROBE_INDETERMINATE
+            return self._keep(record, state, KEPT_PROBE_INDETERMINATE, now_utc)
         if answer.found is True:
-            return self._ack(record, answer, now_utc)
+            return self._ack(record, answer, state, now_utc)
 
         state.clean += 1
-        self._journal.record(self._probe_event(record, state.clean, now_utc))
+        if not self._journal_ok(lambda: self._probe_event(record, state.clean, now_utc)):
+            state.clean = 0
+            return _KEPT, KEPT_JOURNAL_FAILED
         if state.clean < self._count:
             return _KEPT, KEPT_PROBES_PENDING
-        good_till = self._entry_good_till(record)
-        if good_till is None or now_utc < good_till + self._grace:
+        good_till = self._good_till(record)
+        if good_till is None:
+            return _KEPT, KEPT_GTD_UNKNOWN
+        if now_utc < good_till + self._grace:
             return _KEPT, KEPT_GTD_GRACE_NOT_PASSED
 
-        # Fresh reads in this step: exposure and resting orders for the symbol.
-        positions = await self._adapter.snapshot_positions(symbol=record.symbol)
-        orders = await self._adapter.snapshot_open_normal_orders(symbol=record.symbol)
+        # Fresh reads in this step: exposure and resting orders for the symbol. A failed read is
+        # never "flat": the count restarts and the intent stays UNKNOWN.
+        try:
+            positions = await self._adapter.snapshot_positions(symbol=record.symbol)
+            orders = await self._adapter.snapshot_open_normal_orders(symbol=record.symbol)
+        except Exception:  # noqa: BLE001 - an unreadable exchange state is never evidence
+            return self._keep(record, state, KEPT_READ_FAILED, now_utc)
         blocked = _has_exposure(positions, record.symbol) or _has_open_order(orders, record.symbol)
         if blocked is not None:
-            state.clean = 0
-            self._journal_kept(record, blocked, now_utc)
-            return _KEPT, blocked
+            return self._keep(record, state, blocked, now_utc)
 
-        self._journal.record(self._exit_event(record, "REJECTED", now_utc))
-        self._store.finalize_reconciled_resolution(
-            approval_id=record.approval_id,
-            role=record.role,
-            reason_code=RESOLUTION_RECONCILED_ABSENT,
-            now_utc=now_utc,
-        )
+        # The evidence row precedes the finalization: no row, no close (T-20-23).
+        if not self._journal_ok(lambda: self._exit_event(record, "REJECTED", now_utc)):
+            state.clean = 0
+            return _KEPT, KEPT_JOURNAL_FAILED
+        try:
+            self._store.finalize_reconciled_resolution(
+                approval_id=record.approval_id,
+                role=record.role,
+                reason_code=RESOLUTION_RECONCILED_ABSENT,
+                now_utc=now_utc,
+            )
+        except PersistenceError:
+            state.clean = 0
+            return _KEPT, KEPT_STORE_FAILED
         del self._state[record.approval_id]
         return _CLOSED, RESOLUTION_RECONCILED_ABSENT
 
-    def _ack(self, record: IntentRecord, answer: _Probe, now_utc: datetime) -> tuple[str, str]:
-        self._journal.record(self._exit_event(record, "ACKED", now_utc))
+    def _good_till(self, record: IntentRecord) -> datetime | None:
+        """The entry's GTD time, or None when it is missing, naive or not UTC (fail closed)."""
+        try:
+            value = self._entry_good_till(record)
+        except Exception:  # noqa: BLE001 - an unknown GTD time keeps the intent UNKNOWN
+            return None
+        if not isinstance(value, datetime) or value.utcoffset() != timedelta(0):
+            return None
+        return value
+
+    def _keep(
+        self, record: IntentRecord, state: _ProbeState, reason: str, now_utc: datetime
+    ) -> tuple[str, str]:
+        """Keep the intent UNKNOWN: the count restarts and the reason is journaled (best effort)."""
+        state.clean = 0
+        self._journal_ok(lambda: self._kept_event(record, reason, now_utc))
+        return _KEPT, reason
+
+    def _journal_ok(self, build: Callable[[], JournalEvent]) -> bool:
+        """Record one journal event; False when it could not be built or written."""
+        try:
+            self._journal.record(build())
+        except Exception:  # noqa: BLE001 - a row that is not journaled is not evidence
+            return False
+        return True
+
+    def _ack(
+        self, record: IntentRecord, answer: _Probe, state: _ProbeState, now_utc: datetime
+    ) -> tuple[str, str]:
+        if not self._journal_ok(lambda: self._exit_event(record, "ACKED", now_utc)):
+            state.clean = 0
+            return _KEPT, KEPT_JOURNAL_FAILED
         if not _record(
             self._store,
             record,
@@ -521,7 +655,8 @@ class UnknownEntryResolver:
             exchange_status=answer.exchange_status,
             now_utc=now_utc,
         ):
-            return _KEPT, KEPT_READ_INDETERMINATE
+            state.clean = 0
+            return _KEPT, KEPT_STORE_FAILED
         self._state.pop(record.approval_id, None)
         return _ACKED, "ACKED"
 
@@ -557,28 +692,26 @@ class UnknownEntryResolver:
             created_at_utc=now_utc,
         )
 
-    def _journal_kept(self, record: IntentRecord, reason: str, now_utc: datetime) -> None:
+    def _kept_event(self, record: IntentRecord, reason: str, now_utc: datetime) -> JournalEvent:
         body = _sorted_text(
             {"approval_id": record.approval_id, "reason": reason, "role": record.role}
         )
-        self._journal.record(
-            JournalEvent(
-                journal_event_id=content_hash_event_id(
-                    prefix=_KEPT_ID_PREFIX,
-                    event_type=EVENT_UNKNOWN_ENTRY_KEPT,
-                    entity_id=record.approval_id,
-                    occurred_at_utc=now_utc,
-                    payload_json=body,
-                ),
-                occurred_at_utc=now_utc,
+        return JournalEvent(
+            journal_event_id=content_hash_event_id(
+                prefix=_KEPT_ID_PREFIX,
                 event_type=EVENT_UNKNOWN_ENTRY_KEPT,
-                entity_type=_INTENT_ENTITY,
                 entity_id=record.approval_id,
-                correlation_id=self._correlation(record),
-                approval_id=record.approval_id,
+                occurred_at_utc=now_utc,
                 payload_json=body,
-                created_at_utc=now_utc,
-            )
+            ),
+            occurred_at_utc=now_utc,
+            event_type=EVENT_UNKNOWN_ENTRY_KEPT,
+            entity_type=_INTENT_ENTITY,
+            entity_id=record.approval_id,
+            correlation_id=self._correlation(record),
+            approval_id=record.approval_id,
+            payload_json=body,
+            created_at_utc=now_utc,
         )
 
     def _exit_event(self, record: IntentRecord, to_status: str, now_utc: datetime) -> JournalEvent:
