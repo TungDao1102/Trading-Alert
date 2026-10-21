@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from src.adapters.binance_limits import CANONICAL_KEYS, NULLABLE_KEYS, PROVENANCE_LABELS
-from src.execution.execution_limits import EXECUTION_LIMIT_KEYS
+from src.execution.execution_limits import EXECUTION_LIMIT_FIELDS, EXECUTION_LIMIT_KEYS
 
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "scripts")
@@ -205,6 +205,14 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # key, tick_interval_ms (plan 20-01; the rest follow in the same plan).
     assert len(GUARDED_NAMES) == 38
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
+    # Plan 20-01: the key texts AND the "<section>_<key>" field names of the Phase 20 keys are
+    # guarded, so a numeric default cannot hide behind either spelling.
+    assert {
+        "reconcile_tick_interval_ms",
+        "stale_feed_max_mark_price_age_ms",
+        "alerts_dedupe_window_ms",
+    } <= GUARDED_NAMES
+    assert set(EXECUTION_LIMIT_FIELDS.values()) <= GUARDED_NAMES
 
 
 def test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts() -> None:
@@ -267,6 +275,11 @@ _FORBIDDEN_FORMS = {
     "execution limit keyword": "build(entry_terminal_timeout_ms=9000)\n",
     "execution limit parameter default": "def f(max_mark_price_age_ms=800):\n    pass\n",
     "execution limit upper-case constant": "MIN_REMAINING_VALIDITY_SECONDS = 600\n",
+    "phase 20 key text assignment": "tick_interval_ms = 60000\n",
+    "phase 20 field name assignment": "reconcile_tick_interval_ms = 60000\n",
+    "phase 20 stale feed field keyword": "build(stale_feed_max_user_data_silence_ms=9000)\n",
+    "phase 20 probe count default": "def f(reconcile_entry_unknown_probe_count=3):\n    pass\n",
+    "phase 20 alerts constant": "ALERTS_DEDUPE_WINDOW_MS = 60000\n",
     "positional execution limits argument": "ExecutionLimits(1, 2, 3, 4)\n",
     "positional limits argument": "StreamLimits(1800, 3)\n",
     "positional limits argument through a module": "limits_mod.RateLimitPolicy(10, 20, 30)\n",

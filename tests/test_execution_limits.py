@@ -33,9 +33,28 @@ EXPECTED_UNSET = (
     "pre_placement.min_remaining_validity_seconds",
     "pre_placement.max_mark_price_age_ms",
     "pre_placement.max_last_price_age_ms",
-    # Phase 20 (plan 20-01; D-25, T-H): the keys below the seven of Phase 19, in file order.
+    # Phase 20 (plan 20-01; D-25, T-H): the seven new keys, in file order.
     "reconcile.tick_interval_ms",
+    "reconcile.entry_unknown_probe_count",
+    "reconcile.entry_unknown_probe_interval_ms",
+    "reconcile.lot_filter_refresh_interval_ms",
+    "stale_feed.max_mark_price_age_ms",
+    "stale_feed.max_user_data_silence_ms",
+    "alerts.dedupe_window_ms",
 )
+
+# The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
+# "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
+# pre_placement.max_mark_price_age_ms.
+PHASE20_FIELDS = {
+    "reconcile.tick_interval_ms": "reconcile_tick_interval_ms",
+    "reconcile.entry_unknown_probe_count": "reconcile_entry_unknown_probe_count",
+    "reconcile.entry_unknown_probe_interval_ms": "reconcile_entry_unknown_probe_interval_ms",
+    "reconcile.lot_filter_refresh_interval_ms": "reconcile_lot_filter_refresh_interval_ms",
+    "stale_feed.max_mark_price_age_ms": "stale_feed_max_mark_price_age_ms",
+    "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
+    "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
+}
 
 
 def _all_set_document(label: str = "DECISION") -> dict[str, Any]:
@@ -57,7 +76,8 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.max_mark_price_age_ms is None
     assert limits.max_last_price_age_ms is None
     assert limits.unset_keys() == EXPECTED_UNSET
-    assert limits.reconcile_tick_interval_ms is None
+    for field_name in PHASE20_FIELDS.values():
+        assert getattr(limits, field_name) is None, field_name
 
 
 def test_require_live_ready_refuses_naming_every_key() -> None:
@@ -73,6 +93,11 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
         assert "reconcile.tick_interval_ms" in message
+        # The fourteen dotted names come in file order: protection, pre_placement, reconcile,
+        # stale_feed, alerts.
+        assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
+            EXPECTED_UNSET
+        )
     else:  # pragma: no cover - the assertion above must run
         raise AssertionError("require_live_ready did not refuse")
 
@@ -86,6 +111,13 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.min_remaining_validity_seconds == 10
     assert limits.max_mark_price_age_ms == 11
     assert limits.max_last_price_age_ms == 12
+    assert limits.reconcile_tick_interval_ms == 10
+    assert limits.reconcile_entry_unknown_probe_count == 11
+    assert limits.reconcile_entry_unknown_probe_interval_ms == 12
+    assert limits.reconcile_lot_filter_refresh_interval_ms == 13
+    assert limits.stale_feed_max_mark_price_age_ms == 10
+    assert limits.stale_feed_max_user_data_silence_ms == 11
+    assert limits.alerts_dedupe_window_ms == 10
     assert limits.unset_keys() == ()
     assert limits.require_live_ready() is None
 
@@ -331,6 +363,12 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         max_mark_price_age_ms=None,
         max_last_price_age_ms=None,
         reconcile_tick_interval_ms=None,
+        reconcile_entry_unknown_probe_count=None,
+        reconcile_entry_unknown_probe_interval_ms=None,
+        reconcile_lot_filter_refresh_interval_ms=None,
+        stale_feed_max_mark_price_age_ms=None,
+        stale_feed_max_user_data_silence_ms=None,
+        alerts_dedupe_window_ms=None,
     )
     assert limits.unset_keys() == EXPECTED_UNSET
 
@@ -376,11 +414,172 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_the_not_configured_word() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
-    # Eight keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
-    # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the eighth).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 16
+    # Fourteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 28
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
     with pytest.raises(TypeError):
         tl.test_only_execution_limits(bogus=1)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-01 (D-25, D-11, D-21, D-23, T-H): the seven Phase 20 keys.
+# --------------------------------------------------------------------------- #
+
+_PHASE20_SECTIONS = {"reconcile": 4, "stale_feed": 2, "alerts": 1}
+
+
+def _phase20_document() -> dict[str, Any]:
+    """A valid all-set document whose Phase 20 values come from literals (7, 8, 9, ...)."""
+    document = _document()
+    for index, dotted in enumerate(PHASE20_FIELDS):
+        section, key = dotted.split(".", 1)
+        document.setdefault(section, {})[key] = 7 + index
+        document["provenance"].setdefault(section, {})[key] = "DECISION"
+    return document
+
+
+def test_the_phase_20_sections_are_in_the_key_table() -> None:
+    assert list(el.EXECUTION_LIMIT_KEYS)[:2] == ["protection", "pre_placement"]
+    for section, count in _PHASE20_SECTIONS.items():
+        assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
+    dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
+    assert dotted_keys == list(EXPECTED_UNSET)
+
+
+def test_the_field_table_names_every_key_once_and_keeps_the_phase_19_field_names() -> None:
+    dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
+    assert sorted(el.EXECUTION_LIMIT_FIELDS) == sorted(dotted_keys)
+    assert len(set(el.EXECUTION_LIMIT_FIELDS.values())) == len(dotted_keys)
+    for dotted in dotted_keys[:7]:
+        assert el.EXECUTION_LIMIT_FIELDS[dotted] == dotted.split(".", 1)[1], dotted
+    for dotted, field_name in PHASE20_FIELDS.items():
+        assert el.EXECUTION_LIMIT_FIELDS[dotted] == field_name, dotted
+    dataclass_fields = set(el.ExecutionLimits.__dataclass_fields__)
+    assert dataclass_fields == set(el.EXECUTION_LIMIT_FIELDS.values())
+
+
+def test_a_fully_set_phase_20_document_loads_every_new_field() -> None:
+    limits = el.parse_execution_limits(_phase20_document())
+    for index, field_name in enumerate(PHASE20_FIELDS.values()):
+        assert getattr(limits, field_name) == 7 + index, field_name
+    assert limits.unset_keys() == ()
+
+
+def test_the_stale_feed_mark_age_is_not_the_pre_placement_mark_age() -> None:
+    limits = el.parse_execution_limits(_phase20_document())
+    pre_placement = tl.TEST_ONLY_EXECUTION_LIMIT_VALUES["pre_placement.max_mark_price_age_ms"]
+    assert limits.max_mark_price_age_ms == pre_placement
+    assert limits.stale_feed_max_mark_price_age_ms == 7 + 4
+    assert limits.stale_feed_max_mark_price_age_ms != limits.max_mark_price_age_ms
+
+
+def test_the_phase_20_test_only_values_are_distinct_and_the_tick_is_below_the_deadline() -> None:
+    values = tl.TEST_ONLY_EXECUTION_LIMIT_VALUES
+    assert values["reconcile.entry_unknown_probe_count"] == 3
+    assert values["reconcile.entry_unknown_probe_interval_ms"] == 2345
+    assert values["reconcile.lot_filter_refresh_interval_ms"] == 8642
+    assert values["stale_feed.max_mark_price_age_ms"] == 3579
+    assert values["stale_feed.max_user_data_silence_ms"] == 5791
+    assert values["alerts.dedupe_window_ms"] == 6543
+    assert (
+        values["stale_feed.max_mark_price_age_ms"] != values["pre_placement.max_mark_price_age_ms"]
+    )
+    assert values["reconcile.tick_interval_ms"] < values["protection.max_unprotected_ms"]
+    assert len(set(values.values())) == len(values)
+
+
+def test_the_test_only_limits_object_carries_every_phase_20_value() -> None:
+    limits = tl.test_only_execution_limits()
+    for dotted, field_name in PHASE20_FIELDS.items():
+        assert getattr(limits, field_name) == tl.TEST_ONLY_EXECUTION_LIMIT_VALUES[dotted], dotted
+    assert limits.unset_keys() == ()
+
+
+_PHASE20_KEYS_UNDER_TEST = (
+    "reconcile.entry_unknown_probe_count",
+    "stale_feed.max_mark_price_age_ms",
+    "alerts.dedupe_window_ms",
+)
+
+
+def _prov(dotted: str) -> str:
+    section, key = dotted.split(".", 1)
+    return f"provenance.{section}.{key}"
+
+
+_PHASE20_REFUSALS: list[tuple[str, Any, str]] = [
+    ("missing key", lambda d, k: _drop(d, k), ""),
+    ("bool value", lambda d, k: _set(d, k, True), "True"),
+    ("float value", lambda d, k: _set(d, k, 5.5), "5.5"),
+    ("zero", lambda d, k: _set(d, k, 0), ""),
+    ("negative", lambda d, k: _set(d, k, -987), "987"),
+    ("other string", lambda d, k: _set(d, k, "none"), ""),
+    ("numeric string", lambda d, k: _set(d, k, "4242"), "4242"),
+    ("missing provenance label", lambda d, k: _drop(d, _prov(k)), ""),
+    ("placeholder label", lambda d, k: _set(d, _prov(k), "PLACEHOLDER"), "PLACEHOLDER"),
+    ("int with NOT_CONFIGURED label", lambda d, k: _set(d, _prov(k), "NOT_CONFIGURED"), ""),
+    (
+        "unset value with DECISION label",
+        lambda d, k: _set(_set(d, k, "NOT_CONFIGURED"), _prov(k), "DECISION"),
+        "",
+    ),
+    ("unknown label", lambda d, k: _set(d, _prov(k), "WHIM"), "WHIM"),
+]
+
+
+@pytest.mark.parametrize("dotted", _PHASE20_KEYS_UNDER_TEST)
+@pytest.mark.parametrize(
+    ("mutate", "value_text"),
+    [pytest.param(m, v, id=case) for case, m, v in _PHASE20_REFUSALS],
+)
+def test_every_malformed_phase_20_entry_is_refused_by_name(
+    dotted: str, mutate: Any, value_text: str
+) -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(mutate(_phase20_document(), dotted))
+    message = str(info.value)
+    assert dotted in message
+    if value_text:
+        assert value_text not in message
+
+
+@pytest.mark.parametrize("section", sorted(_PHASE20_SECTIONS))
+def test_an_unknown_key_in_a_phase_20_section_is_refused(section: str) -> None:
+    document = _phase20_document()
+    document[section]["surprise_ms"] = 5
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert f"{section}.surprise_ms" in str(info.value)
+
+
+@pytest.mark.parametrize("section", sorted(_PHASE20_SECTIONS))
+def test_a_missing_phase_20_section_is_refused_naming_its_keys(section: str) -> None:
+    document = _phase20_document()
+    del document[section]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    message = str(info.value)
+    assert el.EXECUTION_LIMIT_KEYS[section], section
+    for key in el.EXECUTION_LIMIT_KEYS[section]:
+        assert f"{section}.{key}" in message
+
+
+def test_the_real_file_has_every_section_and_label_unset() -> None:
+    import tomllib
+
+    document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
+    for section, keys in el.EXECUTION_LIMIT_KEYS.items():
+        for key in keys:
+            assert document[section][key] == el.NOT_CONFIGURED_WORD, (section, key)
+            assert document["provenance"][section][key] == el.NOT_CONFIGURED_WORD, (section, key)
+
+
+def test_the_readme_separates_the_user_data_silence_key_from_the_paper_runtime_key() -> None:
+    text = README.read_text(encoding="utf-8")
+    assert "stale_feed.max_user_data_silence_ms" in text
+    assert "max_ws_message_silence_seconds" in text
+    assert "not the paper runtime" in text
+    assert "DECISIONS row" in text
