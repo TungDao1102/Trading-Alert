@@ -9,9 +9,9 @@ Pinned behaviors (a journal outage is the only fault injected):
   1. `SafeModeController.enter_safe_mode` sets the in-memory flag BEFORE journaling, so
      SAFE_MODE survives a journal outage, and the `StoreUnavailable` is NOT swallowed
      (T-17-22).
-  2. `LiveEnablementController.disable` journals BEFORE flipping, so with a failing journal
-     it raises and the controller STAYS ENABLED. This is the F-702 behavior, owned by
-     Phase 20 (the disable must flip first, or be journaled by the caller afterwards).
+  2. `LiveEnablementController.disable` flips FIRST and journals afterwards (Phase 20 plan
+     20-08, F-702): with a failing journal the controller is disabled and `AuditRecordLost`
+     is raised after the flip (or the record waits in a local spill when one is configured).
   3. `expire_pending_entry` and `cancel_untriggered_protectives` journal the pre-image BEFORE
      the exchange call and sit outside their per-leg isolation, so with a failing journal
      NO exchange cancel is issued and the `StoreUnavailable` surfaces unwrapped.
@@ -132,16 +132,26 @@ def test_safe_mode_is_entered_even_though_the_journal_is_down() -> None:
 
 
 def test_disable_with_a_failing_journal_raises_and_the_controller_stays_enabled() -> None:
+    """Rewritten by Phase 20 plan 20-08 (F-702, D-16): disable acts first, journals afterwards.
+
+    The old rule (journal-first, so a database outage kept live orders enabled) is gone. With a
+    journal that raises and no spill the flag still flips and `AuditRecordLost` is raised after
+    it, naming the exception class only. The test keeps its name so the history stays readable.
+    """
+    from src.ops.risk_first import AuditRecordLost
+
     journal = ToggleJournal()
     controller = _enabled_controller(journal)
     journal.down = True
 
-    with pytest.raises(StoreUnavailable):
+    with pytest.raises(AuditRecordLost) as excinfo:
         controller.disable(operator_id="operator_alpha", now_utc=NOW_UTC)
 
-    # F-702: the transition is journal-first, so the flag never flipped. Phase 20 changes this.
-    assert controller.is_disabled is False
-    assert controller.guard_placement(plan_hash=PLAN_HASH).is_no_trade is False
+    # F-702: the flag flipped before the journal was asked; the outage cannot keep live on.
+    assert controller.is_disabled is True
+    assert controller.guard_placement(plan_hash=PLAN_HASH).is_no_trade is True
+    assert "StoreUnavailable" in str(excinfo.value)
+    assert "PostgreSQL unavailable" not in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #
