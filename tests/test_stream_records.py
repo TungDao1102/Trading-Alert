@@ -201,6 +201,19 @@ def test_only_order_and_position_have_unknown_exits(entity_type: str) -> None:
         order_event(entity_type=entity_type)
 
 
+def test_an_execution_intent_has_unknown_exits_too() -> None:
+    """Plan 20-10 (D-11, D-12): an UNKNOWN ENTRY intent closed by a REST reconcile is journaled."""
+    event = order_event(
+        evidence(source=EvidenceSource.REST_RECONCILE, reference="x-clientorderid"),
+        entity_type="EXECUTION_INTENT",
+        entity_id="appr-1",
+        to_status="REJECTED",
+    )
+
+    assert event.entity_type == "EXECUTION_INTENT"
+    assert event.event_type == UNKNOWN_EXIT_EVIDENCE
+
+
 def test_from_status_must_be_unknown_and_differ_from_to_status() -> None:
     with pytest.raises(ValueError):
         order_event(from_status="NEW")

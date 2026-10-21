@@ -1,11 +1,17 @@
 """Restart recovery of in-flight execution intents (Phase 17-12, D-14, F-703, Pitfall 11).
 
-After a restart every intent left INTENDED or SENT is first recorded UNKNOWN, then
-resolved ONLY by querying the exchange by its deterministic client id:
+After a restart every intent left SENT is first recorded UNKNOWN, then resolved ONLY by
+querying the exchange by its deterministic client id (Phase 20, plan 20-10, D-11, Q5):
 
-  found                                   -> ACKED
-  definitively absent, younger than 3 d   -> REJECTED
-  probe error / indeterminate / too old   -> stays UNKNOWN, and SAFE_MODE is entered
+  found                                          -> ACKED
+  ENTRY, INTENDED (never sent), absent           -> REJECTED with NEVER_SENT
+  ENTRY, SENT / UNKNOWN, absent                  -> stays UNKNOWN (absence alone is no evidence;
+                                                    `UnknownEntryResolver` owns closing it)
+  protective leg, absent, younger than 3 d, and
+    its plan's ENTRY is REJECTED                 -> REJECTED
+  protective leg of a plan whose ENTRY is not
+    REJECTED (research F5)                       -> stays UNKNOWN for the coordinator rebuild
+  probe error / indeterminate / too old          -> stays UNKNOWN, and SAFE_MODE is entered
 
 Recovery never places an order: the Binance-semantics fake counts `place_entry` and
 `place_algo_protective` calls and every case asserts both stay at zero.
@@ -235,6 +241,7 @@ async def test_entry_sent_and_found_becomes_acked_with_the_exchange_order_id() -
 
 
 async def test_entry_intended_but_never_sent_becomes_rejected() -> None:
+    """D-11 / Q5: only the INTENDED (never sent) entry keeps a certain REJECTED path."""
     store = InMemoryExecutionIntentStore()
     adapter = BinanceSemanticsFakeAdapter(now_utc=NOW)
     safe_mode = RecordingSafeModeController()
@@ -244,7 +251,9 @@ async def test_entry_intended_but_never_sent_becomes_rejected() -> None:
         store=store, adapter=adapter, safe_mode_controller=safe_mode, now_utc=NOW
     )
 
-    assert _row(store, approval_id, ENTRY).intent_status == REJECTED
+    row = _row(store, approval_id, ENTRY)
+    assert row.intent_status == REJECTED
+    assert row.resolution_reason_code == "NEVER_SENT"  # D-11: its own reason, not a rejection
     assert report.resolved == ((approval_id, ENTRY, REJECTED),)
     assert safe_mode.entered == []
     _no_orders_placed(adapter)
@@ -339,11 +348,16 @@ async def test_absent_and_older_than_three_days_stays_unknown() -> None:
     _no_orders_placed(adapter)
 
 
-async def test_absent_at_exactly_three_days_stays_unknown_and_just_under_is_rejected() -> None:
+async def test_stop_loss_of_a_rejected_entry_at_exactly_three_days_stays_unknown() -> None:
+    """The 3-day window now applies only to protective legs of a plan whose ENTRY is REJECTED.
+
+    Exactly 3 days is outside the window (stays UNKNOWN); one second younger is inside it.
+    """
     store = InMemoryExecutionIntentStore()
     safe_mode = RecordingSafeModeController()
-    exactly = _seed_entry(store, index=1, status=SENT, at=NOW)
-    just_under = _seed_entry(store, index=2, status=SENT, at=NOW + timedelta(seconds=1))
+    for index, at in ((1, NOW), (2, NOW + timedelta(seconds=1))):
+        _seed_entry(store, index=index, status=REJECTED, at=at)
+        _seed_stop_loss(store, index=index, status=SENT, at=at)
     now = NOW + HISTORY_RETENTION
     adapter = BinanceSemanticsFakeAdapter(now_utc=now)
 
@@ -351,8 +365,26 @@ async def test_absent_at_exactly_three_days_stays_unknown_and_just_under_is_reje
         store=store, adapter=adapter, safe_mode_controller=safe_mode, now_utc=now
     )
 
-    assert _row(store, exactly, ENTRY).intent_status == UNKNOWN
-    assert _row(store, just_under, ENTRY).intent_status == REJECTED
+    assert _row(store, "appr-1", STOP_LOSS).intent_status == UNKNOWN
+    assert _row(store, "appr-2", STOP_LOSS).intent_status == REJECTED
+
+
+async def test_an_absent_sent_entry_is_never_rejected_whatever_its_age() -> None:
+    """D-11 / Q5: a SENT entry that is not found stays UNKNOWN, at 1 second and at 2 days."""
+    for age in (timedelta(seconds=1), timedelta(days=2)):
+        store = InMemoryExecutionIntentStore()
+        now = NOW + age
+        adapter = BinanceSemanticsFakeAdapter(now_utc=now)
+        approval_id = _seed_entry(store, status=SENT, at=NOW)
+
+        await resolve_unresolved_intents(
+            store=store,
+            adapter=adapter,
+            safe_mode_controller=RecordingSafeModeController(),
+            now_utc=now,
+        )
+
+        assert _row(store, approval_id, ENTRY).intent_status == UNKNOWN
 
 
 async def test_found_is_acked_even_when_older_than_three_days() -> None:
@@ -375,7 +407,8 @@ async def test_lookup_window_is_a_keyword_argument() -> None:
     store = InMemoryExecutionIntentStore()
     adapter = BinanceSemanticsFakeAdapter(now_utc=NOW + timedelta(hours=2))
     safe_mode = RecordingSafeModeController()
-    approval_id = _seed_entry(store, status=SENT, at=NOW)
+    approval_id = _seed_entry(store, status=REJECTED, at=NOW)
+    _seed_stop_loss(store, status=SENT, at=NOW)
 
     await resolve_unresolved_intents(
         store=store,
@@ -385,7 +418,8 @@ async def test_lookup_window_is_a_keyword_argument() -> None:
         lookup_window=timedelta(hours=1),
     )
 
-    assert _row(store, approval_id, ENTRY).intent_status == UNKNOWN
+    # Older than the one-hour window the absent leg is not provable: it stays UNKNOWN.
+    assert _row(store, approval_id, STOP_LOSS).intent_status == UNKNOWN
     assert len(safe_mode.entered) == 1
 
 
@@ -424,7 +458,7 @@ async def test_resolved_and_unresolved_mix_is_reported_deterministically() -> No
     _seed_entry(store, index=2, status=SENT, at=NOW + timedelta(minutes=1))
     _seed_entry(store, index=3, status=INTENDED, at=NOW + timedelta(minutes=2))
     _exchange_holds_entry(adapter, index=1)  # found -> ACKED
-    # index 2 SENT but absent and young -> REJECTED; index 3 INTENDED, absent -> REJECTED
+    # index 2 SENT but absent -> stays UNKNOWN (D-11); index 3 INTENDED, absent -> REJECTED
 
     report = await resolve_unresolved_intents(
         store=store, adapter=adapter, safe_mode_controller=safe_mode, now_utc=NOW
@@ -433,12 +467,12 @@ async def test_resolved_and_unresolved_mix_is_reported_deterministically() -> No
     assert report == RecoveryReport(
         resolved=(
             ("appr-1", ENTRY, ACKED),
-            ("appr-2", ENTRY, REJECTED),
             ("appr-3", ENTRY, REJECTED),
         ),
-        unresolved=(),
-        safe_mode_entered=False,
+        unresolved=(("appr-2", ENTRY, UNKNOWN),),
+        safe_mode_entered=True,
     )
+    assert safe_mode.entered == [("UNRESOLVED_EXECUTION_INTENT", NOW)]
     _no_orders_placed(adapter)
 
 
