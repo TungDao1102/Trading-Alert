@@ -160,6 +160,7 @@ from src.domain.exchange_errors import (
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
 from src.domain.transitions import PROTECTION_INITIAL_STATE, TransitionKind, is_legal
+from src.execution.cancel_verification import PROVEN_GONE, CancelVerdict
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
@@ -225,6 +226,8 @@ EVENT_ENTRY_CANCEL_NOT_SENT = "PROTECTION_ENTRY_CANCEL_NOT_SENT"
 EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
+# Plan 20-17: a sweep whose cancels did not all verify (a leg STILL_OPEN or UNKNOWN); retried.
+EVENT_SWEEP_UNVERIFIED = "PROTECTION_SWEEP_UNVERIFIED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
 # Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
@@ -1959,13 +1962,20 @@ class ProtectionCoordinator:
             )
 
     async def _sweep(self, tracked: _Tracked) -> None:
-        """Cancel the plan's protective legs by deterministic id once the position is flat."""
+        """Cancel the plan's protective legs by deterministic id once the position is flat.
+
+        Plan 20-17 (20-11 follow-up): the sweep is done only when every leg verified in
+        ``PROVEN_GONE`` (CANCELED or GONE_NOT_CANCELED). A leg that verified STILL_OPEN or UNKNOWN,
+        or a result that is not a verdict map, keeps ``sweep_done`` False: one
+        ``PROTECTION_SWEEP_UNVERIFIED`` row names the verdict of each leg (names only) and the next
+        step sweeps again. The cancel is by deterministic id, so the retry is idempotent.
+        """
         # Imported here: ``manager`` imports ``live_context``, which imports this module.
         from src.execution.manager import cancel_untriggered_protectives
 
         entry = tracked.entry
         try:
-            await cancel_untriggered_protectives(
+            verdicts = await cancel_untriggered_protectives(
                 plan_hash=entry.plan_hash,
                 symbol=entry.symbol,
                 adapter=self._adapter,  # type: ignore[arg-type]
@@ -1977,7 +1987,55 @@ class ProtectionCoordinator:
                 tracked, EVENT_SWEEP_FAILED, {"error_type": type(exc).__name__}, self._now()
             )
             return
-        tracked.sweep_done = True
+        legs = self._sweep_leg_verdicts(verdicts)
+        if all(CancelVerdict(name) in PROVEN_GONE for name in legs.values()):
+            tracked.sweep_done = True
+            return
+        self._journal_sweep_unverified(tracked, legs)
+
+    @staticmethod
+    def _sweep_leg_verdicts(verdicts: object) -> dict[str, str]:
+        """The verdict name of each protective leg; anything unreadable counts as UNKNOWN."""
+        found = verdicts if isinstance(verdicts, dict) else {}
+        legs: dict[str, str] = {}
+        for role in (
+            OrderRole.STOP_LOSS.value,
+            OrderRole.TAKE_PROFIT_1.value,
+            OrderRole.TAKE_PROFIT_2.value,
+        ):
+            verdict = found.get(role)
+            legs[role] = (
+                verdict.value if isinstance(verdict, CancelVerdict) else CancelVerdict.UNKNOWN.value
+            )
+        return legs
+
+    def _journal_sweep_unverified(self, tracked: _Tracked, legs: dict[str, str]) -> None:
+        """One note naming each leg's verdict. The payload carries the legs as a nested map."""
+        entry = tracked.entry
+        now = self._now()
+        body = json.dumps(
+            {"legs": legs, "symbol": entry.symbol, "trade_plan_id": entry.trade_plan_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._record_journal(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="pnt",
+                    event_type=EVENT_SWEEP_UNVERIFIED,
+                    entity_id=entry.plan_hash,
+                    occurred_at_utc=now,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now,
+                event_type=EVENT_SWEEP_UNVERIFIED,
+                entity_type="ProtectionState",
+                entity_id=entry.plan_hash,
+                correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+                payload_json=body,
+            ),
+            now,
+        )
 
     # ------------------------------------------------------------------ #
     # Transitions, journal, store and SAFE_MODE helpers.
@@ -2248,6 +2306,7 @@ __all__ = [
     "EVENT_STOP_NOT_SENT",
     "EVENT_STOP_PLACEMENT_FAILED",
     "EVENT_SWEEP_FAILED",
+    "EVENT_SWEEP_UNVERIFIED",
     "EVENT_TP_UNAVAILABLE",
     "EVENT_UNKNOWN_FILL",
     "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
