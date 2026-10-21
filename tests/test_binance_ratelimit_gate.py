@@ -255,8 +255,18 @@ def test_other_categories_change_nothing(category: ExchangeErrorCategory) -> Non
 
 def test_only_time_lifts_a_restriction() -> None:
     public = {name for name in dir(RestRateLimitGate) if not name.startswith("_")}
-    assert public == {"check", "record", "restriction", "remaining_seconds", "policy"}
-    for word in ("clear", "reset", "lift", "unban", "resume", "release", "open", "restore"):
+    # Plan 20-07 adds `restore` (reads the persisted record once at start; it never clears a
+    # restriction of a running gate: tests/test_gate_restart.py) and `recovery_status`.
+    assert public == {
+        "check",
+        "record",
+        "restriction",
+        "remaining_seconds",
+        "policy",
+        "restore",
+        "recovery_status",
+    }
+    for word in ("clear", "reset", "lift", "unban", "resume", "release", "open"):
         assert not any(word in name.lower() for name in dir(RestRateLimitGate)), word
     gate, clock = _gate()
     gate.record(_C.IP_BANNED, 30)
@@ -297,6 +307,7 @@ def test_gate_module_is_pure() -> None:
     path = Path(inspect.getfile(gate_mod))
     allowed = {
         "__future__",
+        "enum",
         "threading",
         "dataclasses",
         "datetime",
