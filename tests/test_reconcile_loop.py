@@ -611,6 +611,71 @@ async def test_a_real_gate_that_is_not_restored_blocks_every_read_until_restored
     assert rig.adapter.count("snapshot_positions") == 1
 
 
+def _real_gate(tmp_path: Path, *, durable: bool) -> RestRateLimitGate:
+    def clock() -> datetime:
+        return NOW
+
+    store = None
+    if durable:
+        store = FileGateStateStore(tmp_path / "gate.json", clock=clock)
+        store.initialize(now_utc=NOW, operator_id="op-1")
+    return RestRateLimitGate(
+        policy=RateLimitPolicy(
+            no_retry_after_wait_418_seconds=259200,
+            no_retry_after_wait_429_seconds=120,
+            retry_after_cap_seconds=600,
+        ),
+        clock=clock,
+        state_store=store,
+    )
+
+
+async def test_tick_rows_report_the_gate_recovery_status_the_gate_exposes(tmp_path: Path) -> None:
+    gate = _real_gate(tmp_path, durable=True)
+    truth = matching_btc_truth()
+    rig = make_rig(
+        plans=(protected_btc_plan(),), gate=gate, algo=truth["algo"], positions=truth["positions"]
+    )
+
+    blocked = await rig.loop.tick(now_utc=NOW)
+    gate.restore()
+    compared = await rig.loop.tick(now_utc=NOW)
+
+    assert blocked.gate_recovery_status == "NOT_RESTORED"
+    assert compared.gate_recovery_status == "RESTORED_DURABLE"
+    assert json.loads(rig.journal.events[0].payload_json)["gate_recovery_status"] == "NOT_RESTORED"
+    assert (
+        json.loads(rig.journal.events[1].payload_json)["gate_recovery_status"] == "RESTORED_DURABLE"
+    )
+
+
+async def test_a_gate_without_persistence_is_visible_as_legacy_in_memory(tmp_path: Path) -> None:
+    truth = matching_btc_truth()
+    rig = make_rig(
+        plans=(protected_btc_plan(),),
+        gate=_real_gate(tmp_path, durable=False),
+        algo=truth["algo"],
+        positions=truth["positions"],
+    )
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.outcome == TICK_COMPARED
+    assert report.gate_recovery_status == "LEGACY_IN_MEMORY"
+    assert json.loads(rig.journal.events[0].payload_json)["gate_recovery_status"] == (
+        "LEGACY_IN_MEMORY"
+    )
+
+
+async def test_a_gate_with_no_recovery_status_leaves_the_field_out() -> None:
+    rig = make_rig()
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.gate_recovery_status is None
+    assert "gate_recovery_status" not in json.loads(rig.journal.events[0].payload_json)
+
+
 async def test_a_gate_that_raises_fails_closed_without_any_read() -> None:
     adapter = FakeReconcileAdapter()
     rig = make_rig(adapter=adapter, gate=FakeGate(raises=RuntimeError("token=abc")))
