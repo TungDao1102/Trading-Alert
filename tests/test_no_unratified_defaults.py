@@ -34,7 +34,11 @@ RATE_LIMIT_FIELD_NAMES = frozenset(
 # Phase 19 adds the execution-limit keys of D-07/D-13 (plan 19-01) and the owner's 19-REVIEW
 # keys `entry_unknown_grace_ms` (WR-05) and `emergency_close_poll_timeout_ms` (WR-03), then
 # `max_last_price_age_ms` (quick task 261020-l4p, the last-price check): seven keys.
-EXECUTION_LIMIT_NAMES = frozenset(key for keys in EXECUTION_LIMIT_KEYS.values() for key in keys)
+# Phase 20 (plan 20-01) adds seven more keys; their dataclass field names are
+# "<section>_<key>" (EXECUTION_LIMIT_FIELDS), so both spellings are guarded.
+EXECUTION_LIMIT_NAMES = frozenset(key for keys in EXECUTION_LIMIT_KEYS.values() for key in keys) | (
+    frozenset(EXECUTION_LIMIT_FIELDS.values())
+)
 GUARDED_NAMES = (
     frozenset(key for keys in CANONICAL_KEYS.values() for key in keys)
     | RATE_LIMIT_FIELD_NAMES
@@ -201,9 +205,10 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # 30 ratified Binance-limit names + 7 execution-limit names (the fifth,
     # entry_unknown_grace_ms, is the owner's 19-REVIEW WR-05 key; the sixth,
     # emergency_close_poll_timeout_ms, the owner's WR-03 key; the seventh,
-    # max_last_price_age_ms, the last-price check of quick task 261020-l4p) + the first Phase 20
-    # key, tick_interval_ms (plan 20-01; the rest follow in the same plan).
-    assert len(GUARDED_NAMES) == 38
+    # max_last_price_age_ms, the last-price check of quick task 261020-l4p) + the Phase 20 keys of
+    # plan 20-01: 6 new key texts (stale_feed.max_mark_price_age_ms repeats a Phase 19 text) and
+    # 7 "<section>_<key>" field names = 30 + 7 + 6 + 7 = 50 guarded names.
+    assert len(GUARDED_NAMES) == 50
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
     # Plan 20-01: the key texts AND the "<section>_<key>" field names of the Phase 20 keys are
     # guarded, so a numeric default cannot hide behind either spelling.

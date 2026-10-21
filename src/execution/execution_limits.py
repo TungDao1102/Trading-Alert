@@ -1,20 +1,21 @@
 """The Phase 19 execution limits and their fail-closed loader (plan 19-01; D-07, D-13).
 
-No number lives in this module. The seven safety numbers the owner has not chosen yet are
-optional fields of a frozen dataclass that default to nothing: they reach the process only
-through ``config/execution/execution-limits-v1.toml``, where each value is the word
-``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While any field is ``None`` the
-live path refuses: ``ExecutionLimits.require_live_ready`` raises ``ExecutionLimitsNotConfigured``
-naming the unset keys. ``tests/test_no_unratified_defaults.py`` scans ``src`` and ``scripts`` so
-that no numeric default for these names ever appears.
+No number lives in this module. The fourteen safety numbers the owner has not chosen yet (seven
+of Phase 19, seven of Phase 20) are optional fields of a frozen dataclass that default to
+nothing: they reach the process only through ``config/execution/execution-limits-v1.toml``,
+where each value is the word ``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While
+any field is ``None`` the live path refuses: ``ExecutionLimits.require_live_ready`` raises
+``ExecutionLimitsNotConfigured`` naming the unset keys. ``tests/test_no_unratified_defaults.py``
+scans ``src`` and ``scripts`` so that no numeric default for these names ever appears.
 
 The file is separate from ``config/binance/binance-limits-v1.toml``: that file is sha256-pinned
 by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended.
 
 The file format (``config/execution/README.md``):
 
-* exactly the sections ``protection``, ``pre_placement``, ``reconcile`` and ``provenance``
-  (plan 20-01 adds ``reconcile``; D-25);
+* exactly the sections ``protection``, ``pre_placement``, ``reconcile``, ``stale_feed``,
+  ``alerts`` and ``provenance`` (plan 20-01 adds ``reconcile``, ``stale_feed`` and ``alerts``;
+  D-25);
 * exactly the keys of ``EXECUTION_LIMIT_KEYS``; a missing or unknown key refuses to load;
 * each value is a positive integer (not a boolean, not a float, not zero) or exactly the
   string ``NOT_CONFIGURED`` (read as ``None``);
@@ -50,7 +51,14 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "max_mark_price_age_ms",
             "max_last_price_age_ms",
         ),
-        "reconcile": ("tick_interval_ms",),
+        "reconcile": (
+            "tick_interval_ms",
+            "entry_unknown_probe_count",
+            "entry_unknown_probe_interval_ms",
+            "lot_filter_refresh_interval_ms",
+        ),
+        "stale_feed": ("max_mark_price_age_ms", "max_user_data_silence_ms"),
+        "alerts": ("dedupe_window_ms",),
     }
 )
 
@@ -69,6 +77,12 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "pre_placement.max_mark_price_age_ms": "max_mark_price_age_ms",
         "pre_placement.max_last_price_age_ms": "max_last_price_age_ms",
         "reconcile.tick_interval_ms": "reconcile_tick_interval_ms",
+        "reconcile.entry_unknown_probe_count": "reconcile_entry_unknown_probe_count",
+        "reconcile.entry_unknown_probe_interval_ms": "reconcile_entry_unknown_probe_interval_ms",
+        "reconcile.lot_filter_refresh_interval_ms": "reconcile_lot_filter_refresh_interval_ms",
+        "stale_feed.max_mark_price_age_ms": "stale_feed_max_mark_price_age_ms",
+        "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
+        "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
     }
 )
 
@@ -112,7 +126,7 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The seven owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
+    """The fourteen owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
@@ -130,7 +144,17 @@ class ExecutionLimits:
     is separate from the mark bound because the last price moves only on a trade.
     ``reconcile_tick_interval_ms`` (plan 20-01, D-25, T-H): the cadence of the reconcile loop that
     replaces the hard-coded SAFE_MODE tick; it must stay strictly below ``max_unprotected_ms``.
-    The Phase 20 fields are named ``<section>_<key>`` (``EXECUTION_LIMIT_FIELDS``).
+    ``reconcile_entry_unknown_probe_count`` and ``reconcile_entry_unknown_probe_interval_ms``
+    (D-11, consumer plan 20-10): how many consecutive clean not-found probes of an UNKNOWN
+    entry are needed before it may close, and the spacing between them.
+    ``reconcile_lot_filter_refresh_interval_ms`` (D-21, consumer plan 20-21): how often the
+    lot-size filters are refreshed. ``stale_feed_max_mark_price_age_ms`` (D-25, consumer plan
+    20-16): the maximum mark-price age before the feed counts as stale; it is not
+    ``max_mark_price_age_ms`` of the pre-placement check. ``stale_feed_max_user_data_silence_ms``
+    (D-25, D058, plan 20-16): the maximum silence of the user-data stream; it is not the paper
+    runtime key ``max_ws_message_silence_seconds`` and never reuses it.
+    ``alerts_dedupe_window_ms`` (D-23, consumer plan 20-13): the window in which a repeated alert
+    is deduplicated. The Phase 20 fields are named ``<section>_<key>`` (``EXECUTION_LIMIT_FIELDS``).
     """
 
     max_unprotected_ms: int | None
@@ -141,6 +165,12 @@ class ExecutionLimits:
     max_mark_price_age_ms: int | None
     max_last_price_age_ms: int | None
     reconcile_tick_interval_ms: int | None
+    reconcile_entry_unknown_probe_count: int | None
+    reconcile_entry_unknown_probe_interval_ms: int | None
+    reconcile_lot_filter_refresh_interval_ms: int | None
+    stale_feed_max_mark_price_age_ms: int | None
+    stale_feed_max_user_data_silence_ms: int | None
+    alerts_dedupe_window_ms: int | None
 
     def unset_keys(self) -> tuple[str, ...]:
         """The dotted names of the keys still NOT_CONFIGURED, in the fixed file order."""

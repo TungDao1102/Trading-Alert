@@ -37,6 +37,17 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "pre_placement.max_last_price_age_ms": 2468,
     # Plan 20-01 (D-25): a FAKE reconcile cadence, deliberately below max_unprotected_ms (7777).
     "reconcile.tick_interval_ms": 1234,
+    # D-11: FAKE consecutive-probe count and spacing for an UNKNOWN entry.
+    "reconcile.entry_unknown_probe_count": 3,
+    "reconcile.entry_unknown_probe_interval_ms": 2345,
+    # D-21: a FAKE lot-filter refresh interval.
+    "reconcile.lot_filter_refresh_interval_ms": 8642,
+    # D-25: FAKE stale-feed bounds; the mark age differs from pre_placement's 4321 so a test
+    # can tell the two apart.
+    "stale_feed.max_mark_price_age_ms": 3579,
+    "stale_feed.max_user_data_silence_ms": 5791,
+    # D-23: a FAKE alert dedupe window.
+    "alerts.dedupe_window_ms": 6543,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"

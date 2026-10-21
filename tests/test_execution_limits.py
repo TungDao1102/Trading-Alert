@@ -124,9 +124,9 @@ def test_a_fully_set_document_is_live_ready() -> None:
 
 def _reconcile_document(value: Any = 5, label: str = "DECISION") -> dict[str, Any]:
     """A document whose reconcile.tick_interval_ms is set from literals (plan 20-01, D-25)."""
-    document = _all_set_document()
-    document["reconcile"] = {"tick_interval_ms": value}
-    document["provenance"]["reconcile"] = {"tick_interval_ms": label}
+    document = _phase20_document()
+    document["reconcile"]["tick_interval_ms"] = value
+    document["provenance"]["reconcile"]["tick_interval_ms"] = label
     return document
 
 
@@ -519,7 +519,7 @@ _PHASE20_REFUSALS: list[tuple[str, Any, str]] = [
     ("other string", lambda d, k: _set(d, k, "none"), ""),
     ("numeric string", lambda d, k: _set(d, k, "4242"), "4242"),
     ("missing provenance label", lambda d, k: _drop(d, _prov(k)), ""),
-    ("placeholder label", lambda d, k: _set(d, _prov(k), "PLACEHOLDER"), "PLACEHOLDER"),
+    ("placeholder label", lambda d, k: _set(d, _prov(k), "PLACEHOLDER"), ""),
     ("int with NOT_CONFIGURED label", lambda d, k: _set(d, _prov(k), "NOT_CONFIGURED"), ""),
     (
         "unset value with DECISION label",

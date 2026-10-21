@@ -1,4 +1,5 @@
-# Execution protection and pre-placement limits v1 (Phase 19, plan 19-01; D-07, D-13).
+# Execution protection, pre-placement and Phase 20 reconcile limits v1 (Phase 19, plan 19-01; D-07, D-13;
+# Phase 20, plan 20-01; D-25).
 # Purpose: the safety numbers the owner has not chosen yet.
 #   protection.max_unprotected_ms              D-13: longest tolerated time an entry fill is open without a stop
 #   protection.entry_terminal_timeout_ms       D-13: how long the entry order may stay non-terminal
@@ -8,6 +9,12 @@
 #   pre_placement.max_mark_price_age_ms        D-07: maximum age of the mark price used by the price check
 #   pre_placement.max_last_price_age_ms        quick task 261020-l4p (WR-06): maximum age of the last price used by the last-price check
 #   reconcile.tick_interval_ms                 Phase 20, D-25: cadence of the reconcile loop (replaces the hard-coded SAFE_MODE tick)
+#   reconcile.entry_unknown_probe_count        Phase 20, D-11: consecutive clean not-found probes of an UNKNOWN entry before it may close
+#   reconcile.entry_unknown_probe_interval_ms  Phase 20, D-11: spacing between those probes
+#   reconcile.lot_filter_refresh_interval_ms   Phase 20, D-21: how often the lot-size filters are refreshed
+#   stale_feed.max_mark_price_age_ms           Phase 20, D-25: maximum age of the mark price before the feed counts as stale (not pre_placement.max_mark_price_age_ms)
+#   stale_feed.max_user_data_silence_ms        Phase 20, D-25, D058: maximum silence of the user-data stream (not the paper runtime max_ws_message_silence_seconds)
+#   alerts.dedupe_window_ms                    Phase 20, D-23: window in which a repeated alert is deduplicated
 # Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
 # (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED. A set value needs
 # a DECISIONS row and the provenance label DECISION. Key meanings and the file format:
@@ -27,6 +34,16 @@ max_last_price_age_ms = "NOT_CONFIGURED"
 
 [reconcile]
 tick_interval_ms = "NOT_CONFIGURED"
+entry_unknown_probe_count = "NOT_CONFIGURED"
+entry_unknown_probe_interval_ms = "NOT_CONFIGURED"
+lot_filter_refresh_interval_ms = "NOT_CONFIGURED"
+
+[stale_feed]
+max_mark_price_age_ms = "NOT_CONFIGURED"
+max_user_data_silence_ms = "NOT_CONFIGURED"
+
+[alerts]
+dedupe_window_ms = "NOT_CONFIGURED"
 
 [provenance.protection]
 max_unprotected_ms = "NOT_CONFIGURED"
@@ -41,3 +58,13 @@ max_last_price_age_ms = "NOT_CONFIGURED"
 
 [provenance.reconcile]
 tick_interval_ms = "NOT_CONFIGURED"
+entry_unknown_probe_count = "NOT_CONFIGURED"
+entry_unknown_probe_interval_ms = "NOT_CONFIGURED"
+lot_filter_refresh_interval_ms = "NOT_CONFIGURED"
+
+[provenance.stale_feed]
+max_mark_price_age_ms = "NOT_CONFIGURED"
+max_user_data_silence_ms = "NOT_CONFIGURED"
+
+[provenance.alerts]
+dedupe_window_ms = "NOT_CONFIGURED"
