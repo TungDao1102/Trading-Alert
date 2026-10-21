@@ -33,6 +33,8 @@ EXPECTED_UNSET = (
     "pre_placement.min_remaining_validity_seconds",
     "pre_placement.max_mark_price_age_ms",
     "pre_placement.max_last_price_age_ms",
+    # Phase 20 (plan 20-01; D-25, T-H): the keys below the seven of Phase 19, in file order.
+    "reconcile.tick_interval_ms",
 )
 
 
@@ -55,6 +57,7 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.max_mark_price_age_ms is None
     assert limits.max_last_price_age_ms is None
     assert limits.unset_keys() == EXPECTED_UNSET
+    assert limits.reconcile_tick_interval_ms is None
 
 
 def test_require_live_ready_refuses_naming_every_key() -> None:
@@ -69,6 +72,7 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
         assert str(ROOT) not in message
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
+        assert "reconcile.tick_interval_ms" in message
     else:  # pragma: no cover - the assertion above must run
         raise AssertionError("require_live_ready did not refuse")
 
@@ -84,6 +88,46 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.max_last_price_age_ms == 12
     assert limits.unset_keys() == ()
     assert limits.require_live_ready() is None
+
+
+def _reconcile_document(value: Any = 5, label: str = "DECISION") -> dict[str, Any]:
+    """A document whose reconcile.tick_interval_ms is set from literals (plan 20-01, D-25)."""
+    document = _all_set_document()
+    document["reconcile"] = {"tick_interval_ms": value}
+    document["provenance"]["reconcile"] = {"tick_interval_ms": label}
+    return document
+
+
+def test_a_set_reconcile_tick_interval_loads_into_its_prefixed_field() -> None:
+    limits = el.parse_execution_limits(_reconcile_document(5))
+    assert limits.reconcile_tick_interval_ms == 5
+    assert limits.unset_keys() == ()
+
+
+def test_a_document_without_the_reconcile_section_is_refused_by_name() -> None:
+    document = _reconcile_document()
+    del document["reconcile"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert "reconcile.tick_interval_ms" in str(info.value)
+
+
+def test_a_reconcile_key_without_its_provenance_label_is_refused_by_name() -> None:
+    document = _reconcile_document()
+    del document["provenance"]["reconcile"]["tick_interval_ms"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    message = str(info.value)
+    assert "reconcile.tick_interval_ms" in message
+    assert "missing provenance label" in message
+
+
+def test_a_bad_reconcile_tick_interval_value_is_refused_without_the_value() -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(_reconcile_document(-4711))
+    message = str(info.value)
+    assert "reconcile.tick_interval_ms" in message
+    assert "4711" not in message
 
 
 def test_the_module_imports_only_the_standard_library() -> None:
