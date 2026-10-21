@@ -16,7 +16,6 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 import pytest
-
 from src.execution.protection import CriticalAlertSink
 from src.ops.alerts import (
     ALERT_EVENTS,
@@ -26,8 +25,9 @@ from src.ops.alerts import (
     TelegramAlertSender,
     render_alert_text,
 )
+
 from tests.support.ast_guards import forbidden_imports, module_imports, wall_clock_calls
-from tests.support.execution_limits import test_only_execution_limits
+from tests.support.execution_limits import test_only_execution_limits as make_test_limits
 from tests.support.reconcile_doubles import RecordingJournal
 
 NOW = datetime(2026, 9, 19, 0, 0, 0, tzinfo=UTC)
@@ -90,7 +90,7 @@ class Harness:
         self.sink = JournalFirstAlertSink(
             journal=self.journal,
             spill=None,
-            limits=test_only_execution_limits(),
+            limits=make_test_limits(),
             queue=self.queue,
         )
         self.sender = TelegramAlertSender(
