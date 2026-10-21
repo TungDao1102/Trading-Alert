@@ -12,7 +12,7 @@ Binance (no Demo observation).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,7 @@ from src.execution.protection_rebuild import (
 )
 
 from tests.support.ast_guards import float_constructor_calls, wall_clock_calls
-from tests.support.execution_limits import test_only_execution_limits
+from tests.support.execution_limits import test_only_execution_limits as _test_limits
 from tests.support.intent_store_fakes import SimulatedCrash
 from tests.support.protection_doubles import (
     TEST_ONLY_PLAN_HASH,
@@ -105,7 +105,7 @@ def _restart(rig: ProtectionRig, *, closer: Any = None) -> ProtectionCoordinator
         safe_mode_controller=rig.safe_mode,
         alert_sink=rig.alerts,
         emergency_closer=rig.closer if closer is None else closer,
-        limits=test_only_execution_limits(),
+        limits=_test_limits(),
         clock=rig.clock,
         restore_required=True,
     )
@@ -119,7 +119,7 @@ def _real_closer(rig: ProtectionRig) -> MarketEmergencyCloser:
         safe_mode_controller=rig.safe_mode,
         alert_sink=rig.alerts,
         clock=rig.clock,
-        limits=test_only_execution_limits(),
+        limits=_test_limits(),
     )
 
 
@@ -127,20 +127,21 @@ def _place_calls(rig: ProtectionRig) -> int:
     return len(rig.fake.calls_to("place_algo_protective"))
 
 
-def _crash_on_stop_placement(rig: ProtectionRig) -> None:
-    """The next stop placement dies before anything reaches the exchange."""
+async def _crash_after_stop_intent_sent(rig: ProtectionRig) -> None:
+    """Run 1: the first fill is seen, the STOP_LOSS intent is SENT, the process dies before the
+    placement reaches the exchange. The fake is restored for run 2 (a new process)."""
+    original = rig.fake.place_algo_protective
 
     async def crash(**kwargs: Any) -> Any:
         raise SimulatedCrash
 
     rig.fake.place_algo_protective = crash  # type: ignore[method-assign]
-
-
-async def _crash_after_stop_intent_sent(rig: ProtectionRig) -> None:
-    _crash_on_stop_placement(rig)
     rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
-    with pytest.raises(SimulatedCrash):
-        await rig.coordinator.step()
+    try:
+        with pytest.raises(SimulatedCrash):
+            await rig.coordinator.step()
+    finally:
+        rig.fake.place_algo_protective = original  # type: ignore[method-assign]
 
 
 def _first_fill_time(rig: ProtectionRig) -> datetime:
@@ -198,8 +199,8 @@ async def test_crash_after_stop_intent_sent_restart_places_stop_once() -> None:
     await restarted.step()
     calls = rig.fake.calls_to("place_algo_protective")
     assert len(calls) == 1
-    assert calls[0]["client_algo_id"] == rig.stop_id
-    assert calls[0]["trigger_price"] == rig.entry.sl_trigger_price
+    assert calls[0]["kwargs"]["client_algo_id"] == rig.stop_id
+    assert calls[0]["kwargs"]["trigger_price"] == rig.entry.sl_trigger_price
 
     # The next step reads it ACTIVE: the intent ends ACKED and the plan is PROTECTED.
     await restarted.step()

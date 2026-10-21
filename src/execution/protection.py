@@ -144,12 +144,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import ExecutionIntentStatus, LiveInputsStatus, OrderRole
@@ -190,6 +190,10 @@ from src.execution.protection_replay import (
 )
 from src.persistence.errors import IntentStateConflict, PersistenceError
 
+if TYPE_CHECKING:
+    # Imported for the type only: ``protection_rebuild`` imports this module.
+    from src.execution.protection_rebuild import RestoredPlan
+
 POSITION_MODE_ONE_WAY = "ONE_WAY"
 POSITION_MODE_HEDGE = "HEDGE"
 
@@ -198,6 +202,9 @@ SAFE_MODE_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
 # Plan 20-02 (D-29, T-A): a state change the PROTECTION table refuses (fail closed).
 SAFE_MODE_PROTECTION_STATE_INVALID = "PROTECTION_STATE_INVALID"
+# Plan 20-19 (D-08, D-30): a restart could not prove a plan's stop history, or a durable
+# source contradicts another (documented by plan 20-24).
+SAFE_MODE_RESTORE_INCONSISTENT = "RESTORE_INCONSISTENT"
 ALERT_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 ALERT_TP_UNAVAILABLE = "TP_UNAVAILABLE"
 
@@ -235,6 +242,8 @@ EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
 # Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
 EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
+# Plan 20-19 (D-08): one note per plan the coordinator rebuilt after a restart.
+EVENT_PROTECTION_RESTORED = "PROTECTION_RESTORED"
 
 # Plan 20-17 (D-26): the audit rows of the two operator controls (ids, codes and states only).
 EVENT_OPERATOR_CLOSE_REQUESTED = "OPERATOR_CLOSE_REQUESTED"
@@ -301,6 +310,8 @@ _NO_STATE = "NONE"
 # Reasons journaled on a transition (fixed project text, never exchange text).
 REASON_REGISTERED = "REGISTERED"
 REASON_REGISTERED_ENTRY_STATE_UNKNOWN = "REGISTERED_ENTRY_STATE_UNKNOWN"
+# Plan 20-19: the seq-1 row of a plan the journal never recorded (written by ``restore``).
+REASON_REGISTERED_AFTER_RESTORE = "REGISTERED_AFTER_RESTORE"
 REASON_ENTRY_UNRESOLVED = "ENTRY_NOT_FOUND_AFTER_GTD_GRACE"
 REASON_ENTRY_FOUND = "ENTRY_FOUND"
 REASON_FIRST_FILL_STREAM = "FIRST_FILL_STREAM"
@@ -371,6 +382,12 @@ class ProtectionState(str, Enum):
 # Plan 20-14: no stop is placed for a plan in one of these states (a queued stop is superseded).
 _NO_NEW_STOP_STATES: frozenset[ProtectionState] = frozenset(
     {ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED, ProtectionState.FLAT}
+)
+
+# Plan 20-19: states in which an unknown stop history no longer matters (nothing to protect),
+# so a restore does not enter SAFE_MODE for it.
+_RESTORE_DONE_STATES: frozenset[ProtectionState] = frozenset(
+    {ProtectionState.FLAT, ProtectionState.ENTRY_ENDED_NO_FILL}
 )
 
 BLOCKING_STATES: frozenset[ProtectionState] = frozenset(
@@ -488,6 +505,16 @@ class OperatorControlResult:
 
     accepted: bool
     code: str
+
+
+@dataclass(frozen=True)
+class RestoreReport:
+    """What ``ProtectionCoordinator.restore`` did (plan 20-19): plan hashes and reason codes."""
+
+    restored: tuple[str, ...]
+    replay_invalid: tuple[str, ...]
+    stop_history_unknown: tuple[str, ...]
+    safe_mode_reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -619,9 +646,13 @@ class _StopReading(Enum):
 class _Tracked:
     """The mutable record of one registered plan (in-process; the exchange is the truth)."""
 
-    def __init__(self, entry: RestingEntry) -> None:
+    def __init__(
+        self, entry: RestingEntry, *, restored_state: ProtectionState | None = None
+    ) -> None:
         self.entry = entry
-        self.state: ProtectionState | None = None
+        # Plan 20-19: a rebuilt plan is built with its state here; every later change goes
+        # through ``ProtectionCoordinator._transition`` (the one other assignment point).
+        self.state: ProtectionState | None = restored_state
         self.seq = 0
         self.first_fill_at: datetime | None = None
         self.stop_confirmed_at: datetime | None = None
@@ -704,6 +735,7 @@ class ProtectionCoordinator:
         clock: Callable[[], datetime],
         pending_actions: PendingActionStore | None = None,
         spill: IntentSpill | None = None,
+        restore_required: bool = False,
     ) -> None:
         limits.require_live_ready()
         max_unprotected_ms = limits.max_unprotected_ms
@@ -740,6 +772,10 @@ class ProtectionCoordinator:
         self._pending_recorder = BlockedRecorder(pending_actions, spill)
         # Plan 20-17 (D-16): the audit rows of the operator controls fall back to this spill.
         self._spill = spill
+        # Plan 20-19 (F6): a process that must rebuild its plans from durable sources blocks
+        # new entries and reports the restore incomplete until ``restore`` has run.
+        self._restore_required = restore_required
+        self._restored = False
 
     # ------------------------------------------------------------------ #
     # Registry surface.
@@ -786,6 +822,9 @@ class ProtectionCoordinator:
         """
         if any(t.state in BLOCKING_STATES for t in self._tracked.values()):
             return True
+        if self._restore_required and not self._restored:
+            # Plan 20-19 (F6): between process start and the rebuild no entry may open.
+            return True
         store = self._pending
         if store is None:
             return False
@@ -811,13 +850,107 @@ class ProtectionCoordinator:
 
     @property
     def restore_complete(self) -> bool:
-        """Whether the coordinator's tracked plans are complete after a restart (F6 seam).
+        """Whether the coordinator's tracked plans are complete after a restart (F6).
 
-        Always True today: a fresh coordinator has nothing to restore. Plan 20-19 introduces the
-        rebuild from the journal and holds this False until ``restore()`` has finished, so the
-        reconcile loop never reads a half-restored ``protections()`` as "no plans".
+        True for a coordinator built without ``restore_required`` (a fresh one has nothing to
+        restore). With ``restore_required=True`` it stays False until ``restore()`` has
+        finished, so the reconcile loop never reads a half-restored ``protections()`` as "no
+        plans".
         """
-        return True
+        return self._restored or not self._restore_required
+
+    def restore(self, plans: Sequence[RestoredPlan], *, now_utc: datetime) -> RestoreReport:
+        """Install the plans rebuilt from the durable sources after a restart (plan 20-19).
+
+        Each ``RestoredPlan`` (``protection_rebuild.rebuild_plan``) becomes a tracked plan with
+        its rebuilt state, ``seq``, clocks, close branch and ``stop_history_known``. Nothing is
+        sent: no adapter call, no stop placement, no cancel, and no REGISTERED transition (the
+        ``seq`` continues from the rebuilt one; only a plan the journal never recorded gets its
+        missing seq-1 row). No time is taken from ``now_utc`` for a plan that has a durable one.
+        ``sweep_done`` is not restored (the sweep is idempotent).
+
+        Fail closed: a plan whose replay was invalid enters SAFE_MODE
+        ``PROTECTION_STATE_INVALID``; a plan whose stop history is unknown (and which is not
+        already FLAT or ENTRY_ENDED_NO_FILL) enters SAFE_MODE ``RESTORE_INCONSISTENT``. Both are
+        best effort (a failing controller is swallowed; the plan is restored anyway). When the
+        call returns, ``restore_complete`` is True and ``blocks_new_entries`` answers from the
+        restored states.
+
+        Raises:
+            RuntimeError: ``restore`` already ran.
+            ValueError: a plan hash is already tracked or repeated, or a plan is not One-way.
+            TypeError: a plan's state is not a ``ProtectionState``.
+        """
+        _require_utc(now_utc, "now_utc")
+        if self._restored:
+            raise RuntimeError("the coordinator was already restored")
+        seen: set[str] = set()
+        for plan in plans:
+            plan_hash = plan.entry.plan_hash
+            if plan_hash in self._tracked or plan_hash in seen:
+                raise ValueError(f"plan {plan_hash} is already registered")
+            if plan.entry.position_mode != POSITION_MODE_ONE_WAY:
+                raise ValueError("only ONE_WAY plans can be restored (D-14)")
+            if not isinstance(plan.state, ProtectionState):
+                raise TypeError("a restored plan needs a ProtectionState")
+            seen.add(plan_hash)
+        ordered = sorted(plans, key=lambda p: (p.entry.registered_at_utc, p.entry.plan_hash))
+        for plan in ordered:
+            self._install_restored(plan, now_utc)
+        invalid = tuple(p.entry.plan_hash for p in ordered if not p.replay_valid)
+        unknown = tuple(p.entry.plan_hash for p in ordered if not p.stop_history_known)
+        reasons: list[str] = []
+        if any(
+            p.replay_valid and not p.stop_history_known and p.state not in _RESTORE_DONE_STATES
+            for p in ordered
+        ):
+            reasons.append(SAFE_MODE_RESTORE_INCONSISTENT)
+        if invalid:
+            reasons.append(SAFE_MODE_PROTECTION_STATE_INVALID)
+        for reason in reasons:
+            try:
+                self._safe_mode.enter_safe_mode(reason=reason, now_utc=now_utc)
+            except Exception:  # noqa: BLE001, S110 - the plans are restored UNPROTECTED anyway
+                pass
+        self._restored = True
+        return RestoreReport(
+            restored=tuple(p.entry.plan_hash for p in ordered),
+            replay_invalid=invalid,
+            stop_history_unknown=unknown,
+            safe_mode_reasons=tuple(reasons),
+        )
+
+    def _install_restored(self, plan: RestoredPlan, now_utc: datetime) -> None:
+        """Track one rebuilt plan; journal one note, and the seq-1 row only if none exists."""
+        journal_lacks_plan = plan.state is ProtectionState.AWAITING_FILL and plan.seq == 0
+        tracked = _Tracked(plan.entry, restored_state=None if journal_lacks_plan else plan.state)
+        tracked.first_fill_at = plan.first_fill_at
+        tracked.stop_confirmed_at = plan.stop_confirmed_at
+        tracked.stop_lost_at = plan.stop_lost_at
+        tracked.entry_terminal_at = plan.entry_terminal_at
+        tracked.close_branch = plan.close_branch
+        tracked.stop_history_known = plan.stop_history_known
+        self._tracked[plan.entry.plan_hash] = tracked
+        if journal_lacks_plan:
+            # The journal never recorded this plan: write the registration row it lacks.
+            self._transition(
+                tracked, ProtectionState.AWAITING_FILL, REASON_REGISTERED_AFTER_RESTORE, now_utc
+            )
+        else:
+            tracked.seq = plan.seq
+            tracked.last_reason = plan.last_reason
+        self._journal_note(
+            tracked,
+            EVENT_PROTECTION_RESTORED,
+            {
+                "reason": _NO_STATE if plan.last_reason is None else plan.last_reason,
+                "replay_valid": "true" if plan.replay_valid else "false",
+                "seq": str(tracked.seq),
+                "state": plan.state.value,
+                "stop_history_known": "true" if plan.stop_history_known else "false",
+            },
+            now_utc,
+        )
 
     def notify_divergence(self, plan_hash: str, kind: str) -> bool:
         """The reconcile loop reports a stop-related divergence of one plan (D-07).
@@ -2584,6 +2717,7 @@ __all__ = [
     "EVENT_OPERATOR_PROTECT_REFUSED",
     "EVENT_OPERATOR_PROTECT_STEPPED",
     "EVENT_OPERATOR_STOP_ADOPTED",
+    "EVENT_PROTECTION_RESTORED",
     "EVENT_PROTECTION_TRANSITION",
     "EVENT_PROTECTION_TRANSITION_REJECTED",
     "EVENT_REST_FAILED",
@@ -2600,11 +2734,13 @@ __all__ = [
     "NOTIFIABLE_DIVERGENCE_KINDS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
+    "REASON_REGISTERED_AFTER_RESTORE",
     "REASON_STOP_LOST_AFTER_PROTECTED",
     "SAFE_MODE_CLOSE_REQUIRED",
     "SAFE_MODE_DB_FAILURE",
     "SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE",
     "SAFE_MODE_PROTECTION_STATE_INVALID",
+    "SAFE_MODE_RESTORE_INCONSISTENT",
     "TERMINAL_ENTRY_STATUSES",
     "UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS",
     "CriticalAlertSink",
@@ -2616,5 +2752,6 @@ __all__ = [
     "ProtectionRegistry",
     "ProtectionState",
     "RestingEntry",
+    "RestoreReport",
     "RoutedFillLike",
 ]
