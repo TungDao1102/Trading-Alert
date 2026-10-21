@@ -419,6 +419,7 @@ exchange_status        NULL
 outcome_recorded       BOOLEAN NOT NULL DEFAULT false
 outcome_is_no_trade    NULL
 outcome_reason_code    NULL
+resolution_reason_code NULL: RECONCILED_ABSENT / NEVER_SENT (Phase 20, revision 0007)
 intended_at_utc
 sent_at_utc            NULL
 resolved_at_utc        NULL
@@ -427,7 +428,8 @@ updated_at_utc
 
 - Keys and constraints: primary key `pk_execution_intents (approval_id, role)`; `uq_execution_intents_plan_role (trade_plan_id, role)` so a second approval of the same plan cannot take another entry; partial unique indexes on `client_order_id` and `algo_client_id` where not NULL; foreign keys `ON DELETE RESTRICT` to `approvals` and `trade_plans`; named CHECKs for the role set, the status set (`ExecutionIntentStatus`, GLOSSARY section 12.1), the client id by role (an ENTRY row has `client_order_id` and no algo id, every other role the reverse), quantity and price (`NULL` or `> 0`) and the outcome columns (`outcome_recorded` is true exactly when the reason code and flag are set, and only for ENTRY).
 - Status: `ACKED` and `REJECTED` are terminal (trigger `trg_execution_intents_terminal_status`); every other status change goes through `src/domain/transitions.py` (kind `EXECUTION_INTENT`) after a `FOR UPDATE` read. The ENTRY row also stores the persisted `ExecutionOutcome` (`outcome_is_no_trade`, `outcome_reason_code`), so a replay returns the stored result with zero adapter calls; an ENTRY row without a recorded outcome replays as `RECONCILIATION_REQUIRED`.
-- Writers: `PgExecutionStateStore` (`consume_and_record_entry_intent`, `mark_sent`, `record_result`, `record_protective_intent`, `finalize_entry_outcome`). Readers: `execute_approved_plan` (replay), restart recovery (`list_unresolved_intents`, `resolve_unresolved_intents`, Phase 17 code, wired in Phase 20 and 24), reconciliation (Phase 20) and the Telegram message (Phase 23 and 24, through `PgExecutionStateStore.get_entry`).
+- Reconciliation reason (Phase 20, plan 20-03, Alembic revision `0007_intent_resolution_reason`): `resolution_reason_code` is nullable `VARCHAR(32)` with the named CHECK `ck_execution_intents_resolution_reason` (`NULL`, or `intent_status = 'REJECTED'` and the code is `RECONCILED_ABSENT` or `NEVER_SENT`). `RECONCILED_ABSENT` is `UNKNOWN` to `REJECTED` after the Phase 20 reconciliation protocol (plan 20-10) concluded that the exchange shows no such order; `NEVER_SENT` is `INTENDED` to `REJECTED`, nothing was sent because `mark_sent` commits before `place_entry`. It is written only by `finalize_reconciled_resolution` (which also writes `exchange_status` and `exchange_order_id` as NULL and sets `resolved_at_utc`), never by `record_result`; `exchange_status` keeps Binance's status only. A row closed by `record_result(REJECTED)` therefore has a NULL reason, so a definitive Binance rejection and a reconciled absence cannot be confused. The `outcome_*` columns cannot carry this reason: the manager already finalizes them on the ambiguous-entry path and they are written once. There is no backfill.
+- Writers: `PgExecutionStateStore` (`consume_and_record_entry_intent`, `mark_sent`, `record_result`, `record_protective_intent`, `finalize_reconciled_resolution`, `finalize_entry_outcome`). Readers: `execute_approved_plan` (replay), restart recovery (`list_unresolved_intents`, `resolve_unresolved_intents`, Phase 17 code, wired in Phase 20 and 24), reconciliation (Phase 20) and the Telegram message (Phase 23 and 24, through `PgExecutionStateStore.get_entry`).
 
 ### 2.15 `plan_constraint_snapshots`
 
