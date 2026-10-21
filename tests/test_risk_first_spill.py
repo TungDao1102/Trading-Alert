@@ -623,3 +623,310 @@ async def test_a_store_outage_blocks_a_new_entry_but_none_of_the_risk_reducing_c
         spill=LocalSpill(tmp_path / "spill"),
     )
     assert len(cancel_adapter.calls) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: spill robustness (T-I at the spill level; the startup consequence is plan 20-19).
+# --------------------------------------------------------------------------- #
+
+
+def test_a_spill_directory_deleted_before_replay_reports_nothing(tmp_path: Path) -> None:
+    """Absence of a spill is not evidence of anything (D-30); startup policy is plan 20-19."""
+    import shutil
+
+    from src.ops.spill import LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    spill.write(_event())
+    shutil.rmtree(directory)
+    journal = RecordingJournal()
+
+    assert spill.pending() == ()
+    report = replay_spill(spill, journal)
+
+    assert report.replayed == () and report.already_present == ()
+    assert report.conflicts == () and report.corrupt == () and report.failed == ()
+    assert journal.attempts == 0
+
+
+def test_a_write_after_the_directory_vanished_recreates_it(tmp_path: Path) -> None:
+    import shutil
+
+    from src.ops.spill import LocalSpill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    shutil.rmtree(directory)
+
+    spill.write(_event())
+
+    assert _spill_files(directory) == ["unit_test_a.json"]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        pytest.param("{not json", "INVALID_JSON", id="invalid-json"),
+        pytest.param("[1, 2, 3]", "INVALID_RECORD", id="not-an-object"),
+        pytest.param('{"journal_event_id": "unit_test_bad"}', "INVALID_RECORD", id="missing-field"),
+        pytest.param("", "INVALID_JSON", id="empty-file"),
+    ],
+)
+def test_a_corrupt_spill_file_is_reported_kept_and_never_recorded(
+    tmp_path: Path, content: str, reason: str
+) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    (directory / "unit_test_bad.json").write_text(content, encoding="utf-8")
+    journal = RecordingJournal()
+
+    report = replay_spill(spill, journal)
+
+    assert report.corrupt == (("unit_test_bad", reason),)
+    assert report.replayed == ()
+    assert journal.attempts == 0
+    assert _spill_files(directory) == ["unit_test_bad.json"]
+    assert (directory / "unit_test_bad.json").read_text(encoding="utf-8") == content
+
+
+def test_a_spill_file_with_a_wrong_field_type_is_corrupt(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    spill.write(_event())
+    path = directory / "unit_test_a.json"
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["occurred_at_utc"] = "2026-10-21T09:00:00"  # naive: not UTC-aware
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+    report = replay_spill(spill, RecordingJournal())
+
+    assert report.corrupt == (("unit_test_a", "INVALID_RECORD"),)
+    assert _spill_files(directory) == ["unit_test_a.json"]
+
+
+def test_a_file_whose_content_id_differs_from_its_name_is_corrupt(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    spill.write(_event(suffix="a"))
+    (directory / "unit_test_a.json").rename(directory / "unit_test_other.json")
+    journal = RecordingJournal()
+
+    report = replay_spill(spill, journal)
+
+    assert report.corrupt == (("unit_test_other", "ID_MISMATCH"),)
+    assert journal.attempts == 0
+
+
+def test_a_spill_record_that_conflicts_with_the_journal_is_kept_and_the_row_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event(payload={"k": "spilled"}))
+    journal = RecordingJournal()
+    stored = _event(payload={"k": "in-journal"})
+    journal.preload(stored)
+
+    report = replay_spill(spill, journal)
+
+    assert report.conflicts == ("unit_test_a",)
+    assert report.replayed == () and report.already_present == ()
+    assert journal.get("unit_test_a") == stored
+    assert journal.attempts == 0
+    assert _spill_files(tmp_path / "spill") == ["unit_test_a.json"]
+
+
+def test_a_journal_that_raises_conflict_on_record_is_a_conflict_too(tmp_path: Path) -> None:
+    """A journal without `get` still reports the conflict through `record`."""
+    from src.ops.spill import LocalSpill, replay_spill
+
+    class ConflictOnRecord:
+        def record(self, event: JournalEvent) -> None:
+            from src.persistence.errors import JournalConflict
+
+            raise JournalConflict("different fields")
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event())
+
+    report = replay_spill(spill, ConflictOnRecord())
+
+    assert report.conflicts == ("unit_test_a",)
+    assert report.failed == ()
+    assert _spill_files(tmp_path / "spill") == ["unit_test_a.json"]
+
+
+def test_an_identical_event_already_in_the_journal_is_already_present(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    spill = LocalSpill(tmp_path / "spill")
+    event = _event()
+    spill.write(event)
+    journal = RecordingJournal()
+    journal.preload(event)
+
+    report = replay_spill(spill, journal)
+
+    assert report.already_present == ("unit_test_a",)
+    assert report.replayed == ()
+    assert journal.attempts == 0
+    assert _spill_files(tmp_path / "spill") == []
+
+
+def test_first_record_replays_and_second_conflicts_in_one_pass(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    spill = LocalSpill(tmp_path / "spill")
+    early = datetime(2026, 10, 21, 8, 0, tzinfo=UTC)
+    spill.write(_event(suffix="first", at=early))
+    spill.write(_event(suffix="second", payload={"k": "spilled"}))
+    journal = RecordingJournal()
+    journal.preload(_event(suffix="second", payload={"k": "in-journal"}))
+
+    report = replay_spill(spill, journal)
+
+    assert report.replayed == ("unit_test_first",)
+    assert report.conflicts == ("unit_test_second",)
+    assert report.is_clean is False
+    assert _spill_files(tmp_path / "spill") == ["unit_test_second.json"]
+
+
+def test_records_are_replayed_in_occurred_at_then_id_order(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event(suffix="b", at=NOW_UTC))
+    spill.write(_event(suffix="a", at=NOW_UTC))
+    spill.write(_event(suffix="z", at=datetime(2026, 10, 21, 8, 0, tzinfo=UTC)))
+    journal = RecordingJournal()
+
+    report = replay_spill(spill, journal)
+
+    assert report.replayed == ("unit_test_z", "unit_test_a", "unit_test_b")
+    assert report.is_clean is True
+
+
+@pytest.mark.parametrize("name", ["bad name.json", "x..y.json", "a%2Fb.json", "-lead.json"])
+def test_a_file_name_that_is_not_a_journal_id_is_ignored_by_pending_and_reported_corrupt(
+    tmp_path: Path, name: str
+) -> None:
+    from src.ops.spill import INVALID_NAME_LABEL, LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    (directory / name).write_text("{}", encoding="utf-8")
+    journal = RecordingJournal()
+
+    assert spill.pending() == ()
+    report = replay_spill(spill, journal)
+
+    assert report.corrupt == ((INVALID_NAME_LABEL, "INVALID_NAME"),)
+    assert journal.attempts == 0
+    assert (directory / name).exists()  # kept
+
+
+@pytest.mark.parametrize("bad_id", ["../x", "a/b", "a\\b", "", ".hidden", "x.json", "a b"])
+def test_write_refuses_an_id_that_is_not_a_journal_id(tmp_path: Path, bad_id: str) -> None:
+    import dataclasses
+
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    event = dataclasses.replace(_event(), journal_event_id=bad_id)
+
+    with pytest.raises(ValueError):
+        spill.write(event)
+
+    assert list((tmp_path / "spill").iterdir()) == []
+    assert list(tmp_path.iterdir()) == [tmp_path / "spill"]  # nothing escaped the directory
+
+
+def test_write_never_overwrites_a_different_record_under_the_same_id(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event(payload={"k": "one"}))
+
+    with pytest.raises(FileExistsError):
+        spill.write(_event(payload={"k": "two"}))
+
+    (record,) = spill.pending()
+    assert json.loads(record.event.payload_json) == {"k": "one"}
+    # The same record written again is a harmless idempotent replace.
+    spill.write(_event(payload={"k": "one"}))
+    assert len(spill.pending()) == 1
+
+
+def test_a_write_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event())
+
+    assert sorted(p.name for p in (tmp_path / "spill").iterdir()) == ["unit_test_a.json"]
+
+
+def test_a_stray_temp_file_and_a_directory_named_like_a_record_are_not_records(
+    tmp_path: Path,
+) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    (directory / ".unit_test_a.json.123.tmp").write_text("partial", encoding="utf-8")
+    (directory / "unit_test_dir.json").mkdir()
+
+    report = replay_spill(spill, RecordingJournal())
+
+    assert spill.pending() == ()
+    assert report == report.__class__()  # an all-empty report
+
+
+def test_the_replay_report_carries_ids_and_class_names_only(tmp_path: Path) -> None:
+    from src.ops.spill import LocalSpill, replay_spill
+    from src.persistence.errors import StoreUnavailable
+
+    class DownJournal:
+        def record(self, event: JournalEvent) -> None:
+            raise StoreUnavailable("secret-ish connection detail")
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event())
+
+    report = replay_spill(spill, DownJournal())
+
+    assert report.failed == (("unit_test_a", "StoreUnavailable"),)
+    assert "secret-ish" not in repr(report)
+    assert _spill_files(tmp_path / "spill") == ["unit_test_a.json"]
+
+
+def test_a_spilled_event_round_trips_every_field(tmp_path: Path) -> None:
+    import dataclasses
+
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    event = dataclasses.replace(
+        _event(),
+        signal_id="sig-1",
+        trade_plan_id="plan-1",
+        approval_id="appr-1",
+        order_id="ord-1",
+        position_id="pos-1",
+        created_at_utc=NOW_UTC,
+        payload_json='{"b":1,"a":"é"}',
+    )
+    spill.write(event)
+
+    (record,) = spill.pending()
+
+    assert record.event == event
+    assert record.token.journal_event_id == "unit_test_a"
