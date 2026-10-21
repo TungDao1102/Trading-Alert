@@ -1032,10 +1032,52 @@ Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
 - [T-06] The reconcile cadence, stale-feed threshold and WS-silence threshold have no values ("configured freshness threshold"); they must be registry parameters with provenance labels (source: docs/operations/RUNBOOK.md:113-115, .planning/audits/2026-09-29-deep-audit/DEEP_AUDIT_REPORT.md:636 (F-026); decision: open user decision, the values)
 - [G3-005] Promote `ENTRY_WITHOUT_PROTECTIVE` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:206, docs/DECISIONS.md D044 item (1); decision: D044)
 
-**Plans:** 0 plans
+**Plans:** 26 plans (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 20 to break down)
+**Wave 1**
+- [ ] 20-01-PLAN.md - Execution-limit keys for reconcile, stale feed and alerts, all NOT_CONFIGURED; cadence check (T-H, D-25)
+- [ ] 20-02-PLAN.md - Protection transition guard, clearing evidence and replay validator (T-A, D-29, D077)
+- [ ] 20-03-PLAN.md - Reconciliation-finalization API and resolution_reason_code, migration 0007 (T-B)
+- [ ] 20-04-PLAN.md - Compare v2: reverse pass, bound check, STOP required, entry-aware orphan, duplicate ids (D-01..D-03, D-05)
+- [ ] 20-05-PLAN.md - ENTRY_WITHOUT_PROTECTIVE promoted into RejectionReason, GLOSSARY 9.1/9.3 (D-10, G3-005)
+- [ ] 20-06-PLAN.md - Durable SAFE_MODE: persisted on enter, fail-closed load (D-14)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 20-07-PLAN.md - REST gate restart recovery, owner decision O-C (T-D, D-18)
+- [ ] 20-08-PLAN.md - Local spill and act-first risk-reducing controls (D-16, F-702)
+- [ ] 20-09-PLAN.md - Stop supervision after PROTECTED and reconcile hooks (D-07, D-06, D077)
+- [ ] 20-10-PLAN.md - UNKNOWN-entry evidence protocol, owner decision O-F (T-C, D-11, D-12)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 20-11-PLAN.md - Cancel verification and the emergency_manual_close fix (D-17, D-09, D-03)
+- [ ] 20-12-PLAN.md - Reconcile loop tick library (EXEC-02, D-01, D-02, D-07)
+- [ ] 20-13-PLAN.md - Operational alert sender, journal first, dedupe, bounded message retry (D-22, D-23)
+- [ ] 20-14-PLAN.md - Durable pending protective actions, migration 0008 (D-19, Q4)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 20-15-PLAN.md - SAFE_MODE operator exit, readiness rows 1-5 (D-15, F-711)
+- [ ] 20-16-PLAN.md - Stale feed, stream divergences and auth failures in the tick (D-04, D-25, D058)
+- [ ] 20-17-PLAN.md - EXEC-06 operator close and re-protect controls (D-26)
+- [ ] 20-18-PLAN.md - Emergency close with stored validated lot filters, migration 0009 (D-21, Q3)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 20-19-PLAN.md - Coordinator and closer rebuild, startup recovery order (D-08, D-30)
+- [ ] 20-20-PLAN.md - Symbol ownership invariant, owner decision O-D (T-F)
+- [ ] 20-21-PLAN.md - Tick work order: lot-filter refresh and risk-reducing first, owner decision O-E (D-20, D-21)
+- [ ] 20-25-PLAN.md - SAFE_MODE exit rows 6 and 7, owner decision O-B (T-E)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 20-22-PLAN.md - Alert producers and the OPS-05 acceptance matrix (D-23, D-24)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 20-23-PLAN.md - Old-rule tests rewritten, G2-016 drills, Phase 20 gate (D-27, D-28, F-604)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 20-24-PLAN.md - Deferred register, GLOSSARY rows and canonical docs (no owner-gated wording)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 20-26-PLAN.md - Criterion 2 / RISK-03 wording aligned with D077, owner verification O-A (D-05)
 
 ### Phase 21: Account Equity + Daily Loss from Binance
 

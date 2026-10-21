@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 16
-current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
+current_phase: 20
+current_phase_name: reconcile-safe-mode-hardening
 current_plan: "65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host"
 status: executing
 stopped_at: Phase 20 context gathered
-last_updated: "2026-10-20T15:45:12.194Z"
+last_updated: "2026-10-21T04:07:20.270Z"
 last_activity: 2026-10-19
 last_activity_desc: Phase 19 merged into develop; AGENTS.md trimmed to a router
-state_head: 07c01614a55696b35dbf2b57fa301a0353f0a07f
+state_head: d6b3a64942ef7b2c8e28f608106a3546e57f9e40
 progress:
   total_phases: 29
   completed_phases: 18
-  total_plans: 252
+  total_plans: 278
   completed_plans: 249
 milestone_name: milestone
 ---
@@ -31,9 +31,9 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
+Phase: 20 (reconcile-safe-mode-hardening) — READY TO EXECUTE
 Current Plan: 65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host
-Status: Executing Phase 16
+Status: Ready to execute
 Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
 
 Progress: [██████░░░░] 61%
