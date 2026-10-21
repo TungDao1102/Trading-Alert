@@ -4,31 +4,39 @@ Evidence label: executed tests with a fake bot. No Telegram call is made and not
 `[DEMO]`. Telegram rate-limit behaviour is [ASSUMED] (research A3).
 
 Task 1 (tracer): a critical alert is journaled first, then delivered.
+Task 2: bounded retry, send failure, dedupe, the no-secret rule, journal outage.
+Task 3: restart re-queue and the daily-state test trigger.
 """
 
 from __future__ import annotations
 
 import json
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
 import pytest
+from src.execution.execution_limits import ExecutionLimitsNotConfigured
 from src.execution.protection import CriticalAlertSink
 from src.ops.alerts import (
     ALERT_EVENTS,
+    INVALID_REASON,
     AlertSeverity,
     JournalFirstAlertSink,
     OperationalAlert,
     TelegramAlertSender,
     render_alert_text,
 )
+from src.ops.risk_first import AuditRecordLost
+from src.ops.spill import LocalSpill
+from src.paper.notify import NOTIFY_MAX_ATTEMPTS
+from telegram import error as tg_error
 
 from tests.support.ast_guards import forbidden_imports, module_imports, wall_clock_calls
 from tests.support.execution_limits import test_only_execution_limits as make_test_limits
-from tests.support.reconcile_doubles import RecordingJournal
+from tests.support.reconcile_doubles import RaisingJournal, RecordingJournal
 
 NOW = datetime(2026, 9, 19, 0, 0, 0, tzinfo=UTC)
 PLAN_HASH = "a" * 64
@@ -318,3 +326,230 @@ async def test_the_sender_only_ever_calls_send_message() -> None:
     public = sorted(n for n in vars(type(h.bot)) if not n.startswith("_"))
     assert public == ["send_message"]
     assert h.bot.attempts == 1
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: bounded retry, send failure, dedupe, no secret material.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_rate_limited_send_is_retried_honouring_retry_after_then_delivered() -> None:
+    h = Harness()
+    h.bot.errors = [tg_error.RetryAfter(2), tg_error.RetryAfter(3)]
+    _close_required(h.sink)
+
+    report = await h.sender.drain()
+
+    assert h.bot.attempts == 3
+    assert len(h.sleep.calls) == 2
+    assert h.sleep.calls[0] >= 2
+    assert h.sleep.calls[1] >= 3
+    assert (report.delivered, report.failed) == (1, 0)
+    assert len(h.rows("ALERT_DELIVERED")) == 1
+    assert json.loads(h.rows("ALERT_DELIVERED")[0].payload_json) == {"attempts": 3}
+    assert h.rows("ALERT_SEND_FAILED") == []
+
+
+async def test_a_rejected_send_is_tried_once_and_journaled_with_the_class_name_only() -> None:
+    h = Harness()
+    h.bot.errors = [tg_error.BadRequest("chat not found token=abc123")]
+    _close_required(h.sink)
+
+    report = await h.sender.drain()
+
+    assert h.bot.attempts == 1
+    assert h.sleep.calls == []
+    assert (report.delivered, report.failed) == (0, 1)
+    failed = h.rows("ALERT_SEND_FAILED")
+    assert len(failed) == 1
+    assert json.loads(failed[0].payload_json) == {
+        "attempts": 1,
+        "error_class": "BadRequest",
+        "kind": "REJECTED",
+        "retry_after_seconds": None,
+    }
+    assert "abc123" not in failed[0].payload_json
+    assert h.rows("ALERT_DELIVERED") == []
+
+
+async def test_transient_errors_stop_at_the_attempt_budget_and_drain_returns_normally() -> None:
+    h = Harness()
+    h.bot.errors = [tg_error.NetworkError("down") for _ in range(NOTIFY_MAX_ATTEMPTS + 2)]
+    _close_required(h.sink)
+
+    report = await h.sender.drain()
+
+    assert h.bot.attempts == NOTIFY_MAX_ATTEMPTS
+    assert (report.delivered, report.failed) == (0, 1)
+    failed = h.rows("ALERT_SEND_FAILED")
+    assert json.loads(failed[0].payload_json)["attempts"] == NOTIFY_MAX_ATTEMPTS
+    assert json.loads(failed[0].payload_json)["error_class"] == "NetworkError"
+    assert len(h.queue) == 0
+
+
+def _emergency_close_failed(sink: JournalFirstAlertSink, *, at: datetime) -> None:
+    sink.alert(
+        event="EMERGENCY_CLOSE_FAILED",
+        subject="BTCUSDT",
+        reason="CLOSE_FAILED",
+        now_utc=at,
+        plan_hash=PLAN_HASH,
+        symbol="BTCUSDT",
+    )
+
+
+async def test_repeats_inside_the_dedupe_window_are_suppressed_and_counted() -> None:
+    h = Harness()  # TEST_ONLY alerts.dedupe_window_ms = 6543
+    _emergency_close_failed(h.sink, at=NOW)
+    _emergency_close_failed(h.sink, at=NOW + timedelta(milliseconds=1000))
+    _emergency_close_failed(h.sink, at=NOW + timedelta(milliseconds=2000))
+
+    report = await h.sender.drain()
+
+    assert len(h.rows("OPERATIONAL_ALERT")) == 1
+    assert h.bot.attempts == 1
+    assert report.delivered == 1
+    suppressed = h.rows("ALERT_SUPPRESSED")
+    counts = [json.loads(r.payload_json)["count"] for r in suppressed]
+    assert counts == [1, 2]
+    assert {r.entity_id for r in suppressed} == {h.rows("OPERATIONAL_ALERT")[0].entity_id}
+
+    # A fourth one after the window (measured from the first alert) is a new alert.
+    _emergency_close_failed(h.sink, at=NOW + timedelta(milliseconds=6543))
+    await h.sender.drain()
+
+    assert len(h.rows("OPERATIONAL_ALERT")) == 2
+    assert h.bot.attempts == 2
+
+
+def test_the_window_edge_is_exclusive() -> None:
+    h = Harness()
+    _emergency_close_failed(h.sink, at=NOW)
+    _emergency_close_failed(h.sink, at=NOW + timedelta(milliseconds=6542))
+    assert len(h.rows("OPERATIONAL_ALERT")) == 1
+    _emergency_close_failed(h.sink, at=NOW + timedelta(milliseconds=6543))
+    assert len(h.rows("OPERATIONAL_ALERT")) == 2
+
+
+def test_another_reason_or_subject_is_not_suppressed() -> None:
+    h = Harness()
+    _emergency_close_failed(h.sink, at=NOW)
+    h.sink.alert(
+        event="EMERGENCY_CLOSE_FAILED", subject="BTCUSDT", reason="OTHER_CODE", now_utc=NOW
+    )
+    h.sink.alert(
+        event="EMERGENCY_CLOSE_FAILED", subject="ETHUSDT", reason="CLOSE_FAILED", now_utc=NOW
+    )
+
+    assert len(h.rows("OPERATIONAL_ALERT")) == 3
+    assert h.rows("ALERT_SUPPRESSED") == []
+
+
+def test_an_unset_dedupe_window_refuses_construction_and_names_the_key() -> None:
+    journal = RecordingJournal()
+
+    with pytest.raises(ExecutionLimitsNotConfigured) as caught:
+        JournalFirstAlertSink(
+            journal=journal,
+            spill=None,
+            limits=make_test_limits(alerts_dedupe_window_ms=None),
+        )
+
+    assert caught.value.keys == ("alerts.dedupe_window_ms",)
+    assert journal.events == []
+
+
+class _LeakyError(Exception):
+    pass
+
+
+async def test_alert_text_never_contains_secret_material() -> None:
+    secret_message = "token=abc123 postgresql://u:p@h/db 429 Too Many Requests: https://x/y"
+    exc = _LeakyError(secret_message)
+    h = Harness()
+
+    # An exception MESSAGE used as a reason becomes INVALID_REASON.
+    h.sink.alert(event="DB_FAILURE", subject="SYSTEM", reason=str(exc), now_utc=NOW)
+    # A leading underscore is not a class-name shape either.
+    h.sink.alert(
+        event="DB_FAILURE",
+        subject="SYSTEM",
+        reason=type(exc).__name__,
+        now_utc=NOW + timedelta(days=1),
+    )
+    # A poisoned subject, symbol and plan hash are replaced too.
+    h.sink.alert(
+        event="DIVERGENCE",
+        subject="postgresql://u:p@h/db",
+        reason="POSITION_MISMATCH",
+        now_utc=NOW,
+        plan_hash="token=abc123",
+        symbol="x y",
+    )
+    await h.sender.drain()
+
+    texts = [m.text for m in h.bot.sent]
+    journaled = [e.payload_json for e in h.journal.events]
+    assert len(texts) == 3
+    for blob in (*texts, *journaled):
+        assert "abc123" not in blob
+        assert "postgresql" not in blob
+        assert "u:p@h" not in blob
+        assert "https://" not in blob
+        assert "429" not in blob
+    assert f"reason: {INVALID_REASON}" in texts[0]
+    assert "_LeakyError" not in texts[1]
+    assert "subject: INVALID_SUBJECT" in texts[2]
+    assert json.loads(h.rows("OPERATIONAL_ALERT")[2].payload_json)["plan_hash"] == (
+        "INVALID_PLAN_HASH"
+    )
+
+
+async def test_a_class_name_reason_is_kept() -> None:
+    h = Harness()
+    h.sink.alert(event="DB_FAILURE", subject="SYSTEM", reason="StoreUnavailable", now_utc=NOW)
+    await h.sender.drain()
+
+    assert "reason: StoreUnavailable" in h.bot.sent[0].text
+
+
+def test_a_journal_outage_is_absorbed_by_the_spill_and_the_alert_is_still_queued(
+    tmp_path: Path,
+) -> None:
+    spill = LocalSpill(tmp_path / "spill")
+    sink = JournalFirstAlertSink(
+        journal=RaisingJournal(), spill=spill, limits=make_test_limits(), queue=deque()
+    )
+
+    _close_required(sink)  # does not raise: the spill took the record
+
+    assert len(sink.queue) == 1
+    assert len(spill.pending()) == 1
+
+
+def test_when_the_journal_and_the_spill_both_fail_the_alert_is_queued_and_the_loss_raised() -> None:
+    sink = JournalFirstAlertSink(
+        journal=RaisingJournal(), spill=None, limits=make_test_limits(), queue=deque()
+    )
+
+    with pytest.raises(AuditRecordLost):
+        _close_required(sink)
+
+    assert len(sink.queue) == 1  # the operator is still told
+
+
+async def test_a_lost_outcome_row_is_counted_not_raised() -> None:
+    h = Harness()
+    _close_required(h.sink)
+    sender = TelegramAlertSender(
+        bot=h.bot,
+        chat_id=CHAT_ID,
+        journal=RaisingJournal(),
+        spill=None,
+        sleep=h.sleep,
+        queue=h.queue,
+    )
+
+    report = await sender.drain()
+
+    assert (report.delivered, report.failed, report.audit_lost) == (1, 0, 1)
