@@ -48,10 +48,11 @@ guard; the deterministic ids only let a probe find an order whose response was l
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from src.approval.binding import check_binding_full, check_binding_identity
@@ -2544,8 +2545,22 @@ async def operator_protect_position(
     return await coordinator.operator_protect(plan_hash=plan_hash, operator_id=operator_id)
 
 
+# EXEC-06 (plan 20-17, D-26): the five manual emergency controls, control name -> dotted path of
+# the callable. One test imports each of them; a new control is added here and in that test.
+EXEC06_CONTROLS: Mapping[str, str] = MappingProxyType(
+    {
+        "cancel_pending_strategy_orders": "src.execution.manager.expire_pending_entry",
+        "disable_new_entries": "src.execution.enablement.LiveEnablementController.disable",
+        "close_strategy_positions": "src.execution.manager.operator_close_position",
+        "replace_protection": "src.execution.manager.operator_protect_position",
+        "enter_safe_mode": "src.execution.manager.safe_mode_freeze",
+    }
+)
+
+
 __all__ = [
     "APPROVED_QUANTITY_NOT_CONFIRMED",
+    "EXEC06_CONTROLS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
     "resolve_position_mode",
