@@ -85,6 +85,7 @@ None (todo match returned 0).
 
 ### Phase inputs
 - `.planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md` — the carried items, Q3, Q4, Q5, D077 and Phase 18 review notes
+- `.planning/phases/20-reconcile-safe-mode-hardening/20-REVIEW-RESOLUTIONS.md` — review corrections (2026-10-21): task list T-A..T-J, owner checkpoint table, dependency graph; where it corrects a D-xx below, it wins and the D-xx is updated in the same plan
 - `.planning/ROADMAP.md` — Phase 20 goal, criteria and inherited items (D055, D058, G2-026, G4-035, G2-016, G4-029, G4-034, G4-043, G2-019, T-05, T-06, G3-005)
 - `.planning/REQUIREMENTS.md` — EXEC-02, OPS-01, RISK-03, EXEC-06, OPS-05
 
