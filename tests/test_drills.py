@@ -388,20 +388,15 @@ def _build_orphan_scenario() -> dict[str, Any]:
     """Build the ORPHAN drill scenario (§4).
 
     Local intent has a STOP_LOSS algo for BTCUSDT but no local
-    position and no exchange position. The compare classifies
-    ORPHAN_PROTECTIVE divergence; the sweeper cancels the algo after
-    authoritative position-zero verification.
+    position and no exchange position, and the plan's ENTRY is no longer
+    open (Phase 20, D-05: a protective of a resting entry is not an
+    orphan). The compare classifies ORPHAN_PROTECTIVE divergence; the
+    sweeper cancels the algo after authoritative position-zero
+    verification.
     """
     return {
         "local_intent": {
-            "open_orders": [
-                {
-                    "client_order_id": "x-11111111111111111111111111111111EN",
-                    "symbol": "BTCUSDT",
-                    "order_role": "ENTRY",
-                    "status": "NEW",
-                }
-            ],
+            "open_orders": [],
             "open_algos": [
                 {
                     "client_algo_id": "xa-1111111111111111111111111111111SL",
@@ -413,26 +408,7 @@ def _build_orphan_scenario() -> dict[str, Any]:
             "open_positions": [],
         },
         "exchange_truth": {
-            "normal_orders": [
-                {
-                    "symbol": "BTCUSDT",
-                    "client_order_id": "x-11111111111111111111111111111111EN",
-                    "exchange_order_id": "100001",
-                    "side": "BUY",
-                    "position_side": "LONG",
-                    "order_type": "LIMIT",
-                    "time_in_force": "GTC",
-                    "status": "NEW",
-                    "quantity": "0.010",
-                    "price": "50000.00",
-                    "stop_price": None,
-                    "reduce_only": False,
-                    "close_position": False,
-                    "working_type": None,
-                    "price_protect": None,
-                    "update_time_utc": "2026-09-19T10:00:00+00:00",
-                }
-            ],
+            "normal_orders": [],
             "algo_orders": [
                 {
                     "symbol": "BTCUSDT",

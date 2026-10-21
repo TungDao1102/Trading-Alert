@@ -351,8 +351,11 @@ def test_clean_compare_yields_agreement_with_zero_divergences() -> None:
         "open_positions": [
             {
                 "symbol": "BTCUSDT",
-                "position_side": "LONG",
+                "position_side": "BOTH",
                 "position_amt": Decimal("0.010"),
+                "plan_hash": "1" * 64,
+                "expected_side": "LONG",
+                "max_abs_amount": Decimal("0.010"),
             }
         ],
     }
@@ -406,7 +409,7 @@ def test_clean_compare_yields_agreement_with_zero_divergences() -> None:
             _build_position(
                 {
                     "symbol": "BTCUSDT",
-                    "position_side": "LONG",
+                    "position_side": "BOTH",
                     "position_amt": "0.010",
                     "entry_price": "50000.00",
                     "break_even_price": "50000.00",
@@ -618,7 +621,7 @@ def test_divergence_forces_safe_mode_without_cancel() -> None:
             _build_position(
                 {
                     "symbol": "BTCUSDT",
-                    "position_side": "LONG",
+                    "position_side": "BOTH",
                     "position_amt": "0.010",
                     "entry_price": "50000.00",
                     "break_even_price": "50000.00",
