@@ -417,3 +417,84 @@ def test_for_emergency_close_is_called_only_from_the_emergency_closer() -> None:
             if isinstance(node, ast.Attribute) and node.attr == "for_emergency_close":
                 callers.add(path.relative_to(root).as_posix())
     assert callers == {"src/execution/emergency_close.py"}
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: refresh_if_due and the constructor refusal.
+# --------------------------------------------------------------------------- #
+
+REFRESH_MS = 8642  # TEST_ONLY value of reconcile.lot_filter_refresh_interval_ms
+
+
+def _live_reads(rig: FilterRig) -> int:
+    return len(rig.fake.calls_to("symbol_lot_filters"))
+
+
+async def test_refresh_reads_and_stores_when_no_row_exists() -> None:
+    rig = make_filter_rig(D("0.004"))
+    now = rig.clock.now()
+
+    assert await rig.source.refresh_if_due(SYMBOL, now_utc=now) is True
+
+    stored = rig.store.get(SYMBOL)
+    assert stored is not None
+    assert stored.filters == lot_filters()
+    assert stored.fetched_at_utc == now
+
+
+async def test_refresh_does_nothing_before_the_interval_and_acts_at_the_interval() -> None:
+    fetched = VirtualTime().now() - timedelta(hours=1)
+    rig = make_filter_rig(D("0.004"), stored=lot_filters(), stored_at=fetched)
+    just_before = fetched + timedelta(milliseconds=REFRESH_MS - 1)
+    exactly = fetched + timedelta(milliseconds=REFRESH_MS)
+
+    assert await rig.source.refresh_if_due(SYMBOL, now_utc=just_before) is False
+    assert _live_reads(rig) == 0
+    assert rig.store.get(SYMBOL).fetched_at_utc == fetched  # type: ignore[union-attr]
+
+    assert await rig.source.refresh_if_due(SYMBOL, now_utc=exactly) is True
+    assert _live_reads(rig) == 1
+    assert rig.store.get(SYMBOL).fetched_at_utc == exactly  # type: ignore[union-attr]
+
+
+async def test_a_failed_refresh_read_returns_false_and_leaves_the_row_unchanged() -> None:
+    fetched = VirtualTime().now() - timedelta(hours=1)
+    stored = lot_filters(market_max="90")
+    rig = make_filter_rig(D("0.004"), stored=stored, stored_at=fetched)
+    rig.fake.fail_next("symbol_lot_filters", TimeoutError("exchangeInfo timed out"))
+    rig.fake.fail_next("symbol_lot_filters", PreSendRefusal("rest gate paused"))
+    rig.fake.set_lot_filters(SYMBOL, object())
+
+    for _ in range(3):  # a timeout, a gate refusal and a non-filter answer
+        assert await rig.source.refresh_if_due(SYMBOL, now_utc=rig.clock.now()) is False
+
+    row = rig.store.get(SYMBOL)
+    assert row is not None
+    assert row.filters == stored
+    assert row.fetched_at_utc == fetched
+    assert rig.store.upserts == []
+
+
+async def test_refresh_never_raises_into_the_caller_when_the_store_is_down() -> None:
+    rig = make_filter_rig(D("0.004"))
+    rig.source._store = FailingLotFilterStore()  # noqa: SLF001
+
+    # The row cannot be read (treated as due), the live read works, the write fails: False.
+    assert await rig.source.refresh_if_due(SYMBOL, now_utc=rig.clock.now()) is False
+    assert rig.source.last_store_error_type == "ConnectionError"
+
+
+def test_the_source_refuses_limits_without_the_refresh_interval() -> None:
+    from dataclasses import replace
+
+    from src.execution.execution_limits import ExecutionLimitsNotConfigured
+
+    limits = replace(limits_with(), reconcile_lot_filter_refresh_interval_ms=None)
+    with pytest.raises(ExecutionLimitsNotConfigured) as caught:
+        LotFilterSource(
+            adapter=object(),  # type: ignore[arg-type]
+            store=InMemoryLotFilterStore(),
+            limits=limits,
+            clock=VirtualTime(),
+        )
+    assert caught.value.keys == ("reconcile.lot_filter_refresh_interval_ms",)

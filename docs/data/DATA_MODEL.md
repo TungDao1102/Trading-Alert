@@ -495,6 +495,30 @@ resolution_note        NULL while PENDING, fixed project text when closed
 - States: `PENDING` is open. `RESOLVED` means the action got through or became moot because the exchange state settled (the stop was read ACTIVE by its deterministic id, the entry cancel was accepted or the entry is terminal, the close was sent after the gate opened or the position is flat). `SUPERSEDED` means policy now requires a close (`CLOSE_REQUIRED`, `CLOSE_FAILED` or `FLAT`), so a queued stop is never sent (note `CLOSE_REQUIRED_BY_POLICY`). `max_unprotected_ms` running out during the wait moves the plan to `CLOSE_REQUIRED` through the existing deadline.
 - Writers: the protection coordinator (`src/execution/protection.py`: stop and entry-cancel refusals, resolution and supersede) and the emergency closer (`src/execution/emergency_close.py`: `CLOSE_NOT_SENT`), both through `PgPendingActionStore` (`src/persistence/pending_actions.py`). The intent is first written to the local spill (D-16) and then recorded; a store failure enters SAFE_MODE `DB_FAILURE` once and never blocks the protective step. Readers: the coordinator's `blocks_new_entries()` (true while any row is `PENDING`, and true when the store cannot be read), the startup load of open rows (plan 20-19) and the queue order once the gate opens (plan 20-21, D-20). A 418 or 429 pause is never bypassed: the refusal is recorded, not worked around (D-18).
 
+### 2.18 `validated_lot_filters`
+
+The last validated exchangeInfo lot filters of each symbol (Phase 20, plan 20-18, D-21, owner decision Q3 of 2026-10-20, option b). The emergency close sizes its reduce-only MARKET parts from the symbol's lot filters. When exchangeInfo cannot be read at that moment (a timeout or a 5xx), the closer MAY use the stored filters, flagged stale with their fetch time. A new entry NEVER may. One row per symbol, replaced by a newer successful read; every value is a filter the exchange returned and `LotFilters` validated, so the table holds no default and no invented number.
+
+```text
+symbol                   PK, VARCHAR(32)
+price_tick_size          NUMERIC(38,18), > 0
+lot_min_quantity         NUMERIC(38,18), > 0, <= lot_max_quantity
+lot_max_quantity         NUMERIC(38,18), > 0
+lot_step_size            NUMERIC(38,18), > 0
+market_lot_min_quantity  NUMERIC(38,18), > 0, <= market_lot_max_quantity
+market_lot_max_quantity  NUMERIC(38,18), > 0
+market_lot_step_size     NUMERIC(38,18), > 0
+min_notional             NUMERIC(38,18), > 0
+fetched_at_utc           TIMESTAMPTZ, when the exchange last answered with these values
+updated_at_utc           TIMESTAMPTZ, when the row was written, >= fetched_at_utc
+```
+
+- Alembic revision `0009_validated_lot_filters` (down revision `0008_pending_protective_actions`). Named constraints: `pk_validated_lot_filters`, `ck_validated_lot_filters_symbol`, one `ck_validated_lot_filters_<column>_positive` per value column, `ck_validated_lot_filters_lot_range`, `ck_validated_lot_filters_market_lot_range`, `ck_validated_lot_filters_time_order`. No foreign keys; no backfill.
+- Single writer: `LotFilterSource` (`src/execution/lot_filter_source.py`) through `PgLotFilterStore` (`src/persistence/lot_filters.py`), on a successful live read and on the periodic refresh (`reconcile.lot_filter_refresh_interval_ms`; the reconcile tick that calls `refresh_if_due` is plan 20-21). `upsert` keeps the newest fetch: an older `fetched_at_utc` never replaces a newer row.
+- Use: only the emergency close reads a stored row, through `LotFilterSource.for_emergency_close` (called from `src/execution/emergency_close.py` and nowhere else; an AST test pins it). The row is returned with `filters_stale = true` and its fetch time, and the closer journals both on its `EMERGENCY_CLOSE` rows. `for_entry` reads the exchange live and never returns a stored row. With no live read, no stored row and no complete plan snapshot nothing is guessed: the close fails closed as `LOT_FILTERS_UNAVAILABLE`.
+- Tier 2: when no row exists, the persisted `plan_constraint_snapshots` row of the plan (section 2.15) is used, flagged stale, only when its maximum quantity and all three MARKET_LOT_SIZE values are present. It is never "the last validated filters".
+- The close quantity is floored onto the filters (never rounded up to reach the minimum quantity). A close rejected with a lot-filter code is not resent with the same quantity; the next attempt takes a new attempt number and reads live filters again when it can. Binance accepting a close sized on stale filters is `[NOT_TESTED]` (best effort, Q3).
+
 ## 3. Canonical state machines
 
 Canonical states are defined in `GLOSSARY.md`. The legal transitions between them are `GLOSSARY.md` section 11 (six tables: Signal, TradePlan, Order, Position, Approval, ExecutionIntent) and are implemented once in `src/domain/transitions.py`; the Phase 17 persistence status values (`ExecutionIntentStatus`, approval `consumption_status`, `live_inputs_status`, `SystemStateKey`) are `GLOSSARY.md` section 12. The section 11 tables are an auto-mode default awaiting user confirmation (D051).

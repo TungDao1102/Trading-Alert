@@ -182,6 +182,28 @@ class LotFilterSource:
         self._remember(filters, fetched_at)
         return StoredLotFilters(filters=filters, fetched_at_utc=fetched_at, filters_stale=False)
 
+    async def refresh_if_due(self, symbol: str, *, now_utc: datetime) -> bool:
+        """Re-read and store the filters of ``symbol`` when the stored row is due (D-21).
+
+        Due means: no row, or ``now_utc`` is at least ``reconcile.lot_filter_refresh_interval_ms``
+        after the row's fetch time (an unreadable store counts as no row). True only when the live
+        read worked and the row was written. A failed read, a failed write or a bad argument is
+        False and leaves the stored row as it was; nothing is raised into the reconcile tick.
+        """
+        try:
+            _require_utc_aware(now_utc, "now_utc")
+            try:
+                row = self._store.get(symbol)
+            except Exception as exc:  # noqa: BLE001 - an unreadable row is treated as due
+                self.last_store_error_type = type(exc).__name__
+                row = None
+            if row is not None and now_utc - row.fetched_at_utc < self._refresh_interval:
+                return False
+            filters = await self._read_live(symbol)
+        except Exception:  # noqa: BLE001 - the refresh is best effort, the old row stays
+            return False
+        return self._remember(filters, now_utc)
+
     def _stored(self, symbol: str) -> StoredLotFilters | None:
         try:
             row = self._store.get(symbol)
