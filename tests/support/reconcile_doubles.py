@@ -11,11 +11,11 @@ Three duck-typed journals with the one surface every controller uses, `record(ev
 None of them touches a database or the network.
 
 Plan 20-12 adds the doubles of the reconcile loop: `RecordingAlertSink`, `FakeGate`,
-`FakeProtectionView`, `FakeReconcileAdapter`, `InMemorySafeModeStore`, `FakeIntentStore` and five row builders
-(`make_position`, `make_open_order`, `make_algo_order`, `make_plan_protection`,
-`make_intent_record`). The adapter
-double raises on any method whose name starts with `place_` or `new_` and records the attempt,
-so a loop that tried to place an order would fail the test by construction.
+`FakeProtectionView`, `FakeReconcileAdapter`, `InMemorySafeModeStore`, `FakeIntentStore` and
+five row builders (`make_position`, `make_open_order`, `make_algo_order`,
+`make_plan_protection`, `make_intent_record`). The adapter double raises on any method whose
+name starts with `place_` or `new_` and records the attempt, so a loop that tried to place an
+order would fail the test by construction.
 """
 
 from __future__ import annotations
