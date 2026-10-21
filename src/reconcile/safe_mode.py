@@ -3,9 +3,9 @@
 Per D-03: any divergence between local intent and exchange truth
 forces SAFE_MODE. While in SAFE_MODE, new entries are blocked with
 `RECONCILIATION_REQUIRED`; monitoring and reconciliation continue to
-run. Exit requires a fresh, clean three-source compare plus a
-journaled restore event (Pitfall 4: a boolean flip without both is
-rejected).
+run. Exit is an explicit, operator-attributed, fail-closed act (Phase 20, plan 20-15, D-15,
+F-711): see `SafeModeController.exit_safe_mode`. A boolean flip, a restart, a timer or a
+recovered feed never exits.
 
 The module composes with `src/risk/gating.py:evaluate_risk` — the
 guard returns a `SafeModeVerdict` that the risk pipeline can short-
@@ -23,27 +23,13 @@ No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, Protocol, Self
 
 from src.domain.enums import RejectionReason, SystemMode
-
-# --------------------------------------------------------------------------- #
-# Scheduled tick cadence (FLAGGED ASSUMPTION, RECON-01 unclassified).
-#
-# The operator tunes this only before a soak epoch starts, never
-# mid-epoch. The value is a documented constant — not an env var —
-# so a mid-soak change is a code change, not a config drift.
-#
-# 60s default per RESEARCH A2: a 4H/1H swing-trading system has
-# orders of magnitude of headroom for a 60s REST tick; tighter
-# cadences waste rate-limit budget without changing the safety
-# posture.
-# --------------------------------------------------------------------------- #
-
-SAFE_MODE_TICK_SECONDS: int = 60
 
 #: The `entered_reason` of a controller whose persisted state could not be read or parsed at start
 #: (D-14, research C14): an unreadable store must only ever make the system more restricted.
@@ -130,6 +116,65 @@ class SafeModeVerdict:
             raise ValueError("SafeModeVerdict: is_no_trade=True requires RECONCILIATION_REQUIRED")
 
 
+class LocalIntentLike(Protocol):
+    """The local side of one compare (`src.reconcile.local_intent.LocalIntent` satisfies it)."""
+
+    @property
+    def orders(self) -> Sequence[Any]: ...
+
+    @property
+    def algos(self) -> Sequence[Any]: ...
+
+    @property
+    def positions(self) -> Sequence[Any]: ...
+
+
+class ExitRefusal(StrEnum):
+    """Why an operator exit was refused (D-15, 20-REVIEW-RESOLUTIONS T-E rows 1-5).
+
+    The codes are the only content of a `SAFE_MODE_EXIT_REFUSED` journal row: never an exception
+    text, which may carry a connection string.
+    """
+
+    OPERATOR_ID_MISSING = "OPERATOR_ID_MISSING"
+    LOCAL_SOURCE_UNREADABLE = "LOCAL_SOURCE_UNREADABLE"
+    BINANCE_READ_FAILED = "BINANCE_READ_FAILED"
+    COMPARE_NOT_CLEAN = "COMPARE_NOT_CLEAN"
+    UNKNOWN_INTENT_PRESENT = "UNKNOWN_INTENT_PRESENT"
+    BLOCKING_PROTECTION_STATE = "BLOCKING_PROTECTION_STATE"
+    PENDING_ACTION_PRESENT = "PENDING_ACTION_PRESENT"
+    READINESS_UNREADABLE = "READINESS_UNREADABLE"
+
+
+@dataclass(frozen=True)
+class ExitReadiness:
+    """Row 5 of the exit readiness list: what must be zero before SAFE_MODE may end.
+
+    A field is the COUNT found by a successful read. `None` means "could not be read", which
+    refuses the exit (`READINESS_UNREADABLE`) and is never read as zero.
+
+    Attributes:
+        unknown_intents: unresolved execution intents of any status (INTENDED, SENT, UNKNOWN).
+        blocking_plans: plans in UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED.
+        open_pending_actions: protective actions still PENDING in the durable queue.
+    """
+
+    unknown_intents: int | None
+    blocking_plans: int | None
+    open_pending_actions: int | None
+
+
+@dataclass(frozen=True)
+class ExitDecision:
+    """The outcome of one `exit_safe_mode` call; truthy exactly when SAFE_MODE was left."""
+
+    exited: bool
+    refusals: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.exited
+
+
 # --------------------------------------------------------------------------- #
 # Controller.
 # --------------------------------------------------------------------------- #
@@ -174,9 +219,17 @@ class SafeModeController:
         self._in_safe_mode: bool = False
         self._entered_at_utc: datetime | None = None
         self._entered_reason: str | None = None
+        # The last operator exit (D-15): audit metadata only, NOT authentication. Kept across a
+        # later entry so the persisted state still says who last left SAFE_MODE and when.
+        self._last_exit_operator_id: str | None = None
+        self._last_exit_at_utc: datetime | None = None
         # True from the moment the in-memory state changed until the store accepted it, so a
         # failed save (or a failed journal write before it) is retried by the next enter call.
         self._persist_pending: bool = False
+        # Counts every enter_safe_mode call that passed validation. An exit awaits Binance reads
+        # on the same event loop as the reconcile loop; an entry that lands meanwhile means a
+        # divergence was found after the exit's reads began, so the exit is refused.
+        self._enter_calls: int = 0
 
     @classmethod
     def load(
@@ -256,35 +309,53 @@ class SafeModeController:
             journal: The journal layer (as for the constructor).
             compare_fn: The compare function (as for the constructor).
             state: `{"in_safe_mode": bool, "entered_at_utc": ISO UTC text or None,
-                "entered_reason": text or None}`, or None.
+                "entered_reason": text or None, "last_exit_operator_id": text or None,
+                "last_exit_at_utc": ISO UTC text or None}`, or None. The three-key row written
+                by plan 20-06 (no `last_exit_*` keys) is read as `last_exit_*` None.
 
         Raises:
-            ValueError: the mapping is not exactly the snapshot format, a value has the wrong
+            ValueError: the mapping is neither the five-key nor the three-key format (any other
+                key set, including a partial `last_exit_*` pair), a value has the wrong
                 type, a datetime is naive or not UTC, SAFE_MODE is set without its entry time
                 or reason, or SAFE_MODE is off while an entry time or reason is still set.
         """
         controller = cls(adapter=adapter, journal=journal, compare_fn=compare_fn)
         if state is None:
             return controller
-        in_safe_mode, entered_at_utc, entered_reason = _parse_state(state)
-        controller._in_safe_mode = in_safe_mode
-        controller._entered_at_utc = entered_at_utc
-        controller._entered_reason = entered_reason
+        parsed = _parse_state(state)
+        controller._in_safe_mode = parsed.in_safe_mode
+        controller._entered_at_utc = parsed.entered_at_utc
+        controller._entered_reason = parsed.entered_reason
+        controller._last_exit_operator_id = parsed.last_exit_operator_id
+        controller._last_exit_at_utc = parsed.last_exit_at_utc
         return controller
 
     def state_snapshot(self) -> dict[str, str | bool | None]:
-        """The persistable SAFE_MODE state (the `rehydrate` input format).
+        """The persistable SAFE_MODE state (the `rehydrate` input format, five keys).
 
         When the controller is not in SAFE_MODE the entry time and reason are reported as None.
+        The last operator exit (`last_exit_operator_id`, `last_exit_at_utc`) is reported in both
+        states; both are None until an operator has exited once.
         """
+        last_exit_at = (
+            None if self._last_exit_at_utc is None else self._last_exit_at_utc.isoformat()
+        )
         if not self._in_safe_mode:
-            return {"in_safe_mode": False, "entered_at_utc": None, "entered_reason": None}
+            return {
+                "in_safe_mode": False,
+                "entered_at_utc": None,
+                "entered_reason": None,
+                "last_exit_operator_id": self._last_exit_operator_id,
+                "last_exit_at_utc": last_exit_at,
+            }
         return {
             "in_safe_mode": True,
             "entered_at_utc": (
                 None if self._entered_at_utc is None else self._entered_at_utc.isoformat()
             ),
             "entered_reason": self._entered_reason,
+            "last_exit_operator_id": self._last_exit_operator_id,
+            "last_exit_at_utc": last_exit_at,
         }
 
     @property
@@ -334,6 +405,7 @@ class SafeModeController:
             raise ValueError("reason must be a non-empty string")
         effective_now = now_utc if now_utc is not None else datetime.now(UTC)
         _require_utc(effective_now)
+        self._enter_calls += 1
         if self._in_safe_mode:
             # Already in SAFE_MODE — update reason if it changed.
             if self._entered_reason != reason:
@@ -389,81 +461,164 @@ class SafeModeController:
     async def exit_safe_mode(
         self,
         *,
-        local_open_orders: list[Any] | None = None,
-        local_open_algos: list[Any] | None = None,
-        local_open_positions: list[Any] | None = None,
-        local_intent_fn: Callable[[], tuple[list[Any], list[Any], list[Any]]] | None = None,
-        now_utc: datetime | None = None,
-    ) -> bool:
-        """Exit SAFE_MODE only after a fresh clean three-source compare.
+        operator_id: str,
+        local_intent_fn: Callable[[], LocalIntentLike],
+        readiness: Callable[[], ExitReadiness],
+        now_utc: datetime,
+    ) -> ExitDecision:
+        """Leave SAFE_MODE only as an explicit, operator-attributed, fail-closed act (D-15).
 
-        Per Pitfall 4: a boolean flip without both a clean compare
-        AND a journaled restore event is rejected. The function
-        re-fetches the three truth snapshots, runs the compare, and
-        only exits when the diff is clean.
+        A boolean flip, a restart, a timer, a recovered feed and a closed intent never exit
+        SAFE_MODE; this call is the only way. There is no list argument a caller can leave empty
+        (F-711): the only local input is `local_intent_fn`. The readiness list is closed
+        (20-REVIEW-RESOLUTIONS T-E, rows 1-5; rows 6 and 7 wait for owner decision O-B, plan
+        20-25):
+
+          1. `operator_id` is a non-empty string. It is audit metadata, NOT authentication; an
+             allow-list must exist before any LIVE path opens (Phase 23/24).
+          2. `local_intent_fn()` returned its three sequences. A raising or incomplete source
+             BLOCKS the exit; an empty sequence counts only after a successful read.
+          3. Positions, open orders and algo orders were read from Binance during THIS call.
+          4. Compare v2 on those fresh reads agrees, and no `enter_safe_mode` call landed while the
+             reads were awaited (the reconcile loop shares the event loop; such an entry is a
+             divergence the reads predate, and refuses as `COMPARE_NOT_CLEAN`).
+          5. `readiness()` read every count and all are zero: no unresolved intent, no UNPROTECTED /
+             CLOSE_REQUIRED / CLOSE_FAILED plan, no PENDING protective action.
+
+        Every refusal found in one pass is returned and journaled as `SAFE_MODE_EXIT_REFUSED`
+        (codes only, best-effort); the state does not change. On success the order is: journal
+        `SAFE_MODE_EXIT` with the operator id FIRST, persist the exit state SECOND, flip memory
+        LAST (17-REVIEW WR-03, D-14, D-15), so a failure of either write propagates with the
+        controller still in SAFE_MODE and a later call can still exit.
 
         Args:
-            local_open_orders: The current local open-order intent.
-            local_open_algos: The current local open-algo intent.
-            local_open_positions: The current local open-position
-                intent.
-            local_intent_fn: Optional zero-arg callable returning
-                `(orders, algos, positions)` fetched at exit time
-                (same tick as the truth fetch). When supplied it
-                takes precedence over the list arguments, so a stale
-                caller snapshot cannot produce a vacuous clean exit.
-            now_utc: The current UTC-aware datetime. If None, uses
-                `datetime.now(UTC)`.
+            operator_id: Who exits (audit only).
+            local_intent_fn: Zero-argument callable returning the local intent
+                (`.orders`, `.algos`, `.positions`) read at exit time.
+            readiness: Zero-argument callable returning the row-5 counts.
+            now_utc: The current UTC-aware datetime (required; no wall-clock fallback).
 
         Returns:
-            True when the exit succeeded (clean compare + journaled
-            restore event). False when the compare still shows
-            divergences (the controller stays in SAFE_MODE).
+            `ExitDecision(exited=True)` when SAFE_MODE was left (also when it was already off),
+            otherwise `ExitDecision(exited=False, refusals=...)` and the controller stays in
+            SAFE_MODE.
+
+        Raises:
+            ValueError: `now_utc` is naive or not UTC (a caller bug).
+            Exception: whatever the `SAFE_MODE_EXIT` journal write or the state store raised; the
+                controller is still in SAFE_MODE.
         """
+        _require_utc(now_utc)
         if not self._in_safe_mode:
-            return True  # already out
-        effective_now = now_utc if now_utc is not None else datetime.now(UTC)
-        if effective_now.tzinfo is None:
-            raise ValueError("now_utc must be UTC-aware")
-        if effective_now.utcoffset() != _ZERO_TIMEDELTA:
-            raise ValueError("now_utc must be UTC, not offset-aware")
+            return ExitDecision(exited=True)
 
-        if local_intent_fn is not None:
-            local_open_orders, local_open_algos, local_open_positions = local_intent_fn()
+        refusals: list[str] = []
 
-        # Re-fetch the three truth snapshots.
-        truth_normal = await self._adapter.snapshot_open_normal_orders()
-        truth_algos = await self._adapter.snapshot_open_algo_orders()
-        truth_positions = await self._adapter.snapshot_positions()
+        # Row 1: the operator id.
+        if not isinstance(operator_id, str) or operator_id.strip() == "":
+            refusals.append(ExitRefusal.OPERATOR_ID_MISSING.value)
 
-        diff = self._compare(
-            local_open_orders=local_open_orders or [],
-            local_open_algos=local_open_algos or [],
-            local_open_positions=local_open_positions or [],
-            truth_normal_orders=truth_normal,
-            truth_algo_orders=truth_algos,
-            truth_positions=truth_positions,
+        enter_calls_before = self._enter_calls
+
+        # Row 2: the local intent source, read successfully or the exit is blocked.
+        local = _read_local_intent(local_intent_fn)
+        if local is None:
+            refusals.append(ExitRefusal.LOCAL_SOURCE_UNREADABLE.value)
+
+        # Row 3: fresh successful Binance reads in this call.
+        truth = await self._read_truth()
+        if truth is None:
+            refusals.append(ExitRefusal.BINANCE_READ_FAILED.value)
+
+        # Row 4: compare v2 on those two reads. A SAFE_MODE entry that landed while the reads were
+        # awaited (the reconcile loop shares the event loop) is a divergence these reads predate.
+        entered_meanwhile = self._enter_calls != enter_calls_before
+        compare_dirty = (
+            local is not None and truth is not None and not self._compare_is_clean(local, truth)
         )
-        if not diff.agreement:
-            # Still divergent — stay in SAFE_MODE.
-            return False
+        if entered_meanwhile or compare_dirty:
+            refusals.append(ExitRefusal.COMPARE_NOT_CLEAN.value)
 
-        # Clean compare + journaled restore event: exit. The opposite order to
-        # `enter_safe_mode` on purpose (17-REVIEW WR-03): the exit is journaled FIRST, so a
-        # journal failure propagates with the controller still in SAFE_MODE (fail closed)
-        # and a later retry can still exit; entering flips first so a failure there also
-        # fails closed.
-        self._journal_safe_mode_event(
+        # Row 5: the readiness counts.
+        refusals.extend(_readiness_refusals(readiness))
+
+        if refusals:
+            self._journal_exit_refused(refusals=refusals, now_utc=now_utc)
+            return ExitDecision(exited=False, refusals=tuple(refusals))
+
+        # All rows hold. Journal FIRST (a failure propagates, still in SAFE_MODE), persist
+        # SECOND (same), flip memory LAST.
+        self._record_event(
             event_type="SAFE_MODE_EXIT",
-            reason="clean_three_source_compare",
-            now_utc=effective_now,
+            payload={
+                "reason": "clean_three_source_compare",
+                "system_mode": SystemMode.SAFE_MODE.value,
+                "operator_id": operator_id,
+            },
+            now_utc=now_utc,
         )
+        if self._state_store is not None:
+            self._state_store.save(
+                {
+                    "in_safe_mode": False,
+                    "entered_at_utc": None,
+                    "entered_reason": None,
+                    "last_exit_operator_id": operator_id,
+                    "last_exit_at_utc": now_utc.isoformat(),
+                },
+                now_utc=now_utc,
+            )
         self._in_safe_mode = False
         self._entered_at_utc = None
         self._entered_reason = None
-        return True
+        self._last_exit_operator_id = operator_id
+        self._last_exit_at_utc = now_utc
+        self._persist_pending = False
+        return ExitDecision(exited=True)
 
     # ----- internal helpers ---------------------------------------------- #
+
+    async def _read_truth(self) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]] | None:
+        """The three Binance snapshots read now, or None when any read failed (fail closed)."""
+        try:
+            normal = await self._adapter.snapshot_open_normal_orders()
+            algos = await self._adapter.snapshot_open_algo_orders()
+            positions = await self._adapter.snapshot_positions()
+            if normal is None or algos is None or positions is None:
+                return None
+            return tuple(normal), tuple(algos), tuple(positions)
+        except Exception:
+            return None
+
+    def _compare_is_clean(
+        self,
+        local: tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]],
+        truth: tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]],
+    ) -> bool:
+        """True only when the compare ran and reported agreement; an error is never clean."""
+        try:
+            diff = self._compare(
+                local_open_orders=local[0],
+                local_open_algos=local[1],
+                local_open_positions=local[2],
+                truth_normal_orders=truth[0],
+                truth_algo_orders=truth[1],
+                truth_positions=truth[2],
+            )
+            return bool(getattr(diff, "agreement", False) is True)
+        except Exception:
+            return False
+
+    def _journal_exit_refused(self, *, refusals: Sequence[str], now_utc: datetime) -> None:
+        """Journal a refused exit, codes only. Best-effort: the controller stays in SAFE_MODE."""
+        try:
+            self._record_event(
+                event_type="SAFE_MODE_EXIT_REFUSED",
+                payload={"refusals": list(refusals), "system_mode": SystemMode.SAFE_MODE.value},
+                now_utc=now_utc,
+            )
+        except Exception:  # noqa: S110 - the refusal already holds; the audit row is a bonus
+            pass
 
     def _persist(self, *, now_utc: datetime) -> None:
         """Save `state_snapshot()` to the attached store; a failure propagates (fail closed)."""
@@ -529,36 +684,156 @@ def _require_utc(value: datetime) -> None:
         raise ValueError("now_utc must be UTC, not offset-aware")
 
 
-_STATE_KEYS = frozenset({"in_safe_mode", "entered_at_utc", "entered_reason"})
+def _read_local_intent(
+    local_intent_fn: Callable[[], LocalIntentLike],
+) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]] | None:
+    """The local intent as three tuples, or None when the source is unreadable (row 2, F-711).
+
+    A raising source, a missing result or a missing sequence is never turned into an empty list:
+    an empty sequence counts only when the read itself succeeded.
+    """
+    try:
+        intent = local_intent_fn()
+        orders = intent.orders
+        algos = intent.algos
+        positions = intent.positions
+        if orders is None or algos is None or positions is None:
+            return None
+        return tuple(orders), tuple(algos), tuple(positions)
+    except Exception:
+        return None
 
 
-def _parse_state(state: object) -> tuple[bool, datetime | None, str | None]:
-    """Validate a persisted SAFE_MODE mapping (fail closed, `ValueError` on anything off)."""
+def _is_count(value: object) -> bool:
+    """True for a read count: a non-negative int (a bool is not a count)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _readiness_refusals(readiness: Callable[[], ExitReadiness]) -> list[str]:
+    """The row-5 refusal codes: an unreadable field refuses, a non-zero count refuses."""
+    try:
+        counts = readiness()
+        unknown = counts.unknown_intents
+        blocking = counts.blocking_plans
+        pending = counts.open_pending_actions
+    except Exception:
+        return [ExitRefusal.READINESS_UNREADABLE.value]
+    refusals: list[str] = []
+    if not (_is_count(unknown) and _is_count(blocking) and _is_count(pending)):
+        refusals.append(ExitRefusal.READINESS_UNREADABLE.value)
+    if _is_count(unknown) and unknown != 0:
+        refusals.append(ExitRefusal.UNKNOWN_INTENT_PRESENT.value)
+    if _is_count(blocking) and blocking != 0:
+        refusals.append(ExitRefusal.BLOCKING_PROTECTION_STATE.value)
+    if _is_count(pending) and pending != 0:
+        refusals.append(ExitRefusal.PENDING_ACTION_PRESENT.value)
+    return refusals
+
+
+#: Plan states that keep SAFE_MODE on (row 5): exposure that is not (or cannot be) protected.
+#: Compared by string value so this module imports nothing from `src.execution`.
+_BLOCKING_PLAN_STATES: frozenset[str] = frozenset({"UNPROTECTED", "CLOSE_REQUIRED", "CLOSE_FAILED"})
+
+
+def build_exit_readiness(
+    *,
+    unresolved_intents_fn: Callable[[], Iterable[Any]],
+    protections_fn: Callable[[], Iterable[Any]],
+    open_pending_fn: Callable[[], Iterable[Any]],
+) -> ExitReadiness:
+    """Compose the row-5 counts from three plain providers (D-15, T-E).
+
+    The composition passes `ExecutionIntentStore.list_unresolved_intents`,
+    `ProtectionCoordinator.protections` and `PendingActionStore.list_open`. A provider that raises,
+    returns None or returns something that is not an iterable makes ITS field None ("could not be
+    read"), which `exit_safe_mode` refuses as `READINESS_UNREADABLE`; it is never read as zero.
+
+    - `unknown_intents`: every unresolved intent counts, whatever its status (INTENDED, SENT or
+      UNKNOWN), because any of them may still hold an order or an exposure.
+    - `blocking_plans`: plans whose `state` is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED.
+    - `open_pending_actions`: every open pending protective action.
+    """
+    return ExitReadiness(
+        unknown_intents=_count_rows(unresolved_intents_fn, lambda _row: True),
+        blocking_plans=_count_rows(protections_fn, _plan_blocks),
+        open_pending_actions=_count_rows(open_pending_fn, lambda _row: True),
+    )
+
+
+def _plan_blocks(plan: Any) -> bool:
+    """True when the plan's state keeps SAFE_MODE on; raises when the view has no state."""
+    state = plan.state
+    name = getattr(state, "value", state)
+    if not isinstance(name, str) or name == "":
+        raise ValueError("a plan state must be a non-empty string")
+    return name in _BLOCKING_PLAN_STATES
+
+
+def _count_rows(provider: Callable[[], Iterable[Any]], counts: Callable[[Any], bool]) -> int | None:
+    """How many rows of `provider()` satisfy `counts`, or None when the read failed."""
+    try:
+        rows = provider()
+        if rows is None or isinstance(rows, str | bytes):
+            return None
+        return sum(1 for row in rows if counts(row))
+    except Exception:
+        return None
+
+
+_CORE_STATE_KEYS = frozenset({"in_safe_mode", "entered_at_utc", "entered_reason"})
+_EXIT_STATE_KEYS = frozenset({"last_exit_operator_id", "last_exit_at_utc"})
+#: The five-key format written since plan 20-15 (D-15).
+_STATE_KEYS = _CORE_STATE_KEYS | _EXIT_STATE_KEYS
+
+
+@dataclass(frozen=True)
+class _ParsedState:
+    """A validated persisted SAFE_MODE state."""
+
+    in_safe_mode: bool
+    entered_at_utc: datetime | None
+    entered_reason: str | None
+    last_exit_operator_id: str | None
+    last_exit_at_utc: datetime | None
+
+
+def _parse_utc(raw: object, name: str) -> datetime | None:
+    """An ISO-8601 UTC-aware datetime from text, or None for None (`ValueError` on anything off)."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"{name} must be ISO-8601 text, got {type(raw).__name__}")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError(f"{name} is not an ISO-8601 datetime") from None
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must be UTC-aware, got naive datetime")
+    if parsed.utcoffset() != _ZERO_TIMEDELTA:
+        raise ValueError(f"{name} must be UTC, not offset-aware")
+    return parsed
+
+
+def _parse_state(state: object) -> _ParsedState:
+    """Validate a persisted SAFE_MODE mapping (fail closed, `ValueError` on anything off).
+
+    Two key sets are accepted: the five-key format, and the three-key row written by plan 20-06
+    (read as `last_exit_*` None). Any other key set is refused.
+    """
     if not isinstance(state, Mapping):
         raise ValueError(f"SAFE_MODE state must be a mapping, got {type(state).__name__}")
-    if set(state) != _STATE_KEYS:
+    keys = set(state)
+    if keys != _STATE_KEYS and keys != _CORE_STATE_KEYS:
         raise ValueError(
-            f"SAFE_MODE state keys differ: unknown={sorted(map(str, set(state) - _STATE_KEYS))} "
-            f"missing={sorted(_STATE_KEYS - set(state))}"
+            f"SAFE_MODE state keys differ: unknown={sorted(map(str, keys - _STATE_KEYS))} "
+            f"missing={sorted(_CORE_STATE_KEYS - keys)} "
+            f"partial_exit_keys={sorted(map(str, keys & _EXIT_STATE_KEYS))}"
         )
     in_safe_mode = state["in_safe_mode"]
     if not isinstance(in_safe_mode, bool):
         raise ValueError(f"in_safe_mode must be a bool, got {type(in_safe_mode).__name__}")
-    raw_at = state["entered_at_utc"]
+    entered_at = _parse_utc(state["entered_at_utc"], "entered_at_utc")
     reason = state["entered_reason"]
-    if raw_at is None:
-        entered_at: datetime | None = None
-    else:
-        if not isinstance(raw_at, str):
-            raise ValueError(f"entered_at_utc must be ISO-8601 text, got {type(raw_at).__name__}")
-        try:
-            entered_at = datetime.fromisoformat(raw_at)
-        except ValueError:
-            raise ValueError("entered_at_utc is not an ISO-8601 datetime") from None
-        if entered_at.tzinfo is None:
-            raise ValueError("entered_at_utc must be UTC-aware, got naive datetime")
-        if entered_at.utcoffset() != _ZERO_TIMEDELTA:
-            raise ValueError("entered_at_utc must be UTC, not offset-aware")
     if reason is not None and not isinstance(reason, str):
         raise ValueError(f"entered_reason must be text or None, got {type(reason).__name__}")
     if in_safe_mode:
@@ -568,7 +843,19 @@ def _parse_state(state: object) -> tuple[bool, datetime | None, str | None]:
             raise ValueError("in_safe_mode is true but entered_reason is missing")
     elif entered_at is not None or reason is not None:
         raise ValueError("in_safe_mode is false but an entry time or reason is still set")
-    return in_safe_mode, entered_at, reason
+
+    last_operator: str | None = None
+    last_exit_at: datetime | None = None
+    if keys == _STATE_KEYS:
+        raw_operator = state["last_exit_operator_id"]
+        last_exit_at = _parse_utc(state["last_exit_at_utc"], "last_exit_at_utc")
+        if raw_operator is not None:
+            if not isinstance(raw_operator, str) or raw_operator.strip() == "":
+                raise ValueError("last_exit_operator_id must be non-empty text or None")
+            last_operator = raw_operator
+        if (last_operator is None) != (last_exit_at is None):
+            raise ValueError("last_exit_operator_id and last_exit_at_utc must be set together")
+    return _ParsedState(in_safe_mode, entered_at, reason, last_operator, last_exit_at)
 
 
 def _build_payload_json(payload: dict[str, Any]) -> str:
@@ -580,10 +867,14 @@ def _build_payload_json(payload: dict[str, Any]) -> str:
 
 __all__ = [
     "SAFE_MODE_STATE_UNREADABLE",
-    "SAFE_MODE_TICK_SECONDS",
+    "AdapterLike",
+    "build_exit_readiness",
+    "ExitDecision",
+    "ExitReadiness",
+    "ExitRefusal",
+    "JournalLike",
+    "LocalIntentLike",
     "SafeModeController",
     "SafeModeStateStore",
     "SafeModeVerdict",
-    "AdapterLike",
-    "JournalLike",
 ]

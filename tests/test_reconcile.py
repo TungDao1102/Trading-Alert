@@ -604,10 +604,7 @@ def test_divergence_forces_safe_mode_without_cancel() -> None:
     happens on the divergence path itself.
     """
     from src.reconcile.compare import compare
-    from src.reconcile.safe_mode import (
-        SAFE_MODE_TICK_SECONDS,
-        SafeModeController,
-    )
+    from src.reconcile.safe_mode import SafeModeController
 
     local = {
         "open_orders": [],
@@ -674,8 +671,19 @@ def test_divergence_forces_safe_mode_without_cancel() -> None:
     assert adapter.cancel_normal_order_calls == []
     assert adapter.place_order_calls == 0
 
-    # SAFE_MODE_TICK_SECONDS constant is documented + tunable-but-not-mid-run.
-    assert SAFE_MODE_TICK_SECONDS == 60
+    # The hard-coded SAFE_MODE_TICK_SECONDS = 60 is gone (D-25, plan 20-15): the cadence is the
+    # registry key reconcile.tick_interval_ms, owned by the owner and NOT_CONFIGURED until set.
+    import dataclasses
+
+    import src.reconcile as reconcile_package
+    import src.reconcile.safe_mode as safe_mode_module
+    from src.execution.execution_limits import ExecutionLimits
+
+    assert not hasattr(safe_mode_module, "SAFE_MODE_TICK_SECONDS")
+    assert not hasattr(reconcile_package, "SAFE_MODE_TICK_SECONDS")
+    assert "SAFE_MODE_TICK_SECONDS" not in safe_mode_module.__all__
+    assert "SAFE_MODE_TICK_SECONDS" not in reconcile_package.__all__
+    assert "reconcile_tick_interval_ms" in {f.name for f in dataclasses.fields(ExecutionLimits)}
 
 
 # --------------------------------------------------------------------------- #

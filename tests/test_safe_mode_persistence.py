@@ -36,6 +36,13 @@ T2 = T0 + timedelta(minutes=10)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SAFE_OFF: dict[str, Any] = {"in_safe_mode": False, "entered_at_utc": None, "entered_reason": None}
+# The snapshot is the five-key format since plan 20-15 (D-15); SAFE_OFF above is the three-key row
+# of plan 20-06, which must still load.
+SNAP_OFF: dict[str, Any] = {
+    **SAFE_OFF,
+    "last_exit_operator_id": None,
+    "last_exit_at_utc": None,
+}
 
 
 class FakeJournal:
@@ -127,6 +134,8 @@ def test_enter_saves_exactly_the_state_snapshot() -> None:
                 "in_safe_mode": True,
                 "entered_at_utc": T0.isoformat(),
                 "entered_reason": "DB_FAILURE",
+                "last_exit_operator_id": None,
+                "last_exit_at_utc": None,
             },
             T0,
         )
@@ -154,7 +163,7 @@ def test_load_of_a_store_that_never_persisted_is_the_default_controller() -> Non
     controller = _load(store)
 
     assert controller.in_safe_mode is False
-    assert controller.state_snapshot() == SAFE_OFF
+    assert controller.state_snapshot() == SNAP_OFF
     assert store.saved == []
 
 
@@ -366,7 +375,7 @@ def test_enter_refuses_an_empty_or_non_string_reason_and_changes_nothing(reason:
         controller.enter_safe_mode(reason=reason, now_utc=T0)
 
     assert controller.in_safe_mode is False
-    assert controller.state_snapshot() == SAFE_OFF
+    assert controller.state_snapshot() == SNAP_OFF
     assert journal.events == []
     assert store.saved == []
 

@@ -64,7 +64,7 @@ from src.reconcile.compare import (
     OrphanProtective,
     compare,
 )
-from src.reconcile.safe_mode import SafeModeController, SafeModeVerdict
+from src.reconcile.safe_mode import ExitReadiness, SafeModeController, SafeModeVerdict
 from src.reconcile.sweeper import OrphanSweeper
 
 # --------------------------------------------------------------------------- #
@@ -1001,6 +1001,15 @@ async def test_wr15_async_position_verifier_supported() -> None:
 # --------------------------------------------------------------------------- #
 
 
+class _LocalIntentStub:
+    """Duck-typed local intent: the compare accepts plain dict rows (WR-14)."""
+
+    def __init__(self, orders: list[Any], algos: list[Any], positions: list[Any]) -> None:
+        self.orders = orders
+        self.algos = algos
+        self.positions = positions
+
+
 async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
     """A stale caller snapshot cannot force the exit decision."""
     journal = _FakeJournal()
@@ -1014,13 +1023,17 @@ async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
             "status": OrderStatus.NEW.value,
         }
     ]
-    # Fresh supplier matches the empty truth: exit must succeed.
-    exited = await controller.exit_safe_mode(
-        local_open_orders=stale_orders,
-        local_intent_fn=lambda: ([], [], []),
+    # Fresh supplier matches the empty truth: exit must succeed. Since plan 20-15 there is no
+    # list argument at all, so a stale caller snapshot cannot exist (`stale_orders` documents the
+    # shape the old signature accepted).
+    assert stale_orders
+    decision = await controller.exit_safe_mode(
+        operator_id="operator-1",
+        local_intent_fn=lambda: _LocalIntentStub([], [], []),
+        readiness=lambda: ExitReadiness(0, 0, 0),
         now_utc=NOW,
     )
-    assert exited is True
+    assert decision.exited is True
     assert controller.in_safe_mode is False
 
 
@@ -1037,12 +1050,14 @@ async def test_wr16_divergent_intent_fn_blocks_exit() -> None:
             "status": OrderStatus.NEW.value,
         }
     ]
-    exited = await controller.exit_safe_mode(
-        local_open_orders=[],
-        local_intent_fn=lambda: (divergent, [], []),
+    decision = await controller.exit_safe_mode(
+        operator_id="operator-1",
+        local_intent_fn=lambda: _LocalIntentStub(divergent, [], []),
+        readiness=lambda: ExitReadiness(0, 0, 0),
         now_utc=NOW,
     )
-    assert exited is False
+    assert decision.exited is False
+    assert decision.refusals == ("COMPARE_NOT_CLEAN",)
     assert controller.in_safe_mode is True
 
 

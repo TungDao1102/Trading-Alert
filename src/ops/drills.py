@@ -444,6 +444,9 @@ def _build_drill_outcome_event(
 # outcome; the SAFE_MODE_ENTER/EXIT side events are emitted by the
 # SafeModeController itself.
 _RESTORE_FAULT: str = "stale three-source compare forcing SAFE_MODE enter"
+
+#: The operator id the restore drill records with its SAFE_MODE exit (audit metadata, D-15).
+DRILL_OPERATOR_ID: str = "drill-operator"
 _RESTORE_OUTCOME_FAULT: str = "fresh clean three-source compare after operator-confirmed restore"
 
 
@@ -853,13 +856,16 @@ def make_restore_drill(
     safe_mode_controller: Any,
     now_utc: datetime,
     enter_reason: str = "INITIAL_SAFE_MODE",
+    operator_id: str = DRILL_OPERATOR_ID,
+    local_intent_fn: Callable[[], Any] | None = None,
+    readiness: Callable[[], Any] | None = None,
 ) -> DrillDeclaration:
     """Build the RESTORE drill (clean restore — the only SAFE_MODE exit).
 
-    Per D-05 + 08-04 D-06: SAFE_MODE exits only on a fresh clean
-    three-source compare PLUS a journaled SAFE_MODE_EXIT event
-    (Pitfall 4). The restore drill enters SAFE_MODE on a stale
-    compare, then exercises the exit path with a clean compare and
+    Per D-05 + 08-04 D-06 and Phase 20 plan 20-15 (D-15): SAFE_MODE exits only through the
+    operator-attributed exit: a fresh clean three-source compare, a successfully read local
+    intent, clean readiness counts and a journaled SAFE_MODE_EXIT event carrying the operator id.
+    The restore drill enters SAFE_MODE on a stale compare, then exercises that exit path and
     asserts the controller returns to NORMAL.
 
     Args:
@@ -868,8 +874,25 @@ def make_restore_drill(
             "INITIAL_SAFE_MODE"; tests override to exercise specific
             enter paths).
         now_utc: Caller-supplied UTC timestamp for the SAFE_MODE_ENTER
-            event.
+            event and the exit.
+        operator_id: The operator id recorded with the exit (audit only; default
+            `DRILL_OPERATOR_ID`).
+        local_intent_fn: Zero-argument callable reading the drill's local intent. The default
+            reads the drill's own (empty) local state successfully.
+        readiness: Zero-argument callable returning the row-5 `ExitReadiness`. The default is the
+            drill context's clean counts (nothing unresolved, no blocking plan, no pending action).
     """
+    from src.reconcile.local_intent import LocalIntent
+    from src.reconcile.safe_mode import ExitReadiness
+
+    resolved_local: Callable[[], Any] = (
+        local_intent_fn
+        if local_intent_fn is not None
+        else (lambda: LocalIntent(orders=(), algos=(), positions=()))
+    )
+    resolved_readiness: Callable[[], Any] = (
+        readiness if readiness is not None else (lambda: ExitReadiness(0, 0, 0))
+    )
 
     def inject() -> str:
         return _RESTORE_FAULT
@@ -885,9 +908,18 @@ def make_restore_drill(
 
         # The exit path is async; tests inject a clean adapter so the
         # controller's compare yields agreement=True.
-        exited = _run_coro(safe_mode_controller.exit_safe_mode())
-        if not exited:
-            raise AssertionError("restore drill: expected exit_safe_mode to return True")
+        decision = _run_coro(
+            safe_mode_controller.exit_safe_mode(
+                operator_id=operator_id,
+                local_intent_fn=resolved_local,
+                readiness=resolved_readiness,
+                now_utc=now_utc,
+            )
+        )
+        if not decision:
+            raise AssertionError(
+                f"restore drill: expected exit_safe_mode to exit, refusals={decision.refusals}"
+            )
         if safe_mode_controller.in_safe_mode:
             raise AssertionError("restore drill: expected controller out of SAFE_MODE after exit")
         return OUTCOME_RESTORE_CLEAN_EXIT
@@ -919,6 +951,7 @@ __all__ = [
     "DRILL_STALE_FEED",
     "DRILL_DB_FAILURE",
     "DRILL_MANUAL_CLOSE",
+    "DRILL_OPERATOR_ID",
     "DRILL_RESTORE",
     "OUTCOME_SAFE_MODE_ENTERED",
     "OUTCOME_SAFE_MODE_BLOCKED",
