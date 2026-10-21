@@ -44,12 +44,16 @@ modules only. No Binance SDK, no SQLAlchemy, no Telegram PTB.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from src.domain.journal import JournalEvent, content_hash_event_id
+
+if TYPE_CHECKING:
+    from src.reconcile.loop import ReconcileLoop
 
 # --------------------------------------------------------------------------- #
 # Canonical drill vocabulary — the eight RUNBOOK procedures this plan
@@ -100,7 +104,6 @@ OUTCOME_SAFE_MODE_BLOCKED: str = "safe_mode_blocked_entries"
 OUTCOME_ORPHAN_SWEPTED: str = "orphan_swept"
 OUTCOME_REPLAY_TRANSITIONED: str = "replay_one_transition"
 OUTCOME_RESTORE_CLEAN_EXIT: str = "restore_clean_exit"
-OUTCOME_NO_PLACE_ORDER_INVARIANT: str = "no_place_order_invariant_held"
 
 ALL_OUTCOMES: frozenset[str] = frozenset(
     {
@@ -109,7 +112,16 @@ ALL_OUTCOMES: frozenset[str] = frozenset(
         OUTCOME_ORPHAN_SWEPTED,
         OUTCOME_REPLAY_TRANSITIONED,
         OUTCOME_RESTORE_CLEAN_EXIT,
-        OUTCOME_NO_PLACE_ORDER_INVARIANT,
+    }
+)
+
+#: Outcome strings that are no longer emitted, with the reason (Phase 20, plan 20-23, D-27).
+#: A retired string is not in `ALL_OUTCOMES`, so a `DrillOutcome` that carries one is refused.
+RETIRED_OUTCOMES: Mapping[str, str] = MappingProxyType(
+    {
+        "no_place_order_invariant_held": (
+            "encoded the pre-D034 rule (08-REVIEW IN-08); replaced by the narrowed static guard"
+        ),
     }
 )
 
@@ -460,54 +472,56 @@ def _require_now_utc_utc(value: datetime, field_name: str) -> None:
 
 def make_unprotected_drill(
     *,
-    compare_fn: Callable[..., Any],
+    loop: ReconcileLoop,
     safe_mode_controller: Any,
-    local_intent: dict[str, Any],
-    truth: dict[str, Any],
+    now_utc: datetime,
 ) -> DrillDeclaration:
     """Build the UNPROTECTED drill (§3 Position without confirmed stop).
 
-    Per RUNBOOK §3: an open position without a confirmed stop-loss
-    forces SAFE_MODE — never auto-place rescue protection. The drill
-    injects a local ENTRY + position but no SL algo; the compare
-    classifies `ENTRY_WITHOUT_PROTECTIVE` divergence; SAFE_MODE is
-    entered; entries are blocked with RECONCILIATION_REQUIRED; no
-    cancel call is made (Pitfall 1).
+    Phase 20 (plan 20-23, D-27, G2-016): the drill runs ONE tick of the real `ReconcileLoop`.
+    The scenario the caller builds with fakes is an exchange position of a tracked plan with no
+    stop. The tick must classify POSITION_WITHOUT_STOP, enter SAFE_MODE with that reason, hand
+    the plan to the protection coordinator (`notify_divergence`, reported in
+    `TickReport.delegated`) and leave the entry guard answering RECONCILIATION_REQUIRED. The
+    loop itself places nothing: a stop is only ever sent by the coordinator in `src/execution`
+    after its own re-check (D034 / D077); the caller's fakes record who called a placement
+    method, and the test asserts that no call came from `src/reconcile`.
 
     Args:
-        compare_fn: The 08-04 `compare` function.
-        safe_mode_controller: A `SafeModeController` instance.
-        local_intent: Dict with `open_orders` / `open_algos` /
-            `open_positions` keys (duck-typed for compare).
-        truth: Dict with `normal_orders` / `algo_orders` / `positions`
-            keys.
+        loop: A `ReconcileLoop` built over fakes (adapter, protection view, alert sink).
+        safe_mode_controller: The durable `SafeModeController` the loop was built with.
+        now_utc: Caller-supplied UTC timestamp handed to the tick (never wall-clock).
     """
+    from src.reconcile.loop import TICK_COMPARED
 
     def inject() -> str:
-        return "local ENTRY + position but no SL protective (ENTRY_WITHOUT_PROTECTIVE)"
+        return "exchange position of a tracked plan with no stop (POSITION_WITHOUT_STOP)"
 
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
-        diff = compare_fn(
-            local_open_orders=local_intent["open_orders"],
-            local_open_algos=local_intent["open_algos"],
-            local_open_positions=local_intent["open_positions"],
-            truth_normal_orders=truth["normal_orders"],
-            truth_algo_orders=truth["algo_orders"],
-            truth_positions=truth["positions"],
-        )
-        if diff.agreement:
-            raise AssertionError("unprotected drill: expected divergence, got agreement")
-        if not any(d.kind == "ENTRY_WITHOUT_PROTECTIVE" for d in diff.divergences):
-            raise AssertionError("unprotected drill: expected ENTRY_WITHOUT_PROTECTIVE divergence")
-        # Enter SAFE_MODE on the divergence (mirrors the reconciler tick).
-        safe_mode_controller.enter_safe_mode(reason="ENTRY_WITHOUT_PROTECTIVE")
-        # Guard blocks new entries with RECONCILIATION_REQUIRED.
+        _require_now_utc_utc(now_utc, "now_utc")
+        report = _run_coro(loop.tick(now_utc=now_utc))
+        if report.outcome != TICK_COMPARED:
+            raise AssertionError(
+                f"unprotected drill: expected a compared tick, got {report.outcome}"
+            )
+        if not any(d.kind == "POSITION_WITHOUT_STOP" for d in report.divergences):
+            raise AssertionError("unprotected drill: expected a POSITION_WITHOUT_STOP divergence")
+        if not any(kind == "POSITION_WITHOUT_STOP" for _plan, kind in report.delegated):
+            raise AssertionError(
+                "unprotected drill: expected the plan delegated to the coordinator"
+            )
+        if not safe_mode_controller.in_safe_mode:
+            raise AssertionError("unprotected drill: expected SAFE_MODE after the tick")
+        if "POSITION_WITHOUT_STOP" not in report.safe_mode_reasons:
+            raise AssertionError(
+                "unprotected drill: expected the tick to enter SAFE_MODE POSITION_WITHOUT_STOP"
+            )
         verdict = safe_mode_controller.guard_new_entries(trade_plan=None)
         if not verdict.is_no_trade:
             raise AssertionError("unprotected drill: expected guard_new_entries to block entries")
         if verdict.reason_code != "RECONCILIATION_REQUIRED":
             raise AssertionError("unprotected drill: expected RECONCILIATION_REQUIRED reason")
-        return OUTCOME_SAFE_MODE_ENTERED
+        return OUTCOME_SAFE_MODE_BLOCKED
 
     return DrillDeclaration(
         name=DRILL_UNPROTECTED,
@@ -699,36 +713,49 @@ def make_api_down_drill(
 
 def make_stale_feed_drill(
     *,
+    loop: ReconcileLoop,
     safe_mode_controller: Any,
-    feed_freshness_check: Callable[[], bool],
+    now_utc: datetime,
 ) -> DrillDeclaration:
     """Build the STALE_FEED drill (§7 Market feed stale).
 
-    Per RUNBOOK §7: when `now - last_expected_closed_candle > configured
-    freshness threshold`, the system issues NO_NEW_SIGNALS and
-    NO_NEW_ORDERS, reconnects/re-bootstraps, and resumes only after a
-    health check. The drill injects a feed-freshness below-threshold
-    read; SAFE_MODE is entered; new entries are blocked.
+    Phase 20 (plan 20-23, D-27, D-25, G2-016): the drill runs ONE tick of the real
+    `ReconcileLoop` built with a `FeedSource` whose reading is stale. The loop's own feed check
+    must judge the reading: SAFE_MODE `STALE_FEED`, a STALE_DATA alert per stale feed, and the
+    entry guard answering RECONCILIATION_REQUIRED. A fresh reading later never leaves SAFE_MODE
+    (only the operator does, D-15); that is asserted by the loop tests, not here.
 
     Args:
-        safe_mode_controller: A `SafeModeController` instance.
-        feed_freshness_check: Caller-supplied callable that returns
-            True iff the feed is stale.
+        loop: A `ReconcileLoop` built over fakes with a stale `FeedSource`.
+        safe_mode_controller: The durable `SafeModeController` the loop was built with.
+        now_utc: Caller-supplied UTC timestamp handed to the tick (never wall-clock).
     """
+    from src.reconcile.loop import TICK_COMPARED
 
     def inject() -> str:
         return "market feed freshness below configured threshold"
 
     def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
-        is_stale = feed_freshness_check()
-        if not is_stale:
-            raise AssertionError("stale_feed drill: expected feed_freshness_check to return True")
-        # Enter SAFE_MODE on stale feed (matches RUNBOOK §7).
-        safe_mode_controller.enter_safe_mode(reason="STALE_FEED")
+        _require_now_utc_utc(now_utc, "now_utc")
+        report = _run_coro(loop.tick(now_utc=now_utc))
+        if report.outcome != TICK_COMPARED:
+            raise AssertionError(
+                f"stale_feed drill: expected a compared tick, got {report.outcome}"
+            )
+        if not report.stale_symbols and not report.user_data_silent:
+            raise AssertionError("stale_feed drill: expected the loop to judge a feed stale")
+        if report.alerts_sent < 1:
+            raise AssertionError("stale_feed drill: expected a STALE_DATA alert to be sent")
+        if not safe_mode_controller.in_safe_mode:
+            raise AssertionError("stale_feed drill: expected SAFE_MODE after the tick")
+        if "STALE_FEED" not in report.safe_mode_reasons:
+            raise AssertionError("stale_feed drill: expected the tick to report STALE_FEED")
         verdict = safe_mode_controller.guard_new_entries(trade_plan=None)
         if not verdict.is_no_trade:
             raise AssertionError("stale_feed drill: expected guard_new_entries to block entries")
-        return OUTCOME_SAFE_MODE_ENTERED
+        if verdict.reason_code != "RECONCILIATION_REQUIRED":
+            raise AssertionError("stale_feed drill: expected RECONCILIATION_REQUIRED reason")
+        return OUTCOME_SAFE_MODE_BLOCKED
 
     return DrillDeclaration(
         name=DRILL_STALE_FEED,
@@ -783,34 +810,42 @@ def make_db_failure_drill(
 
 def make_manual_close_drill(
     *,
+    close_control: Callable[[], Awaitable[Any]],
+    read_truth: Callable[[], Awaitable[Mapping[str, Any]]],
     sweeper: Any,
     safe_mode_controller: Any,
     local_intent: dict[str, Any],
-    truth: dict[str, Any],
     position_verifier: Callable[..., Any],
     compare_fn: Callable[..., Any] | None = None,
 ) -> DrillDeclaration:
     """Build the MANUAL_CLOSE drill (§12 Manual close).
 
-    Per RUNBOOK §12: a manual position close must be explicit and
-    recorded; after manual close, the reconciliation process must
-    cancel orphan protective orders. The drill injects a manual
-    close + orphan protective scenario; the sweeper cancels the
-    orphan after position-zero verification; SAFE_MODE is entered
-    on the divergence.
+    Phase 20 (plan 20-23, D-27, D-28, G2-016): the drill runs the operator control
+    (`close_control` binds `emergency_manual_close`) and then the reconciler's compare and
+    cancel-only sweeper against the exchange as it reads afterwards. Both answers to G4-035 are
+    rehearsed by the caller's fake exchange, and neither is assumed:
+
+    * the exchange removed the closePosition legs with the position: nothing is left to
+      sweep; the control entered SAFE_MODE `MANUAL_CLOSE` and the outcome is
+      `OUTCOME_SAFE_MODE_ENTERED`;
+    * the legs stayed: they are orphans, the sweeper cancels them after two zero position reads
+      and verifies each cancel, and the outcome is `OUTCOME_ORPHAN_SWEPTED`.
+
+    The control never cancels the stop of a position that may still be open (D-09), so a
+    position that is still open leaves its stop in place and no orphan exists. SAFE_MODE is
+    never exited by the drill. `[NOT_TESTED]` against the real exchange (Phases 25/26).
 
     Args:
-        sweeper: An `OrphanSweeper` instance.
-        safe_mode_controller: A `SafeModeController` instance.
-        local_intent: Dict with `open_orders` / `open_algos` /
-            `open_positions` keys (duck-typed for sweeper).
-        truth: Dict with `normal_orders` / `algo_orders` / `positions`
-            keys.
-        position_verifier: Caller-supplied function returning the
-            current position amount for a symbol.
-        compare_fn: The 08-04 `compare` function. Defaults to the
-            canonical compare; inject a sentinel in tests to verify
-            the drill exercises the configured function.
+        close_control: Zero-argument async callable running `emergency_manual_close` for the
+            drill's plan over the caller's fake exchange and the same controller.
+        read_truth: Zero-argument async callable returning the exchange as it reads after the
+            control: a mapping with `normal_orders`, `algo_orders` and `positions`.
+        sweeper: An `OrphanSweeper` instance over the same fake exchange.
+        safe_mode_controller: The `SafeModeController` passed to the control.
+        local_intent: Dict with `open_orders` / `open_algos` / `open_positions` keys.
+        position_verifier: Caller-supplied function returning the current position amount.
+        compare_fn: The compare function. Defaults to the canonical compare; inject a sentinel
+            in tests to verify the drill exercises the configured function.
     """
     if compare_fn is None:
         from src.reconcile.compare import compare as default_compare
@@ -820,11 +855,15 @@ def make_manual_close_drill(
         resolved_compare = compare_fn
 
     def inject() -> str:
-        return "operator-initiated manual close + orphan protective"
+        return "operator-initiated manual close of a position (closePosition legs may stay)"
 
-    def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
-        # Build a diff against the post-manual-close truth (the local
-        # algo protective survives the manual close as an orphan).
+    async def run() -> str:
+        await close_control()
+        if not safe_mode_controller.in_safe_mode:
+            raise AssertionError("manual_close drill: expected SAFE_MODE after the control")
+        if safe_mode_controller.entered_reason != "MANUAL_CLOSE":
+            raise AssertionError("manual_close drill: expected SAFE_MODE reason MANUAL_CLOSE")
+        truth = await read_truth()
         diff = resolved_compare(
             local_open_orders=local_intent["open_orders"],
             local_open_algos=local_intent["open_algos"],
@@ -833,15 +872,22 @@ def make_manual_close_drill(
             truth_algo_orders=truth["algo_orders"],
             truth_positions=truth["positions"],
         )
-        if diff.agreement:
-            raise AssertionError("manual_close drill: expected divergence after manual close")
+        outcome = await sweeper.sweep(diff, position_verifier=position_verifier)
+        if len(outcome.skipped) > 0:
+            raise AssertionError(
+                f"manual_close drill: unexpected skipped cancels ({len(outcome.skipped)})"
+            )
         if len(diff.orphan_protectives) == 0:
-            raise AssertionError("manual_close drill: expected orphan_protectives list populated")
-        safe_mode_controller.enter_safe_mode(reason="MANUAL_CLOSE")
-        outcome = _run_coro(sweeper.sweep(diff, position_verifier=position_verifier))
+            if outcome.swept_count != 0:
+                raise AssertionError("manual_close drill: swept something with no orphan")
+            return OUTCOME_SAFE_MODE_ENTERED
         if outcome.swept_count == 0:
-            raise AssertionError("manual_close drill: expected sweeper to cancel the orphan")
+            raise AssertionError("manual_close drill: expected the sweeper to cancel the orphans")
         return OUTCOME_ORPHAN_SWEPTED
+
+    def assert_outcome(journal: DrillLog, context: dict[str, Any]) -> str:
+        result: str = _run_coro(run())
+        return result
 
     return DrillDeclaration(
         name=DRILL_MANUAL_CLOSE,
@@ -973,7 +1019,7 @@ __all__ = [
     "OUTCOME_ORPHAN_SWEPTED",
     "OUTCOME_REPLAY_TRANSITIONED",
     "OUTCOME_RESTORE_CLEAN_EXIT",
-    "OUTCOME_NO_PLACE_ORDER_INVARIANT",
+    "RETIRED_OUTCOMES",
     "ALL_OUTCOMES",
     "AssertOutcome",
     "DrillDeclaration",

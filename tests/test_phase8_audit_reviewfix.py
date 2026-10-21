@@ -1394,11 +1394,21 @@ def test_wr28_manual_close_uses_injected_compare() -> None:
         "algo_orders": [SimpleNamespace(client_algo_id=algo_id, symbol="BTCUSDT")],
         "positions": [],
     }
+    controller = _drill_controller()
+
+    async def close_control() -> None:
+        # Plan 20-23: the control (emergency_manual_close) enters SAFE_MODE itself.
+        controller.enter_safe_mode(reason="MANUAL_CLOSE")
+
+    async def read_truth() -> dict[str, Any]:
+        return truth
+
     declaration = make_manual_close_drill(
+        close_control=close_control,
+        read_truth=read_truth,
         sweeper=sweeper,
-        safe_mode_controller=_drill_controller(),
+        safe_mode_controller=controller,
         local_intent=local_intent,
-        truth=truth,
         position_verifier=lambda symbol: Decimal("0"),
         compare_fn=sentinel,
     )

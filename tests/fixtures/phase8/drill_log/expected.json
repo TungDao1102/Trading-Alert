@@ -11,23 +11,23 @@
     "restore"
   ],
   "outcomes": [
-    "safe_mode_entered",
+    "safe_mode_blocked_entries",
     "orphan_swept",
     "replay_one_transition",
     "safe_mode_entered",
-    "safe_mode_entered",
+    "safe_mode_blocked_entries",
     "safe_mode_entered",
     "orphan_swept",
     "restore_clean_exit"
   ],
   "faults": [
-    "local ENTRY + position but no SL protective (ENTRY_WITHOUT_PROTECTIVE)",
+    "exchange position of a tracked plan with no stop (POSITION_WITHOUT_STOP)",
     "local algo protective with no matching local position and no exchange position (ORPHAN_PROTECTIVE)",
     "5x replay of same APPROVE callback",
     "Binance API raised transient error on signed order path",
     "market feed freshness below configured threshold",
     "database write raised transient error",
-    "operator-initiated manual close + orphan protective",
+    "operator-initiated manual close of a position (closePosition legs may stay)",
     "stale three-source compare forcing SAFE_MODE enter"
   ],
   "occurred_at_utc": [
