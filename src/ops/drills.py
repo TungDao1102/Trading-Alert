@@ -859,6 +859,8 @@ def make_restore_drill(
     operator_id: str = DRILL_OPERATOR_ID,
     local_intent_fn: Callable[[], Any] | None = None,
     readiness: Callable[[], Any] | None = None,
+    gate_status: Callable[[], tuple[str | None, str]] | None = None,
+    stream_state: Callable[[], str] | None = None,
 ) -> DrillDeclaration:
     """Build the RESTORE drill (clean restore — the only SAFE_MODE exit).
 
@@ -881,6 +883,11 @@ def make_restore_drill(
             reads the drill's own (empty) local state successfully.
         readiness: Zero-argument callable returning the row-5 `ExitReadiness`. The default is the
             drill context's clean counts (nothing unresolved, no blocking plan, no pending action).
+        gate_status: Zero-argument callable returning the row-6 `(restriction, recovery status)`
+            of the REST gate (owner decision O-B, plan 20-25). The default is the drill context's
+            healthy fake: no restriction and `RESTORED_DURABLE`.
+        stream_state: Zero-argument callable returning the row-7 user-data stream state string.
+            The default is the drill context's healthy fake: `"LIVE"`.
     """
     from src.reconcile.local_intent import LocalIntent
     from src.reconcile.safe_mode import ExitReadiness
@@ -892,6 +899,12 @@ def make_restore_drill(
     )
     resolved_readiness: Callable[[], Any] = (
         readiness if readiness is not None else (lambda: ExitReadiness(0, 0, 0))
+    )
+    resolved_gate: Callable[[], tuple[str | None, str]] = (
+        gate_status if gate_status is not None else (lambda: (None, "RESTORED_DURABLE"))
+    )
+    resolved_stream: Callable[[], str] = (
+        stream_state if stream_state is not None else (lambda: "LIVE")
     )
 
     def inject() -> str:
@@ -913,6 +926,8 @@ def make_restore_drill(
                 operator_id=operator_id,
                 local_intent_fn=resolved_local,
                 readiness=resolved_readiness,
+                gate_status=resolved_gate,
+                stream_state=resolved_stream,
                 now_utc=now_utc,
             )
         )

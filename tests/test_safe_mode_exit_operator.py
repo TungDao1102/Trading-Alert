@@ -15,8 +15,9 @@ Pins, on fakes only (nothing here is [DEMO] evidence):
   - the state format accepts five keys, reads the three-key row of plan 20-06 as last_exit_* None
     and refuses every other key set.
 
-Rows 6 (REST gate) and 7 (StreamState.LIVE) are NOT built here: they wait for owner decision O-B
-(plan 20-25).
+Rows 6 (REST gate open and restored) and 7 (StreamState.LIVE) were accepted by owner decision O-B
+"accept-both" (plan 20-25, 2026-10-21); their failure tests are in the last section of this file.
+Every other test here uses healthy fakes for them.
 """
 
 from __future__ import annotations
@@ -185,6 +186,16 @@ def _readiness() -> ExitReadiness:
     return CLEAN
 
 
+def _gate_healthy() -> tuple[str | None, str]:
+    """Row 6 healthy fake: no restriction and a durably restored gate (owner decision O-B)."""
+    return (None, "RESTORED_DURABLE")
+
+
+def _stream_live() -> str:
+    """Row 7 healthy fake: the user-data stream is LIVE (owner decision O-B)."""
+    return "LIVE"
+
+
 async def _exit(
     rig: Rig,
     *,
@@ -197,6 +208,8 @@ async def _exit(
         operator_id=operator_id,
         local_intent_fn=local_intent_fn,
         readiness=readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
         now_utc=now_utc,
     )
 
@@ -328,7 +341,14 @@ def test_exit_safe_mode_has_only_the_keyword_only_operator_signature() -> None:
 
     sig = inspect.signature(SafeModeController.exit_safe_mode)
     names = [p.name for p in sig.parameters.values() if p.name != "self"]
-    assert names == ["operator_id", "local_intent_fn", "readiness", "now_utc"]
+    assert names == [
+        "operator_id",
+        "local_intent_fn",
+        "readiness",
+        "gate_status",
+        "stream_state",
+        "now_utc",
+    ]
     assert all(
         p.kind is inspect.Parameter.KEYWORD_ONLY
         for p in sig.parameters.values()
@@ -522,7 +542,12 @@ async def test_row3_an_unreadable_binance_side_skips_the_compare() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.refusals == ("BINANCE_READ_FAILED",)
@@ -549,7 +574,12 @@ async def test_row4_a_compare_that_raises_is_never_clean() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.refusals == ("COMPARE_NOT_CLEAN",)
@@ -563,7 +593,12 @@ async def test_row4_a_compare_result_without_agreement_is_never_clean() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.refusals == ("COMPARE_NOT_CLEAN",)
@@ -732,7 +767,12 @@ async def test_an_exit_without_a_store_still_journals_and_flips() -> None:
     controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
 
     decision = await controller.exit_safe_mode(
-        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
     )
 
     assert decision.exited is True
@@ -1013,17 +1053,6 @@ async def test_an_entry_during_the_exit_reads_refuses_the_exit() -> None:
 # --------------------------------------------------------------------------- #
 # Owner decision O-B (plan 20-25, T-E rows 6 and 7): REST gate restored and open, stream LIVE
 # --------------------------------------------------------------------------- #
-
-#: What a healthy composition injects: no restriction and a durably restored gate; a LIVE stream.
-GATE_HEALTHY: tuple[str | None, str] = (None, "RESTORED_DURABLE")
-
-
-def _gate_healthy() -> tuple[str | None, str]:
-    return GATE_HEALTHY
-
-
-def _stream_live() -> str:
-    return "LIVE"
 
 
 def _gate_of(status: tuple[str | None, str] | Any) -> Any:
