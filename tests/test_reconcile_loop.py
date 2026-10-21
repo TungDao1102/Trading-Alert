@@ -826,6 +826,20 @@ async def test_a_raising_unknown_entry_step_enters_safe_mode_and_the_tick_goes_o
     assert all("hunter2" not in e.payload_json for e in rig.journal.events)
 
 
+async def test_a_tick_never_calls_exit_safe_mode_even_when_everything_agrees() -> None:
+    """A clean compare is not an exit: only the operator leaves SAFE_MODE (D-15)."""
+    truth = matching_btc_truth()
+    rig = make_rig(plans=(protected_btc_plan(),), algo=truth["algo"], positions=truth["positions"])
+    rig.safe_mode.enter_safe_mode(reason="OPERATOR_TEST", now_utc=NOW)
+    rig.safe_mode.enter_calls.clear()
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.agreement is True
+    assert rig.safe_mode.in_safe_mode is True
+    assert rig.safe_mode.exit_calls == 0
+
+
 async def test_a_naive_now_is_refused() -> None:
     rig = make_rig()
     with pytest.raises(ValueError):

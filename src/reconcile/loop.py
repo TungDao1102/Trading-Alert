@@ -84,6 +84,13 @@ _ENTITY_ID = "reconcile_loop"
 _CORRELATION_ID = "reconcile_loop"
 _UNKNOWN_REASON = "UNKNOWN"
 
+#: How urgent the owner of a divergence is; SAFE_MODE reasons are entered in ascending order.
+_ACTION_URGENCY: dict[DivergenceAction, int] = {
+    DivergenceAction.ALERT_ONLY: 0,
+    DivergenceAction.SWEEP_ORPHAN: 1,
+    DivergenceAction.DELEGATE_TO_COORDINATOR: 2,
+}
+
 
 # --------------------------------------------------------------------------- #
 # Protocols: everything is injected, nothing is imported from an adapter or a store.
@@ -412,11 +419,14 @@ class ReconcileLoop:
         unknown_report: Any,
         failures: list[str],
     ) -> TickReport:
-        reasons: list[str] = []
+        # One entry per distinct reason, least urgent first: the controller keeps the LAST reason,
+        # so the persisted reason is the most urgent one (stop-related exposure), and every
+        # reason is still in the journal.
+        ranked: dict[str, int] = {}
         for divergence in diff.divergences:
-            reason = classify(divergence.kind).safe_mode_reason
-            if reason not in reasons:
-                reasons.append(reason)
+            policy = classify(divergence.kind)
+            ranked.setdefault(policy.safe_mode_reason, _ACTION_URGENCY[policy.action])
+        reasons = sorted(ranked, key=lambda reason: ranked[reason])
         for reason in reasons:
             self._enter_safe_mode(reason, now_utc, failures)
 
