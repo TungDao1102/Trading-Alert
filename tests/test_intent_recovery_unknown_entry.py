@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import ast
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,7 +31,8 @@ from src.execution.intent_recovery import (
 )
 from src.execution.intent_store import RESOLUTION_RECONCILED_ABSENT, IntentRecord
 
-from tests.support.execution_limits import TEST_ONLY_EXECUTION_LIMIT_VALUES, test_only_execution_limits
+from tests.support.execution_limits import TEST_ONLY_EXECUTION_LIMIT_VALUES
+from tests.support.execution_limits import test_only_execution_limits as make_limits
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 from tests.support.reconcile_doubles import RecordingJournal
@@ -51,12 +52,18 @@ PROBE_COUNT = TEST_ONLY_EXECUTION_LIMIT_VALUES["reconcile.entry_unknown_probe_co
 INTERVAL = timedelta(
     milliseconds=TEST_ONLY_EXECUTION_LIMIT_VALUES["reconcile.entry_unknown_probe_interval_ms"]
 )
-GRACE = timedelta(milliseconds=TEST_ONLY_EXECUTION_LIMIT_VALUES["protection.entry_unknown_grace_ms"])
+GRACE = timedelta(
+    milliseconds=TEST_ONLY_EXECUTION_LIMIT_VALUES["protection.entry_unknown_grace_ms"]
+)
 GOOD_TILL = NOW + timedelta(hours=1)
 AFTER_GRACE = GOOD_TILL + GRACE + INTERVAL
 
 # The only adapter methods the resolver may call: the two probes' ENTRY half and the two reads.
-ALLOWED_ADAPTER_CALLS = {"query_order_by_client", "snapshot_positions", "snapshot_open_normal_orders"}
+ALLOWED_ADAPTER_CALLS = {
+    "query_order_by_client",
+    "snapshot_positions",
+    "snapshot_open_normal_orders",
+}
 
 
 class SafeModeSpy:
@@ -99,7 +106,7 @@ def _make(
         adapter=adapter,
         journal=journal,
         safe_mode_controller=safe_mode,
-        limits=test_only_execution_limits(),
+        limits=make_limits(),
         entry_good_till=_good_till,
     )
     return resolver, store, adapter, journal, safe_mode
@@ -177,6 +184,6 @@ def test_the_resolver_refuses_unset_limits() -> None:
                 adapter=BinanceSemanticsFakeAdapter(now_utc=NOW),
                 journal=RecordingJournal(),
                 safe_mode_controller=SafeModeSpy(),
-                limits=test_only_execution_limits(**{field: None}),
+                limits=make_limits(**{field: None}),
                 entry_good_till=_good_till,
             )

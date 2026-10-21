@@ -41,8 +41,10 @@ USER_DATA_STREAM = "USER_DATA_STREAM"
 EXIT_EVIDENCE_PREFIX = "ev"
 STREAM_ANOMALY_PREFIX = "sa"
 
-# The state machines whose UNKNOWN exit must be backed by Binance evidence.
-EXIT_EVIDENCE_ENTITY_TYPES = frozenset({"ORDER", "POSITION"})
+# The state machines whose UNKNOWN exit must be backed by Binance evidence. EXECUTION_INTENT
+# (plan 20-10, D-11, D-12) is the execution_intents row of an ENTRY left UNKNOWN by an
+# ambiguous send.
+EXIT_EVIDENCE_ENTITY_TYPES = frozenset({"ORDER", "POSITION", "EXECUTION_INTENT"})
 UNKNOWN_STATUS = "UNKNOWN"
 
 DETAIL_MAX_CHARS = 200
@@ -148,13 +150,14 @@ def exit_evidence_event(
 
     Raises:
         TypeError: `evidence` is not an `ExitEvidence`.
-        ValueError: the entity type is not ORDER or POSITION, `from_status` is not UNKNOWN,
-            `to_status` equals it, a field is empty or too long, or `now_utc` is not UTC.
+        ValueError: the entity type is not ORDER, POSITION or EXECUTION_INTENT, `from_status`
+            is not UNKNOWN, `to_status` equals it, a field is empty or too long, or `now_utc`
+            is not UTC.
     """
     if not isinstance(evidence, ExitEvidence):
         raise TypeError(f"evidence must be ExitEvidence, got {type(evidence).__name__}")
     if entity_type not in EXIT_EVIDENCE_ENTITY_TYPES:
-        raise ValueError("entity_type must be ORDER or POSITION")
+        raise ValueError("entity_type must be ORDER, POSITION or EXECUTION_INTENT")
     _require_text(entity_id, "entity_id", _ID_MAX_CHARS)
     if _require_status(from_status, "from_status") != UNKNOWN_STATUS:
         raise ValueError("from_status must be UNKNOWN")
