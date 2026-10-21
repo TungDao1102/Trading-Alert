@@ -985,3 +985,26 @@ def test_safe_mode_module_imports_nothing_from_persistence_or_execution() -> Non
         elif isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
     assert [m for m in imported if m.startswith(("src.persistence", "src.execution"))] == []
+
+
+# --------------------------------------------------------------------------- #
+# A divergence found while the exit awaits Binance must not be lost
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_entry_during_the_exit_reads_refuses_the_exit() -> None:
+    """The reconcile loop shares the event loop: it may re-enter SAFE_MODE while the exit awaits
+    its Binance reads. Exiting on the older, clean-looking reads would erase that divergence."""
+    rig = _rig()
+
+    class EnteringAdapter(FakeAdapter):
+        async def snapshot_positions(self, *, symbol: str | None = None) -> Any:
+            rig.controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T1)  # same reason
+            return await super().snapshot_positions(symbol=symbol)
+
+    rig.controller._adapter = EnteringAdapter()  # type: ignore[attr-defined]
+
+    decision = await _exit(rig, now_utc=T2)
+
+    assert decision == ExitDecision(exited=False, refusals=("COMPARE_NOT_CLEAN",))
+    _assert_still_in_safe_mode(rig)

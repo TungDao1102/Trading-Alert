@@ -226,6 +226,10 @@ class SafeModeController:
         # True from the moment the in-memory state changed until the store accepted it, so a
         # failed save (or a failed journal write before it) is retried by the next enter call.
         self._persist_pending: bool = False
+        # Counts every enter_safe_mode call that passed validation. An exit awaits Binance reads
+        # on the same event loop as the reconcile loop; an entry that lands meanwhile means a
+        # divergence was found after the exit's reads began, so the exit is refused.
+        self._enter_calls: int = 0
 
     @classmethod
     def load(
@@ -401,6 +405,7 @@ class SafeModeController:
             raise ValueError("reason must be a non-empty string")
         effective_now = now_utc if now_utc is not None else datetime.now(UTC)
         _require_utc(effective_now)
+        self._enter_calls += 1
         if self._in_safe_mode:
             # Already in SAFE_MODE — update reason if it changed.
             if self._entered_reason != reason:
@@ -474,7 +479,9 @@ class SafeModeController:
           2. `local_intent_fn()` returned its three sequences. A raising or incomplete source
              BLOCKS the exit; an empty sequence counts only after a successful read.
           3. Positions, open orders and algo orders were read from Binance during THIS call.
-          4. Compare v2 on those fresh reads agrees.
+          4. Compare v2 on those fresh reads agrees, and no `enter_safe_mode` call landed while the
+             reads were awaited (the reconcile loop shares the event loop; such an entry is a
+             divergence the reads predate, and refuses as `COMPARE_NOT_CLEAN`).
           5. `readiness()` read every count and all are zero: no unresolved intent, no UNPROTECTED /
              CLOSE_REQUIRED / CLOSE_FAILED plan, no PENDING protective action.
 
@@ -511,6 +518,8 @@ class SafeModeController:
         if not isinstance(operator_id, str) or operator_id.strip() == "":
             refusals.append(ExitRefusal.OPERATOR_ID_MISSING.value)
 
+        enter_calls_before = self._enter_calls
+
         # Row 2: the local intent source, read successfully or the exit is blocked.
         local = _read_local_intent(local_intent_fn)
         if local is None:
@@ -521,8 +530,13 @@ class SafeModeController:
         if truth is None:
             refusals.append(ExitRefusal.BINANCE_READ_FAILED.value)
 
-        # Row 4: compare v2 on those two reads.
-        if local is not None and truth is not None and not self._compare_is_clean(local, truth):
+        # Row 4: compare v2 on those two reads. A SAFE_MODE entry that landed while the reads were
+        # awaited (the reconcile loop shares the event loop) is a divergence these reads predate.
+        entered_meanwhile = self._enter_calls != enter_calls_before
+        compare_dirty = (
+            local is not None and truth is not None and not self._compare_is_clean(local, truth)
+        )
+        if entered_meanwhile or compare_dirty:
             refusals.append(ExitRefusal.COMPARE_NOT_CLEAN.value)
 
         # Row 5: the readiness counts.
