@@ -27,7 +27,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,6 +39,7 @@ from src.reconcile.safe_mode import (
     ExitDecision,
     ExitReadiness,
     SafeModeController,
+    build_exit_readiness,
 )
 
 T0 = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
@@ -815,3 +818,170 @@ def test_the_restore_drill_fails_when_the_local_source_is_unreadable() -> None:
         run_drill(drill, journal=DrillLog(), now_utc=T0)
 
     assert rig.controller.in_safe_mode is True
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - build_exit_readiness (row 5) and the no-exit guarantees outside the controller
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _Plan:
+    state: Any
+
+
+class _State(StrEnum):
+    UNPROTECTED = "UNPROTECTED"
+    CLOSE_REQUIRED = "CLOSE_REQUIRED"
+    CLOSE_FAILED = "CLOSE_FAILED"
+    PROTECTED = "PROTECTED"
+    FLAT = "FLAT"
+    AWAITING_FILL = "AWAITING_FILL"
+
+
+def _readiness_of(
+    *,
+    intents: Any = lambda: [],  # noqa: B006 - lambdas are fresh per call
+    plans: Any = lambda: [],
+    pending: Any = lambda: [],
+) -> ExitReadiness:
+    return build_exit_readiness(
+        unresolved_intents_fn=intents, protections_fn=plans, open_pending_fn=pending
+    )
+
+
+def test_a_clean_composition_reads_all_zero() -> None:
+    plans = [_Plan(_State.PROTECTED), _Plan("FLAT"), _Plan(_State.AWAITING_FILL)]
+
+    assert _readiness_of(plans=lambda: plans) == ExitReadiness(0, 0, 0)
+
+
+@pytest.mark.parametrize("status", ["INTENDED", "SENT", "UNKNOWN"])
+def test_an_unresolved_intent_of_any_status_counts(status: str) -> None:
+    rows = [SimpleNamespace(intent_status=status), SimpleNamespace(intent_status=status)]
+
+    assert _readiness_of(intents=lambda: rows).unknown_intents == 2
+
+
+@pytest.mark.parametrize(
+    ("state", "blocks"),
+    [
+        (_State.UNPROTECTED, True),
+        ("UNPROTECTED", True),
+        (_State.CLOSE_REQUIRED, True),
+        ("CLOSE_REQUIRED", True),
+        (_State.CLOSE_FAILED, True),
+        ("CLOSE_FAILED", True),
+        (_State.PROTECTED, False),
+        (_State.FLAT, False),
+        (_State.AWAITING_FILL, False),
+        ("ENTRY_UNRESOLVED", False),
+    ],
+)
+def test_only_unprotected_close_required_and_close_failed_block(state: Any, blocks: bool) -> None:
+    result = _readiness_of(plans=lambda: [_Plan(state)])
+
+    assert result.blocking_plans == (1 if blocks else 0)
+
+
+def test_open_pending_actions_are_counted() -> None:
+    assert _readiness_of(pending=lambda: [object(), object(), object()]).open_pending_actions == 3
+
+
+def test_each_provider_is_independent() -> None:
+    result = _readiness_of(
+        intents=lambda: [object()],
+        plans=lambda: [_Plan("UNPROTECTED"), _Plan("CLOSE_FAILED")],
+        pending=lambda: [object(), object(), object()],
+    )
+
+    assert result == ExitReadiness(unknown_intents=1, blocking_plans=2, open_pending_actions=3)
+
+
+@pytest.mark.parametrize("field", ["intents", "plans", "pending"])
+@pytest.mark.parametrize("failure", ["raises", "none", "not-iterable"])
+def test_a_provider_that_cannot_read_gives_none_in_its_field_only(field: str, failure: str) -> None:
+    def bad() -> Any:
+        if failure == "raises":
+            raise RuntimeError("db down")
+        return None if failure == "none" else 5
+
+    result = _readiness_of(**{field: bad})
+
+    expected = {
+        "intents": "unknown_intents",
+        "plans": "blocking_plans",
+        "pending": "open_pending_actions",
+    }
+    for name in ("unknown_intents", "blocking_plans", "open_pending_actions"):
+        assert getattr(result, name) == (None if name == expected[field] else 0)
+
+
+def test_a_plan_view_without_a_state_makes_the_plans_field_unreadable() -> None:
+    assert _readiness_of(plans=lambda: [object()]).blocking_plans is None
+
+
+async def test_an_unreadable_provider_refuses_the_exit_as_readiness_unreadable() -> None:
+    rig = _rig()
+
+    def down() -> Any:
+        raise RuntimeError("db down")
+
+    decision = await _exit(rig, readiness=lambda: _readiness_of(pending=down))
+
+    assert decision.refusals == ("READINESS_UNREADABLE",)
+    assert rig.controller.in_safe_mode is True
+
+
+async def test_the_composed_readiness_gates_the_exit() -> None:
+    rig = _rig()
+
+    refused = await _exit(
+        rig, readiness=lambda: _readiness_of(plans=lambda: [_Plan("UNPROTECTED")])
+    )
+    assert refused.refusals == ("BLOCKING_PROTECTION_STATE",)
+
+    allowed = await _exit(rig, readiness=lambda: _readiness_of(plans=lambda: [_Plan("PROTECTED")]))
+    assert allowed.exited is True
+
+
+def _calls_of_exit_safe_mode(path: Path) -> list[int]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == "exit_safe_mode":
+                lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["src/reconcile/loop.py", "src/execution/intent_recovery.py", "src/ops/alerts.py"],
+)
+def test_tick_recovery_and_alerts_never_call_exit_safe_mode(relative: str) -> None:
+    """D-15: a tick, an intent closure and an alert never exit SAFE_MODE."""
+    assert _calls_of_exit_safe_mode(REPO_ROOT / relative) == []
+
+
+def test_only_the_operator_path_calls_exit() -> None:
+    """Across all of src, the only caller of exit_safe_mode is the restore drill."""
+    callers = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        if _calls_of_exit_safe_mode(path)
+    }
+    assert callers == {"src/ops/drills.py"}
+
+
+def test_safe_mode_module_imports_nothing_from_persistence_or_execution() -> None:
+    tree = ast.parse(SAFE_MODE_SOURCE.read_text(encoding="utf-8"))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported.append(node.module)
+        elif isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+    assert [m for m in imported if m.startswith(("src.persistence", "src.execution"))] == []

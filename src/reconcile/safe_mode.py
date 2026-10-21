@@ -23,7 +23,7 @@ No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -716,6 +716,56 @@ def _readiness_refusals(readiness: Callable[[], ExitReadiness]) -> list[str]:
     return refusals
 
 
+#: Plan states that keep SAFE_MODE on (row 5): exposure that is not (or cannot be) protected.
+#: Compared by string value so this module imports nothing from `src.execution`.
+_BLOCKING_PLAN_STATES: frozenset[str] = frozenset({"UNPROTECTED", "CLOSE_REQUIRED", "CLOSE_FAILED"})
+
+
+def build_exit_readiness(
+    *,
+    unresolved_intents_fn: Callable[[], Iterable[Any]],
+    protections_fn: Callable[[], Iterable[Any]],
+    open_pending_fn: Callable[[], Iterable[Any]],
+) -> ExitReadiness:
+    """Compose the row-5 counts from three plain providers (D-15, T-E).
+
+    The composition passes `ExecutionIntentStore.list_unresolved_intents`,
+    `ProtectionCoordinator.protections` and `PendingActionStore.list_open`. A provider that raises,
+    returns None or returns something that is not an iterable makes ITS field None ("could not be
+    read"), which `exit_safe_mode` refuses as `READINESS_UNREADABLE`; it is never read as zero.
+
+    - `unknown_intents`: every unresolved intent counts, whatever its status (INTENDED, SENT or
+      UNKNOWN), because any of them may still hold an order or an exposure.
+    - `blocking_plans`: plans whose `state` is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED.
+    - `open_pending_actions`: every open pending protective action.
+    """
+    return ExitReadiness(
+        unknown_intents=_count_rows(unresolved_intents_fn, lambda _row: True),
+        blocking_plans=_count_rows(protections_fn, _plan_blocks),
+        open_pending_actions=_count_rows(open_pending_fn, lambda _row: True),
+    )
+
+
+def _plan_blocks(plan: Any) -> bool:
+    """True when the plan's state keeps SAFE_MODE on; raises when the view has no state."""
+    state = plan.state
+    name = getattr(state, "value", state)
+    if not isinstance(name, str) or name == "":
+        raise ValueError("a plan state must be a non-empty string")
+    return name in _BLOCKING_PLAN_STATES
+
+
+def _count_rows(provider: Callable[[], Iterable[Any]], counts: Callable[[Any], bool]) -> int | None:
+    """How many rows of `provider()` satisfy `counts`, or None when the read failed."""
+    try:
+        rows = provider()
+        if rows is None or isinstance(rows, str | bytes):
+            return None
+        return sum(1 for row in rows if counts(row))
+    except Exception:
+        return None
+
+
 _CORE_STATE_KEYS = frozenset({"in_safe_mode", "entered_at_utc", "entered_reason"})
 _EXIT_STATE_KEYS = frozenset({"last_exit_operator_id", "last_exit_at_utc"})
 #: The five-key format written since plan 20-15 (D-15).
@@ -804,6 +854,7 @@ def _build_payload_json(payload: dict[str, Any]) -> str:
 __all__ = [
     "SAFE_MODE_STATE_UNREADABLE",
     "AdapterLike",
+    "build_exit_readiness",
     "ExitDecision",
     "ExitReadiness",
     "ExitRefusal",
