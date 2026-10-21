@@ -27,6 +27,8 @@ import pytest
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
+from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH as RIG_PLAN_HASH
+from tests.support.protection_doubles import ProtectionRig, make_rig
 from tests.support.reconcile_doubles import RaisingJournal, RecordingJournal
 
 NOW_UTC = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
@@ -510,3 +512,176 @@ def test_no_manual_control_moves_a_trade_plan_to_expired() -> None:
             params = set(inspect.signature(getattr(manager, node.name)).parameters)
             assert not any("plan_store" in p or "status" in p for p in params), node.name
     assert seen == controls
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-17, Task 1 (D-26, D-06, D-09, D034): operator_close_position flattens through the
+# coordinator's own close flow. Evidence label: executed tests with the Binance-semantics fake and
+# the real MarketEmergencyCloser; reduce-only MARKET behavior on Binance is [NOT_TESTED].
+# --------------------------------------------------------------------------- #
+
+RIG_SL_ID = derive_algo_client_id(plan_hash=RIG_PLAN_HASH, role="STOP_LOSS")
+RIG_TP1_ID = derive_algo_client_id(plan_hash=RIG_PLAN_HASH, role="TAKE_PROFIT_1")
+RIG_TP2_ID = derive_algo_client_id(plan_hash=RIG_PLAN_HASH, role="TAKE_PROFIT_2")
+
+
+def _state(rig: ProtectionRig) -> str:
+    view = rig.coordinator.protection_of(RIG_PLAN_HASH)
+    assert view is not None
+    return view.state.value
+
+
+def _last_reason(rig: ProtectionRig) -> str | None:
+    view = rig.coordinator.protection_of(RIG_PLAN_HASH)
+    assert view is not None
+    return view.last_reason
+
+
+def _rig_events(rig: ProtectionRig, event_type: str) -> list[dict[str, Any]]:
+    return [json.loads(e.payload_json) for e in rig.journal.calls if e.event_type == event_type]
+
+
+async def _protected_rig(**overrides: Any) -> ProtectionRig:
+    """A +0.004 LONG position, the stop confirmed ACTIVE, the entry remainder cancelled."""
+    rig = await make_rig(real_closer=True, **overrides)
+    rig.coordinator.fill_sink(rig.stream_fill(QUANTITY))
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    assert _state(rig) == "PROTECTED"
+    return rig
+
+
+async def test_operator_close_flattens_through_the_coordinator() -> None:
+    rig = await _protected_rig()
+    assert rig.fake.calls_to("cancel_algo_order") == []
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    assert _last_reason(rig) == "OPERATOR_CLOSE"
+    closes = rig.fake.calls_to("place_market_close")
+    assert len(closes) == 1
+    assert (closes[0]["kwargs"]["side"], closes[0]["kwargs"]["quantity"]) == ("SELL", QUANTITY)
+    # The stop is kept until the plan is FLAT (D-09): nothing protective is cancelled yet.
+    assert rig.fake.calls_to("cancel_algo_order") == []
+    assert RIG_SL_ID in rig.fake.open_algos
+    assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [("CLOSE_REQUIRED", "OPERATOR_CLOSE")]
+
+    await rig.coordinator.step()  # two zero reads, the entry is terminal: FLAT, then the sweep
+
+    assert _state(rig) == "FLAT"
+    swept = [c["kwargs"]["client_algo_id"] for c in rig.fake.calls_to("cancel_algo_order")]
+    assert swept == [RIG_SL_ID, RIG_TP1_ID, RIG_TP2_ID]
+    assert len(rig.fake.calls_to("place_market_close")) == 1, "no second close"
+    requested = _rig_events(rig, "OPERATOR_CLOSE_REQUESTED")
+    assert len(requested) == 1
+    assert requested[0]["operator_id"] == "op-1"
+    assert requested[0]["state_before"] == "PROTECTED"
+
+
+async def test_operator_close_of_a_resting_entry_cancels_it_and_ends_flat() -> None:
+    rig = await make_rig(real_closer=True)
+    assert _state(rig) == "AWAITING_FILL"
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    assert rig.fake.calls_to("place_market_close") == [], "no position, so no close order"
+    for _ in range(3):
+        await rig.coordinator.step()
+    assert _state(rig) == "FLAT"
+    assert rig.entry.entry_client_order_id not in rig.fake.open_orders
+
+
+async def test_operator_close_refuses_without_an_operator_id_and_sends_nothing() -> None:
+    rig = await _protected_rig()
+    calls_before = len(rig.fake.calls)
+    rows_before = len(rig.journal.calls)
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="")
+
+    assert (result.accepted, result.code) == (False, "OPERATOR_ID_MISSING")
+    assert _state(rig) == "PROTECTED"
+    assert len(rig.fake.calls) == calls_before
+    assert len(rig.journal.calls) == rows_before
+
+
+async def test_operator_close_refuses_an_unknown_plan() -> None:
+    rig = await _protected_rig()
+
+    result = await rig.coordinator.operator_close(plan_hash="f" * 64, operator_id="op-1")
+
+    assert (result.accepted, result.code) == (False, "UNKNOWN_PLAN")
+    assert rig.fake.calls_to("place_market_close") == []
+
+
+async def test_operator_close_has_nothing_to_close_for_a_flat_or_unfilled_ended_plan() -> None:
+    flat = await _protected_rig()
+    await flat.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    await flat.coordinator.step()
+    assert _state(flat) == "FLAT"
+    closes = len(flat.fake.calls_to("place_market_close"))
+    again = await flat.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    assert (again.accepted, again.code) == (False, "NOTHING_TO_CLOSE")
+    assert len(flat.fake.calls_to("place_market_close")) == closes
+
+    ended = await make_rig(real_closer=True)
+    ended.fake.cancel(ended.entry.entry_client_order_id)
+    await ended.coordinator.step()
+    assert _state(ended) == "ENTRY_ENDED_NO_FILL"
+    result = await ended.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    assert (result.accepted, result.code) == (False, "NOTHING_TO_CLOSE")
+
+
+async def test_operator_close_while_a_close_is_already_required_starts_nothing_new() -> None:
+    rig = await _protected_rig()
+    first = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+    assert first.accepted is True
+    alerts = len(rig.alerts.alerts)
+
+    second = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-2")
+
+    assert (second.accepted, second.code) == (False, "CLOSE_ALREADY_REQUIRED")
+    assert len(rig.alerts.alerts) == alerts
+    assert len(_rig_events(rig, "OPERATOR_CLOSE_REQUESTED")) == 1
+
+
+async def test_operator_close_never_sends_a_guessed_quantity_when_the_position_is_unreadable() -> (
+    None
+):
+    rig = await _protected_rig()
+    for _ in range(50):
+        rig.fake.fail_next("snapshot_positions", RuntimeError("scripted read failure"))
+
+    result = await rig.coordinator.operator_close(plan_hash=RIG_PLAN_HASH, operator_id="op-1")
+
+    assert result.accepted is True, "the request is accepted; the close itself fails closed"
+    assert rig.fake.calls_to("place_market_close") == []
+    assert _state(rig) == "CLOSE_FAILED"
+    assert RIG_SL_ID in rig.fake.open_algos
+
+
+async def test_manager_operator_close_position_is_a_thin_wrapper() -> None:
+    from src.execution.manager import operator_close_position
+
+    rig = await _protected_rig()
+
+    result = await operator_close_position(
+        coordinator=rig.coordinator, plan_hash=RIG_PLAN_HASH, operator_id="op-1"
+    )
+
+    assert (result.accepted, result.code) == (True, "CLOSE_REQUESTED")
+    assert _state(rig) == "CLOSE_REQUIRED"
+    tree = ast.parse(MANAGER.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "operator_close_position":
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            attrs = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+            assert "adapter" not in names | attrs
+            assert attrs == {"operator_close"}
+            break
+    else:
+        raise AssertionError("operator_close_position not found")

@@ -62,6 +62,22 @@ def test_the_table_allows_close_required_only_to_close_failed_or_flat() -> None:
     }
 
 
+def test_an_operator_close_may_enter_close_required_from_every_state_with_a_position() -> None:
+    """Plan 20-17 (D-26): the OPERATOR_CLOSE edges. A finished plan has none."""
+    for state in (
+        "AWAITING_FILL",
+        "ENTRY_UNRESOLVED",
+        "UNPROTECTED",
+        "PROTECTED_ENTRY_OPEN",
+        "PROTECTED",
+        "COMPLETE",
+        "TP_UNAVAILABLE",
+    ):
+        assert is_legal(TransitionKind.PROTECTION, state, "CLOSE_REQUIRED") is True, state
+    for state in ("FLAT", "ENTRY_ENDED_NO_FILL"):
+        assert is_legal(TransitionKind.PROTECTION, state, "CLOSE_REQUIRED") is False, state
+
+
 async def test_close_required_never_downgrades_to_protected() -> None:
     rig = await make_rig(real_closer=True)
     rig.fake.reject_next_algo(-2021)
