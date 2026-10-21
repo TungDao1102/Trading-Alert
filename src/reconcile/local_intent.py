@@ -39,6 +39,14 @@ The position intent carries what compare v2 needs (plan 20-04): `plan_hash`, `ex
 view does not carry stays None, which compare reads as AMBIGUOUS_POSITION_OWNER, never as
 agreement. A state name this table does not know raises ValueError: the caller fails closed.
 
+The active plans (plan 20-20, owner decision O-D): `LocalIntent.active_plans` lists, once per
+plan hash, every tracked plan whose state is not FLAT or ENTRY_ENDED_NO_FILL, plus every plan that
+is not tracked at all but is named by an unresolved ENTRY intent (SENT or UNKNOWN: the order may
+exist). A tracked plan's own state decides, so an unresolved ENTRY row of a FLAT plan does not
+reactivate it. Compare reads the list as evidence of ownership only: more than one plan for one
+symbol is a divergence, and no plan is ever picked. A plan known only to the journal and not yet
+rebuilt into `protections()` is not seen (the loop skips the tick until the restore is complete).
+
 Pure module: stdlib, `src.domain.enums`, the id derivations and the compare carriers. No clock,
 no I/O, no adapter, no store.
 """
@@ -53,7 +61,12 @@ from typing import Any, Protocol
 
 from src.domain.enums import OrderRole, OrderStatus
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
-from src.reconcile.compare import LocalAlgoIntent, LocalOrderIntent, LocalPositionIntent
+from src.reconcile.compare import (
+    LocalActivePlan,
+    LocalAlgoIntent,
+    LocalOrderIntent,
+    LocalPositionIntent,
+)
 
 # The plan states that hold nothing on the exchange and no exposure.
 STATE_FLAT: str = "FLAT"
@@ -169,6 +182,7 @@ class LocalIntent:
     orders: tuple[LocalOrderIntent, ...]
     algos: tuple[LocalAlgoIntent, ...]
     positions: tuple[LocalPositionIntent, ...]
+    active_plans: tuple[LocalActivePlan, ...] = ()
 
     def compare_kwargs(self) -> dict[str, tuple[Any, ...]]:
         """The local keywords of `compare(...)`; the loop passes them with `**`, so a later plan
@@ -177,6 +191,7 @@ class LocalIntent:
             "local_open_orders": self.orders,
             "local_open_algos": self.algos,
             "local_open_positions": self.positions,
+            "local_active_plans": self.active_plans,
         }
 
 
@@ -205,8 +220,11 @@ def derive_local_intent(
     orders: dict[str, LocalOrderIntent] = {}
     algos: dict[str, LocalAlgoIntent] = {}
     positions: list[LocalPositionIntent] = []
+    active: dict[str, LocalActivePlan] = {}
+    tracked_hashes: set[str] = set()
 
     for plan in protections:
+        tracked_hashes.add(plan.plan_hash)
         state = _name(plan.state)
         rule = STATE_RULES.get(state)
         if rule is None:
@@ -226,6 +244,9 @@ def derive_local_intent(
                 ),
             )
         if state not in INACTIVE_STATE_NAMES:
+            active.setdefault(
+                plan.plan_hash, LocalActivePlan(plan_hash=plan.plan_hash, symbol=plan.symbol)
+            )
             if plan.stop_confirmed_at_utc is not None and plan.stop_lost_at_utc is None:
                 _add_algo(algos, plan, OrderRole.STOP_LOSS.value)
             if rule.take_profits:
@@ -239,6 +260,10 @@ def derive_local_intent(
             continue
         role = _name(row.role)
         if role in _NORMAL_ROLES:
+            if row.plan_hash not in tracked_hashes:
+                active.setdefault(
+                    row.plan_hash, LocalActivePlan(plan_hash=row.plan_hash, symbol=row.symbol)
+                )
             order_id = row.client_order_id or derive_client_order_id(
                 plan_hash=row.plan_hash, role=role
             )
@@ -273,6 +298,7 @@ def derive_local_intent(
         orders=tuple(sorted(orders.values(), key=lambda o: (o.symbol, o.client_order_id))),
         algos=tuple(sorted(algos.values(), key=lambda a: (a.symbol, a.client_algo_id))),
         positions=tuple(sorted(positions, key=lambda p: (p.symbol, p.plan_hash or ""))),
+        active_plans=tuple(sorted(active.values(), key=lambda a: (a.symbol, a.plan_hash))),
     )
 
 

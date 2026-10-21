@@ -154,7 +154,10 @@ def _empty_compare(**overrides: Any) -> Any:
 async def test_two_active_plans_on_one_symbol_enter_safe_mode() -> None:
     rig = _make_rig(
         plans=(_awaiting(H1), _awaiting(H2)),
-        normal=(make_open_order(_entry_id(H1), "BTCUSDT"), make_open_order(_entry_id(H2), "BTCUSDT")),
+        normal=(
+            make_open_order(_entry_id(H1), "BTCUSDT"),
+            make_open_order(_entry_id(H2), "BTCUSDT"),
+        ),
     )
 
     report = await rig.loop.tick(now_utc=NOW)
@@ -173,7 +176,10 @@ async def test_two_active_plans_on_one_symbol_enter_safe_mode() -> None:
 async def test_two_active_plans_on_one_symbol_never_delegate_or_close() -> None:
     rig = _make_rig(
         plans=(_awaiting(H1), _awaiting(H2)),
-        normal=(make_open_order(_entry_id(H1), "BTCUSDT"), make_open_order(_entry_id(H2), "BTCUSDT")),
+        normal=(
+            make_open_order(_entry_id(H1), "BTCUSDT"),
+            make_open_order(_entry_id(H2), "BTCUSDT"),
+        ),
     )
 
     report = await rig.loop.tick(now_utc=NOW)

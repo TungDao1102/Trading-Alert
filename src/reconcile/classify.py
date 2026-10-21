@@ -3,7 +3,8 @@
 A pure table, one `DivergencePolicy` per kind of `src.reconcile.compare`:
 
   * every kind enters SAFE_MODE (any divergence blocks new entries; the reason is the kind name,
-    except STREAM_TASK_DIED which is the supervisor halt USER_DATA_STREAM_HALTED);
+    except STREAM_TASK_DIED which is the supervisor halt USER_DATA_STREAM_HALTED and
+    AMBIGUOUS_POSITION_OWNER which is SYMBOL_OWNERSHIP_CONFLICT);
   * exactly one owner acts: `SWEEP_ORPHAN` (the cancel-only sweeper, ORPHAN_PROTECTIVE only),
     `DELEGATE_TO_COORDINATOR` (stop-related exposure goes to the protection coordinator, which
     decides by the position as in D077) or `ALERT_ONLY` (the operator is told, nothing is touched);
@@ -14,8 +15,14 @@ it did not prove it owns (D-02), and closing a position it did not open is the h
 action. No kind is mapped to a cancel of a foreign order, and `SWEEP_ORPHAN` belongs to
 ORPHAN_PROTECTIVE alone (tests pin both).
 
+The ownership conflict (plan 20-20, owner decision O-D, not D-13) is alert-only on purpose: more
+than one active plan for one symbol, or exposure whose owner cannot be named, blocks entries and
+tells the operator, never picks an owner and never closes anything (the D077 protection-state rules
+of each plan run on their own).
+
 The SAFE_MODE reasons named after the new kinds need their GLOSSARY 9.4 rows; plan 20-24 writes
-them. The module is pure: stdlib and the kind constants of the compare only.
+them (SYMBOL_OWNERSHIP_CONFLICT already has its row, written by plan 20-20).
+The module is pure: stdlib and the kind constants of the compare only.
 """
 
 from __future__ import annotations
@@ -57,6 +64,9 @@ ALERT_AUTH_FAILURE: str = "AUTH_FAILURE"
 
 #: The SAFE_MODE reason of the supervisor halt (Phase 18 TASK_DIED, D-04).
 SAFE_MODE_USER_DATA_STREAM_HALTED: str = "USER_DATA_STREAM_HALTED"
+
+#: The SAFE_MODE reason of an ambiguous symbol owner (plan 20-20, owner decision O-D).
+SAFE_MODE_SYMBOL_OWNERSHIP_CONFLICT: str = "SYMBOL_OWNERSHIP_CONFLICT"
 
 
 class DivergenceAction(str, Enum):
@@ -143,6 +153,7 @@ POLICY_BY_KIND: Mapping[str, DivergencePolicy] = MappingProxyType(
                 DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER,
                 ALERT_DIVERGENCE,
                 DivergenceAction.ALERT_ONLY,
+                safe_mode_reason=SAFE_MODE_SYMBOL_OWNERSHIP_CONFLICT,
             ),
             _policy(
                 DIVERGENCE_KIND_UNSUPPORTED_POSITION_SIDE,
@@ -183,6 +194,7 @@ __all__ = [
     "ALERT_UNKNOWN_ORDER",
     "ALERT_UNPROTECTED_POSITION",
     "POLICY_BY_KIND",
+    "SAFE_MODE_SYMBOL_OWNERSHIP_CONFLICT",
     "SAFE_MODE_USER_DATA_STREAM_HALTED",
     "DivergenceAction",
     "DivergencePolicy",

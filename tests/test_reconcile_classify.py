@@ -91,8 +91,13 @@ def test_each_kind_has_the_planned_action_alert_and_safe_mode_reason(kind: str) 
     policy = classify(kind)
     action, alert = EXPECTED_POLICY[kind]
     assert (policy.action, policy.alert_event) == (action, alert)
-    expected_reason = "USER_DATA_STREAM_HALTED" if kind == "STREAM_TASK_DIED" else kind
-    assert policy.safe_mode_reason == expected_reason
+    # The two kinds with a reason of their own: the supervisor halt (plan 20-16) and the
+    # ownership conflict (plan 20-20, owner decision O-D).
+    own_reason = {
+        "STREAM_TASK_DIED": "USER_DATA_STREAM_HALTED",
+        "AMBIGUOUS_POSITION_OWNER": "SYMBOL_OWNERSHIP_CONFLICT",
+    }
+    assert policy.safe_mode_reason == own_reason.get(kind, kind)
     assert policy.safe_mode_reason != ""
 
 
@@ -372,9 +377,15 @@ def test_the_result_does_not_depend_on_the_input_order() -> None:
     assert forward == backward
 
 
-def test_compare_kwargs_names_exactly_the_three_local_inputs_of_compare() -> None:
+def test_compare_kwargs_names_exactly_the_local_inputs_of_compare() -> None:
     kwargs = derive_local_intent([], []).compare_kwargs()
-    assert set(kwargs) == {"local_open_orders", "local_open_algos", "local_open_positions"}
+    # Plan 20-20 added local_active_plans (symbol ownership, owner decision O-D).
+    assert set(kwargs) == {
+        "local_open_orders",
+        "local_open_algos",
+        "local_open_positions",
+        "local_active_plans",
+    }
     assert all(isinstance(value, tuple) for value in kwargs.values())
 
 

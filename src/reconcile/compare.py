@@ -41,6 +41,11 @@ Phase 20 (plan 20-04) adds, without changing the five above:
   - STREAM_SINK_FAILURE / STREAM_TASK_DIED: vocabulary for plan 20-16; this
     module emits neither.
 
+Phase 20 (plan 20-20, owner decision O-D, not D-13) adds one optional local input,
+`local_active_plans`: more than one distinct active plan for one symbol is also
+AMBIGUOUS_POSITION_OWNER, with or without exchange exposure. The compare never picks one
+of the plans.
+
 The module is dependency-free: stdlib, `src/domain` and the pure id
 predicates of `src/execution/order_ids.py`. No Binance SDK, no SQLAlchemy,
 no Pydantic, no Polars.
@@ -163,6 +168,18 @@ class LocalPositionIntent:
 
 
 @dataclass(frozen=True)
+class LocalActivePlan:
+    """One plan that is active locally: it may still place, hold or close exposure on `symbol`.
+
+    Phase 20 (plan 20-20, owner decision O-D). Evidence of ownership only; Binance stays the
+    authority for positions and orders.
+    """
+
+    plan_hash: str
+    symbol: str
+
+
+@dataclass(frozen=True)
 class OrphanProtective:
     """One orphan protective ready for the sweeper.
 
@@ -252,6 +269,7 @@ def compare(
     truth_normal_orders: Sequence[Any],
     truth_algo_orders: Sequence[Any],
     truth_positions: Sequence[Any],
+    local_active_plans: Sequence[Any] = (),
 ) -> CompareDiff:
     """Three-source set-difference compare.
 
@@ -264,6 +282,12 @@ def compare(
         truth_normal_orders: Sequence of `OpenOrderSnapshot`.
         truth_algo_orders: Sequence of `OpenAlgoOrderSnapshot`.
         truth_positions: Sequence of `PositionSnapshot`.
+        local_active_plans: Optional sequence of `LocalActivePlan` (or duck-typed items
+            with `plan_hash` and `symbol`): the plans that are active locally. A symbol
+            with more than one distinct `plan_hash` yields one AMBIGUOUS_POSITION_OWNER
+            (merged with the exposure-based emission, so a symbol never yields two); an
+            item whose plan hash or symbol is missing cannot be attributed and also yields
+            one. Default empty: existing callers are unchanged.
 
     Returns:
         A `CompareDiff` carrying `agreement`, the full `divergences`
@@ -271,7 +295,7 @@ def compare(
         authorised to act on.
 
     Raises:
-        TypeError: any of the six sources is None (a missing source is never
+        TypeError: any of the seven sources is None (a missing source is never
             read as empty), or an exchange `position_amt` is not a `Decimal`.
         ValueError: an exchange `position_amt` is not finite.
 
@@ -294,7 +318,10 @@ def compare(
         one-plan-per-symbol pre-placement rule holds. Two plans on one symbol,
         or exposure whose owner cannot be determined (missing plan_hash,
         expected_side or a positive Decimal max_abs_amount), is
-        AMBIGUOUS_POSITION_OWNER; the compare never picks one plan.
+        AMBIGUOUS_POSITION_OWNER; the compare never picks one plan. The same kind
+        is emitted, without any exposure, when `local_active_plans` shows more than one
+        distinct plan for one symbol (plan 20-20, owner decision O-D): the premise of the
+        per-symbol bound check is broken even before a fill.
 
         The compare holds no clock and cannot judge the age of its inputs.
         Stale or unreadable local data must be refused by the caller before
@@ -307,6 +334,7 @@ def compare(
         truth_normal_orders=truth_normal_orders,
         truth_algo_orders=truth_algo_orders,
         truth_positions=truth_positions,
+        local_active_plans=local_active_plans,
     )
     for _row in truth_positions:
         _require_decimal_amount(_row)
@@ -635,6 +663,27 @@ def compare(
                 )
             )
 
+    # Pass 3b — symbol ownership (plan 20-20, owner decision O-D): more than one active plan
+    # for one symbol, or an active plan that cannot be named, is AMBIGUOUS_POSITION_OWNER. A
+    # symbol that Pass 3 already reported is not reported twice. Nothing here picks a plan.
+    already_ambiguous = {
+        d.symbol for d in divergences if d.kind == DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER
+    }
+    for conflict_symbol, conflict_reason in _ownership_conflicts(local_active_plans):
+        if conflict_symbol in already_ambiguous:
+            continue
+        already_ambiguous.add(conflict_symbol)
+        divergences.append(
+            Divergence(
+                kind=DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER,
+                symbol=conflict_symbol,
+                order_role="POSITION",
+                client_order_id=None,
+                client_algo_id=None,
+                reason=conflict_reason,
+            )
+        )
+
     # Pass 4 — reverse pass (D-01, D-02): every exchange order with no open local
     # intent is a divergence. A foreign order is never added to `orphan_protectives`.
     reported_ids: set[str] = set()
@@ -829,6 +878,35 @@ def _check_position_bound(
     return (None, "")
 
 
+def _ownership_conflicts(local_active_plans: Sequence[Any]) -> list[tuple[str, str]]:
+    """The `(symbol, reason)` of every symbol whose active plans cannot be told to be one.
+
+    Fail closed: an item with no usable plan hash or symbol is a conflict of its symbol
+    (`UNKNOWN` when the symbol is unusable), never silently dropped.
+    """
+    plans_by_symbol: dict[str, set[str]] = {}
+    conflicts: dict[str, str] = {}
+    for item in local_active_plans:
+        plan_hash = _get_field(item, "plan_hash")
+        symbol = _get_field(item, "symbol")
+        usable_symbol = symbol if isinstance(symbol, str) and symbol != "" else "UNKNOWN"
+        if not isinstance(plan_hash, str) or plan_hash == "" or usable_symbol == "UNKNOWN":
+            conflicts.setdefault(
+                usable_symbol,
+                "an active local plan has no usable plan hash or symbol "
+                "(ownership cannot be established; the compare never guesses)",
+            )
+            continue
+        plans_by_symbol.setdefault(usable_symbol, set()).add(plan_hash)
+    for symbol_name, hashes in plans_by_symbol.items():
+        if len(hashes) > 1:
+            conflicts.setdefault(
+                symbol_name,
+                "more than one active plan for one symbol (the compare never picks one plan)",
+            )
+    return sorted(conflicts.items())
+
+
 def _check_stop(symbol: Any, truth_algo_orders: Sequence[Any]) -> str | None:
     """None when an ACTIVE system STOP_LOSS exists; else the kind of the missing stop.
 
@@ -905,6 +983,7 @@ __all__ = [
     "LocalOrderIntent",
     "LocalAlgoIntent",
     "LocalPositionIntent",
+    "LocalActivePlan",
     "OrphanProtective",
     "DIVERGENCE_KIND_ORPHAN_PROTECTIVE",
     "DIVERGENCE_KIND_UNSYNCED_NORMAL",
