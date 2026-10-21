@@ -824,14 +824,14 @@ class ProtectionCoordinator:
             )
             self._apply_entry_answer(tracked, answer)
             if tracked.entry_terminal_at is not None and await self._second_read_is_flat(tracked):
-                self._transition(
+                if self._transition(
                     tracked,
                     ProtectionState.FLAT,
                     REASON_NO_POSITION_ON_STOP,
                     self._now(),
                     evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
-                )
-                await self._sweep(tracked)
+                ):
+                    await self._sweep(tracked)
 
     async def _poll_entry(self, tracked: _Tracked) -> None:
         """REST poll of an AWAITING_FILL entry: the fill source when no stream event arrived.
@@ -1249,14 +1249,14 @@ class ProtectionCoordinator:
             and tracked.entry_terminal_at is not None
             and await self._second_read_is_flat(tracked)
         ):
-            self._transition(
+            if self._transition(
                 tracked,
                 ProtectionState.FLAT,
                 REASON_STOP_CONSUMED_FLAT,
                 self._now(),
                 evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
-            )
-            await self._sweep(tracked)
+            ):
+                await self._sweep(tracked)
             return
         if tracked.state is not ProtectionState.UNPROTECTED:
             self._transition(tracked, ProtectionState.UNPROTECTED, REASON_STOP_LOST, self._now())
@@ -1446,14 +1446,14 @@ class ProtectionCoordinator:
         if amount == _ZERO:
             # T-8-30 (19-REVIEW CR-03): one zero read never sweeps the confirmed stop.
             if await self._second_read_is_flat(tracked):
-                self._transition(
+                if self._transition(
                     tracked,
                     ProtectionState.FLAT,
                     REASON_POSITION_CLOSED,
                     self._now(),
                     evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
-                )
-                await self._sweep(tracked)
+                ):
+                    await self._sweep(tracked)
             return
         if (amount > _ZERO) != (entry.side == "LONG"):
             await self._enter_tp_unavailable(
@@ -1553,14 +1553,14 @@ class ProtectionCoordinator:
             return
         if not await self._second_read_is_flat(tracked):
             return
-        self._transition(
+        if self._transition(
             tracked,
             ProtectionState.FLAT,
             REASON_POSITION_CLOSED,
             self._now(),
             evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
-        )
-        await self._sweep(tracked)
+        ):
+            await self._sweep(tracked)
 
     # ------------------------------------------------------------------ #
     # CLOSE_REQUIRED, the emergency close, FLAT and the orphan sweep (D-12, D034).
@@ -1651,14 +1651,14 @@ class ProtectionCoordinator:
         if entry_terminal:
             # The closer answers True only on two consecutive zero reads (T-8-30); the entry was
             # read terminal before the close.
-            self._transition(
+            if self._transition(
                 tracked,
                 ProtectionState.FLAT,
                 REASON_CLOSED_ENTRY_TERMINAL,
                 self._now(),
                 evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
-            )
-            await self._sweep(tracked)
+            ):
+                await self._sweep(tracked)
         elif tracked.state is ProtectionState.CLOSE_FAILED:
             # Flat now, but the entry is still open and may fill again: keep watching.
             self._transition(
