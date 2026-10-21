@@ -27,8 +27,23 @@ Divergence kinds (the only kinds the reconciler emits):
   - UNSYNCED_POSITION: exchange position with no matching local intent
     (suspicious — drives SAFE_MODE but not the sweeper).
 
-The module is dependency-free: stdlib + `src/domain/enums.py` only.
-No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
+Phase 20 (plan 20-04) adds, without changing the five above:
+
+  - FOREIGN_ORDER: an exchange order with no local intent whose id does not
+    carry this system's prefix. Never sweepable, never cancelled (D-02).
+  - UNTRACKED_SYSTEM_ORDER: an exchange order with no local intent whose id
+    does carry this system's prefix. Still a divergence, still not sweepable.
+  - DUPLICATE_EXCHANGE_ID: the same client id twice in the exchange truth.
+  - DOUBLED_POSITION / SIGN_FLIPPED_POSITION: the signed bound check.
+  - POSITION_WITHOUT_STOP / TP_ONLY_POSITION: no ACTIVE system STOP_LOSS.
+  - AMBIGUOUS_POSITION_OWNER: exposure that cannot be tied to one plan.
+  - UNSUPPORTED_POSITION_SIDE: a Hedge-mode row (V1 is One-way only).
+  - STREAM_SINK_FAILURE / STREAM_TASK_DIED: vocabulary for plan 20-16; this
+    module emits neither.
+
+The module is dependency-free: stdlib, `src/domain` and the pure id
+predicates of `src/execution/order_ids.py`. No Binance SDK, no SQLAlchemy,
+no Pydantic, no Polars.
 """
 
 from __future__ import annotations
@@ -38,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.domain.enums import OrderRole, OrderStatus
+from src.execution.order_ids import is_system_client_id, role_of_client_id
 
 # --------------------------------------------------------------------------- #
 # Divergence-kind vocabulary.
@@ -54,6 +70,20 @@ DIVERGENCE_KIND_UNSYNCED_NORMAL: str = "UNSYNCED_NORMAL"
 DIVERGENCE_KIND_UNSYNCED_ALGO: str = "UNSYNCED_ALGO"
 DIVERGENCE_KIND_UNSYNCED_POSITION: str = "UNSYNCED_POSITION"
 
+# Phase 20 (plan 20-04, D-01..D-04, D-07).
+DIVERGENCE_KIND_FOREIGN_ORDER: str = "FOREIGN_ORDER"
+DIVERGENCE_KIND_UNTRACKED_SYSTEM_ORDER: str = "UNTRACKED_SYSTEM_ORDER"
+DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID: str = "DUPLICATE_EXCHANGE_ID"
+DIVERGENCE_KIND_DOUBLED_POSITION: str = "DOUBLED_POSITION"
+DIVERGENCE_KIND_SIGN_FLIPPED_POSITION: str = "SIGN_FLIPPED_POSITION"
+DIVERGENCE_KIND_TP_ONLY_POSITION: str = "TP_ONLY_POSITION"
+DIVERGENCE_KIND_POSITION_WITHOUT_STOP: str = "POSITION_WITHOUT_STOP"
+DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER: str = "AMBIGUOUS_POSITION_OWNER"
+DIVERGENCE_KIND_UNSUPPORTED_POSITION_SIDE: str = "UNSUPPORTED_POSITION_SIDE"
+# Vocabulary only: plan 20-16 emits these two (D-04). This module never does.
+DIVERGENCE_KIND_STREAM_SINK_FAILURE: str = "STREAM_SINK_FAILURE"
+DIVERGENCE_KIND_STREAM_TASK_DIED: str = "STREAM_TASK_DIED"
+
 _DIVERGENCE_KINDS: frozenset[str] = frozenset(
     {
         DIVERGENCE_KIND_ORPHAN_PROTECTIVE,
@@ -61,6 +91,17 @@ _DIVERGENCE_KINDS: frozenset[str] = frozenset(
         DIVERGENCE_KIND_UNSYNCED_NORMAL,
         DIVERGENCE_KIND_UNSYNCED_ALGO,
         DIVERGENCE_KIND_UNSYNCED_POSITION,
+        DIVERGENCE_KIND_FOREIGN_ORDER,
+        DIVERGENCE_KIND_UNTRACKED_SYSTEM_ORDER,
+        DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID,
+        DIVERGENCE_KIND_DOUBLED_POSITION,
+        DIVERGENCE_KIND_SIGN_FLIPPED_POSITION,
+        DIVERGENCE_KIND_TP_ONLY_POSITION,
+        DIVERGENCE_KIND_POSITION_WITHOUT_STOP,
+        DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER,
+        DIVERGENCE_KIND_UNSUPPORTED_POSITION_SIDE,
+        DIVERGENCE_KIND_STREAM_SINK_FAILURE,
+        DIVERGENCE_KIND_STREAM_TASK_DIED,
     }
 )
 
@@ -450,6 +491,19 @@ def compare(
                 )
             )
 
+    # Pass 4 — reverse pass (D-01, D-02): every exchange order with no open local
+    # intent is a divergence. A foreign order is never added to `orphan_protectives`.
+    for truth_order in truth_normal_orders:
+        order_id = _get_field(truth_order, "client_order_id")
+        if isinstance(order_id, str) and order_id in local_normal_by_client_id:
+            continue
+        divergences.append(_unowned_order_divergence(truth_order, order_id, is_algo=False))
+    for truth_algo in truth_algo_orders:
+        algo_id = _get_field(truth_algo, "client_algo_id")
+        if isinstance(algo_id, str) and algo_id in local_algo_by_client_id:
+            continue
+        divergences.append(_unowned_order_divergence(truth_algo, algo_id, is_algo=True))
+
     # Sort divergences deterministically.
     divergences.sort(
         key=lambda d: (
@@ -539,6 +593,30 @@ def _get_field(entry: Any, field_name: str) -> Any:
     return getattr(entry, field_name, None)
 
 
+def _unowned_order_divergence(row: Any, order_id: Any, *, is_algo: bool) -> Divergence:
+    """The divergence for an exchange order that no open local intent owns.
+
+    FOREIGN_ORDER when the id is absent or does not carry this system's prefix,
+    UNTRACKED_SYSTEM_ORDER when it does. Neither is ever sweepable.
+    """
+    symbol = _get_field(row, "symbol")
+    usable_id = order_id if isinstance(order_id, str) and order_id != "" else None
+    if usable_id is not None and is_system_client_id(usable_id):
+        kind = DIVERGENCE_KIND_UNTRACKED_SYSTEM_ORDER
+        reason = "exchange order with a system id and no local intent"
+    else:
+        kind = DIVERGENCE_KIND_FOREIGN_ORDER
+        reason = "exchange order this system did not create (no local intent, foreign id)"
+    return Divergence(
+        kind=kind,
+        symbol=symbol if isinstance(symbol, str) and symbol != "" else "UNKNOWN",
+        order_role=(usable_id and role_of_client_id(usable_id)) or "UNKNOWN",
+        client_order_id=None if is_algo else usable_id,
+        client_algo_id=usable_id if is_algo else None,
+        reason=reason,
+    )
+
+
 def _symbols_for_position_side(
     local_position_keys: set[tuple[str, str]], symbol: str
 ) -> set[tuple[str, str]]:
@@ -558,4 +636,15 @@ __all__ = [
     "DIVERGENCE_KIND_UNSYNCED_NORMAL",
     "DIVERGENCE_KIND_UNSYNCED_ALGO",
     "DIVERGENCE_KIND_UNSYNCED_POSITION",
+    "DIVERGENCE_KIND_FOREIGN_ORDER",
+    "DIVERGENCE_KIND_UNTRACKED_SYSTEM_ORDER",
+    "DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID",
+    "DIVERGENCE_KIND_DOUBLED_POSITION",
+    "DIVERGENCE_KIND_SIGN_FLIPPED_POSITION",
+    "DIVERGENCE_KIND_TP_ONLY_POSITION",
+    "DIVERGENCE_KIND_POSITION_WITHOUT_STOP",
+    "DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER",
+    "DIVERGENCE_KIND_UNSUPPORTED_POSITION_SIDE",
+    "DIVERGENCE_KIND_STREAM_SINK_FAILURE",
+    "DIVERGENCE_KIND_STREAM_TASK_DIED",
 ]
