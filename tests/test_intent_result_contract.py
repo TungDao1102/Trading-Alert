@@ -6,7 +6,7 @@ A reconciliation conclusion has its own API, `finalize_reconciled_resolution`, a
 (`IntentResultContract`) that every store must satisfy; `IntentResultContract` is not collected
 itself, a subclass supplies the `harness` fixture:
 
-  - `TestInMemoryIntentResultContract` (added by plan 20-03 task 2, same file),
+  - `TestInMemoryIntentResultContract` (same file),
   - `tests/test_intent_result_contract_pg.py` runs the same tests against `PgExecutionStateStore`.
 
 What the contract pins (D-11, T-B):
@@ -22,6 +22,7 @@ What the contract pins (D-11, T-B):
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,15 @@ from src.execution.intent_store import (
     IntentRecord,
 )
 from src.persistence.errors import IntentStateConflict
+
+from tests.support.intent_store_fakes import (
+    AlwaysWinsIntentStore,
+    BarrierBeforeConsume,
+    CrashAfter,
+    FailingIntentStore,
+    InMemoryExecutionIntentStore,
+    SimulatedCrash,
+)
 
 T0 = datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
 T1 = T0 + timedelta(minutes=1)
@@ -313,3 +323,99 @@ class IntentResultContract:
         assert frozenset({"RECONCILED_ABSENT", "NEVER_SENT"}) == RESOLUTION_REASON_CODES
         assert RESOLUTION_RECONCILED_ABSENT == "RECONCILED_ABSENT"
         assert RESOLUTION_NEVER_SENT == "NEVER_SENT"
+
+
+# --------------------------------------------------------------------------------------------
+# The in-memory run (plan 20-03 task 2 adds the implementation; this class is the proof).
+# --------------------------------------------------------------------------------------------
+
+
+class TestInMemoryIntentResultContract(IntentResultContract):
+    @pytest.fixture
+    def harness(self) -> Iterator[ContractHarness]:
+        store = InMemoryExecutionIntentStore()
+        approval_id = "approval-contract-1"
+
+        def read(role: str) -> IntentRecord | None:
+            return store.get_intent(approval_id=approval_id, role=role)
+
+        yield ContractHarness(
+            store=store,
+            approval_id=approval_id,
+            entry_args=default_entry_args(approval_id),
+            protective_args=default_protective_args(approval_id),
+            read=read,
+        )
+
+
+# --------------------------------------------------------------------------------------------
+# Every test double implements the Protocol, so `runtime_checkable` keeps passing.
+# --------------------------------------------------------------------------------------------
+
+
+def _fakes() -> dict[str, ExecutionIntentStore]:
+    inner = InMemoryExecutionIntentStore()
+    return {
+        "InMemoryExecutionIntentStore": inner,
+        "AlwaysWinsIntentStore": AlwaysWinsIntentStore(),
+        "CrashAfter": CrashAfter(inner, step="finalize"),
+        "BarrierBeforeConsume": BarrierBeforeConsume(inner, barrier=threading.Barrier(1)),
+        "FailingIntentStore": FailingIntentStore("get_entry", RuntimeError("boom")),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_fakes()))
+def test_every_fake_is_an_execution_intent_store(name: str) -> None:
+    fake = _fakes()[name]
+    assert isinstance(fake, ExecutionIntentStore)
+    assert callable(getattr(fake, "finalize_reconciled_resolution", None))
+
+
+def test_the_failing_store_can_fail_the_new_method() -> None:
+    failing = FailingIntentStore("finalize_reconciled_resolution", RuntimeError("boom"), role=ENTRY)
+    with pytest.raises(RuntimeError):
+        failing.finalize_reconciled_resolution(
+            approval_id="a", role=ENTRY, reason_code=RESOLUTION_NEVER_SENT, now_utc=T0
+        )
+    assert failing.failures_raised == 1
+
+
+def test_the_crash_wrapper_crashes_after_the_reconciliation_step_committed() -> None:
+    inner = InMemoryExecutionIntentStore()
+    harness_args = default_entry_args("approval-crash-1")
+    assert inner.consume_and_record_entry_intent(**harness_args) is True
+    crashing = CrashAfter(inner, step="reconcile")
+    with pytest.raises(SimulatedCrash):
+        crashing.finalize_reconciled_resolution(
+            approval_id="approval-crash-1",
+            role=ENTRY,
+            reason_code=RESOLUTION_NEVER_SENT,
+            now_utc=T0,
+        )
+    row = inner.get_entry(approval_id="approval-crash-1")
+    assert row is not None
+    assert row.resolution_reason_code == RESOLUTION_NEVER_SENT
+
+
+def test_the_intent_record_default_keeps_every_constructor_valid() -> None:
+    row = IntentRecord(
+        approval_id="a",
+        role=ENTRY,
+        trade_plan_id="p",
+        plan_hash="h",
+        client_order_id="c",
+        algo_client_id=None,
+        symbol="BTCUSDT",
+        side="BUY",
+        intended_quantity=Decimal("1"),
+        intended_price=Decimal("1"),
+        intent_status=ExecutionIntentStatus.INTENDED,
+        exchange_order_id=None,
+        exchange_status=None,
+        outcome=None,
+        intended_at_utc=T0,
+        sent_at_utc=None,
+        resolved_at_utc=None,
+        updated_at_utc=T0,
+    )
+    assert row.resolution_reason_code is None
