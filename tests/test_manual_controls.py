@@ -840,7 +840,7 @@ async def test_operator_protect_never_places_after_a_stop_lost_in_close_required
 
 
 async def test_operator_protect_refuses_every_other_close_required_branch() -> None:
-    """No stop is restored as a workaround for the D077 close: REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED."""
+    """No stop is restored as a workaround for the D077 close (CLOSE_REQUIRED refusal)."""
     code = "REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED"
 
     # B5: the stop was rejected definitively.
@@ -1124,7 +1124,12 @@ async def test_operator_protect_gate_refusal_in_the_delegated_step_is_the_coordi
 
 
 def test_operator_protect_has_no_placement_and_no_transition_of_its_own() -> None:
-    """The body of ProtectionCoordinator.operator_protect never places, closes, cancels or moves."""
+    """operator_protect and its helpers never place, close, cancel or move a plan's state.
+
+    The only thing that can place is the coordinator's own per-plan step that
+    `_operator_protect_step` runs; none of these bodies names a placement, close, cancel or
+    `_transition` call.
+    """
     path = Path(__file__).parent.parent / "src" / "execution" / "protection.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     forbidden = {
@@ -1138,22 +1143,31 @@ def test_operator_protect_has_no_placement_and_no_transition_of_its_own() -> Non
         "cancel_normal_order",
         "close_position",
     }
-    found = False
+    own = {
+        "operator_protect",
+        "_operator_protect_precheck",
+        "_operator_protect_position_refusal",
+        "_operator_protect_step",
+        "_operator_protect_stop_refusal",
+    }
+    seen: set[str] = set()
+    called_by: dict[str, set[str]] = {}
     for cls in tree.body:
         if isinstance(cls, ast.ClassDef) and cls.name == "ProtectionCoordinator":
             for node in cls.body:
-                if isinstance(node, ast.AsyncFunctionDef) and node.name == "operator_protect":
-                    found = True
-                    called = {
+                if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name in own:
+                    seen.add(node.name)
+                    called_by[node.name] = {
                         n.func.attr
                         if isinstance(n.func, ast.Attribute)
                         else getattr(n.func, "id", "")
                         for n in ast.walk(node)
                         if isinstance(n, ast.Call)
                     }
-                    assert not called & forbidden, called & forbidden
-                    assert "_step_plan" in called, "it delegates to the coordinator's own step"
-    assert found
+                    assert not called_by[node.name] & forbidden, node.name
+    assert seen == own
+    assert "_step_plan" in called_by["_operator_protect_step"]
+    assert "_operator_protect_step" in called_by["operator_protect"]
 
 
 async def test_manager_operator_protect_position_is_a_thin_wrapper() -> None:

@@ -2528,6 +2528,22 @@ async def operator_close_position(
     return await coordinator.operator_close(plan_hash=plan_hash, operator_id=operator_id)
 
 
+async def operator_protect_position(
+    *, coordinator: ProtectionCoordinator, plan_hash: str, operator_id: str
+) -> OperatorControlResult:
+    """EXEC-06 control: re-place protection on an explicit operator action (D-26, D077).
+
+    A thin wrapper with NO placement of its own. The coordinator runs its own per-plan step once
+    for a plan whose stop was never confirmed (the same-id re-place at the plan stop price after
+    a definitive absence, escalation at ``max_unprotected_ms``), adopts an ACTIVE stop in a
+    confirmed state, and refuses with nothing sent after a confirmed stop was lost, in
+    CLOSE_REQUIRED / CLOSE_FAILED, on an unknown stop history and on an unreadable, zero or
+    wrong-sided position. The D077-compatible human action for the stop-lost branch is
+    ``operator_close_position``.
+    """
+    return await coordinator.operator_protect(plan_hash=plan_hash, operator_id=operator_id)
+
+
 __all__ = [
     "APPROVED_QUANTITY_NOT_CONFIRMED",
     "POSITION_MODE_HEDGE",
@@ -2546,4 +2562,5 @@ __all__ = [
     "safe_mode_freeze",
     "emergency_manual_close",
     "operator_close_position",
+    "operator_protect_position",
 ]
