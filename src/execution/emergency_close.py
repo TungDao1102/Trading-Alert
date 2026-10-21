@@ -137,6 +137,8 @@ CODE_PROBE_INDETERMINATE = "PROBE_INDETERMINATE"
 CODE_STATUS_UNREADABLE = "ATTEMPT_STATUS_UNREADABLE"
 CODE_HISTORY_NOT_TERMINAL = "ATTEMPT_HISTORY_NOT_TERMINAL"
 CODE_POLL_DEADLINE_PASSED = "CLOSE_POLL_DEADLINE_PASSED"
+# Plan 20-18: the part is the one the exchange just refused for its lot filters.
+CODE_FILTER_REJECTED_SAME_PAYLOAD = "FILTER_REJECTED_SAME_PAYLOAD"
 
 _ZERO = Decimal("0")
 _ONE_MS = timedelta(milliseconds=1)
@@ -154,6 +156,10 @@ _TERMINAL_NOT_FILLED: frozenset[str] = frozenset(
 _TERMINAL_STATUSES: frozenset[str] = _TERMINAL_NOT_FILLED | {_STATUS_FILLED}
 # The order statuses that are known and not terminal: the attempt may still execute.
 _ACTIVE_STATUSES: frozenset[str] = frozenset({"NEW", "PARTIALLY_FILLED"})
+# Plan 20-18 (D-21): Binance codes that say the QUANTITY broke a lot filter (documented as
+# "Filter rejection" in src/domain/exchange_errors.py). -1013 is not in that table, so such
+# an answer is classified ambiguous and goes through the existing probe path instead.
+_FILTER_REJECTION_CODES: frozenset[int] = frozenset({-1111, -4003, -4004, -4005})
 _DEFINITIVE_REJECTIONS: frozenset[ExchangeErrorCategory] = frozenset(
     {
         ExchangeErrorCategory.REJECTED_DEFINITIVE,
@@ -199,6 +205,8 @@ class _Outcome:
     # Plan 20-14: what a pre-send refusal said (fixed project text and whole seconds only).
     gate_reason: str | None = None
     retry_after_seconds: int | None = None
+    # Plan 20-18: the rejection says the quantity broke a lot filter (the filters were wrong).
+    filter_rejected: bool = False
 
 
 @dataclass
@@ -344,6 +352,10 @@ class MarketEmergencyCloser(EmergencyCloser):
         self._lot_filters = lot_filters
         # The filters behind the last close of each plan (stale flag, fetch time): journaled.
         self._filters_meta: dict[str, tuple[bool, datetime]] = {}
+        # A close the exchange refused for its filters, per plan: (the quantity, the next
+        # free attempt number). The same quantity is never sent again; a new one gets a
+        # new number.
+        self._filter_rejected: dict[str, tuple[Decimal, int]] = {}
 
     @property
     def last_result(self) -> EmergencyCloseResult | None:
@@ -387,6 +399,7 @@ class MarketEmergencyCloser(EmergencyCloser):
                 self._journal_note(entry, PHASE_ALREADY_FLAT, reason)
             self._last_result = EmergencyCloseResult(EmergencyCloseStatus.FLAT, parts_sent, reason)
             self._resolve_close_row(entry, NOTE_CLOSE_CONFIRMED_FLAT)
+            self._filter_rejected.pop(entry.plan_hash, None)
             return True
 
         self._filters_meta.pop(entry.plan_hash, None)
@@ -394,7 +407,9 @@ class MarketEmergencyCloser(EmergencyCloser):
             # Q3 / D-21: live first; the last validated filters, flagged stale, only when the
             # live read fails; with neither, nothing is guessed (fail closed below).
             try:
-                chosen = await self._lot_filters.for_emergency_close(symbol)
+                chosen = await self._lot_filters.for_emergency_close(
+                    symbol, trade_plan_id=entry.trade_plan_id
+                )
             except LotFiltersUnavailable as exc:
                 return self._fail(
                     entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, exc.error_type
@@ -443,6 +458,12 @@ class MarketEmergencyCloser(EmergencyCloser):
                 status=EmergencyCloseStatus.PENDING_UNKNOWN,
             )
 
+        # A close the exchange refused for its filters is not resent as it was: its attempt
+        # number is spent even though the exchange holds no such order (plan 20-18, D-21).
+        filter_refusal = self._filter_rejected.get(entry.plan_hash)
+        if filter_refusal is not None:
+            attempt_no = max(attempt_no, filter_refusal[1])
+
         # Never more confirmed parts in one call than the parts planned from the REST position
         # read above (D-15): a part that does not move the position must not turn into an
         # endless loop. Attempts proven to have had no effect are bounded by the same number.
@@ -455,6 +476,15 @@ class MarketEmergencyCloser(EmergencyCloser):
             if quantity is None:
                 return self._fail(entry, reason, "NO_VALID_PART", parts_sent, None)
             side = "SELL" if position > _ZERO else "BUY"
+            filter_refusal = self._filter_rejected.get(entry.plan_hash)
+            if filter_refusal is not None:
+                if filter_refusal[0] == quantity:
+                    # The part the exchange just refused for its filters: even fresh filters give
+                    # the same one. Nothing is sent; the failure stays visible.
+                    return self._fail(
+                        entry, reason, CODE_FILTER_REJECTED_SAME_PAYLOAD, parts_sent, None
+                    )
+                del self._filter_rejected[entry.plan_hash]
             try:
                 client_order_id = derive_close_order_id(
                     plan_hash=entry.plan_hash, attempt_no=attempt_no
@@ -465,6 +495,8 @@ class MarketEmergencyCloser(EmergencyCloser):
                 entry, reason, attempt_no, client_order_id, side, quantity
             )
             attempt_no += 1  # whatever happened, this id is spent
+            if outcome.kind is _Kind.REJECTED and outcome.filter_rejected:
+                self._filter_rejected[entry.plan_hash] = (quantity, attempt_no)
             if outcome.kind is _Kind.NOT_SENT:
                 return self._not_sent(entry, reason, parts_sent, outcome)
             if outcome.kind is _Kind.PENDING:
@@ -491,6 +523,7 @@ class MarketEmergencyCloser(EmergencyCloser):
                     EmergencyCloseStatus.FLAT, parts_sent, reason
                 )
                 self._resolve_close_row(entry, NOTE_CLOSE_CONFIRMED_FLAT)
+                self._filter_rejected.pop(entry.plan_hash, None)
                 return True
             if outcome.kind is _Kind.REJECTED:
                 # The exchange refused the part and the position is still open: -2022 and
@@ -565,7 +598,11 @@ class MarketEmergencyCloser(EmergencyCloser):
             if self._is_definitive_rejection(exc):
                 del self._pending[entry.plan_hash]
                 journal(PHASE_REJECTED, error_type)
-                return _Outcome(_Kind.REJECTED, error_type=error_type)
+                return _Outcome(
+                    _Kind.REJECTED,
+                    error_type=error_type,
+                    filter_rejected=self._is_filter_rejection(exc),
+                )
             journal(PHASE_AMBIGUOUS, error_type)
         else:
             self._resolve_close_row(entry, NOTE_CLOSE_SENT_AFTER_GATE)
@@ -592,6 +629,14 @@ class MarketEmergencyCloser(EmergencyCloser):
         except Exception:  # noqa: BLE001 - an unclassifiable failure is ambiguous
             return False
         return category in _DEFINITIVE_REJECTIONS
+
+    def _is_filter_rejection(self, exc: Exception) -> bool:
+        """True when the adapter's facts carry a code that says a lot filter was broken."""
+        try:
+            code = _attr(self._adapter.error_facts(exc), "code")
+        except Exception:  # noqa: BLE001 - no facts, no claim
+            return False
+        return isinstance(code, int) and code in _FILTER_REJECTION_CODES
 
     async def _poll(
         self, entry: RestingEntry, close_reason: str, pending: _PendingAttempt
@@ -950,6 +995,7 @@ __all__ = [
     "CODE_ATTEMPT_NOT_TERMINAL",
     "CODE_HISTORY_NOT_TERMINAL",
     "CODE_NOT_FOUND_AFTER_ACK",
+    "CODE_FILTER_REJECTED_SAME_PAYLOAD",
     "CODE_POLL_DEADLINE_PASSED",
     "CODE_PROBE_FAILED",
     "CODE_PROBE_INDETERMINATE",

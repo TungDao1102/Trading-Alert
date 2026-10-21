@@ -38,7 +38,9 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from src.domain.lot_filters import LotFilters
+from src.execution.constraint_snapshot import PlanConstraintSnapshot
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
+from src.execution.lot_split import lot_filters_from_plan_snapshot
 
 _REFRESH_KEY = "reconcile.lot_filter_refresh_interval_ms"
 _ONE_MS = timedelta(milliseconds=1)
@@ -103,6 +105,9 @@ class LotFilterAdapter(Protocol):
     async def symbol_lot_filters(self, *, symbol: str) -> Any: ...
 
 
+SnapshotFor = Callable[[str], PlanConstraintSnapshot | None]
+
+
 class LotFilterSource:
     """Live lot filters for entries; live-then-stale lot filters for the emergency close."""
 
@@ -113,6 +118,7 @@ class LotFilterSource:
         store: LotFilterStore,
         limits: ExecutionLimits,
         clock: Callable[[], datetime],
+        snapshot_for: SnapshotFor | None = None,
     ) -> None:
         interval_ms = limits.reconcile_lot_filter_refresh_interval_ms
         if interval_ms is None:
@@ -121,6 +127,7 @@ class LotFilterSource:
         self._adapter = adapter
         self._store = store
         self._clock = clock
+        self._snapshot_for = snapshot_for
         self.last_store_error_type: str | None = None
 
     # ------------------------------------------------------------------ #
@@ -156,14 +163,20 @@ class LotFilterSource:
         self._remember(filters, self._clock())
         return filters
 
-    async def for_emergency_close(self, symbol: str) -> StoredLotFilters:
-        """Filters for the emergency close only (Q3, D-21); see the module docstring."""
+    async def for_emergency_close(
+        self, symbol: str, *, trade_plan_id: str | None = None
+    ) -> StoredLotFilters:
+        """Filters for the emergency close only (Q3, D-21); see the module docstring.
+
+        Order: the live read; the stored last validated filters; the persisted plan snapshot of
+        ``trade_plan_id`` (tier 2); else ``LotFiltersUnavailable`` (nothing is guessed).
+        """
         try:
             filters = await self._read_live(symbol)
         except LotFiltersUnavailable as live_failure:
-            stored = self._stored(symbol)
-            if stored is not None:
-                return stored
+            fallback = self._stored(symbol) or self._from_plan_snapshot(symbol, trade_plan_id)
+            if fallback is not None:
+                return fallback
             raise live_failure
         fetched_at = self._clock()
         self._remember(filters, fetched_at)
@@ -181,11 +194,37 @@ class LotFilterSource:
             filters=row.filters, fetched_at_utc=row.fetched_at_utc, filters_stale=True
         )
 
+    def _from_plan_snapshot(
+        self, symbol: str, trade_plan_id: str | None
+    ) -> StoredLotFilters | None:
+        """Tier 2: the plan's persisted snapshot, only when it holds every value the close needs.
+
+        ``lot_filters_from_plan_snapshot`` answers None unless the maximum quantity and all three
+        MARKET_LOT_SIZE values are present; a snapshot of another symbol, a failing lookup and an
+        invalid value are all "nothing" (fail closed).
+        """
+        if self._snapshot_for is None or trade_plan_id is None:
+            return None
+        try:
+            snapshot = self._snapshot_for(trade_plan_id)
+            if snapshot is None or snapshot.symbol != symbol:
+                return None
+            filters = lot_filters_from_plan_snapshot(snapshot)
+        except Exception as exc:  # noqa: BLE001 - an unreadable or invalid snapshot is nothing
+            self.last_store_error_type = type(exc).__name__
+            return None
+        if filters is None:
+            return None
+        return StoredLotFilters(
+            filters=filters, fetched_at_utc=snapshot.constraints_observed_at_utc, filters_stale=True
+        )
+
 
 __all__ = [
     "LotFilterAdapter",
     "LotFilterSource",
     "LotFilterStore",
     "LotFiltersUnavailable",
+    "SnapshotFor",
     "StoredLotFilters",
 ]
