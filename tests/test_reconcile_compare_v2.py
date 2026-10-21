@@ -638,3 +638,102 @@ def test_compare_v2_has_no_float_constructor_and_no_wall_clock() -> None:
     for path in (COMPARE_PATH, ORDER_IDS_PATH):
         assert float_constructor_calls(path) == [], path
         assert wall_clock_calls(path) == [], path
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - entry-aware orphan rule (D-05, code part).
+#
+# Since Phase 19 the stop is placed after the first fill, so a protective that exists while its
+# plan's ENTRY is still resting or partially filled is not an orphan. The criterion wording is
+# the owner's checkpoint O-A (plan 20-24); this is only the code part.
+# --------------------------------------------------------------------------- #
+
+
+def _stop_ids(role: str = "STOP_LOSS", plan_hash: str = PLAN_A) -> str:
+    return derive_algo_client_id(plan_hash=plan_hash, role=role)
+
+
+def _protective_without_position(
+    *,
+    role: str = "STOP_LOSS",
+    local_entry_status: str | None = None,
+    entry_plan_hash: str = PLAN_A,
+    entry_in_truth: bool = False,
+    plan_hash_fields: bool = False,
+) -> CompareDiff:
+    """A local protective of PLAN_A with no position anywhere, and the given ENTRY state."""
+    algo_id = _stop_ids(role)
+    entry_id = derive_client_order_id(plan_hash=entry_plan_hash, role="ENTRY")
+    local_orders: list[Any] = []
+    if local_entry_status is not None:
+        local_orders.append(
+            LocalOrderIntent(
+                client_order_id=entry_id,
+                symbol=SYMBOL,
+                order_role="ENTRY",
+                status=local_entry_status,
+                plan_hash=entry_plan_hash if plan_hash_fields else None,
+            )
+        )
+    return _run(
+        local_open_orders=local_orders,
+        local_open_algos=[
+            LocalAlgoIntent(
+                client_algo_id=algo_id,
+                symbol=SYMBOL,
+                order_role=role,
+                status="NEW",
+                plan_hash=PLAN_A if plan_hash_fields else None,
+            )
+        ],
+        truth_normal_orders=[_truth_order(entry_id)] if entry_in_truth else [],
+        truth_algo_orders=[_truth_algo(algo_id)],
+    )
+
+
+@pytest.mark.parametrize("role", ["STOP_LOSS", "TAKE_PROFIT_1", "TAKE_PROFIT_2"])
+@pytest.mark.parametrize("status", ["NEW", "PARTIALLY_FILLED"])
+@pytest.mark.parametrize("plan_hash_fields", [False, True])
+def test_protective_of_a_resting_entry_is_never_an_orphan(
+    role: str, status: str, plan_hash_fields: bool
+) -> None:
+    diff = _protective_without_position(
+        role=role,
+        local_entry_status=status,
+        entry_in_truth=True,
+        plan_hash_fields=plan_hash_fields,
+    )
+    assert "ORPHAN_PROTECTIVE" not in _kinds(diff)
+    assert diff.orphan_protectives == ()
+
+
+def test_protective_of_an_entry_that_is_only_on_the_exchange_is_never_an_orphan() -> None:
+    """The ENTRY is absent locally but still in the exchange open normal orders (by plan hash
+    prefix of the ids). It is untracked, which is its own divergence, but the protective is
+    not swept."""
+    diff = _protective_without_position(local_entry_status=None, entry_in_truth=True)
+    kinds = _kinds(diff)
+    assert "ORPHAN_PROTECTIVE" not in kinds
+    assert "UNTRACKED_SYSTEM_ORDER" in kinds
+    assert diff.orphan_protectives == ()
+
+
+@pytest.mark.parametrize("status", ["FILLED", "CANCELED", "EXPIRED", "REJECTED"])
+def test_protective_of_a_terminal_entry_is_an_orphan(status: str) -> None:
+    diff = _protective_without_position(local_entry_status=status, entry_in_truth=False)
+    assert "ORPHAN_PROTECTIVE" in _kinds(diff)
+    assert [o.client_algo_id for o in diff.orphan_protectives] == [_stop_ids()]
+
+
+def test_protective_with_no_entry_anywhere_is_an_orphan() -> None:
+    diff = _protective_without_position()
+    assert _kinds(diff) == ["ORPHAN_PROTECTIVE"]
+    assert [o.client_algo_id for o in diff.orphan_protectives] == [_stop_ids()]
+
+
+def test_a_resting_entry_of_another_plan_does_not_exempt_the_protective() -> None:
+    diff = _protective_without_position(
+        local_entry_status="NEW", entry_plan_hash=PLAN_B, entry_in_truth=True
+    )
+    assert "ORPHAN_PROTECTIVE" in _kinds(diff)
+    assert [o.client_algo_id for o in diff.orphan_protectives] == [_stop_ids()]
