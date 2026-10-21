@@ -14,7 +14,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * Migration 0005 (Phase 19, D-22, G4-008) adds the nullable `sized_realized_risk` column
     and its named CHECK to `execution_intents`.
   * Migration 0006 (Phase 19 review-fix batch 4, D078, 19-REVIEW WR-01) adds the nullable
-    `approved_quantity` column and its named CHECK to `approvals`; the head test pins 0006.
+    `approved_quantity` column and its named CHECK to `approvals`.
+  * Migration 0007 (Phase 20, plan 20-03, T-B) adds the nullable `resolution_reason_code`
+    column and its named CHECK to `execution_intents`; the head test pins 0007.
 """
 
 from __future__ import annotations
@@ -84,6 +86,10 @@ REVISION_0005 = "0005_live_sized_risk"
 MIGRATION_0005 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0005_live_sized_risk.py"
 REVISION_0006 = "0006_approval_quantity"
 MIGRATION_0006 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0006_approval_quantity.py"
+REVISION_0007 = "0007_intent_resolution_reason"
+MIGRATION_0007 = (
+    REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0007_intent_resolution_reason.py"
+)
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -447,7 +453,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0006
+    assert alembic_head_revision() == REVISION_0007
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -775,6 +781,121 @@ def test_downgrade_0006_keeps_rows_and_removes_only_the_column_and_the_check(
             ).scalar_one()
         assert version == REVISION_0005
         assert approvals == 1
+        assert check == 0
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0007: resolution_reason_code (Phase 20, plan 20-03, T-B, D-11)
+# --------------------------------------------------------------------------------------
+def test_migration_0007_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0007, ("src", "tests")) == []
+
+
+def test_migration_0007_revises_0006() -> None:
+    text_of_migration = MIGRATION_0007.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0006}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0007}"' in text_of_migration
+
+
+def test_resolution_reason_code_column_and_check_catalog(engine: Engine) -> None:
+    with engine.connect() as conn:
+        column = conn.execute(
+            text(
+                "SELECT data_type, character_maximum_length, is_nullable "
+                "FROM information_schema.columns WHERE table_schema = 'public' "
+                "AND table_name = 'execution_intents' AND column_name = 'resolution_reason_code'"
+            )
+        ).one()
+        definition = conn.execute(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_execution_intents_resolution_reason' AND contype = 'c'"
+            )
+        ).scalar_one()
+    assert tuple(column) == ("character varying", 32, "YES")
+    assert "resolution_reason_code IS NULL" in definition
+    assert set(_QUOTED_LITERAL.findall(definition)) == {
+        "REJECTED",
+        "RECONCILED_ABSENT",
+        "NEVER_SENT",
+    }
+
+
+def test_data_bearing_upgrade_0006_to_0007_keeps_every_row_with_null(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", REVISION_0006)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert "resolution_reason_code" not in _present_columns(engine)("execution_intents")
+        inserted = _reflected_inserts(
+            engine,
+            [
+                make_signal(1),
+                make_plan(1, 1),
+                make_approval(1, 1, 1),
+                _intent("ENTRY"),
+                _intent("STOP_LOSS"),
+            ],
+        )
+        assert len(inserted) == 5
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        _assert_rows_intact(engine, inserted)
+        with engine.connect() as conn:
+            reasons = conn.execute(
+                text("SELECT role, resolution_reason_code FROM execution_intents ORDER BY role")
+            ).all()
+        assert [tuple(row) for row in reasons] == [("ENTRY", None), ("STOP_LOSS", None)]
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_0007_keeps_rows_and_removes_only_the_column_and_the_check(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        insert_and_commit(
+            engine,
+            make_signal(1),
+            make_plan(1, 1),
+            make_approval(1, 1, 1),
+            _intent(
+                "ENTRY",
+                intent_status="REJECTED",
+                resolution_reason_code="RECONCILED_ABSENT",
+                resolved_at_utc=T0,
+            ),
+        )
+        before = _present_columns(engine)("execution_intents")
+        assert "resolution_reason_code" in before
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0006)
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        after = _present_columns(engine)("execution_intents")
+        assert before - after == {"resolution_reason_code"}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            intents = conn.execute(text("SELECT count(*) FROM execution_intents")).scalar_one()
+            check = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_constraint "
+                    "WHERE conname = 'ck_execution_intents_resolution_reason'"
+                )
+            ).scalar_one()
+        assert version == REVISION_0006
+        assert intents == 1
         assert check == 0
     finally:
         engine.dispose()
