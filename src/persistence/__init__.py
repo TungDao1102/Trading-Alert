@@ -19,6 +19,9 @@ names every module of the package):
                            (durable SAFE_MODE, Phase 20)
   - `pending_actions`      `PgPendingActionStore`: the durable intent of a protective action the
                            REST gate refused (Phase 20, plan 20-14)
+  - `lot_filters`         `PgLotFilterStore`: the last validated lot filters of each symbol, used
+                           only by the emergency close when exchangeInfo is unreadable (Phase 20,
+                           plan 20-18)
   - `paper_runtime_state`  `PgRuntimeState`: journal-only paper runtime state (Phase 16)
   - `shadow_stores`        `PgShadowStores`: the SHADOW chain's composed stores (Phase 16)
 

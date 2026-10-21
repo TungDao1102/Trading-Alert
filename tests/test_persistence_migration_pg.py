@@ -17,8 +17,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
     `approved_quantity` column and its named CHECK to `approvals`.
   * Migration 0007 (Phase 20, plan 20-03, T-B) adds the nullable `resolution_reason_code`
     column and its named CHECK to `execution_intents`.
-  * Migration 0008 (Phase 20, plan 20-14, D-19, Q4) adds the `pending_protective_actions` table;
-    the head test pins 0008.
+  * Migration 0008 (Phase 20, plan 20-14, D-19, Q4) adds the `pending_protective_actions` table.
+  * Migration 0009 (Phase 20, plan 20-18, Q3, D-21) adds the `validated_lot_filters` table; the
+    head test pins 0009.
 """
 
 from __future__ import annotations
@@ -97,6 +98,8 @@ REVISION_0008 = "0008_pending_protective_actions"
 MIGRATION_0008 = (
     REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0008_pending_protective_actions.py"
 )
+REVISION_0009 = "0009_validated_lot_filters"
+MIGRATION_0009 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0009_validated_lot_filters.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -464,7 +467,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0008
+    assert alembic_head_revision() == REVISION_0009
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -960,7 +963,11 @@ def test_downgrade_0008_drops_only_the_pending_table_and_upgrade_restores_it(
     run_alembic(pg_empty_db, "downgrade", REVISION_0007)
     engine = make_sync_engine(pg_empty_db)
     try:
-        assert _public_tables(engine) == full_schema - {"pending_protective_actions"}
+        # Downgrading from head to 0007 also passes through 0009, which owns the filters table.
+        assert _public_tables(engine) == full_schema - {
+            "pending_protective_actions",
+            "validated_lot_filters",
+        }
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         assert version == REVISION_0007
@@ -971,5 +978,61 @@ def test_downgrade_0008_drops_only_the_pending_table_and_upgrade_restores_it(
     engine = make_sync_engine(pg_empty_db)
     try:
         assert _public_tables(engine) == full_schema
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0009: validated_lot_filters (Phase 20, plan 20-18, Q3, D-21)
+# --------------------------------------------------------------------------------------
+def test_migration_0009_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0009, ("src", "tests")) == []
+
+
+def test_migration_0009_revises_0008() -> None:
+    text_of_migration = MIGRATION_0009.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0008}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0009}"' in text_of_migration
+
+
+def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        assert "validated_lot_filters" in full_schema
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO validated_lot_filters (symbol, price_tick_size, "
+                    "lot_min_quantity, lot_max_quantity, lot_step_size, "
+                    "market_lot_min_quantity, market_lot_max_quantity, market_lot_step_size, "
+                    "min_notional, fetched_at_utc, updated_at_utc) VALUES "
+                    "('BTCUSDT', 0.1, 0.001, 1000, 0.001, 0.001, 120, 0.001, 100, :t0, :t0)"
+                ),
+                {"t0": T0},
+            )
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0008)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema - {"validated_lot_filters"}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0008
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0009
     finally:
         engine.dispose()

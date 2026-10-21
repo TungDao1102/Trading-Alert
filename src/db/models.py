@@ -977,6 +977,64 @@ class PendingProtectiveActionRow(Base):
     )
 
 
+_VALIDATED_LOT_FILTER_POSITIVE_COLUMNS = (
+    "price_tick_size",
+    "lot_min_quantity",
+    "lot_max_quantity",
+    "lot_step_size",
+    "market_lot_min_quantity",
+    "market_lot_max_quantity",
+    "market_lot_step_size",
+    "min_notional",
+)
+
+
+class ValidatedLotFiltersRow(Base):
+    """The last validated exchangeInfo lot filters of one symbol (Q3, D-21, migration 0009).
+
+    One row per symbol (an upsert by `LotFilterSource`): the values the exchange returned and
+    `LotFilters` validated, with the time of that read. Only the emergency close may use a
+    stored row when the live read fails, and then flagged stale; a new entry never may.
+    """
+
+    __tablename__ = "validated_lot_filters"
+
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_tick_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    lot_min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    lot_max_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    lot_step_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    market_lot_min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    market_lot_max_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    market_lot_step_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    min_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fetched_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", name="pk_validated_lot_filters"),
+        CheckConstraint("symbol <> ''", name="ck_validated_lot_filters_symbol").ddl_if(
+            dialect="postgresql"
+        ),
+        *(
+            CheckConstraint(f"{name} > 0", name=f"ck_validated_lot_filters_{name}_positive").ddl_if(
+                dialect="postgresql"
+            )
+            for name in _VALIDATED_LOT_FILTER_POSITIVE_COLUMNS
+        ),
+        CheckConstraint(
+            "lot_min_quantity <= lot_max_quantity", name="ck_validated_lot_filters_lot_range"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "market_lot_min_quantity <= market_lot_max_quantity",
+            name="ck_validated_lot_filters_market_lot_range",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "updated_at_utc >= fetched_at_utc", name="ck_validated_lot_filters_time_order"
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
 # ---------- engine factory ---------------------------------------------------
 
 

@@ -48,9 +48,11 @@ Decisions and open items:
   automatic close is a separate path and ``emergency_manual_close`` (the operator path in
   ``src/execution/manager.py``) is unchanged.
 * D-14: Hedge Mode is not supported in V1; a Hedge entry is refused with ``ValueError``.
-* Q3 (owner-open): a failed live exchangeInfo read during the close is treated as "no valid
-  part can be built", the D-16 SAFE_MODE branch. The plan-time snapshot is NOT used as a
-  fallback until the owner decides.
+* Q3 (owner decided 2026-10-20, plan 20-18, D-21): without a ``lot_filters`` source a failed
+  live exchangeInfo read is "no valid part can be built", the D-16 SAFE_MODE branch. With a
+  ``LotFilterSource`` the close reads live first and, when that fails, may size from the last
+  validated filters flagged stale (journaled as ``filters_stale`` and ``filters_fetched_at_utc``);
+  with none it fails closed as ``LOT_FILTERS_UNAVAILABLE``. A new entry never uses stored filters.
 * Q4 / Phase 18 src/WR-12 (owner-open): a 418/429 pause refuses the close too (the adapter
   raises ``PreSendRefusal`` with nothing sent). No exemption is added; the deadline keeps running
   in the coordinator and no claim of safety is made. Plan 20-14 (D-19): with a pending-action
@@ -86,6 +88,7 @@ from src.domain.exchange_errors import (
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.domain.lot_filters import LotFilters
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
+from src.execution.lot_filter_source import LotFilterSource, LotFiltersUnavailable
 from src.execution.lot_split import next_close_part, plan_close_parts
 from src.execution.order_ids import derive_close_order_id
 from src.execution.pending_actions import (
@@ -315,6 +318,7 @@ class MarketEmergencyCloser(EmergencyCloser):
         limits: ExecutionLimits,
         pending_actions: PendingActionStore | None = None,
         spill: IntentSpill | None = None,
+        lot_filters: LotFilterSource | None = None,
     ) -> None:
         limits.require_live_ready()
         poll_timeout_ms = limits.emergency_close_poll_timeout_ms
@@ -334,6 +338,12 @@ class MarketEmergencyCloser(EmergencyCloser):
         self._pending_actions = pending_actions
         self._blocked = BlockedRecorder(pending_actions, spill)
         self._pending_store_failed = False
+        # Plan 20-18 (Q3, D-21): where the lot filters come from. None keeps the direct live
+        # read; a source adds the stale-stored fallback, used by this closer and by nothing
+        # that sizes an entry.
+        self._lot_filters = lot_filters
+        # The filters behind the last close of each plan (stale flag, fetch time): journaled.
+        self._filters_meta: dict[str, tuple[bool, datetime]] = {}
 
     @property
     def last_result(self) -> EmergencyCloseResult | None:
@@ -379,12 +389,25 @@ class MarketEmergencyCloser(EmergencyCloser):
             self._resolve_close_row(entry, NOTE_CLOSE_CONFIRMED_FLAT)
             return True
 
-        try:
-            filters = await self._adapter.symbol_lot_filters(symbol=symbol)
-        except Exception as exc:  # noqa: BLE001 - Q3: no live filters means no valid part
-            return self._fail(
-                entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, type(exc).__name__
-            )
+        self._filters_meta.pop(entry.plan_hash, None)
+        if self._lot_filters is not None:
+            # Q3 / D-21: live first; the last validated filters, flagged stale, only when the
+            # live read fails; with neither, nothing is guessed (fail closed below).
+            try:
+                chosen = await self._lot_filters.for_emergency_close(symbol)
+            except LotFiltersUnavailable as exc:
+                return self._fail(
+                    entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, exc.error_type
+                )
+            filters: Any = chosen.filters
+            self._filters_meta[entry.plan_hash] = (chosen.filters_stale, chosen.fetched_at_utc)
+        else:
+            try:
+                filters = await self._adapter.symbol_lot_filters(symbol=symbol)
+            except Exception as exc:  # noqa: BLE001 - Q3: no live filters means no valid part
+                return self._fail(
+                    entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, type(exc).__name__
+                )
         if not isinstance(filters, LotFilters):
             return self._fail(
                 entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, "InvalidFilters"
@@ -882,6 +905,11 @@ class MarketEmergencyCloser(EmergencyCloser):
     ) -> None:
         """Journal one event; a failing journal loses only the audit row (D034)."""
         now = self._clock()
+        meta = self._filters_meta.get(entry.plan_hash)
+        if meta is not None:
+            # Plan 20-18: which filters sized this close, and when the exchange vouched for them.
+            payload["filters_stale"] = meta[0]
+            payload["filters_fetched_at_utc"] = meta[1].isoformat()
         body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         event = JournalEvent(
             journal_event_id=content_hash_event_id(
