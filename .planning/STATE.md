@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 20
 current_phase_name: Reconcile + SAFE_MODE Hardening + Alerts
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 20-01-PLAN.md
-last_updated: "2026-10-21T08:07:29.358Z"
+stopped_at: Completed 20-02-PLAN.md
+last_updated: "2026-10-21T08:32:21.521Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 20 execution started
-state_head: 43b873f11a6ad4b8455a5eb0e3b72a0ac585a4ab
+state_head: 92882a2f5c53e80f9d1026a2b729c36bf3278970
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 278
-  completed_plans: 250
+  completed_plans: 251
 milestone_name: milestone
 ---
 
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTING
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 26
 Status: Ready to execute
 Last activity: 2026-10-21 — Phase 20 execution started
@@ -240,6 +240,7 @@ Progress: [██████░░░░] 61%
 | Phase 19 P01 | 28 min | 3 tasks | 8 files |
 | Phase 19 P16 | about 30 min (commit clock, 13:45 to 14:13) | 3 tasks | 13 files |
 | Phase 20 P01 | 15 min | 3 tasks | 7 files |
+| Phase 20 P02 | 18 min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -568,6 +569,7 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-63: research run 1 regenerated under 2.3.0 (240 records, families in parallel by owner decision); the 2.1.0 records are superseded in the owner's wording with only the versions replaced (16-DEC-RUN1-SUPERSEDED.md)
 - [Phase 16]: 16-63: R7: the soak image is rebuilt from a commit containing the TP2 guard and the 16-62 gate repeated before plan 16-43 pins the epoch
 - [Phase 20]: 20-01: Phase 20 ExecutionLimits fields are <section>_<key> (EXECUTION_LIMIT_FIELDS); Phase 19 field names unchanged; the numeric-default guard covers key texts and field names
+- [Phase 20]: 20-02: PROTECTION is a seventh TransitionKind (not persisted, no GLOSSARY block until O-01); ProtectionCoordinator._transition is the only place a protection state changes and refuses moves outside the table (journal PROTECTION_TRANSITION_REJECTED, SAFE_MODE PROTECTION_STATE_INVALID). — D-29, T-A, D077. Audit added the edges PROTECTED_ENTRY_OPEN -> FLAT and AWAITING_FILL -> ENTRY_UNRESOLVED (covered by the docstring intent). O-H exception not built (default NO). Phase 20 has no exchange event-time column: no general stale-event detection (deferred to Phase 24).
 
 ### Pending Todos
 
@@ -654,6 +656,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-21T08:07:12.364Z
-Stopped at: Completed 20-01-PLAN.md
+Last session: 2026-10-21T08:32:20.243Z
+Stopped at: Completed 20-02-PLAN.md
 Resume file: None
