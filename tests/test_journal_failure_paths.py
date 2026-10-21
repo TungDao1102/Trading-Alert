@@ -225,13 +225,20 @@ async def test_emergency_close_with_a_failing_journal_runs_every_step_but_reache
     # Every isolated step ran and failed on the journal (disable, SAFE_MODE, entry, protectives).
     failures = excinfo.value.exceptions
     assert len(failures) == 4
-    assert all(isinstance(failure, StoreUnavailable) for failure in failures)
+    # Plan 20-08 Task 1: disable now flips first, so its failure is the lost audit record
+    # (the cancel steps are made act-first in Task 2 of the same plan).
+    from src.ops.risk_first import AuditRecordLost
+
+    assert sorted(type(failure).__name__ for failure in failures) == sorted(
+        [AuditRecordLost.__name__, "StoreUnavailable", "StoreUnavailable", "StoreUnavailable"]
+    )
     assert journal.attempts - attempts_before == 4
     # SAFE_MODE was entered (flag set before journaling) ...
     assert safe_mode.in_safe_mode is True
     assert safe_mode.entered_reason == "MANUAL_CLOSE"
-    # ... but live orders stay enabled (F-702) and the exchange was never asked to cancel.
-    assert enablement.is_disabled is False
+    # ... live orders are now disabled even though the journal is down (F-702) ...
+    assert enablement.is_disabled is True
+    # ... but the cancel steps still wait for the journal until Task 2.
     assert adapter.calls == []
 
 
