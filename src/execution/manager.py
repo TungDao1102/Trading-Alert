@@ -2015,7 +2015,7 @@ async def _cancel_then_audit(
                 event=event("cancel_failed", type(exc).__name__),
             )
         except AuditRecordLost as failed_lost:
-            exc.add_note(str(failed_lost))
+            exc.add_note(type(failed_lost).__name__)
         raise
     try:
         record_after(spill=spill, journal=journal, event=event("post_cancel"))
