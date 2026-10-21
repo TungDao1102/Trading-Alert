@@ -259,6 +259,7 @@ Reason strings passed to `SafeModeController.enter_safe_mode(reason=...)` or rec
 | `EMERGENCY_CLOSE_FAILED` | `src/execution/emergency_close.py` (the automatic reduce-only MARKET close did not end flat) |
 | `PROTECTION_HANDOFF_FAILED` | `src/execution/manager.py` (the entry was placed but could not be handed to the protection coordinator, so no stop will be placed automatically) |
 | `APPROVED_QUANTITY_INCONSISTENT` | `src/execution/manager.py` (the approval row read inside the consume transaction stores a quantity that differs from the bound one or is below the quantity to place, D078 (6); nothing was consumed or sent; a NULL legacy row does not enter SAFE_MODE) |
+| `SYMBOL_OWNERSHIP_CONFLICT` | `src/reconcile/classify.py`, `src/reconcile/loop.py` (reconcile time: more than one active plan for one symbol, or exposure whose owning plan cannot be determined, is the divergence kind `AMBIGUOUS_POSITION_OWNER` from `src/reconcile/compare.py`; SAFE_MODE blocks new entries and the operator is alerted, nothing is closed, cancelled or guessed; owner decision O-D, not a D-13 decision) |
 
 Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and `SKIPPED_USER` in different modules. Use the canonical enum names above.
 
