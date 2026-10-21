@@ -50,8 +50,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
+from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import OrderRole, OrderStatus
 from src.execution.order_ids import is_system_client_id, role_of_client_id
 
@@ -124,6 +126,9 @@ class LocalOrderIntent:
     symbol: str
     order_role: str
     status: str
+    # Phase 20: the plan this order belongs to (64-char hash). Optional; when absent the
+    # compare falls back to the plan-hash prefix inside the client id.
+    plan_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,7 @@ class LocalAlgoIntent:
     symbol: str
     order_role: str
     status: str
+    plan_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +149,13 @@ class LocalPositionIntent:
     symbol: str
     position_side: str
     position_amt: Any  # Decimal — accepted as Any to keep this layer dependency-free
+    # Phase 20 (D-01a): what the compare needs to check the exchange amount against the plan.
+    # All three default to None so older fixtures stay constructible; a position whose intent
+    # lacks any of them cannot be attributed to a plan with a checkable side and bound, so
+    # the compare reports AMBIGUOUS_POSITION_OWNER and never an agreement.
+    plan_hash: str | None = None
+    expected_side: str | None = None  # "LONG" / "SHORT": the side of the owning plan
+    max_abs_amount: Any = None  # Decimal: the intended quantity, the upper bound of abs(exchange)
 
 
 @dataclass(frozen=True)
@@ -253,16 +266,73 @@ def compare(
         list, and the `orphan_protectives` subset the sweeper is
         authorised to act on.
 
+    Raises:
+        TypeError: any of the six sources is None (a missing source is never
+            read as empty), or an exchange `position_amt` is not a `Decimal`.
+        ValueError: an exchange `position_amt` is not finite.
+
     Note:
         The function is pure — it does not call the adapter. The
         caller (the scheduled reconciler tick) is responsible for
         fetching the three truth snapshots before invoking compare.
+
+        Signed amount is a BOUND check per symbol (Phase 20, D-01a), not an
+        exact reconciliation: the sign of the exchange amount must match the
+        side of the owning plan (LONG needs a positive amount, SHORT a
+        negative one) and `abs(exchange amount)` must not exceed the plan's
+        intended quantity (equality agrees). When both the sign and the bound
+        are violated only SIGN_FLIPPED_POSITION is reported (sign is checked
+        first). An over-fill that stays below the intended quantity is NOT
+        detectable here; exact comparison needs the fills ledger and Order
+        rows attributed by client order id (Phase 24, D-13 deferred). A
+        One-way position is the symbol's total exposure, so the check is per
+        symbol; it equals a per-plan check only while the Phase 19
+        one-plan-per-symbol pre-placement rule holds. Two plans on one symbol,
+        or exposure whose owner cannot be determined (missing plan_hash,
+        expected_side or a positive Decimal max_abs_amount), is
+        AMBIGUOUS_POSITION_OWNER; the compare never picks one plan.
+
+        The compare holds no clock and cannot judge the age of its inputs.
+        Stale or unreadable local data must be refused by the caller before
+        compare is invoked (plans 20-12 and 20-20), never passed as empty.
     """
+    _require_sources(
+        local_open_orders=local_open_orders,
+        local_open_algos=local_open_algos,
+        local_open_positions=local_open_positions,
+        truth_normal_orders=truth_normal_orders,
+        truth_algo_orders=truth_algo_orders,
+        truth_positions=truth_positions,
+    )
+    for _row in truth_positions:
+        _require_decimal_amount(_row)
+
     divergences: list[Divergence] = []
 
-    # Index truth rows by their canonical identifier for O(1) lookup.
-    truth_normal_by_client_id: dict[str, Any] = {o.client_order_id: o for o in truth_normal_orders}
-    truth_algo_by_client_id: dict[str, Any] = {o.client_algo_id: o for o in truth_algo_orders}
+    # Index truth rows by their canonical identifier for O(1) lookup. A repeated id
+    # is a divergence (D-03), not a silent last-row-wins collapse; the first row is kept.
+    truth_normal_by_client_id: dict[str, Any] = {}
+    for _order in truth_normal_orders:
+        _oid = _get_field(_order, "client_order_id")
+        if not isinstance(_oid, str) or _oid == "":
+            continue
+        if _oid in truth_normal_by_client_id:
+            if not any(d.client_order_id == _oid for d in divergences):
+                divergences.append(_duplicate_id_divergence(truth_normal_by_client_id[_oid], _oid))
+            continue
+        truth_normal_by_client_id[_oid] = _order
+    truth_algo_by_client_id: dict[str, Any] = {}
+    for _algo in truth_algo_orders:
+        _aid = _get_field(_algo, "client_algo_id")
+        if not isinstance(_aid, str) or _aid == "":
+            continue
+        if _aid in truth_algo_by_client_id:
+            if not any(d.client_algo_id == _aid for d in divergences):
+                divergences.append(
+                    _duplicate_id_divergence(truth_algo_by_client_id[_aid], _aid, is_algo=True)
+                )
+            continue
+        truth_algo_by_client_id[_aid] = _algo
 
     # Index local intent by canonical identifier for the reverse check.
     local_normal_by_client_id: dict[str, Any] = {}
@@ -474,34 +544,90 @@ def compare(
             )
             continue
 
-    # Pass 3 — for each exchange position, check it has a local match.
+    # Pass 3 — for each exchange position: Hedge refusal, local match, ownership and the
+    # signed bound check (D-01a), and the STOP requirement (D-01, D-07).
     for truth_pos in truth_positions:
-        if _is_zero_like(_get_field(truth_pos, "position_amt")):
+        amount = _get_field(truth_pos, "position_amt")
+        if amount == 0:
             continue
-        key = (_get_field(truth_pos, "symbol"), _get_field(truth_pos, "position_side"))
-        if key not in local_position_keys:
+        pos_side = _get_field(truth_pos, "position_side")
+        raw_symbol = _get_field(truth_pos, "symbol")
+        symbol_text = raw_symbol if isinstance(raw_symbol, str) and raw_symbol else "UNKNOWN"
+        if pos_side in _HEDGE_POSITION_SIDES:
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_UNSUPPORTED_POSITION_SIDE,
+                    symbol=symbol_text,
+                    order_role=pos_side,
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason="Hedge-mode position row (V1 supports One-way only)",
+                )
+            )
+            continue
+        if (raw_symbol, pos_side) not in local_position_keys:
             divergences.append(
                 Divergence(
                     kind=DIVERGENCE_KIND_UNSYNCED_POSITION,
-                    symbol=_get_field(truth_pos, "symbol"),
+                    symbol=raw_symbol,
                     order_role="N/A",
                     client_order_id=None,
                     client_algo_id=None,
                     reason=("exchange position with no matching local intent"),
                 )
             )
+        else:
+            local_for_symbol = [
+                p
+                for p in local_open_positions
+                if _get_field(p, "symbol") == raw_symbol
+                and not _is_zero_like(_get_field(p, "position_amt"))
+            ]
+            owner_kind, owner_reason = _check_position_bound(amount, local_for_symbol)
+            if owner_kind is not None:
+                divergences.append(
+                    Divergence(
+                        kind=owner_kind,
+                        symbol=symbol_text,
+                        order_role="POSITION",
+                        client_order_id=None,
+                        client_algo_id=None,
+                        reason=owner_reason,
+                    )
+                )
+        stop_kind = _check_stop(raw_symbol, truth_algo_orders)
+        if stop_kind is not None:
+            divergences.append(
+                Divergence(
+                    kind=stop_kind,
+                    symbol=symbol_text,
+                    order_role="POSITION",
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason=(
+                        "exchange position with only take-profit legs and no STOP_LOSS"
+                        if stop_kind == DIVERGENCE_KIND_TP_ONLY_POSITION
+                        else "exchange position without an ACTIVE system STOP_LOSS algo order"
+                    ),
+                )
+            )
 
     # Pass 4 — reverse pass (D-01, D-02): every exchange order with no open local
     # intent is a divergence. A foreign order is never added to `orphan_protectives`.
+    reported_ids: set[str] = set()
     for truth_order in truth_normal_orders:
         order_id = _get_field(truth_order, "client_order_id")
-        if isinstance(order_id, str) and order_id in local_normal_by_client_id:
-            continue
+        if isinstance(order_id, str) and order_id != "":
+            if order_id in local_normal_by_client_id or order_id in reported_ids:
+                continue
+            reported_ids.add(order_id)
         divergences.append(_unowned_order_divergence(truth_order, order_id, is_algo=False))
     for truth_algo in truth_algo_orders:
         algo_id = _get_field(truth_algo, "client_algo_id")
-        if isinstance(algo_id, str) and algo_id in local_algo_by_client_id:
-            continue
+        if isinstance(algo_id, str) and algo_id != "":
+            if algo_id in local_algo_by_client_id or algo_id in reported_ids:
+                continue
+            reported_ids.add(algo_id)
         divergences.append(_unowned_order_divergence(truth_algo, algo_id, is_algo=True))
 
     # Sort divergences deterministically.
@@ -591,6 +717,116 @@ def _get_field(entry: Any, field_name: str) -> Any:
     if isinstance(entry, dict):
         return entry.get(field_name)
     return getattr(entry, field_name, None)
+
+
+_HEDGE_POSITION_SIDES: frozenset[str] = frozenset({"LONG", "SHORT"})
+
+
+def _require_sources(**sources: Any) -> None:
+    """Refuse a None source: a missing source is never read as an empty one."""
+    for name, value in sources.items():
+        if value is None:
+            raise TypeError(
+                f"compare: {name} must be a sequence, got None "
+                "(a missing source is never read as empty)"
+            )
+
+
+def _require_decimal_amount(truth_pos: Any) -> None:
+    amount = _get_field(truth_pos, "position_amt")
+    if not isinstance(amount, Decimal):
+        raise TypeError(
+            f"compare: exchange position_amt must be a Decimal, got {type(amount).__name__}"
+        )
+    if not amount.is_finite():
+        raise ValueError("compare: exchange position_amt must be finite")
+
+
+def _is_positive_decimal(value: Any) -> bool:
+    return isinstance(value, Decimal) and value.is_finite() and value > 0
+
+
+def _check_position_bound(
+    amount: Decimal, local_for_symbol: Sequence[Any]
+) -> tuple[str | None, str]:
+    """Attribute exposure to one plan, then run the sign check before the bound check.
+
+    Returns `(kind, reason)`; `kind` is None when the exposure agrees with its owner.
+    """
+    owners: set[tuple[str, str, Decimal]] = set()
+    for intent in local_for_symbol:
+        plan_hash = _get_field(intent, "plan_hash")
+        side = _get_field(intent, "expected_side")
+        bound = _get_field(intent, "max_abs_amount")
+        if (
+            not isinstance(plan_hash, str)
+            or plan_hash == ""
+            or side not in _HEDGE_POSITION_SIDES
+            or not _is_positive_decimal(bound)
+        ):
+            return (
+                DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER,
+                "exposure cannot be attributed to one plan with a checkable side and bound "
+                "(local position intent lacks plan_hash, expected_side or a positive "
+                "Decimal max_abs_amount)",
+            )
+        owners.add((plan_hash, side, bound))
+    if len(owners) != 1:
+        return (
+            DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER,
+            "more than one owning plan, or conflicting plan data, for one symbol "
+            "(the compare never picks one plan)",
+        )
+    _plan, side, bound = next(iter(owners))
+    if (side == "LONG" and amount < 0) or (side == "SHORT" and amount > 0):
+        return (
+            DIVERGENCE_KIND_SIGN_FLIPPED_POSITION,
+            f"exchange amount sign disagrees with the {side} plan",
+        )
+    if abs(amount) > bound:
+        return (
+            DIVERGENCE_KIND_DOUBLED_POSITION,
+            "abs(exchange amount) is larger than the intended quantity of the plan",
+        )
+    return (None, "")
+
+
+def _check_stop(symbol: Any, truth_algo_orders: Sequence[Any]) -> str | None:
+    """None when an ACTIVE system STOP_LOSS exists; else the kind of the missing stop.
+
+    TP_ONLY_POSITION when there is no STOP_LOSS row of this system at all but at least one
+    take-profit leg; POSITION_WITHOUT_STOP otherwise (no algo, a foreign stop, or a system
+    stop whose status is not in the ACTIVE class).
+    """
+    has_stop_row = False
+    has_tp_leg = False
+    for algo in truth_algo_orders:
+        if _get_field(algo, "symbol") != symbol:
+            continue
+        role = role_of_client_id(_get_field(algo, "client_algo_id"))
+        if role == OrderRole.STOP_LOSS.value:
+            if is_protection_confirmed(_get_field(algo, "algo_status")):
+                return None
+            has_stop_row = True
+        elif role in (OrderRole.TAKE_PROFIT_1.value, OrderRole.TAKE_PROFIT_2.value):
+            has_tp_leg = True
+    if has_tp_leg and not has_stop_row:
+        return DIVERGENCE_KIND_TP_ONLY_POSITION
+    return DIVERGENCE_KIND_POSITION_WITHOUT_STOP
+
+
+def _duplicate_id_divergence(
+    first_row: Any, client_id: str, *, is_algo: bool = False
+) -> Divergence:
+    symbol = _get_field(first_row, "symbol")
+    return Divergence(
+        kind=DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID,
+        symbol=symbol if isinstance(symbol, str) and symbol != "" else "UNKNOWN",
+        order_role=role_of_client_id(client_id) or "UNKNOWN",
+        client_order_id=None if is_algo else client_id,
+        client_algo_id=client_id if is_algo else None,
+        reason="the same client id appears more than once in the exchange truth",
+    )
 
 
 def _unowned_order_divergence(row: Any, order_id: Any, *, is_algo: bool) -> Divergence:
