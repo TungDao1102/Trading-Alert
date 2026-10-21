@@ -2,12 +2,15 @@
 
 Per D-04: deployment default is `LIVE_ORDERS_DISABLED`; live execution
 requires an explicit operator enable step. The controller owns the
-`LIVE_ORDERS_DISABLED` flag, journals enable/disable transitions before
-flipping the flag (journal-first pattern mirroring `SafeModeController`),
-and exposes `guard_placement` returning an `EnablementVerdict`.
+`LIVE_ORDERS_DISABLED` flag. ENABLE is journaled before the flag flips (an enable
+without its audit record must not happen). DISABLE is risk-reducing, so it acts first
+and journals afterwards (Phase 20 plan 20-08, D-16, F-702): the flag flips, then the
+record goes to the journal or, if the journal is down, to a local spill. The controller
+exposes `guard_placement` returning an `EnablementVerdict`.
 
-The module is dependency-free: stdlib + `src/domain/journal.py` + `src/domain/enums.py`.
-No analytics import, no Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
+The module imports only stdlib, `src/domain` and the pure-Python `src/ops/risk_first` /
+`src/ops/spill` helpers. No analytics import, no Binance SDK, no SQLAlchemy, no Pydantic,
+no Polars of its own.
 """
 
 from __future__ import annotations
@@ -16,10 +19,14 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Protocol, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from src.domain.enums import KillGateState
 from src.domain.journal import JournalEvent, content_hash_event_id
+from src.ops.risk_first import record_after
+
+if TYPE_CHECKING:
+    from src.ops.spill import LocalSpill
 
 # --------------------------------------------------------------------------- #
 # Reason code constants — enablement-specific vocabulary.
@@ -82,27 +89,38 @@ class EnablementVerdict:
 
 
 class LiveEnablementController:
-    """LIVE_ORDERS_DISABLED flag owner with journal-first transitions.
+    """LIVE_ORDERS_DISABLED flag owner: enable is journal-first, disable acts first.
 
     The controller is the single owner of the `LIVE_ORDERS_DISABLED`
     flag. The default is `True` (disabled) — live execution requires an
-    explicit operator enable step. Enable/disable transitions are
-    journaled BEFORE the flag flips (journal-first pattern mirroring
-    `SafeModeController`).
+    explicit operator enable step. The ENABLE transition is journaled
+    BEFORE the flag flips. The DISABLE transition flips the flag FIRST and
+    is journaled afterwards, through the local spill when the journal is
+    down (D-16, F-702), so a database outage can never keep live orders on.
 
     Args:
         journal: The journal layer (Protocol-typed; the real journal
             satisfies this).
+        spill: Optional local spill that keeps the disable audit record
+            when the journal is down. Without one a failing journal raises
+            `AuditRecordLost` AFTER the flag flipped.
     """
 
-    def __init__(self, *, journal: JournalLike) -> None:
+    def __init__(self, *, journal: JournalLike, spill: LocalSpill | None = None) -> None:
         self._journal = journal
+        self._spill = spill
         self._disabled: bool = True
         self._enabled_at_utc: datetime | None = None
         self._operator_id: str | None = None
 
     @classmethod
-    def rehydrate(cls, *, journal: JournalLike, state: Mapping[str, Any] | None) -> Self:
+    def rehydrate(
+        cls,
+        *,
+        journal: JournalLike,
+        state: Mapping[str, Any] | None,
+        spill: LocalSpill | None = None,
+    ) -> Self:
         """Rebuild a controller from a persisted `state_snapshot()` mapping (D-22, F-606).
 
         `state=None` means nothing was ever persisted and returns the default controller
@@ -115,6 +133,7 @@ class LiveEnablementController:
 
         Args:
             journal: The journal layer (as for the constructor).
+            spill: The optional local spill (as for the constructor).
             state: `{"disabled": bool, "enabled_at_utc": ISO UTC text or None,
                 "operator_id": text or None}`, or None.
 
@@ -123,7 +142,7 @@ class LiveEnablementController:
                 type, a datetime is naive or not UTC, an enabled state lacks its operator id or
                 enable time, or a disabled state still carries either.
         """
-        controller = cls(journal=journal)
+        controller = cls(journal=journal, spill=spill)
         if state is None:
             return controller
         disabled, enabled_at_utc, operator_id = _parse_state(state)
@@ -252,33 +271,41 @@ class LiveEnablementController:
                 "until an explicit human decision record clears it"
             )
 
-        # Journal first, then flip the flag.
-        self._journal_enablement_event(
-            event_type="LIVE_ORDERS_ENABLED",
-            operator_id=operator_id,
-            now_utc=now_utc,
-            disabled_after=False,
+        # Journal first, then flip the flag (enabling is not risk-reducing).
+        self._journal.record(
+            self._build_enablement_event(
+                event_type="LIVE_ORDERS_ENABLED",
+                operator_id=operator_id,
+                now_utc=now_utc,
+                disabled_after=False,
+            )
         )
         self._disabled = False
         self._enabled_at_utc = now_utc
         self._operator_id = operator_id
 
     def disable(self, *, operator_id: str, now_utc: datetime) -> None:
-        """Disable live orders. Journals the transition before flipping the flag.
+        """Disable live orders. Flips the flag first, journals the transition afterwards.
 
-        Per D-04: disable transitions are journaled with operator id
-        plus timestamp. The journal event is recorded BEFORE the flag
-        flips (journal-first pattern).
+        Per D-04 the transition is journaled with operator id plus timestamp. Per D-16
+        (F-702) disabling is risk-reducing, so it never waits for the journal: the flag
+        flips, then the record goes to the journal, or to the local spill when the journal
+        is down. A database outage therefore cannot keep live orders enabled.
 
         Args:
             operator_id: The operator id disabling live orders.
             now_utc: The current UTC-aware datetime.
+
+        Raises:
+            ValueError: invalid operator id or timestamp (before any change).
+            AuditRecordLost: the flag flipped, but neither the journal nor the spill took the
+                audit record (the message names exception classes only).
         """
         _validate_operator_id(operator_id)
         _validate_utc_aware(now_utc)
 
-        # Journal first, then flip the flag.
-        self._journal_enablement_event(
+        # Build the record while the prior state is still known, flip, then record.
+        event = self._build_enablement_event(
             event_type="LIVE_ORDERS_DISABLED",
             operator_id=operator_id,
             now_utc=now_utc,
@@ -287,21 +314,20 @@ class LiveEnablementController:
         self._disabled = True
         self._enabled_at_utc = None
         self._operator_id = None
+        record_after(spill=self._spill, journal=self._journal, event=event)
 
     # ----- internal helpers ---------------------------------------------- #
 
-    def _journal_enablement_event(
+    def _build_enablement_event(
         self, *, event_type: str, operator_id: str, now_utc: datetime, disabled_after: bool
-    ) -> None:
-        """Record one enable/disable transition as a JournalEvent.
+    ) -> JournalEvent:
+        """Build one enable/disable transition as a JournalEvent.
 
-        The journal layer is the audit trail; the controller never
-        mutates state without journaling first (D-05 extended). Because
-        the event is written BEFORE the flag flips, the payload carries
-        the TARGET state explicitly (`live_orders_disabled`, the state
-        after this transition) plus the prior state
-        (`live_orders_disabled_before`) — 09-REVIEW WR-10: the record
-        never contradicts its own event type.
+        The journal layer is the audit trail. The payload carries the TARGET
+        state explicitly (`live_orders_disabled`, the state after this
+        transition) plus the prior state (`live_orders_disabled_before`),
+        so the record never contradicts its own event type (09-REVIEW WR-10).
+        The event is built BEFORE the flag changes so the prior state is exact.
         """
         payload_json = json.dumps(
             {
@@ -311,7 +337,7 @@ class LiveEnablementController:
             },
             separators=(",", ":"),
         )
-        event = JournalEvent(
+        return JournalEvent(
             # 09-REVIEW WR-09: content-hash id (no same-millisecond PK collision).
             journal_event_id=content_hash_event_id(
                 prefix="enablement",
@@ -327,7 +353,6 @@ class LiveEnablementController:
             correlation_id="execution_enablement",
             payload_json=payload_json,
         )
-        self._journal.record(event)
 
 
 # --------------------------------------------------------------------------- #

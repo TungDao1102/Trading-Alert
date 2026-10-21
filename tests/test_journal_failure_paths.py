@@ -1,27 +1,22 @@
-"""Journal-first controllers when the journal raises `StoreUnavailable` (Phase 17-08, Pitfall 9).
+"""Controllers when the journal raises `StoreUnavailable` (Phase 17-08 pins, Phase 20-08 rule).
 
 No PostgreSQL here: a `ToggleJournal` stands in for `PgJournalStore` during a database
-outage. The module PINS what the code does TODAY so that Phase 20 changes it deliberately;
-it does not change any controller (controller fixes are Phase 20).
-
-Pinned behaviors (a journal outage is the only fault injected):
+outage. Phase 17 pinned the unsafe behavior; Phase 20 plan 20-08 (D-16, F-702) replaced it
+with "act first, journal afterwards". Behaviors (a journal outage is the only fault injected):
 
   1. `SafeModeController.enter_safe_mode` sets the in-memory flag BEFORE journaling, so
      SAFE_MODE survives a journal outage, and the `StoreUnavailable` is NOT swallowed
      (T-17-22).
-  2. `LiveEnablementController.disable` journals BEFORE flipping, so with a failing journal
-     it raises and the controller STAYS ENABLED. This is the F-702 behavior, owned by
-     Phase 20 (the disable must flip first, or be journaled by the caller afterwards).
-  3. `expire_pending_entry` and `cancel_untriggered_protectives` journal the pre-image BEFORE
-     the exchange call and sit outside their per-leg isolation, so with a failing journal
-     NO exchange cancel is issued and the `StoreUnavailable` surfaces unwrapped.
-  4. Consequently `emergency_manual_close` with a failing journal runs all four of its
-     isolated steps (each failure is collected, none aborts a later step) but issues ZERO
-     exchange cancels, leaves live orders enabled (via step 2) and enters SAFE_MODE (via
-     step 1). It raises one `ExceptionGroup` holding four `StoreUnavailable`.
-
-Behaviors 2-4 are UNSAFE gaps for an outage (see the 17-08 SUMMARY); they are pinned, not
-fixed, here.
+  2. `LiveEnablementController.disable` flips FIRST and journals afterwards (Phase 20 plan
+     20-08, F-702): with a failing journal the controller is disabled and `AuditRecordLost`
+     is raised after the flip (or the record waits in a local spill when one is configured).
+  3. `expire_pending_entry` and `cancel_untriggered_protectives` act FIRST (plan 20-08):
+     with a failing journal the exchange cancel is still issued, once per order, and
+     `AuditRecordLost` is raised afterwards when there is no spill to hold the record.
+  4. Consequently `emergency_manual_close` with a failing journal runs all four steps, issues
+     all four exchange cancels, disables live orders and enters SAFE_MODE. It raises one
+     `ExceptionGroup` holding the SAFE_MODE `StoreUnavailable` (SAFE_MODE journaling is not
+     part of plan 20-08) and one `AuditRecordLost` per lost audit record.
 
   5. `SafeModeController.exit_safe_mode` journals the exit BEFORE clearing the flag
      (17-REVIEW WR-03, the opposite order to entering): with a failing journal the controller
@@ -131,29 +126,47 @@ def test_safe_mode_is_entered_even_though_the_journal_is_down() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_disable_with_a_failing_journal_raises_and_the_controller_stays_enabled() -> None:
+def test_disable_with_a_failing_journal_flips_the_flag_and_raises_audit_record_lost() -> None:
+    """Rewritten by Phase 20 plan 20-08 (F-702, D-16): disable acts first, journals afterwards.
+
+    The Phase 17 pin (`..._raises_and_the_controller_stays_enabled`) said a database outage kept
+    live orders enabled. With a journal that raises and no spill the flag now flips and
+    `AuditRecordLost` is raised after it, naming the exception class only.
+    """
+    from src.ops.risk_first import AuditRecordLost
+
     journal = ToggleJournal()
     controller = _enabled_controller(journal)
     journal.down = True
 
-    with pytest.raises(StoreUnavailable):
+    with pytest.raises(AuditRecordLost) as excinfo:
         controller.disable(operator_id="operator_alpha", now_utc=NOW_UTC)
 
-    # F-702: the transition is journal-first, so the flag never flipped. Phase 20 changes this.
-    assert controller.is_disabled is False
-    assert controller.guard_placement(plan_hash=PLAN_HASH).is_no_trade is False
+    # F-702: the flag flipped before the journal was asked; the outage cannot keep live on.
+    assert controller.is_disabled is True
+    assert controller.guard_placement(plan_hash=PLAN_HASH).is_no_trade is True
+    assert "StoreUnavailable" in str(excinfo.value)
+    assert "PostgreSQL unavailable" not in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #
-# 3. Cancel steps journal before the exchange call.
+# 3. Cancel steps act first (plan 20-08, F-702, D-16).
 # --------------------------------------------------------------------------- #
 
 
-async def test_expire_pending_entry_issues_no_cancel_when_the_journal_is_down() -> None:
+async def test_expire_pending_entry_still_cancels_when_the_journal_is_down() -> None:
+    """Rewritten by Phase 20 plan 20-08 (F-702): the cancel no longer waits for the journal.
+
+    The Phase 17 pin (`..._issues_no_cancel_when_the_journal_is_down`) said a journal outage
+    prevented the cancel. Now the cancel is issued once and, with no spill configured,
+    `AuditRecordLost` is raised afterwards, naming exception classes only.
+    """
+    from src.ops.risk_first import AuditRecordLost
+
     journal = ToggleJournal(down=True)
     adapter = RecordingCancelAdapter()
 
-    with pytest.raises(StoreUnavailable):
+    with pytest.raises(AuditRecordLost) as excinfo:
         await expire_pending_entry(
             plan_hash=PLAN_HASH,
             symbol=SYMBOL,
@@ -163,16 +176,24 @@ async def test_expire_pending_entry_issues_no_cancel_when_the_journal_is_down() 
             trigger_reason="operator_close",
         )
 
-    assert adapter.calls == []
+    assert [method for method, _ in adapter.calls] == ["cancel_normal_order"]
+    assert "StoreUnavailable" in str(excinfo.value)
+    assert "PostgreSQL unavailable" not in str(excinfo.value)
 
 
-async def test_cancel_untriggered_protectives_issues_no_cancel_when_the_journal_is_down() -> None:
+async def test_cancel_untriggered_protectives_cancels_every_leg_in_an_outage() -> None:
+    """Rewritten by Phase 20 plan 20-08 (F-702): every leg is cancelled during an outage.
+
+    The Phase 17 pin said the outage surfaced unwrapped on the first leg and no cancel was
+    issued. Now all three legs are cancelled in SL -> TP1 -> TP2 order and each lost audit
+    record is collected into the `ExceptionGroup` (one per leg).
+    """
+    from src.ops.risk_first import AuditRecordLost
+
     journal = ToggleJournal(down=True)
     adapter = RecordingCancelAdapter()
 
-    # The pre-image write sits outside the per-leg isolation: the outage surfaces
-    # unwrapped on the first leg and no later leg is attempted.
-    with pytest.raises(StoreUnavailable):
+    with pytest.raises(ExceptionGroup) as excinfo:
         await cancel_untriggered_protectives(
             plan_hash=PLAN_HASH,
             symbol=SYMBOL,
@@ -181,8 +202,9 @@ async def test_cancel_untriggered_protectives_issues_no_cancel_when_the_journal_
             now_utc=NOW_UTC,
         )
 
-    assert adapter.calls == []
-    assert journal.attempts == 1
+    assert [method for method, _ in adapter.calls] == ["cancel_algo_order"] * 3
+    assert [type(e) for e in excinfo.value.exceptions] == [AuditRecordLost] * 3
+    assert journal.attempts == 6  # pre-image and post-image per leg, none withheld
 
 
 # --------------------------------------------------------------------------- #
@@ -190,15 +212,21 @@ async def test_cancel_untriggered_protectives_issues_no_cancel_when_the_journal_
 # --------------------------------------------------------------------------- #
 
 
-async def test_emergency_close_with_a_failing_journal_runs_every_step_but_reaches_no_exchange() -> (
-    None
-):
+async def test_emergency_close_in_an_outage_runs_every_step_and_reaches_the_exchange() -> None:
+    """Rewritten by Phase 20 plan 20-08 (F-702): the whole sequence works during an outage.
+
+    The Phase 17 pin said four `StoreUnavailable`, zero exchange cancels and live orders left
+    enabled. Now live orders are disabled, SAFE_MODE is entered and all four cancels are issued.
+    The group holds the SAFE_MODE `StoreUnavailable` (SAFE_MODE journaling is not part of this
+    plan) and the lost audit records of the disable, the entry cancel and the protective cancels.
+    """
+    from src.ops.risk_first import AuditRecordLost
+
     journal = ToggleJournal()
     enablement = _enabled_controller(journal)
     safe_mode = _safe_mode_controller(journal)
     adapter = RecordingCancelAdapter()
     journal.down = True
-    attempts_before = journal.attempts
 
     with pytest.raises(ExceptionGroup) as excinfo:
         await emergency_manual_close(
@@ -212,17 +240,22 @@ async def test_emergency_close_with_a_failing_journal_runs_every_step_but_reache
             now_utc=NOW_UTC,
         )
 
-    # Every isolated step ran and failed on the journal (disable, SAFE_MODE, entry, protectives).
     failures = excinfo.value.exceptions
-    assert len(failures) == 4
-    assert all(isinstance(failure, StoreUnavailable) for failure in failures)
-    assert journal.attempts - attempts_before == 4
-    # SAFE_MODE was entered (flag set before journaling) ...
+    assert [type(failure) for failure in failures] == [
+        AuditRecordLost,  # disable
+        StoreUnavailable,  # SAFE_MODE enter (flag set first)
+        AuditRecordLost,  # entry cancel
+        ExceptionGroup,  # protective legs, one lost record per leg
+    ]
     assert safe_mode.in_safe_mode is True
     assert safe_mode.entered_reason == "MANUAL_CLOSE"
-    # ... but live orders stay enabled (F-702) and the exchange was never asked to cancel.
-    assert enablement.is_disabled is False
-    assert adapter.calls == []
+    assert enablement.is_disabled is True
+    assert [method for method, _ in adapter.calls] == [
+        "cancel_normal_order",
+        "cancel_algo_order",
+        "cancel_algo_order",
+        "cancel_algo_order",
+    ]
 
 
 async def test_emergency_close_cancels_run_once_the_journal_is_back() -> None:

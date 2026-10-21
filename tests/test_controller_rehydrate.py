@@ -318,7 +318,9 @@ def test_constructor_signatures_are_unchanged() -> None:
     assert list(safe.parameters) == ["self", "adapter", "journal", "compare_fn", "state_store"]
     assert safe.parameters["state_store"].default is None
     enable = inspect.signature(LiveEnablementController.__init__)
-    assert list(enable.parameters) == ["self", "journal"]
+    # Plan 20-08 (D-16) adds the optional `spill` keyword; `journal` keeps its place.
+    assert list(enable.parameters) == ["self", "journal", "spill"]
+    assert enable.parameters["spill"].default is None
 
 
 @pytest.mark.parametrize("module", ["reconcile/safe_mode.py", "execution/enablement.py"])
