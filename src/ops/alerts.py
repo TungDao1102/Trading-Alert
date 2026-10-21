@@ -20,6 +20,11 @@ with the real infrastructure; plan 20-22 wires the producers and publishes `OPS0
 - `emit_daily_state_alert` is a TEST TRIGGER for the Phase 21 daily states: no production
   module calls it until Phase 21 provides a producer.
 
+`OPS05_MATRIX` states, per OPS-05 alert, the producer and what Phase 20 delivers.
+OPS-05 is NOT complete end-to-end in Phase 20: DAILY_STOP and DAILY_LOSS_WARNING have a contract
+and a test trigger only (the producer is Phase 21), and a test trigger is not end-to-end
+coverage (D-23).
+
 The module reads no clock: every time comes from the caller.
 """
 
@@ -712,6 +717,155 @@ class SafeModeAlertObserver:
         )
 
 
+# --------------------------------------------------------------------------- #
+# The OPS-05 acceptance matrix (plan 20-22, T-G, D-23, D-24).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Ops05Row:
+    """One alert of OPS-05: its event, where it comes from and what Phase 20 delivers.
+
+    `alert` is the event name in `ALERT_EVENTS` (the event contract: name, severity and fixed
+    template). `requirement_source` says where the alert is required (`OPS-05` or a Phase 20
+    decision). `producer` is the module that raises it today, or `Phase 21` when none exists
+    yet; `phase20_delivers` is the honest scope. `journal_first` and `dedupe_and_retry` describe
+    the shared sink: the alert is journaled before it is queued, a repeat inside the dedupe
+    window is suppressed, and only the MESSAGE is retried (an order never is, Q5).
+    """
+
+    alert: str
+    requirement_source: str
+    phase20_delivers: str
+    producer: str
+    journal_first: bool
+    dedupe_and_retry: str
+
+
+_SINK_BEHAVIOR = "dedupe window + bounded message retry; orders never retried"
+_SOURCE_OPS05 = "OPS-05"
+_SOURCE_D24 = "D-24 (entry path)"
+_PRODUCER_PHASE21 = "Phase 21"
+
+OPS05_MATRIX: tuple[Ops05Row, ...] = (
+    Ops05Row(
+        "ENTRY_STATE_UNKNOWN",
+        _SOURCE_D24,
+        "SAFE_MODE entry of the entry path alerts through the on_enter observer",
+        "src/execution/manager.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "PROTECTION_HANDOFF_FAILED",
+        _SOURCE_D24,
+        "SAFE_MODE entry of the entry path alerts through the on_enter observer",
+        "src/execution/manager.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "DB_FAILURE",
+        _SOURCE_D24,
+        "SAFE_MODE entry after a store failure alerts through the on_enter observer",
+        "src/execution/manager.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "PROTECTIVE_REJECTED",
+        _SOURCE_OPS05,
+        "definitive stop rejection after a fill (B5) alerts with CLOSE_REQUIRED",
+        "src/execution/protection.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "UNPROTECTED_POSITION",
+        _SOURCE_OPS05,
+        "reconcile tick alerts a position without stop, a TP-only position, an entry without "
+        "protective",
+        "src/reconcile/classify.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "CLOSE_REQUIRED",
+        _SOURCE_OPS05,
+        "the protection coordinator alerts once per plan when the position must be closed",
+        "src/execution/protection.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "DIVERGENCE",
+        _SOURCE_OPS05,
+        "reconcile tick alerts a local versus exchange divergence",
+        "src/reconcile/classify.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "UNKNOWN_ORDER",
+        _SOURCE_OPS05,
+        "reconcile tick alerts an untracked system order",
+        "src/reconcile/classify.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "FOREIGN_ORDER",
+        _SOURCE_OPS05,
+        "reconcile tick alerts a foreign order",
+        "src/reconcile/classify.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "STALE_DATA",
+        _SOURCE_OPS05,
+        "reconcile tick alerts a stale mark price, a silent user-data stream or a halted stream",
+        "src/reconcile/loop.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "AUTH_FAILURE",
+        _SOURCE_OPS05,
+        "produced only by the reconcile tick REST reads (plan 20-16); the coordinator, the "
+        "closer and the manager journal the error class and do not alert it in Phase 20",
+        "src/reconcile/loop.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "DUPLICATE_EXECUTION_ATTEMPT",
+        _SOURCE_OPS05,
+        "an already consumed approval (stored outcome or lost consume race) alerts through the "
+        "optional LivePlacementContext.alert_sink; nothing is re-sent",
+        "src/execution/manager.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "DAILY_STOP",
+        _SOURCE_OPS05,
+        "contract and test trigger only (emit_daily_state_alert); not end-to-end",
+        _PRODUCER_PHASE21,
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "DAILY_LOSS_WARNING",
+        _SOURCE_OPS05,
+        "contract and test trigger only (emit_daily_state_alert); not end-to-end",
+        _PRODUCER_PHASE21,
+        True,
+        _SINK_BEHAVIOR,
+    ),
+)
+
+
 class _AlertEmitter(Protocol):
     def alert(
         self,
@@ -765,8 +919,10 @@ __all__ = [
     "AlertTextBot",
     "DEDICATED_PRODUCER_REASONS",
     "JournalFirstAlertSink",
+    "OPS05_MATRIX",
     "RequeueReport",
     "OperationalAlert",
+    "Ops05Row",
     "SafeModeAlertObserver",
     "SendReport",
     "TelegramAlertSender",
