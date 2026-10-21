@@ -8,6 +8,8 @@ process; here it is driven by tests with fakes. One tick:
      GATE_STATE_UNKNOWN after a restart, plan 20-07). If so it reads nothing, journals
      RECONCILE_SKIPPED_GATE and stops: a pause is never bypassed (D-18). The coordinator's own
      clock-driven deadlines keep running in its step, not here.
+     The gate's `recovery_status()` (plan 20-07), when it has one, is copied into the tick rows
+     and the report, so LEGACY_IN_MEMORY (no persistence wired) is visible.
   2. stops with RECONCILE_SKIPPED_RESTORE_PENDING while the coordinator's tracked plans are not
      rebuilt (`restore_complete`), so a half-restored view is never read as "no plans".
   3. lets the optional `UnknownEntryResolver` step (D-11, D-12: every UNKNOWN exit goes through it
@@ -39,6 +41,7 @@ kinds, symbols, counts and exception class names.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -207,6 +210,7 @@ class TickReport:
     swept: tuple[tuple[str, str], ...] = ()
     sweep_skipped: tuple[tuple[str, str], ...] = ()
     gate_reason: str | None = None
+    gate_recovery_status: str | None = None
     failed_source: str | None = None
     action_failures: tuple[str, ...] = ()
     unknown_entries: Any = None
@@ -296,14 +300,16 @@ class ReconcileLoop:
         if self._lock.locked():
             return TickReport(outcome=TICK_SKIPPED_OVERLAP, now_utc=now_utc)
         async with self._lock:
-            return await self._run(now_utc)
+            gate_status = self._gate_recovery_status()
+            report = await self._run(now_utc, gate_status)
+            return dataclasses.replace(report, gate_recovery_status=gate_status)
 
     # ------------------------------------------------------------------ #
     # Steps.
     # ------------------------------------------------------------------ #
 
-    async def _run(self, now_utc: datetime) -> TickReport:
-        gate_report = self._check_gate(now_utc)
+    async def _run(self, now_utc: datetime, gate_status: str | None) -> TickReport:
+        gate_report = self._check_gate(now_utc, gate_status)
         if gate_report is not None:
             return gate_report
         if not self._restore_complete():
@@ -351,9 +357,25 @@ class ReconcileLoop:
                 now_utc, "compare", exc, SAFE_MODE_API_DEGRADATION, action_failures
             )
 
-        return await self._act(now_utc, diff, plans, unknown_report, action_failures)
+        return await self._act(now_utc, diff, plans, unknown_report, action_failures, gate_status)
 
-    def _check_gate(self, now_utc: datetime) -> TickReport | None:
+    def _gate_recovery_status(self) -> str | None:
+        """The gate's restart-recovery verdict (plan 20-07), when the gate exposes one.
+
+        LEGACY_IN_MEMORY means no persistence is wired (plan 20-25 must not accept it); None means
+        the gate offers no verdict (or it could not be read), and the field is left out.
+        """
+        reader = getattr(self._gate, "recovery_status", None)
+        if not callable(reader):
+            return None
+        try:
+            status = reader()
+        except Exception:
+            return None
+        value = getattr(status, "value", status)
+        return value if isinstance(value, str) and value != "" else None
+
+    def _check_gate(self, now_utc: datetime, gate_status: str | None) -> TickReport | None:
         try:
             restriction = self._gate.restriction()
         except Exception as exc:
@@ -363,6 +385,8 @@ class ReconcileLoop:
         reason = getattr(restriction, "reason", None)
         reason_text = reason if isinstance(reason, str) and reason != "" else _UNKNOWN_REASON
         payload: dict[str, Any] = {"reason": reason_text}
+        if gate_status is not None:
+            payload["gate_recovery_status"] = gate_status
         remaining = getattr(restriction, "remaining_seconds", None)
         if isinstance(remaining, int) and not isinstance(remaining, bool):
             payload["remaining_seconds"] = remaining
@@ -418,6 +442,7 @@ class ReconcileLoop:
         plans: tuple[Any, ...],
         unknown_report: Any,
         failures: list[str],
+        gate_status: str | None,
     ) -> TickReport:
         # One entry per distinct reason, least urgent first: the controller keeps the LAST reason,
         # so the persisted reason is the most urgent one (stop-related exposure), and every
@@ -456,23 +481,22 @@ class ReconcileLoop:
         counts: dict[str, int] = {}
         for divergence in diff.divergences:
             counts[divergence.kind] = counts.get(divergence.kind, 0) + 1
-        self._journal_row(
-            RECONCILE_TICK,
-            {
-                "outcome": TICK_COMPARED,
-                "divergence_count": len(diff.divergences),
-                "counts": counts,
-                "safe_mode_reasons": reasons,
-                "delegated": len(delegated),
-                "undelegated": len(undelegated),
-                "alerts_sent": alerts_sent,
-                "alerts_failed": alerts_failed,
-                "swept": len(swept),
-                "sweep_skipped": len(sweep_skipped),
-                "action_failures": list(failures),
-            },
-            now_utc,
-        )
+        tick_payload: dict[str, Any] = {
+            "outcome": TICK_COMPARED,
+            "divergence_count": len(diff.divergences),
+            "counts": counts,
+            "safe_mode_reasons": reasons,
+            "delegated": len(delegated),
+            "undelegated": len(undelegated),
+            "alerts_sent": alerts_sent,
+            "alerts_failed": alerts_failed,
+            "swept": len(swept),
+            "sweep_skipped": len(sweep_skipped),
+            "action_failures": list(failures),
+        }
+        if gate_status is not None:
+            tick_payload["gate_recovery_status"] = gate_status
+        self._journal_row(RECONCILE_TICK, tick_payload, now_utc)
         return TickReport(
             outcome=TICK_COMPARED,
             now_utc=now_utc,
