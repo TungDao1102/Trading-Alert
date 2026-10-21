@@ -84,9 +84,7 @@ def _clean_compare(**_kwargs: Any) -> Any:
     return SimpleNamespace(agreement=True)
 
 
-def _controller(
-    store: FakeStore | None, journal: FakeJournal | None = None
-) -> SafeModeController:
+def _controller(store: FakeStore | None, journal: FakeJournal | None = None) -> SafeModeController:
     return SafeModeController(
         adapter=_NoAdapter(),
         journal=journal if journal is not None else FakeJournal(),
