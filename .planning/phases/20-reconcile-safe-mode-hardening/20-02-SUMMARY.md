@@ -45,7 +45,7 @@ key-decisions:
   - "The O-H exception (a return from CLOSE_REQUIRED to protected exposure) is NOT built: default NO."
   - "A FLAT sweep runs only after an accepted FLAT move, so a refused move can never cancel the stop."
 
-requirements-completed: [RISK-03]  # copied from the plan frontmatter as in 20-01; REQUIREMENTS.md is NOT edited and RISK-03 is NOT marked complete (wording checkpoint O-A is open)
+requirements-addressed: [RISK-03]  # copied from the plan frontmatter as in 20-01; REQUIREMENTS.md is NOT edited and RISK-03 is NOT marked complete (wording checkpoint O-A is open)
 
 coverage:
   - id: D1

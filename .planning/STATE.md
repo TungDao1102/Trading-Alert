@@ -3,9 +3,9 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 20
 current_phase_name: Reconcile + SAFE_MODE Hardening + Alerts
-current_plan: 3
+current_plan: 7
 status: executing
-stopped_at: Completed 20-02-PLAN.md
+stopped_at: Completed 20-06-PLAN.md (wave 1 done; wave 2 next)
 last_updated: "2026-10-21T08:32:21.521Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 20 execution started
@@ -32,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 ## Current Position
 
 Phase: 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTING
-Current Plan: 3
+Current Plan: 7 (wave 2: 20-07..20-10)
 Total Plans in Phase: 26
 Status: Ready to execute
 Last activity: 2026-10-21 — Phase 20 execution started

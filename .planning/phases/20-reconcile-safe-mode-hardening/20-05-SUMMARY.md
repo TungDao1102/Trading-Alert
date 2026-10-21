@@ -25,7 +25,7 @@ key-files:
 key-decisions:
   - "ENTRY_WITHOUT_PROTECTIVE promoted into RejectionReason with the string value unchanged (D-10, G3-005, D044 item 1)."
   - "Divergence-kind and SAFE_MODE copies in compare.py, fill_monitor.py, health.py, protection.py stay plain strings."
-requirements-completed: []
+requirements-addressed: []
 duration: 25min
 completed: 2026-10-21
 status: complete

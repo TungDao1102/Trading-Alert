@@ -44,7 +44,7 @@ key-decisions:
   - "The numeric-default guard covers both the key texts and the <section>_<key> field names (GUARDED_NAMES 37 -> 50, computed from the code)."
   - "check_reconcile_cadence is a pure function with no caller in this plan; the ReconcileLoop constructor of plan 20-12 calls it."
 
-requirements-completed: [EXEC-02, OPS-05]
+requirements-addressed: [EXEC-02, OPS-05]
 
 coverage:
   - id: D1
