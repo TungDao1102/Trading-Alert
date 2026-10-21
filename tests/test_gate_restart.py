@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,10 +21,16 @@ import src.adapters.binance_ratelimit_gate as gate_mod
 from src.adapters.binance_limits import RateLimitPolicy
 from src.adapters.binance_ratelimit_gate import (
     GATE_NOT_RESTORED,
+    GATE_STATE_UNKNOWN,
+    IP_BAN_418,
+    RATE_LIMIT_PAUSE_429,
     GateNotRestored,
     GateRecoveryStatus,
     GateRestriction,
+    GateStateCorrupt,
+    GateStateRecord,
     RateLimitBanActive,
+    RateLimitPauseActive,
     RestGateRefusal,
     RestRateLimitGate,
 )
@@ -196,3 +203,356 @@ def test_gate_module_stays_pure_and_does_no_file_io() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "open" not in calls
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: pause, expiry, loss and corruption of initialized state, persistence failures.
+# --------------------------------------------------------------------------- #
+
+RECOVERY_REQUIRED = "REST_GATE_RECOVERY_REQUIRED"
+
+
+class _Alerts:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def __call__(self, event: str) -> None:
+        self.events.append(event)
+
+
+def _gate_with_alerts(
+    store: FileGateStateStore, clock: VirtualClock
+) -> tuple[RestRateLimitGate, _Alerts]:
+    alerts = _Alerts()
+    gate = RestRateLimitGate(policy=_policy(), clock=clock, state_store=store, on_alert=alerts)
+    return gate, alerts
+
+
+def test_restart_with_active_429_pause_is_enforced_until_its_end(tmp_path: Path) -> None:
+    store, clock = _initialized(tmp_path)
+    first = _gate(store, clock)
+    first.restore()
+    pause_start = clock()
+    first.record(_C.RATE_LIMITED, 50)
+
+    clock.advance(20)
+    second = _gate(store, clock)
+    second.restore()
+    with pytest.raises(RateLimitPauseActive):
+        second.check()
+    restriction = second.restriction()
+    assert restriction is not None
+    assert restriction.reason == RATE_LIMIT_PAUSE_429
+    assert restriction.until_utc == pause_start + timedelta(seconds=50)
+    clock.advance(30)
+    assert second.check() is None
+
+
+def test_restart_with_an_expired_restriction_opens_and_is_restored(tmp_path: Path) -> None:
+    store, clock = _initialized(tmp_path)
+    first = _gate(store, clock)
+    first.restore()
+    first.record(_C.IP_BANNED, 60)
+    clock.advance(500)
+    second = _gate(store, clock)
+    assert second.restore() is GateRecoveryStatus.RESTORED_DURABLE
+    assert second.check() is None
+    assert second.restriction() is None
+    assert second.recovery_status() is GateRecoveryStatus.RESTORED_DURABLE
+
+
+def test_restart_with_a_ban_and_a_pause_keeps_the_ban_as_the_reason(tmp_path: Path) -> None:
+    store, clock = _initialized(tmp_path)
+    first = _gate(store, clock)
+    first.restore()
+    first.record(_C.IP_BANNED, 40)
+    first.record(_C.RATE_LIMITED, 90)
+    second = _gate(store, clock)
+    second.restore()
+    restriction = second.restriction()
+    assert restriction is not None
+    assert restriction.reason == IP_BAN_418
+    assert restriction.until_utc == T0 + timedelta(seconds=90)
+
+
+def test_missing_file_without_bootstrap_is_not_a_fresh_install(tmp_path: Path) -> None:
+    clock = VirtualClock()
+    store = _store(tmp_path, clock)  # initialize() never ran
+    gate, alerts = _gate_with_alerts(store, clock)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    assert gate.recovery_status() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    restriction = gate.restriction()
+    assert restriction == GateRestriction(
+        reason=GATE_STATE_UNKNOWN, until_utc=None, remaining_seconds=1
+    )
+    with pytest.raises(GateNotRestored) as info:
+        gate.check()
+    assert info.value.reason == GATE_STATE_UNKNOWN
+    assert alerts.events == [RECOVERY_REQUIRED]
+    assert not (tmp_path / "gate.json").exists()  # restore() never writes a fresh install
+
+
+def test_loss_after_initialization_blocks_with_no_end_until_the_operator_acts(
+    tmp_path: Path,
+) -> None:
+    store, clock = _initialized(tmp_path)
+    (tmp_path / "gate.json").unlink()
+
+    for days in (0, 1, 4):  # every restart re-detects the loss; no timer ever ends the block
+        clock.advance(days * 86400)
+        gate, alerts = _gate_with_alerts(store, clock)
+        assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+        with pytest.raises(GateNotRestored):
+            gate.check()
+        restriction = gate.restriction()
+        assert restriction is not None
+        assert restriction.until_utc is None
+        assert alerts.events == [RECOVERY_REQUIRED]
+
+    store.initialize(now_utc=clock(), operator_id="op-2")  # the operator, after checking
+    recovered = _gate(store, clock)
+    assert recovered.restore() is GateRecoveryStatus.RESTORED_DURABLE
+    assert recovered.check() is None
+
+
+_STAMP = '"recorded_at_utc":"2026-10-21T09:00:00Z","initialized_at_utc":"2026-10-21T09:00:00Z"'
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"{not json",
+        b"",
+        b"[]",
+        (
+            '{"schema_version":2,"ban_until_utc":null,"pause_until_utc":null,'
+            + _STAMP
+            + ',"initialized_by":"op-1"}'
+        ).encode(),
+        (
+            '{"schema_version":1,"ban_until_utc":"2026-10-21T09:05:00",'
+            '"pause_until_utc":null,' + _STAMP + ',"initialized_by":"op-1"}'
+        ).encode(),
+        (
+            '{"schema_version":1,"ban_until_utc":null,"pause_until_utc":null,'
+            + _STAMP
+            + ',"initialized_by":"op-1","extra":1}'
+        ).encode(),
+        (
+            b'{"schema_version":1,"ban_until_utc":null,"pause_until_utc":null,'
+            b'"recorded_at_utc":"2026-10-21T09:00:00Z","initialized_at_utc":null,'
+            b'"initialized_by":"op-1"}'
+        ),
+        b"\xff\xfe\x00",
+    ],
+)
+def test_corruption_after_initialization_keeps_the_file_and_blocks(
+    tmp_path: Path, content: bytes
+) -> None:
+    store, clock = _initialized(tmp_path)
+    (tmp_path / "gate.json").write_bytes(content)
+    gate, alerts = _gate_with_alerts(store, clock)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    with pytest.raises(GateNotRestored) as info:
+        gate.check()
+    assert info.value.reason == GATE_STATE_UNKNOWN
+    assert alerts.events == [RECOVERY_REQUIRED]
+    aside = [p for p in tmp_path.iterdir() if ".corrupt-" in p.name]
+    assert [p.name for p in aside] == ["gate.json.corrupt-20261021T090000Z"]
+    assert aside[0].read_bytes() == content  # kept, never deleted or rewritten
+    assert not (tmp_path / "gate.json").exists()
+    # The next start sees a missing file: still loss, never a fresh install.
+    again, _ = _gate_with_alerts(store, clock)
+    assert again.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+
+
+def test_two_corrupt_files_in_one_second_get_distinct_aside_names(tmp_path: Path) -> None:
+    store, _ = _initialized(tmp_path)
+    for _attempt in range(2):
+        (tmp_path / "gate.json").write_bytes(b"bad")
+        with pytest.raises(GateStateCorrupt):
+            store.load()
+    names = sorted(p.name for p in tmp_path.iterdir() if ".corrupt-" in p.name)
+    assert len(names) == 2
+
+
+def test_an_unreadable_store_fails_closed_and_alerts() -> None:
+    class Broken:
+        def load(self) -> GateStateRecord | None:
+            raise OSError("denied")
+
+        def save(self, record: GateStateRecord) -> None:
+            raise AssertionError("an unknown state must never be saved")
+
+    clock = VirtualClock()
+    alerts = _Alerts()
+    gate = RestRateLimitGate(policy=_policy(), clock=clock, state_store=Broken(), on_alert=alerts)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    with pytest.raises(GateNotRestored):
+        gate.check()
+    assert alerts.events == [RECOVERY_REQUIRED]
+
+
+def test_unknown_end_restriction_never_parks_a_sleeping_consumer_for_the_quarantine_wait(
+    tmp_path: Path,
+) -> None:
+    clock = VirtualClock()
+    gate = _gate(_store(tmp_path, clock), clock)
+    before = gate.restriction()  # NOT_RESTORED
+    assert before is not None and before.remaining_seconds == 1
+    gate.restore()  # loss: no file
+    restriction = gate.restriction()
+    assert restriction is not None
+    assert restriction.remaining_seconds == 1
+    assert restriction.remaining_seconds != WAIT_418
+    assert gate.remaining_seconds() == 1
+    with pytest.raises(GateNotRestored) as info:
+        gate.check()
+    assert info.value.retry_after_seconds == 1
+
+
+def test_restore_is_one_shot_and_a_running_gate_is_never_cleared(tmp_path: Path) -> None:
+    clock = VirtualClock()
+    store = _store(tmp_path, clock)
+    gate = _gate(store, clock)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    store.initialize(now_utc=clock(), operator_id="op-1")
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE  # same process
+    with pytest.raises(GateNotRestored):
+        gate.check()
+    assert _gate(store, clock).restore() is GateRecoveryStatus.RESTORED_DURABLE  # next start
+
+
+def test_an_unknown_state_is_never_overwritten_by_a_late_record(tmp_path: Path) -> None:
+    clock = VirtualClock()
+    store = _store(tmp_path, clock)
+    gate = _gate(store, clock)
+    gate.restore()
+    gate.record(_C.IP_BANNED, 100)  # a late classified answer
+    assert not (tmp_path / "gate.json").exists()  # no valid-looking file may reopen the gate
+    with pytest.raises(GateNotRestored):
+        gate.check()
+
+
+def test_a_record_before_restore_is_merged_and_saved_afterwards(tmp_path: Path) -> None:
+    store, clock = _initialized(tmp_path)
+    gate = _gate(store, clock)
+    gate.record(_C.IP_BANNED, 100)
+    saved = store.load()
+    assert saved is not None and saved.ban_until_utc is None  # nothing saved before restore
+    gate.restore()
+    saved = store.load()
+    assert saved is not None
+    assert saved.ban_until_utc == T0 + timedelta(seconds=100)
+    with pytest.raises(RateLimitBanActive):
+        gate.check()
+
+
+class _FlakyStore:
+    """Wraps a real store; `save` raises while `fail` is set."""
+
+    def __init__(self, inner: FileGateStateStore) -> None:
+        self.inner = inner
+        self.fail = False
+
+    def load(self) -> GateStateRecord | None:
+        return self.inner.load()
+
+    def save(self, record: GateStateRecord) -> None:
+        if self.fail:
+            raise OSError("disk full")
+        self.inner.save(record)
+
+
+def test_state_persistence_failure_keeps_restriction(tmp_path: Path) -> None:
+    inner, clock = _initialized(tmp_path)
+    flaky = _FlakyStore(inner)
+    gate = RestRateLimitGate(policy=_policy(), clock=clock, state_store=flaky)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_DURABLE
+    flaky.fail = True
+    decision = gate.record(_C.IP_BANNED, 100)  # must not raise into the REST caller
+    assert decision.wait_seconds == 100
+    with pytest.raises(RateLimitBanActive):
+        gate.check()
+    assert gate.recovery_status() is GateRecoveryStatus.PERSISTENCE_FAILED
+    flaky.fail = False
+    gate.record(_C.RATE_LIMITED, 10)  # a later save succeeds and carries both deadlines
+    assert gate.recovery_status() is GateRecoveryStatus.RESTORED_DURABLE
+    saved = inner.load()
+    assert saved is not None and saved.ban_until_utc == T0 + timedelta(seconds=100)
+
+
+def test_an_alert_hook_that_raises_does_not_open_the_gate(tmp_path: Path) -> None:
+    clock = VirtualClock()
+
+    def boom(event: str) -> None:
+        raise RuntimeError("alert sink down")
+
+    gate = RestRateLimitGate(
+        policy=_policy(), clock=clock, state_store=_store(tmp_path, clock), on_alert=boom
+    )
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    with pytest.raises(GateNotRestored):
+        gate.check()
+
+
+def test_no_bypass_for_reduce_only(tmp_path: Path) -> None:
+    signature = inspect.signature(RestRateLimitGate.check)
+    assert list(signature.parameters) == ["self"]
+    public = {n for n in dir(RestRateLimitGate) if not n.startswith("_")}
+    assert public == {
+        "check",
+        "record",
+        "restriction",
+        "remaining_seconds",
+        "policy",
+        "restore",
+        "recovery_status",
+    }
+    # A closed gate refuses whoever asks: there is nothing to pass that could exempt a request.
+    clock = VirtualClock()
+    gate = _gate(_store(tmp_path, clock), clock)
+    gate.restore()
+    with pytest.raises(GateNotRestored):
+        gate.check()
+    with pytest.raises(TypeError):
+        gate.check(reduce_only=True)  # type: ignore[call-arg]
+
+
+def test_refusals_carry_no_url_key_or_path(tmp_path: Path) -> None:
+    clock = VirtualClock()
+    store = _store(tmp_path, clock)
+    messages: list[str] = []
+    gate = _gate(store, clock)
+    for _attempt in range(2):  # NOT_RESTORED, then GATE_STATE_UNKNOWN
+        with pytest.raises(GateNotRestored) as info:
+            gate.check()
+        messages.append(str(info.value))
+        gate.restore()
+    for text in messages:
+        for forbidden in ("http", "://", "fapi", "binance", "key", "secret", "?", "gate.json"):
+            assert forbidden not in text.lower(), (forbidden, text)
+        assert str(tmp_path) not in text
+
+
+def test_restore_without_a_store_is_legacy_and_changes_nothing() -> None:
+    clock = VirtualClock()
+    gate = RestRateLimitGate(policy=_policy(), clock=clock)
+    assert gate.restore() is GateRecoveryStatus.LEGACY_IN_MEMORY
+    assert gate.check() is None
+
+
+def test_state_file_is_canonical_json_schema_version_1(tmp_path: Path) -> None:
+    store, clock = _initialized(tmp_path)
+    gate = _gate(store, clock)
+    gate.restore()
+    gate.record(_C.IP_BANNED, 120)
+    text = (tmp_path / "gate.json").read_text(encoding="ascii")
+    payload = json.loads(text)
+    assert list(payload) == sorted(payload)
+    assert payload["schema_version"] == 1
+    assert payload["ban_until_utc"] == "2026-10-21T09:02:00Z"
+    assert payload["pause_until_utc"] is None
+    assert payload["initialized_by"] == "op-1"
+    assert text.endswith("\n")
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
