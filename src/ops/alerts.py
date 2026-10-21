@@ -45,7 +45,7 @@ from src.adapters.telegram_notify import (
     send_text,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id
-from src.execution.execution_limits import ExecutionLimits
+from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.ops.risk_first import AuditRecordLost, record_after
 from src.ops.spill import LocalSpill
 from src.paper.notify import (
@@ -71,6 +71,8 @@ INVALID_REASON = "INVALID_REASON"
 INVALID_SUBJECT = "INVALID_SUBJECT"
 INVALID_SYMBOL = "INVALID_SYMBOL"
 INVALID_PLAN_HASH = "INVALID_PLAN_HASH"
+
+_DEDUPE_KEY = "alerts.dedupe_window_ms"
 
 
 class AlertSeverity(str, Enum):
@@ -258,21 +260,27 @@ def _alert_event(alert: OperationalAlert) -> JournalEvent:
 
 
 def _outcome_event(
-    *, prefix: str, event_type: str, alert: OperationalAlert, payload: dict[str, Any]
+    *,
+    prefix: str,
+    event_type: str,
+    entity_id: str,
+    occurred_at_utc: datetime,
+    payload: dict[str, Any],
 ) -> JournalEvent:
+    """A follow-up row of an alert: its id is a content hash, so a replay is a no-op."""
     payload_json = json.dumps(payload, sort_keys=True)
     return JournalEvent(
         journal_event_id=content_hash_event_id(
             prefix=prefix,
             event_type=event_type,
-            entity_id=alert.alert_id,
-            occurred_at_utc=alert.occurred_at_utc,
+            entity_id=entity_id,
+            occurred_at_utc=occurred_at_utc,
             payload_json=payload_json,
         ),
-        occurred_at_utc=alert.occurred_at_utc,
+        occurred_at_utc=occurred_at_utc,
         event_type=event_type,
         entity_type=_ENTITY_TYPE,
-        entity_id=alert.alert_id,
+        entity_id=entity_id,
         correlation_id=ALERT_CORRELATION_ID,
         payload_json=payload_json,
     )
@@ -283,8 +291,23 @@ def _outcome_event(
 # --------------------------------------------------------------------------- #
 
 
+@dataclass
+class _Episode:
+    """One dedupe episode: the first alert of a (event, subject, reason) key and its repeats."""
+
+    alert_id: str
+    started_at_utc: datetime
+    suppressed: int
+
+
 class JournalFirstAlertSink:
     """Journal the alert (spill fallback), then queue it for the sender.
+
+    Dedupe (D-23): one alert per (event, subject, reason) episode. An episode starts with the
+    first alert and lasts `alerts.dedupe_window_ms` measured from that first alert; a repeat
+    inside it is not queued, and each one writes an `ALERT_SUPPRESSED` row carrying the running
+    count (1, 2, ...). The comparison uses the `occurred_at_utc` values the caller passes; the
+    sink reads no clock. An unset window refuses construction (no default).
 
     `critical(...)` adapts the `CriticalAlertSink` call of the coordinator and the closer;
     `alert(...)` is the shape the reconcile loop calls. Both are synchronous.
@@ -304,7 +327,11 @@ class JournalFirstAlertSink:
     ) -> None:
         self._journal = journal
         self._spill = spill
-        self._limits = limits
+        window_ms = limits.alerts_dedupe_window_ms
+        if window_ms is None:
+            raise ExecutionLimitsNotConfigured((_DEDUPE_KEY,))
+        self._window = timedelta(milliseconds=window_ms)
+        self._episodes: dict[tuple[str, str, str], _Episode] = {}
         self.queue: deque[OperationalAlert] = deque() if queue is None else queue
 
     def alert(
@@ -325,6 +352,28 @@ class JournalFirstAlertSink:
             plan_hash=plan_hash,
             symbol=symbol,
         )
+        key = (alert.event, alert.subject, alert.reason)
+        episode = self._episodes.get(key)
+        if episode is not None and alert.occurred_at_utc - episode.started_at_utc < self._window:
+            episode.suppressed += 1
+            record_after(
+                spill=self._spill,
+                journal=self._journal,
+                event=_outcome_event(
+                    prefix="alertsup",
+                    event_type=EVENT_ALERT_SUPPRESSED,
+                    entity_id=episode.alert_id,
+                    occurred_at_utc=alert.occurred_at_utc,
+                    payload={
+                        "count": episode.suppressed,
+                        "event": alert.event,
+                        "reason": alert.reason,
+                        "subject": alert.subject,
+                    },
+                ),
+            )
+            return
+        self._episodes[key] = _Episode(alert.alert_id, alert.occurred_at_utc, 0)
         try:
             record_after(spill=self._spill, journal=self._journal, event=_alert_event(alert))
         finally:
@@ -497,7 +546,8 @@ class TelegramAlertSender:
                 outcome = _outcome_event(
                     prefix="alertdlv",
                     event_type=EVENT_ALERT_DELIVERED,
-                    alert=alert,
+                    entity_id=alert.alert_id,
+                    occurred_at_utc=alert.occurred_at_utc,
                     payload={"attempts": attempts},
                 )
             else:
@@ -505,7 +555,8 @@ class TelegramAlertSender:
                 outcome = _outcome_event(
                     prefix="alertfail",
                     event_type=EVENT_ALERT_SEND_FAILED,
-                    alert=alert,
+                    entity_id=alert.alert_id,
+                    occurred_at_utc=alert.occurred_at_utc,
                     payload={
                         "attempts": attempts,
                         "kind": failure.kind.value,
