@@ -12,6 +12,11 @@ guard returns a `SafeModeVerdict` that the risk pipeline can short-
 circuit on. The risk pipeline's fail-closed posture is preserved:
 SAFE_MODE blocks entries, never places orders.
 
+SAFE_MODE is durable (Phase 20, plan 20-06, D-14, F-127): `enter_safe_mode` saves
+`state_snapshot()` through the injected `SafeModeStateStore` and `SafeModeController.load` restores
+it at start, failing closed into SAFE_MODE when the store cannot be read. The store is a Protocol,
+so this module imports nothing from `src.persistence`.
+
 The module is dependency-free: stdlib + `src/domain/enums.py` only.
 No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 """
@@ -39,6 +44,10 @@ from src.domain.enums import RejectionReason, SystemMode
 # --------------------------------------------------------------------------- #
 
 SAFE_MODE_TICK_SECONDS: int = 60
+
+#: The `entered_reason` of a controller whose persisted state could not be read or parsed at start
+#: (D-14, research C14): an unreadable store must only ever make the system more restricted.
+SAFE_MODE_STATE_UNREADABLE: str = "SAFE_MODE_STATE_UNREADABLE"
 
 
 # --------------------------------------------------------------------------- #
@@ -71,6 +80,22 @@ class JournalLike(Protocol):
     """
 
     def record(self, event: Any) -> None: ...
+
+
+class SafeModeStateStore(Protocol):
+    """Durable memory of the SAFE_MODE state (D-14).
+
+    The real implementation is `src.persistence.safe_mode_store.PgSafeModeStateStore`; tests inject
+    an in-memory fake. The mapping is exactly the `SafeModeController.state_snapshot()` format.
+    """
+
+    def save(self, state: Mapping[str, str | bool | None], *, now_utc: datetime) -> None:
+        """Persist one SAFE_MODE state; raise on any failure (the caller fails closed)."""
+        ...
+
+    def load(self) -> Mapping[str, str | bool | None] | None:
+        """The latest persisted state, or None when nothing was ever persisted."""
+        ...
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +150,8 @@ class SafeModeController:
             satisfies this).
         compare_fn: The compare function (default: `compare` from
             `src/reconcile/compare.py`). Injected for testability.
+        state_store: The durable SAFE_MODE store (D-14). None keeps the controller in-memory
+            only (`is_durable` is False); the reconcile loop and startup refuse such a controller.
     """
 
     def __init__(
@@ -133,9 +160,11 @@ class SafeModeController:
         adapter: AdapterLike,
         journal: JournalLike,
         compare_fn: Callable[..., Any] | None = None,
+        state_store: SafeModeStateStore | None = None,
     ) -> None:
         self._adapter = adapter
         self._journal = journal
+        self._state_store = state_store
         if compare_fn is None:
             from .compare import compare as _compare
 
@@ -145,6 +174,63 @@ class SafeModeController:
         self._in_safe_mode: bool = False
         self._entered_at_utc: datetime | None = None
         self._entered_reason: str | None = None
+        # True from the moment the in-memory state changed until the store accepted it, so a
+        # failed save (or a failed journal write before it) is retried by the next enter call.
+        self._persist_pending: bool = False
+
+    @classmethod
+    def load(
+        cls,
+        *,
+        adapter: AdapterLike,
+        journal: JournalLike,
+        state_store: SafeModeStateStore,
+        now_utc: datetime,
+        compare_fn: Callable[..., Any] | None = None,
+    ) -> Self:
+        """Start a controller from the durable store, failing closed (D-14, research C14).
+
+        `state_store.load()` returning None means nothing was ever persisted: the default
+        controller (not in SAFE_MODE). A persisted state is restored through the `rehydrate`
+        parsing. Any exception from the store, or a malformed mapping, starts the controller IN
+        SAFE_MODE with reason `SAFE_MODE_STATE_UNREADABLE` and entry time `now_utc`: a restart
+        never reads SAFE_MODE as off. The failure is journaled best-effort with the exception
+        TYPE name only, never its message (it may carry a connection string).
+
+        Args:
+            adapter: The exchange-truth adapter (as for the constructor).
+            journal: The journal layer (as for the constructor).
+            state_store: The durable store; attached to the returned controller.
+            now_utc: The current UTC-aware datetime (the entry time of an unreadable start).
+            compare_fn: The compare function (as for the constructor).
+
+        Raises:
+            ValueError: `now_utc` is naive or not UTC (a caller bug, not a store failure).
+        """
+        _require_utc(now_utc)
+        try:
+            state = state_store.load()
+            controller = cls.rehydrate(
+                adapter=adapter, journal=journal, compare_fn=compare_fn, state=state
+            )
+        except Exception as exc:
+            controller = cls(
+                adapter=adapter, journal=journal, compare_fn=compare_fn, state_store=state_store
+            )
+            controller._in_safe_mode = True
+            controller._entered_at_utc = now_utc
+            controller._entered_reason = SAFE_MODE_STATE_UNREADABLE
+            try:
+                controller._record_event(
+                    event_type=SAFE_MODE_STATE_UNREADABLE,
+                    payload={"error_type": type(exc).__name__},
+                    now_utc=now_utc,
+                )
+            except Exception:  # noqa: S110 - best-effort audit; the fail-closed state is set
+                pass
+            return controller
+        controller._state_store = state_store
+        return controller
 
     @classmethod
     def rehydrate(
@@ -202,6 +288,11 @@ class SafeModeController:
         }
 
     @property
+    def is_durable(self) -> bool:
+        """True when a `SafeModeStateStore` is attached (the reconcile loop and startup need it)."""
+        return self._state_store is not None
+
+    @property
     def in_safe_mode(self) -> bool:
         """True when the controller is currently in SAFE_MODE."""
         return self._in_safe_mode
@@ -224,35 +315,49 @@ class SafeModeController:
         different reason updates the reason string and journals a
         new enter event (the previous divergence is still active).
 
+        With a state store attached the new state is saved after the journal write (D-14). The
+        in-memory flag flips first, so a failing journal or store write propagates with the
+        controller still in SAFE_MODE (fail closed). The next call, even with the same reason,
+        retries the save until the store accepts it.
+
         Args:
-            reason: A short string describing the divergence that
+            reason: A short, non-empty string describing the divergence that
                 triggered the entry (e.g., the divergence kind).
             now_utc: The current UTC-aware datetime. If None, uses
                 `datetime.now(UTC)`.
+
+        Raises:
+            ValueError: `reason` is empty or not text (nothing changes), or `now_utc` is naive or
+                not UTC.
         """
+        if not isinstance(reason, str) or reason == "":
+            raise ValueError("reason must be a non-empty string")
         effective_now = now_utc if now_utc is not None else datetime.now(UTC)
-        if effective_now.tzinfo is None:
-            raise ValueError("now_utc must be UTC-aware")
-        if effective_now.utcoffset() != _ZERO_TIMEDELTA:
-            raise ValueError("now_utc must be UTC, not offset-aware")
+        _require_utc(effective_now)
         if self._in_safe_mode:
             # Already in SAFE_MODE — update reason if it changed.
             if self._entered_reason != reason:
                 self._entered_reason = reason
+                self._persist_pending = self._state_store is not None
                 self._journal_safe_mode_event(
                     event_type="SAFE_MODE_REENTER",
                     reason=reason,
                     now_utc=effective_now,
                 )
+                self._persist(now_utc=effective_now)
+            elif self._persist_pending:
+                self._persist(now_utc=effective_now)
             return
         self._in_safe_mode = True
         self._entered_at_utc = effective_now
         self._entered_reason = reason
+        self._persist_pending = self._state_store is not None
         self._journal_safe_mode_event(
             event_type="SAFE_MODE_ENTER",
             reason=reason,
             now_utc=effective_now,
         )
+        self._persist(now_utc=effective_now)
 
     def guard_new_entries(self, trade_plan: Any) -> SafeModeVerdict:
         """Block new entries while in SAFE_MODE.
@@ -360,21 +465,35 @@ class SafeModeController:
 
     # ----- internal helpers ---------------------------------------------- #
 
+    def _persist(self, *, now_utc: datetime) -> None:
+        """Save `state_snapshot()` to the attached store; a failure propagates (fail closed)."""
+        if self._state_store is None:
+            return
+        # `_persist_pending` stays True when `save` raises, so the next enter call retries it.
+        self._state_store.save(self.state_snapshot(), now_utc=now_utc)
+        self._persist_pending = False
+
     def _journal_safe_mode_event(self, *, event_type: str, reason: str, now_utc: datetime) -> None:
         """Record one SAFE_MODE transition as a JournalEvent.
 
         The journal layer is the audit trail; the controller never
         mutates state without journaling first (D-05 extended).
         """
+        self._record_event(
+            event_type=event_type,
+            payload={
+                "reason": reason,
+                "system_mode": SystemMode.SAFE_MODE.value,
+            },
+            now_utc=now_utc,
+        )
+
+    def _record_event(self, *, event_type: str, payload: dict[str, Any], now_utc: datetime) -> None:
+        """Record one SystemMode JournalEvent with the given payload."""
         from src.domain.journal import JournalEvent, content_hash_event_id
 
         entity_id = SystemMode.SAFE_MODE.value
-        payload_json = _build_payload_json(
-            {
-                "reason": reason,
-                "system_mode": SystemMode.SAFE_MODE.value,
-            }
-        )
+        payload_json = _build_payload_json(payload)
         event = JournalEvent(
             # Content hash (D-10, F-412): two different transitions at the
             # same millisecond must not share an id.
@@ -400,6 +519,15 @@ class SafeModeController:
 # --------------------------------------------------------------------------- #
 
 _ZERO_TIMEDELTA = timedelta(0)
+
+
+def _require_utc(value: datetime) -> None:
+    """Raise `ValueError` unless `value` is a UTC-aware datetime."""
+    if value.tzinfo is None:
+        raise ValueError("now_utc must be UTC-aware")
+    if value.utcoffset() != _ZERO_TIMEDELTA:
+        raise ValueError("now_utc must be UTC, not offset-aware")
+
 
 _STATE_KEYS = frozenset({"in_safe_mode", "entered_at_utc", "entered_reason"})
 
@@ -451,8 +579,10 @@ def _build_payload_json(payload: dict[str, Any]) -> str:
 
 
 __all__ = [
+    "SAFE_MODE_STATE_UNREADABLE",
     "SAFE_MODE_TICK_SECONDS",
     "SafeModeController",
+    "SafeModeStateStore",
     "SafeModeVerdict",
     "AdapterLike",
     "JournalLike",

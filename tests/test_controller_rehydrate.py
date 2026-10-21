@@ -314,7 +314,9 @@ def test_enablement_rehydrate_fails_closed_on_malformed_state(state: Any) -> Non
 
 def test_constructor_signatures_are_unchanged() -> None:
     safe = inspect.signature(SafeModeController.__init__)
-    assert list(safe.parameters) == ["self", "adapter", "journal", "compare_fn"]
+    # Plan 20-06 (D-14) adds the optional `state_store` keyword; the others keep their order.
+    assert list(safe.parameters) == ["self", "adapter", "journal", "compare_fn", "state_store"]
+    assert safe.parameters["state_store"].default is None
     enable = inspect.signature(LiveEnablementController.__init__)
     assert list(enable.parameters) == ["self", "journal"]
 
