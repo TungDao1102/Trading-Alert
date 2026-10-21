@@ -583,3 +583,67 @@ def test_the_readme_separates_the_user_data_silence_key_from_the_paper_runtime_k
     assert "max_ws_message_silence_seconds" in text
     assert "not the paper runtime" in text
     assert "DECISIONS row" in text
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-01 (D-25): the reconcile tick must be strictly below max_unprotected_ms.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_cadence_check_does_nothing_while_both_values_are_unset() -> None:
+    limits = tl.test_only_execution_limits(reconcile_tick_interval_ms=None, max_unprotected_ms=None)
+    assert el.check_reconcile_cadence(limits) is None
+
+
+def test_the_cadence_check_does_nothing_while_the_tick_is_unset() -> None:
+    limits = tl.test_only_execution_limits(reconcile_tick_interval_ms=None)
+    assert el.check_reconcile_cadence(limits) is None
+
+
+def test_the_cadence_check_does_nothing_while_the_deadline_is_unset() -> None:
+    limits = tl.test_only_execution_limits(max_unprotected_ms=None)
+    assert el.check_reconcile_cadence(limits) is None
+
+
+def test_a_tick_below_the_deadline_passes_the_cadence_check() -> None:
+    limits = tl.test_only_execution_limits()
+    assert limits.reconcile_tick_interval_ms == 1234
+    assert limits.max_unprotected_ms == 7777
+    assert el.check_reconcile_cadence(limits) is None
+
+
+def _refused_cadence(tick: int, deadline: int) -> el.ExecutionLimitsInvalid:
+    limits = tl.test_only_execution_limits(
+        reconcile_tick_interval_ms=tick, max_unprotected_ms=deadline
+    )
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.check_reconcile_cadence(limits)
+    return info.value
+
+
+def test_a_tick_equal_to_the_deadline_is_refused_naming_both_keys() -> None:
+    error = _refused_cadence(4242, 4242)
+    message = str(error)
+    assert "reconcile.tick_interval_ms" in message
+    assert "protection.max_unprotected_ms" in message
+    assert error.problems == [
+        "reconcile.tick_interval_ms (must be strictly below protection.max_unprotected_ms)"
+    ]
+
+
+def test_a_tick_above_the_deadline_is_refused_naming_both_keys() -> None:
+    message = str(_refused_cadence(9191, 4242))
+    assert "reconcile.tick_interval_ms" in message
+    assert "protection.max_unprotected_ms" in message
+
+
+def test_the_cadence_refusal_carries_neither_value() -> None:
+    for tick, deadline in ((4242, 4242), (9191, 4242)):
+        message = str(_refused_cadence(tick, deadline))
+        assert str(tick) not in message
+        assert str(deadline) not in message
+        assert not any(character.isdigit() for character in message)
+
+
+def test_the_cadence_check_is_exported() -> None:
+    assert "check_reconcile_cadence" in el.__all__
