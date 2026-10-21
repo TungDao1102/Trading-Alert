@@ -587,6 +587,11 @@ def test_two_adapters_share_one_gate(exc: BaseException, refusal: type[RestGateR
     assert second_sleep.waits == []
 
 
+_PLAN_20_07_RESTART_RESTORE_NAMES = frozenset(
+    {"restore", "_restore_done", "_restore_lock", "recovery_status"}
+)
+
+
 def test_restriction_expiry_sends_and_replays_nothing() -> None:
     clock = VirtualClock()
     gate = _gate(clock)
@@ -612,6 +617,8 @@ def test_restriction_expiry_sends_and_replays_nothing() -> None:
     for holder in (gate, adapter):
         for name in dir(holder):
             lowered = name.lower()
+            if holder is gate and name in _PLAN_20_07_RESTART_RESTORE_NAMES:
+                continue  # restart restore only; never an automatic recovery after expiry
             for word in ("restor", "recover", "resum", "unban", "clear", "reset", "healthy"):
                 assert word not in lowered, (type(holder).__name__, name)
 

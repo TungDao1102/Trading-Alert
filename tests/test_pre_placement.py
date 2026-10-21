@@ -598,7 +598,7 @@ def test_invalidation_code_is_distinct_from_the_enum_and_the_enum_is_unchanged()
     from src.domain.enums import RejectionReason
 
     assert pp.PLAN_INVALIDATED_BEFORE_PLACEMENT != RejectionReason.INVALIDATED.value
-    assert len(RejectionReason) == 20
+    assert len(RejectionReason) == 21  # plan 20-05 added ENTRY_WITHOUT_PROTECTIVE
 
 
 # --------------------------------------------------------------------------- #
