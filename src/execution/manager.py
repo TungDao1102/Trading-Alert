@@ -84,6 +84,11 @@ from src.execution.binding import (
     check_working_type,
     take_profit_levels,
 )
+from src.execution.cancel_verification import (
+    CancelDetail,
+    CancelVerdict,
+    confirm_entry_cancel,
+)
 from src.execution.constraint_snapshot import snapshot_is_valid_for_live
 from src.execution.intent_store import ExecutionIntentStore, IntentRecord
 from src.execution.live_context import LivePlacementContext
@@ -1930,6 +1935,8 @@ def _build_cancel_event(
     phase: str,
     now_utc: datetime,
     error_type: str | None = None,
+    verdict: str | None = None,
+    observed_status: str | None = None,
 ) -> JournalEvent:
     """Build one pre/post-cancel JournalEvent (journal-first pattern).
 
@@ -1938,6 +1945,12 @@ def _build_cancel_event(
     cancel call, THEN journals the post-image twin (or a
     `cancel_failed` twin carrying the exception TYPE — never its message,
     which may carry request material).
+
+    Phase 20 plan 20-11 (D-17): a cancel that was not shown CANCELED by a query afterwards
+    is journaled as phase `cancel_unverified` with the observed `verdict` (a `CancelVerdict`
+    value), Binance's `observed_status` when one came back, and the query's exception CLASS
+    in `error_type` when it raised. The keys are added only when set, so the ids of the
+    older phases do not change.
     """
     payload: dict[str, str] = {
         "symbol": symbol,
@@ -1947,6 +1960,10 @@ def _build_cancel_event(
     }
     if error_type is not None:
         payload["error_type"] = error_type
+    if verdict is not None:
+        payload["verdict"] = verdict
+    if observed_status is not None:
+        payload["observed_status"] = observed_status
     payload_json = json.dumps(payload, separators=(",", ":"))
     return JournalEvent(
         # 09-REVIEW WR-09: content-hash id (no same-millisecond PK collision).
@@ -1977,7 +1994,8 @@ async def _cancel_then_audit(
     symbol: str,
     trigger_reason: str,
     now_utc: datetime,
-) -> None:
+    verify: Callable[[CancelDetail], Awaitable[CancelVerdict]] | None = None,
+) -> CancelVerdict | None:
     """Run one exchange cancel FIRST, then record its pre-image and post-image (D-16, F-702).
 
     The pre-image is the write-ahead record: it goes to the local spill before the cancel
@@ -1986,9 +2004,21 @@ async def _cancel_then_audit(
     re-raises the cancel's own exception; a lost audit record is attached to it as a note.
     When the cancel succeeded but an audit record could not reach the journal or the spill,
     `AuditRecordLost` is raised after the post-image attempt.
+
+    Plan 20-11 (D-17, F-502): when `verify` is given it runs right after the cancel returned
+    (also when the cancel answered absent, which the adapter maps to None) and its verdict
+    decides the twin. `post_cancel` is recorded only for `CANCELED`; every other verdict
+    records phase `cancel_unverified` with the verdict, the observed Binance status and the
+    query's exception class (never its text). The verdict is returned (None without `verify`,
+    where the twin stays `post_cancel` as before). `verify` must not raise an `Exception`.
     """
 
-    def event(phase: str, error_type: str | None = None) -> JournalEvent:
+    def event(
+        phase: str,
+        error_type: str | None = None,
+        verdict: str | None = None,
+        observed_status: str | None = None,
+    ) -> JournalEvent:
         return _build_cancel_event(
             event_type=event_type,
             entity_type=entity_type,
@@ -1998,12 +2028,23 @@ async def _cancel_then_audit(
             phase=phase,
             now_utc=now_utc,
             error_type=error_type,
+            verdict=verdict,
+            observed_status=observed_status,
         )
+
+    detail = CancelDetail()
+    verdict: CancelVerdict | None = None
+
+    async def cancel_then_verify() -> None:
+        nonlocal verdict
+        await action()
+        if verify is not None:
+            verdict = await verify(detail)
 
     lost: AuditRecordLost | None = None
     try:
         await act_then_record(
-            spill=spill, journal=journal, event=event("pre_cancel"), action=action
+            spill=spill, journal=journal, event=event("pre_cancel"), action=cancel_then_verify
         )
     except AuditRecordLost as pre_lost:
         lost = pre_lost  # the cancel itself succeeded
@@ -2018,11 +2059,21 @@ async def _cancel_then_audit(
             exc.add_note(str(failed_lost))
         raise
     try:
-        record_after(spill=spill, journal=journal, event=event("post_cancel"))
+        if verdict is None or verdict is CancelVerdict.CANCELED:
+            twin = event("post_cancel")
+        else:
+            twin = event(
+                "cancel_unverified",
+                error_type=detail.error_type,
+                verdict=verdict.value,
+                observed_status=detail.observed_status,
+            )
+        record_after(spill=spill, journal=journal, event=twin)
     except AuditRecordLost as post_lost:
         lost = lost or post_lost
     if lost is not None:
         raise lost
+    return verdict
 
 
 async def expire_pending_entry(
@@ -2034,7 +2085,7 @@ async def expire_pending_entry(
     now_utc: datetime,
     trigger_reason: str,
     spill: LocalSpill | None = None,
-) -> None:
+) -> CancelVerdict:
     """Cancel a stale pending LIMIT entry via its deterministic `x-` id.
 
     Per EXECUTION_SPEC §4: an unfilled entry must be canceled on any of
@@ -2047,8 +2098,14 @@ async def expire_pending_entry(
 
     The cancel goes through the adapter's real
     `cancel_normal_order(*, symbol, orig_client_order_id)` surface
-    (09-REVIEW CR-10), which already treats "already canceled" as
-    success.
+    (09-REVIEW CR-10), which maps "already canceled" and an absent order
+    (-2011) to the same `None`. Neither counts as a cancel (Phase 20 plan 20-11,
+    D-17, F-502): the entry is queried by its client id afterwards and the result
+    is the returned `CancelVerdict`. `post_cancel` is journaled only for CANCELED;
+    FILLED_OR_PARTIAL (the entry filled; the protection coordinator owns that
+    exposure), STILL_OPEN, GONE_NOT_CANCELED and UNKNOWN (including "not found")
+    journal `cancel_unverified` with the verdict instead. Callers that ignored the
+    old `None` return keep working.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -2061,6 +2118,9 @@ async def expire_pending_entry(
             triggers.
         spill: Optional local spill that keeps the audit records while the
             journal is down.
+
+    Returns:
+        The verdict of the query after the cancel (never raises for the query).
 
     Raises:
         ValueError: `symbol` is not in the live-5 universe, or
@@ -2080,7 +2140,12 @@ async def expire_pending_entry(
     async def cancel() -> None:
         await adapter.cancel_normal_order(symbol=symbol, orig_client_order_id=client_order_id)
 
-    await _cancel_then_audit(
+    async def verify(detail: CancelDetail) -> CancelVerdict:
+        return await confirm_entry_cancel(
+            adapter, symbol=symbol, client_order_id=client_order_id, detail=detail
+        )
+
+    verdict = await _cancel_then_audit(
         action=cancel,
         spill=spill,
         journal=journal,
@@ -2090,7 +2155,9 @@ async def expire_pending_entry(
         symbol=symbol,
         trigger_reason=trigger_reason,
         now_utc=now_utc,
+        verify=verify,
     )
+    return CancelVerdict.UNKNOWN if verdict is None else verdict
 
 
 async def cancel_untriggered_protectives(

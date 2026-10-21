@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -38,6 +39,8 @@ class ContractCancelAdapter:
 
     def __init__(self, *, fail_ids: frozenset[str] = frozenset()) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        # Post-cancel queries (Phase 20 plan 20-11, D-17) are kept apart from the cancel calls.
+        self.queries: list[tuple[str, dict[str, Any]]] = []
         self._fail_ids = fail_ids
 
     def _record(self, method: str, kwargs: dict[str, Any]) -> None:
@@ -55,6 +58,17 @@ class ContractCancelAdapter:
         self._record("cancel_algo_order", kwargs)
         if kwargs["client_algo_id"] in self._fail_ids:
             raise RuntimeError("simulated rate limit")
+
+    async def query_order_by_client(self, **kwargs: Any) -> Any:
+        """A healthy exchange: the canceled entry reads CANCELED (D-17 verification)."""
+        inspect.signature(BinanceUsdmAdapter.query_order_by_client).bind(None, **kwargs)
+        self.queries.append(("query_order_by_client", kwargs))
+        return SimpleNamespace(found=True, status="CANCELED")
+
+    async def query_algo_order_by_client(self, **kwargs: Any) -> Any:
+        inspect.signature(BinanceUsdmAdapter.query_algo_order_by_client).bind(None, **kwargs)
+        self.queries.append(("query_algo_order_by_client", kwargs))
+        return SimpleNamespace(found=True, algo_status="CANCELED")
 
 
 class RecordingEnablement:

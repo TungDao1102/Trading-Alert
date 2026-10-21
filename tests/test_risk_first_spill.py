@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -340,6 +341,14 @@ class CancelAdapter:
         self.calls.append(("cancel_algo_order", client_algo_id))
         if client_algo_id in self._fail_ids:
             raise RuntimeError("simulated rate limit")
+
+    # A healthy exchange answers the post-cancel query (plan 20-11, D-17) with CANCELED; the
+    # queries are not part of `calls`, which lists the cancels only.
+    async def query_order_by_client(self, *, symbol: str, orig_client_order_id: str) -> Any:
+        return SimpleNamespace(found=True, status="CANCELED")
+
+    async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any:
+        return SimpleNamespace(found=True, algo_status="CANCELED")
 
 
 def _ids() -> tuple[str, str, str, str]:
