@@ -207,6 +207,9 @@ SAFE_MODE_PROTECTION_STATE_INVALID = "PROTECTION_STATE_INVALID"
 SAFE_MODE_RESTORE_INCONSISTENT = "RESTORE_INCONSISTENT"
 ALERT_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 ALERT_TP_UNAVAILABLE = "TP_UNAVAILABLE"
+# Plan 20-22 (D-24): the exchange definitively rejected the stop after a fill (branch B5). Distinct
+# from PROTECTION_HANDOFF_FAILED (the entry could not be handed to the coordinator).
+ALERT_PROTECTIVE_REJECTED = "PROTECTIVE_REJECTED"
 
 # The branch codes of 19-NOTES.md "Fill, stop and entry remainder" (D-12): the reason journaled on
 # the transition into CLOSE_REQUIRED, the reason of the critical alert and the reason handed to the
@@ -2309,6 +2312,17 @@ class ProtectionCoordinator:
             )
         except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist
             pass
+        if branch == BRANCH_B5_STOP_REJECTED:
+            try:
+                self._alerts.critical(
+                    event=ALERT_PROTECTIVE_REJECTED,
+                    plan_hash=entry.plan_hash,
+                    symbol=entry.symbol,
+                    reason=branch,
+                    now_utc=now,
+                )
+            except Exception:  # noqa: BLE001, S110 - the close below must still run
+                pass
         await self._attempt_close(tracked, branch)
 
     async def _attempt_close(self, tracked: _Tracked, reason: str) -> bool:
@@ -2690,6 +2704,7 @@ class ProtectionCoordinator:
 
 __all__ = [
     "ALERT_CLOSE_REQUIRED",
+    "ALERT_PROTECTIVE_REJECTED",
     "ALERT_TP_UNAVAILABLE",
     "BLOCKING_STATES",
     "BRANCH_B1_ENTRY_NOT_TERMINAL",

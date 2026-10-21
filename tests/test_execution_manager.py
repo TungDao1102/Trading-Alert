@@ -2905,9 +2905,15 @@ def test_live_context_validates_every_field() -> None:
         "gtd_clock_margin",
         "tp1_quantity_fraction",
         "clock",
+        "alert_sink",
     }
-    # Every field is required: building without one raises TypeError.
+    # Every field is required except the optional alert sink (plan 20-22): building without one
+    # raises TypeError.
+    assert fields["alert_sink"] is None
     for name in fields:
+        if name == "alert_sink":
+            LivePlacementContext(**{k: v for k, v in fields.items() if k != name})
+            continue
         partial = {k: v for k, v in fields.items() if k != name}
         with pytest.raises(TypeError):
             LivePlacementContext(**partial)
@@ -2920,6 +2926,7 @@ def test_live_context_validates_every_field() -> None:
         "gtd_clock_margin": 0.5,
         "tp1_quantity_fraction": 0.5,
         "clock": object(),
+        "alert_sink": object(),
     }
     for name, bad in bad_values.items():
         with pytest.raises(TypeError):
@@ -2950,13 +2957,15 @@ def test_live_context_module_is_pure() -> None:
             imported.add(node.module)
         elif isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
-    # `collections.abc` (stdlib) types the injected clock (19-REVIEW CR-01).
+    # `collections.abc` (stdlib) types the injected clock (19-REVIEW CR-01); `typing` types the
+    # optional alert sink (plan 20-22).
     assert imported <= {
         "__future__",
         "collections.abc",
         "dataclasses",
         "datetime",
         "decimal",
+        "typing",
         "src.domain.signal",
         "src.execution.constraint_snapshot",
         "src.execution.execution_limits",

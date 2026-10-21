@@ -166,6 +166,7 @@ async def _close(
     order: list[str] | None = None,
     safe_mode: RecordingSafeMode | None = None,
     spill: Any = None,
+    alert_sink: Any = None,
 ) -> tuple[RecordingEnablement, RecordingSafeMode]:
     from src.execution.manager import emergency_manual_close
 
@@ -182,6 +183,7 @@ async def _close(
         operator_id="operator_alpha",
         now_utc=NOW_UTC,
         spill=spill,
+        alert_sink=alert_sink,
     )
     return enablement, safe_mode
 

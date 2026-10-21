@@ -1407,7 +1407,11 @@ def test_fill_scenario_with_a_rejected_stop_closes_by_market_and_fails(tmp_path:
     assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
     assert data["details"]["protection_flow"]["final_state"] == "FLAT"
     assert "CLOSE_REQUIRED" in _to_states(data)
-    assert [a["event"] for a in data["details"]["critical_alerts"]] == ["CLOSE_REQUIRED"]
+    # Plan 20-22 (D-24): a definitively rejected stop also alerts PROTECTIVE_REJECTED.
+    assert [a["event"] for a in data["details"]["critical_alerts"]] == [
+        "CLOSE_REQUIRED",
+        "PROTECTIVE_REJECTED",
+    ]
     assert [o["type"] for o in data["exchange_orders"]] == [
         "EntryPlacementResult",
         "MarketCloseResult",

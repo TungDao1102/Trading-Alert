@@ -253,6 +253,13 @@ def resolve_position_mode(result: Any) -> str:
 # No-blind-recovery entry placement (EXECUTION_SPEC §10, 09-REVIEW CR-09, Q5).
 # --------------------------------------------------------------------------- #
 
+# Plan 20-22 (D-23, T-05): the alert for an approval that was already consumed, and its two
+# fixed reasons (a stored-outcome replay, and losing the consume race).
+ALERT_DUPLICATE_EXECUTION_ATTEMPT = "DUPLICATE_EXECUTION_ATTEMPT"
+ALERT_MANUAL_CLOSE_ORPHAN_UNVERIFIED = "MANUAL_CLOSE_ORPHAN_UNVERIFIED"
+_DUPLICATE_STORED_OUTCOME_REPLAY = "STORED_OUTCOME_REPLAY"
+_DUPLICATE_CONSUME_RACE_LOST = "CONSUME_RACE_LOST"
+
 _ENTRY_STATE_PLACED = "ENTRY_PLACED"
 _ENTRY_STATE_EXISTS = "ENTRY_EXISTS"
 _ENTRY_STATE_UNKNOWN = "ENTRY_STATE_UNKNOWN"
@@ -652,6 +659,9 @@ async def execute_approved_plan(
     except PersistenceError:
         return _reconciliation_required()
     if stored_entry is not None:
+        _alert_duplicate_execution(
+            live_context, stored_entry, reason=_DUPLICATE_STORED_OUTCOME_REPLAY, now_utc=now_utc
+        )
         return _stored_entry_outcome(stored_entry)
 
     # Gate 1: full approval binding (identity again plus the expiry gate).
@@ -1052,6 +1062,9 @@ async def execute_approved_plan(
             return _reconciliation_required()
         if existing_entry is None:  # lost the race yet nothing stored: fail closed
             return _reconciliation_required()
+        _alert_duplicate_execution(
+            live_context, existing_entry, reason=_DUPLICATE_CONSUME_RACE_LOST, now_utc=now_utc
+        )
         return _stored_entry_outcome(existing_entry)
 
     # Post-consume store handling. Before `place_entry` a store failure only stops the
@@ -1344,6 +1357,31 @@ def _reconciliation_required() -> ExecutionOutcome:
     return ExecutionOutcome(
         is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
     )
+
+
+def _alert_duplicate_execution(
+    live_context: LivePlacementContext, record: IntentRecord, *, reason: str, now_utc: datetime
+) -> None:
+    """Alert a duplicate execution attempt (D-23, T-05). Best-effort and send-nothing.
+
+    Only fixed codes and the stored plan hash and symbol reach the sink. The sink's dedupe window
+    keeps a redelivered callback to one message. A missing or failing sink never changes the
+    stored outcome the caller gets back, and nothing is re-sent to the exchange.
+    """
+    sink = live_context.alert_sink
+    if sink is None:
+        return
+    try:
+        sink.alert(
+            event=ALERT_DUPLICATE_EXECUTION_ATTEMPT,
+            subject=record.plan_hash,
+            reason=reason,
+            now_utc=now_utc,
+            plan_hash=record.plan_hash,
+            symbol=record.symbol,
+        )
+    except Exception:  # noqa: BLE001, S110 - the stored outcome is the answer, not the alert
+        pass
 
 
 def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
@@ -2364,6 +2402,7 @@ async def emergency_manual_close(
     operator_id: str,
     now_utc: datetime,
     spill: LocalSpill | None = None,
+    alert_sink: Any | None = None,
 ) -> None:
     """Run the EXECUTION_SPEC §11 manual emergency control sequence.
 
@@ -2419,6 +2458,9 @@ async def emergency_manual_close(
         spill: Optional local spill passed to the cancel steps and the two audit events (the
             enablement controller holds its own). None of the steps waits for the journal
             (D-16, F-702).
+        alert_sink: Optional operator-alert sink (`.alert(...)` call shape). When the legs could
+            not be proven gone it alerts `MANUAL_CLOSE_ORPHAN_UNVERIFIED` (D-09); best-effort,
+            a failing sink never changes the sequence.
 
     Raises:
         ExceptionGroup: one or more steps failed (every step was still
@@ -2510,6 +2552,18 @@ async def emergency_manual_close(
         if any(CancelVerdict(v) not in PROVEN_GONE for v in legs.values()):
             # SAFE_MODE was entered in step 2 and nothing here leaves it.
             record_event("MANUAL_CLOSE_ORPHAN_UNVERIFIED", {"symbol": symbol, "legs": legs})
+            if alert_sink is not None:
+                try:
+                    alert_sink.alert(
+                        event=ALERT_MANUAL_CLOSE_ORPHAN_UNVERIFIED,
+                        subject=symbol,
+                        reason="LEGS_NOT_PROVEN_GONE",
+                        now_utc=now_utc,
+                        plan_hash=plan_hash,
+                        symbol=symbol,
+                    )
+                except Exception:  # noqa: BLE001, S110 - the journal row and SAFE_MODE exist
+                    pass
 
     if errors:
         raise ExceptionGroup("emergency_manual_close: sequence incomplete", errors)

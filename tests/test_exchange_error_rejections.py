@@ -121,7 +121,8 @@ def _assert_close_required_after_a_rejected_stop(rig: ProtectionRig) -> None:
     assert rig.coordinator.blocks_new_entries() is True
     assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
     assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
-        ("CLOSE_REQUIRED", "B5_STOP_REJECTED")
+        ("CLOSE_REQUIRED", "B5_STOP_REJECTED"),
+        ("PROTECTIVE_REJECTED", "B5_STOP_REJECTED"),
     ]
     assert len(rig.fake.calls_to("place_algo_protective")) == 1  # never resent
     assert len(rig.fake.calls_to("place_market_close")) == 1

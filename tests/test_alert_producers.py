@@ -267,3 +267,287 @@ def test_safe_mode_py_imports_nothing_from_src_ops() -> None:
         elif isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
     assert [m for m in imported if m.startswith("src.ops")] == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: PROTECTIVE_REJECTED, DUPLICATE_EXECUTION_ATTEMPT, MANUAL_CLOSE_ORPHAN_UNVERIFIED.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_definitively_rejected_stop_alerts_close_required_then_protective_rejected() -> (
+    None
+):
+    from decimal import Decimal
+
+    from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH, make_rig
+
+    rig = await make_rig(real_closer=True)
+    rig.fake.reject_next_algo(-2021)
+    rig.coordinator.fill_sink(rig.stream_fill(Decimal("0.004")))
+
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+
+    # In this order, once per plan; the handoff alert is a different event and is not raised.
+    assert [(a.event, a.reason, a.plan_hash) for a in rig.alerts.alerts] == [
+        ("CLOSE_REQUIRED", "B5_STOP_REJECTED", TEST_ONLY_PLAN_HASH),
+        ("PROTECTIVE_REJECTED", "B5_STOP_REJECTED", TEST_ONLY_PLAN_HASH),
+    ]
+    assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
+    # The close flow ran: exactly one reduce-only MARKET close went out and the stop is not re-sent.
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+    assert len(rig.fake.calls_to("place_algo_protective")) == 1
+
+
+async def test_a_failing_protective_rejected_alert_does_not_stop_the_close() -> None:
+    from decimal import Decimal
+
+    from tests.support.protection_doubles import make_rig
+
+    rig = await make_rig(real_closer=True)
+    original = rig.alerts.critical
+
+    def _critical(**kwargs: Any) -> None:
+        original(**kwargs)
+        if kwargs["event"] == "PROTECTIVE_REJECTED":
+            raise RuntimeError("sink down")
+
+    rig.alerts.critical = _critical  # type: ignore[method-assign]
+    rig.fake.reject_next_algo(-2021)
+    rig.coordinator.fill_sink(rig.stream_fill(Decimal("0.004")))
+
+    await rig.coordinator.step()
+
+    assert len(rig.fake.calls_to("place_market_close")) == 1
+
+
+async def test_another_close_required_branch_does_not_alert_protective_rejected() -> None:
+    from decimal import Decimal
+
+    from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH, make_rig
+
+    # The operator close enters CLOSE_REQUIRED through its own branch (OPERATOR_CLOSE): the
+    # PROTECTIVE_REJECTED alert belongs to the B5 branch only.
+    rig = await make_rig(closer_results=[False])
+    rig.coordinator.fill_sink(rig.stream_fill(Decimal("0.004")))
+    await rig.coordinator.step()
+
+    await rig.coordinator.operator_close(
+        plan_hash=TEST_ONLY_PLAN_HASH, operator_id="operator_alpha"
+    )
+
+    events = [a.event for a in rig.alerts.alerts]
+    assert "CLOSE_REQUIRED" in events
+    assert "PROTECTIVE_REJECTED" not in events
+
+
+class _AlertCalls:
+    """A duck-typed `.alert(...)` sink that records the calls (replay and manual-close paths)."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._fail = fail
+
+    def alert(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if self._fail:
+            raise RuntimeError("sink down")
+
+
+async def test_a_second_call_for_an_executed_approval_alerts_a_duplicate_and_sends_nothing() -> (
+    None
+):
+    from tests.test_execution_manager import (
+        FakeExecutionAdapter,
+        InMemoryExecutionIntentStore,
+        _build_live_context,
+        _load_input,
+        _run_plan,
+    )
+
+    case = _load_input()
+    store = InMemoryExecutionIntentStore()
+    sink = _AlertCalls()
+    first = await _run_plan(
+        FakeExecutionAdapter(),
+        intent_store=store,
+        live_context=_build_live_context(case, alert_sink=sink),
+    )
+    assert first.is_no_trade is False
+    assert sink.calls == []  # a first execution is not a duplicate
+
+    replay_adapter = FakeExecutionAdapter()
+    replay = await _run_plan(
+        replay_adapter,
+        intent_store=store,
+        live_context=_build_live_context(case, alert_sink=sink),
+    )
+
+    assert replay == first
+    assert replay_adapter.calls == []
+    (call,) = sink.calls
+    assert call["event"] == "DUPLICATE_EXECUTION_ATTEMPT"
+    assert call["reason"] == "STORED_OUTCOME_REPLAY"
+    assert call["subject"] == call["plan_hash"]
+    assert len(call["plan_hash"]) == 64
+
+
+async def test_a_redelivered_callback_is_deduped_by_the_alert_window() -> None:
+    from tests.test_execution_manager import (
+        FakeExecutionAdapter,
+        InMemoryExecutionIntentStore,
+        _build_live_context,
+        _load_input,
+        _run_plan,
+    )
+
+    case = _load_input()
+    store = InMemoryExecutionIntentStore()
+    real = JournalFirstAlertSink(
+        journal=RecordingJournal(), spill=None, limits=make_test_limits(), queue=deque()
+    )
+    await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    for _ in range(3):
+        adapter = FakeExecutionAdapter()
+        await _run_plan(
+            adapter,
+            intent_store=store,
+            live_context=_build_live_context(case, alert_sink=real),
+        )
+        assert adapter.calls == []
+
+    assert [(a.event, a.reason) for a in real.queue] == [
+        ("DUPLICATE_EXECUTION_ATTEMPT", "STORED_OUTCOME_REPLAY")
+    ]
+
+
+async def test_losing_the_consume_race_alerts_a_duplicate_too() -> None:
+    from tests.test_execution_manager import (
+        FakeExecutionAdapter,
+        InMemoryExecutionIntentStore,
+        _build_live_context,
+        _load_input,
+        _run_plan,
+    )
+
+    case = _load_input()
+    real_store = InMemoryExecutionIntentStore()
+    await _run_plan(FakeExecutionAdapter(), intent_store=real_store)
+
+    class _RaceLostStore:
+        """The first lookup finds nothing; the consume loses; the second lookup finds the row."""
+
+        def __init__(self) -> None:
+            self.lookups = 0
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_store, name)
+
+        def get_entry(self, *, approval_id: str) -> Any:
+            self.lookups += 1
+            return None if self.lookups == 1 else real_store.get_entry(approval_id=approval_id)
+
+        def consume_and_record_entry_intent(self, **kwargs: Any) -> bool:
+            return False
+
+    sink = _AlertCalls()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=_RaceLostStore(),
+        live_context=_build_live_context(case, alert_sink=sink),
+    )
+
+    assert outcome.is_no_trade is False  # the stored outcome of the winner
+    assert "place_entry" not in [c["method"] for c in adapter.calls]
+    (call,) = sink.calls
+    assert (call["event"], call["reason"]) == ("DUPLICATE_EXECUTION_ATTEMPT", "CONSUME_RACE_LOST")
+
+
+async def test_without_an_alert_sink_or_with_a_failing_one_the_replay_outcome_is_unchanged() -> (
+    None
+):
+    from tests.test_execution_manager import (
+        FakeExecutionAdapter,
+        InMemoryExecutionIntentStore,
+        _build_live_context,
+        _load_input,
+        _run_plan,
+    )
+
+    case = _load_input()
+    store = InMemoryExecutionIntentStore()
+    first = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    quiet = await _run_plan(FakeExecutionAdapter(), intent_store=store)
+    failing = _AlertCalls(fail=True)
+    loud = await _run_plan(
+        FakeExecutionAdapter(),
+        intent_store=store,
+        live_context=_build_live_context(case, alert_sink=failing),
+    )
+
+    assert quiet == first == loud
+    assert len(failing.calls) == 1
+
+
+def test_live_context_alert_sink_defaults_to_none_and_must_offer_alert() -> None:
+    from tests.test_execution_manager import _build_live_context, _load_input
+
+    case = _load_input()
+    assert _build_live_context(case).alert_sink is None
+    with pytest.raises(TypeError):
+        _build_live_context(case, alert_sink=object())
+
+
+async def test_a_manual_close_with_an_unverifiable_leg_alerts_the_orphan() -> None:
+    from tests.test_manual_controls import (
+        PLAN_HASH,
+        SL_ID,
+        SYMBOL,
+        ScriptedFake,
+        _close,
+        _resting_entry_with_legs,
+    )
+
+    fake = ScriptedFake()
+    await _resting_entry_with_legs(fake)
+    fake.unreadable_algo_ids = {SL_ID}
+    sink = _AlertCalls()
+
+    await _close(fake, RecordingJournal(), alert_sink=sink)
+
+    (call,) = sink.calls
+    assert call["event"] == "MANUAL_CLOSE_ORPHAN_UNVERIFIED"
+    assert call["subject"] == SYMBOL
+    assert call["plan_hash"] == PLAN_HASH
+    assert call["reason"] == "LEGS_NOT_PROVEN_GONE"
+
+
+async def test_a_manual_close_that_proves_the_legs_gone_alerts_nothing() -> None:
+    from tests.test_manual_controls import ScriptedFake, _close, _resting_entry_with_legs
+
+    fake = ScriptedFake()
+    await _resting_entry_with_legs(fake)
+    sink = _AlertCalls()
+
+    await _close(fake, RecordingJournal(), alert_sink=sink)
+
+    assert sink.calls == []
+
+
+async def test_a_failing_orphan_alert_does_not_change_the_manual_close() -> None:
+    from tests.test_manual_controls import SL_ID, ScriptedFake, _close, _resting_entry_with_legs
+
+    fake = ScriptedFake()
+    await _resting_entry_with_legs(fake)
+    fake.unreadable_algo_ids = {SL_ID}
+    journal = RecordingJournal()
+    sink = _AlertCalls(fail=True)
+
+    enablement, safe_mode = await _close(fake, journal, alert_sink=sink)
+
+    assert len(sink.calls) == 1
+    assert enablement.disabled is True
+    assert safe_mode.reasons == ["MANUAL_CLOSE"]
+    assert [e.event_type for e in journal.events].count("MANUAL_CLOSE_ORPHAN_UNVERIFIED") == 1
