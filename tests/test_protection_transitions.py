@@ -19,6 +19,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
+import src.execution.protection_replay as replay
 from src.domain.transitions import LEGAL_TRANSITIONS, TransitionKind, is_legal
 from src.execution.protection import ProtectionState
 
@@ -430,3 +432,246 @@ def test_the_evidence_names_are_the_pinned_literals() -> None:
 
     assert EVIDENCE_REST_STOP_CONFIRMED == EVIDENCE_STOP
     assert EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL == EVIDENCE_FLAT
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: replay_transitions - a valid history passes the same guard, a corrupt one fails closed.
+# --------------------------------------------------------------------------- #
+
+
+HAPPY_CHAIN = [
+    ("NONE", "AWAITING_FILL"),
+    ("AWAITING_FILL", "UNPROTECTED"),
+    ("UNPROTECTED", "PROTECTED_ENTRY_OPEN"),
+    ("PROTECTED_ENTRY_OPEN", "PROTECTED"),
+    ("PROTECTED", "FLAT"),
+]
+
+
+async def _valid_history() -> list[dict[str, Any]]:
+    """The journaled payloads of a real run: registered, filled, protected, stopped out, flat."""
+    rig = await make_rig(real_closer=True)
+    await _protected_entry_open(rig)
+    await rig.coordinator.step()  # the remainder cancel goes through
+    await rig.coordinator.step()  # entry terminal, stop ACTIVE: PROTECTED
+    assert _tracked(rig).state is ProtectionState.PROTECTED
+    rig.fake.trigger_stop(rig.stop_id)  # the stop closed the position
+    await rig.coordinator.step()  # PROTECTED: two zero reads, FLAT
+    assert _tracked(rig).state is ProtectionState.FLAT
+    rows = _rows(rig, EVENT_TRANSITION)
+    assert [(r["from"], r["to"]) for r in rows] == HAPPY_CHAIN
+    return rows
+
+
+def _invalid(rows: list[dict[str, Any]], code: str) -> None:
+    with pytest.raises(replay.ProtectionReplayInvalid) as caught:
+        replay.replay_transitions(rows, plan_hash=TEST_ONLY_PLAN_HASH)
+    assert caught.value.reason == code
+    assert isinstance(caught.value, ValueError)
+    # The error carries a fixed code only, never row text.
+    assert str(caught.value) == code
+    assert "BTCUSDT" not in str(caught.value)
+
+
+async def test_a_real_run_replays_to_its_last_state() -> None:
+    rows = await _valid_history()
+
+    result = replay.replay_transitions(rows, plan_hash=TEST_ONLY_PLAN_HASH)
+
+    assert result.plan_hash == TEST_ONLY_PLAN_HASH
+    assert result.state == "FLAT"
+    assert result.seq == rows[-1]["seq"] == len(rows)
+    assert result.last_reason == rows[-1]["reason"] == "POSITION_CLOSED"
+    assert result.rows == len(rows)
+    with pytest.raises(AttributeError):  # frozen
+        result.state = "PROTECTED"  # type: ignore[misc]
+
+
+async def test_rows_out_of_order_are_sorted_and_an_identical_duplicate_counts_once() -> None:
+    rows = await _valid_history()
+    expected = replay.replay_transitions(rows, plan_hash=TEST_ONLY_PLAN_HASH)
+
+    shuffled = [rows[3], rows[0], rows[4], rows[2], rows[1], dict(rows[2])]
+
+    assert replay.replay_transitions(shuffled, plan_hash=TEST_ONLY_PLAN_HASH) == expected
+
+
+async def test_the_same_seq_with_a_different_payload_fails_closed() -> None:
+    rows = await _valid_history()
+    conflicting = {**rows[2], "reason": "SOMETHING_ELSE"}
+
+    _invalid([*rows, conflicting], "DUPLICATE_CONFLICT")
+
+
+async def test_a_seq_gap_fails_closed() -> None:
+    rows = await _valid_history()
+
+    _invalid([r for r in rows if r["seq"] != 3], "SEQ_GAP")  # a hole in the middle
+    _invalid(rows[1:], "SEQ_GAP")  # the history does not start at seq 1
+    _invalid(rows[:-1] + [{**rows[-1], "seq": rows[-1]["seq"] + 1}], "SEQ_GAP")
+
+
+async def test_a_first_row_that_is_not_the_registration_fails_closed() -> None:
+    rows = await _valid_history()
+    wrong_to = [{**rows[0], "to": "UNPROTECTED"}, *rows[1:]]
+    wrong_from = [{**rows[0], "from": "AWAITING_FILL"}, *rows[1:]]
+
+    _invalid(wrong_to, "BAD_START")
+    _invalid(wrong_from, "BAD_START")
+
+
+async def test_a_broken_from_to_chain_fails_closed() -> None:
+    rows = await _valid_history()
+    broken = [rows[0], rows[1], {**rows[2], "from": "PROTECTED"}, *rows[3:]]
+
+    _invalid(broken, "CHAIN_BROKEN")
+
+
+async def test_an_edge_outside_the_table_fails_closed() -> None:
+    rows = await _valid_history()
+    illegal = [rows[0], {**rows[1], "to": "PROTECTED"}]  # AWAITING_FILL -> PROTECTED
+    equal_state = [rows[0], {**rows[1], "to": "AWAITING_FILL"}]  # never journaled by the guard
+
+    _invalid(illegal, "ILLEGAL_EDGE")
+    _invalid(equal_state, "ILLEGAL_EDGE")
+
+
+async def test_a_close_required_history_that_returns_to_protected_fails_closed() -> None:
+    rows = await _valid_history()
+    base = {k: rows[1][k] for k in ("approval_id", "symbol", "trade_plan_id")}
+    chain = [
+        {**base, "seq": 1, "from": "NONE", "to": "AWAITING_FILL", "reason": "REGISTERED"},
+        {**base, "seq": 2, "from": "AWAITING_FILL", "to": "UNPROTECTED", "reason": "X"},
+        {**base, "seq": 3, "from": "UNPROTECTED", "to": "CLOSE_REQUIRED", "reason": "B2"},
+        {**base, "seq": 4, "from": "CLOSE_REQUIRED", "to": "PROTECTED", "reason": "LATE"},
+    ]
+
+    _invalid(chain, "ILLEGAL_EDGE")
+
+
+async def test_a_clearing_edge_without_the_allowed_evidence_fails_closed() -> None:
+    rows = await _valid_history()
+    for index, edge in ((2, "UNPROTECTED->PROTECTED_ENTRY_OPEN"), (4, "PROTECTED->FLAT")):
+        assert f"{rows[index]['from']}->{rows[index]['to']}" == edge
+    stop_row = rows[2]  # UNPROTECTED -> PROTECTED_ENTRY_OPEN, evidence REST_STOP_CONFIRMED
+    assert stop_row["evidence"] == EVIDENCE_STOP
+
+    for bad in (None, "ANYTHING", EVIDENCE_FLAT):
+        _invalid([*rows[:2], {**stop_row, "evidence": bad}, *rows[3:]], "EVIDENCE_MISSING")
+    without_key = {k: v for k, v in stop_row.items() if k != "evidence"}  # a pre-20-02 row
+    _invalid([*rows[:2], without_key, *rows[3:]], "EVIDENCE_MISSING")
+
+    close_flat = [
+        rows[0],
+        rows[1],
+        {**rows[1], "seq": 3, "from": "UNPROTECTED", "to": "CLOSE_REQUIRED", "reason": "B2"},
+        {**rows[1], "seq": 4, "from": "CLOSE_REQUIRED", "to": "FLAT", "reason": "X"},
+    ]
+    _invalid(close_flat, "EVIDENCE_MISSING")  # the evidence is null
+    with_evidence = [*close_flat[:3], {**close_flat[3], "evidence": EVIDENCE_FLAT}]
+    assert replay.replay_transitions(with_evidence, plan_hash=TEST_ONLY_PLAN_HASH).state == "FLAT"
+
+
+async def test_a_stop_lost_history_that_clears_back_to_protected_fails_closed() -> None:
+    rows = await _valid_history()
+    base = {k: rows[1][k] for k in ("approval_id", "symbol", "trade_plan_id")}
+    chain = [
+        {**base, "seq": 1, "from": "NONE", "to": "AWAITING_FILL", "reason": "REGISTERED"},
+        {**base, "seq": 2, "from": "AWAITING_FILL", "to": "UNPROTECTED", "reason": "X"},
+        {
+            **base,
+            "seq": 3,
+            "from": "UNPROTECTED",
+            "to": "PROTECTED_ENTRY_OPEN",
+            "reason": "STOP_CONFIRMED_ENTRY_OPEN",
+            "evidence": EVIDENCE_STOP,
+        },
+        {
+            **base,
+            "seq": 4,
+            "from": "PROTECTED_ENTRY_OPEN",
+            "to": "UNPROTECTED",
+            "reason": "STOP_LOST",
+        },
+        {
+            **base,
+            "seq": 5,
+            "from": "UNPROTECTED",
+            "to": "PROTECTED_ENTRY_OPEN",
+            "reason": "STOP_CONFIRMED_ENTRY_OPEN",
+            "evidence": EVIDENCE_STOP,
+        },
+    ]
+
+    _invalid(chain, "STOP_LOST_CLEARED")
+    assert (
+        replay.replay_transitions(chain[:4], plan_hash=TEST_ONLY_PLAN_HASH).state == "UNPROTECTED"
+    )
+
+
+async def test_a_malformed_row_fails_closed() -> None:
+    rows = await _valid_history()
+    for key in ("from", "to", "reason", "seq", "approval_id", "trade_plan_id", "symbol"):
+        missing = {k: v for k, v in rows[1].items() if k != key}
+        _invalid([rows[0], missing, *rows[2:]], "MALFORMED_ROW")
+    for bad_seq in ("2", 2.0, True, None, 0, -1):
+        _invalid([rows[0], {**rows[1], "seq": bad_seq}, *rows[2:]], "MALFORMED_ROW")
+    for key in ("from", "to", "reason"):
+        _invalid([rows[0], {**rows[1], key: 7}, *rows[2:]], "MALFORMED_ROW")
+        _invalid([rows[0], {**rows[1], key: ""}, *rows[2:]], "MALFORMED_ROW")
+    _invalid([rows[0], {**rows[1], "to": "NOT_A_STATE"}, *rows[2:]], "MALFORMED_ROW")
+    _invalid([rows[0], {**rows[1], "from": "NOT_A_STATE"}, *rows[2:]], "MALFORMED_ROW")
+    _invalid([rows[0], {**rows[1], "evidence": 5}, *rows[2:]], "MALFORMED_ROW")
+    _invalid([rows[0], "not a mapping", *rows[2:]], "MALFORMED_ROW")  # type: ignore[list-item]
+    _invalid([], "EMPTY_HISTORY")
+
+
+async def test_rows_of_two_plans_fail_closed() -> None:
+    rows = await _valid_history()
+
+    _invalid([*rows[:2], {**rows[2], "plan_hash": "b2" * 32}, *rows[3:]], "PLAN_MISMATCH")
+    _invalid([*rows[:2], {**rows[2], "approval_id": "approval-other"}, *rows[3:]], "PLAN_MISMATCH")
+    _invalid([*rows[:2], {**rows[2], "symbol": "ETHUSDT"}, *rows[3:]], "PLAN_MISMATCH")
+    tagged = [{**r, "plan_hash": TEST_ONLY_PLAN_HASH} for r in rows]
+    assert replay.replay_transitions(tagged, plan_hash=TEST_ONLY_PLAN_HASH).state == "FLAT"
+
+
+async def test_the_live_guard_and_the_replay_share_one_clearing_rule() -> None:
+    assert replay.CLEARING_EVIDENCE == {EVIDENCE_STOP, EVIDENCE_FLAT}
+    assert replay.clearing_violation("UNPROTECTED", "PROTECTED", None, stop_lost=False) == (
+        "EVIDENCE_MISSING"
+    )
+    assert replay.clearing_violation("UNPROTECTED", "PROTECTED", EVIDENCE_STOP, stop_lost=True) == (
+        "STOP_LOST_CLEARED"
+    )
+    assert replay.clearing_violation("CLOSE_FAILED", "FLAT", EVIDENCE_FLAT, stop_lost=False) is None
+    assert replay.clearing_violation("AWAITING_FILL", "UNPROTECTED", None, stop_lost=False) is None
+
+
+def test_protection_replay_is_a_pure_module() -> None:
+    from tests.support.ast_guards import (
+        float_constructor_calls,
+        forbidden_imports,
+        wall_clock_calls,
+    )
+
+    path = Path(__file__).resolve().parents[1] / "src" / "execution" / "protection_replay.py"
+    forbidden = (
+        "asyncio",
+        "binance*",
+        "httpx",
+        "numpy",
+        "pandas",
+        "polars",
+        "pydantic",
+        "requests",
+        "sqlalchemy",
+        "src.adapters",
+        "src.db",
+        "src.execution.manager",
+        "src.execution.protection",
+        "src.persistence",
+    )
+    assert forbidden_imports(path, forbidden) == []
+    assert float_constructor_calls(path) == []
+    assert wall_clock_calls(path) == []
