@@ -196,15 +196,16 @@ def test_system_mode_values_match_glossary_section_8() -> None:
 def test_rejection_reason_values_match_glossary_section_9() -> None:
     """Beh. 8: RejectionReason enum values are exactly the GLOSSARY section 9.1 set.
 
-    GLOSSARY section 9.1 (20 canonical codes; the five deprecated aliases were
-    removed in Phase 12, D-09, and are recorded in section 9.2):
+    GLOSSARY section 9.1 (21 canonical codes; the five deprecated aliases were
+    removed in Phase 12, D-09, and are recorded in section 9.2; Phase 20 D-10
+    promoted ENTRY_WITHOUT_PROTECTIVE, inherited item G3-005):
         NO_TRADE_REGIME, RR_TOO_LOW, STALE_SETUP, INVALIDATED,
         INSUFFICIENT_MARGIN, EXCHANGE_CONSTRAINT, DATA_STALE,
         RECONCILIATION_REQUIRED, APPROVAL_EXPIRED, MIN_QTY_REJECT,
         NOTIONAL_REJECT, UTILIZATION_REJECT, CLUSTER_CAP_REJECT,
         AGGREGATE_CAP_REJECT, MAX_POSITIONS_REJECT, DAILY_STOP_BLOCK,
         STALE_CONSTRAINTS, UNCERTAIN_ACCOUNT_STATE, STOP_TOO_TIGHT,
-        COST_TO_RISK_EXCEEDED
+        COST_TO_RISK_EXCEEDED, ENTRY_WITHOUT_PROTECTIVE
     """
     expected = {
         "NO_TRADE_REGIME",
@@ -229,10 +230,13 @@ def test_rejection_reason_values_match_glossary_section_9() -> None:
         # Phase 12 D-08 cost-guard codes.
         "STOP_TOO_TIGHT",
         "COST_TO_RISK_EXCEEDED",
+        # Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005).
+        "ENTRY_WITHOUT_PROTECTIVE",
     }
     actual = {member.value for member in RejectionReason}
     assert actual == expected
-    assert len(RejectionReason) == 20
+    # Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005): 20 -> 21 members.
+    assert len(RejectionReason) == 21
 
 
 @pytest.mark.parametrize(
@@ -298,14 +302,14 @@ def test_portfolio_verdict_accepts_new_cost_guard_codes(code: str) -> None:
 
 
 def test_glossary_section_9_1_block_equals_enum() -> None:
-    """The GLOSSARY 9.1 text block parses to the same 20 tokens as the enum."""
+    """The GLOSSARY 9.1 text block parses to the same 21 tokens as the enum."""
     lines = (_REPO_ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8").splitlines()
     start = lines.index("### 9.1 Canonical codes")
     fence = "`" * 3
     open_idx = lines.index(fence + "text", start)
     close_idx = lines.index(fence, open_idx + 1)
     tokens = [line.strip() for line in lines[open_idx + 1 : close_idx] if line.strip()]
-    assert len(tokens) == len(set(tokens)) == 20
+    assert len(tokens) == len(set(tokens)) == 21
     assert set(tokens) == {member.value for member in RejectionReason}
 
 

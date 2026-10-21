@@ -414,8 +414,9 @@ def test_invariant_2_pinned_enums_and_role_codes_are_unchanged() -> None:
     from src.execution.order_ids import ROLE_CODES
 
     # The new reason codes are plain strings documented in GLOSSARY 9.3, not enum members
-    # (research F10): the enum keeps its 20 members.
-    assert len(RejectionReason) == 20
+    # (research F10): the enum keeps its 20 members, plus ENTRY_WITHOUT_PROTECTIVE which
+    # Phase 20 D-10 promoted (G3-005): 21 members.
+    assert len(RejectionReason) == 21
     assert {member.name for member in OrderRole} == {
         "ENTRY",
         "STOP_LOSS",
