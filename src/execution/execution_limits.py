@@ -316,6 +316,28 @@ def load_execution_limits(path: Path | str) -> ExecutionLimits:
     return parse_execution_limits(raw)
 
 
+def check_reconcile_cadence(limits: ExecutionLimits) -> None:
+    """Refuse a reconcile cadence that is not strictly below ``protection.max_unprotected_ms``.
+
+    D-25: when both values are configured, ``reconcile.tick_interval_ms`` must be below
+    ``protection.max_unprotected_ms``, otherwise a loop could not notice an unprotected position
+    before its deadline. While either value is unset this does nothing: ``require_live_ready``
+    refuses separately, and no default is chosen here so that the check can pass. The reconcile
+    loop constructor calls it (plan 20-12); this module has no caller.
+
+    Raises:
+        ExecutionLimitsInvalid: naming both keys and neither value.
+    """
+    tick = limits.reconcile_tick_interval_ms
+    deadline = limits.max_unprotected_ms
+    if tick is None or deadline is None:
+        return
+    if tick >= deadline:
+        raise ExecutionLimitsInvalid(
+            ["reconcile.tick_interval_ms (must be strictly below protection.max_unprotected_ms)"]
+        )
+
+
 __all__ = [
     "ALLOWED_PROVENANCE_LABELS",
     "ALLOWED_SECTIONS",
@@ -327,6 +349,7 @@ __all__ = [
     "ExecutionLimitsFileMissing",
     "ExecutionLimitsInvalid",
     "ExecutionLimitsNotConfigured",
+    "check_reconcile_cadence",
     "load_execution_limits",
     "parse_execution_limits",
 ]
