@@ -28,13 +28,43 @@ rejects a duplicate while the earlier order is still open (F-126).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from src.domain.enums import ExecutionIntentStatus
+
+# Why a reconciliation closed an intent row (Phase 20, plan 20-03, T-B, D-11, migration 0007).
+# The application's conclusion, never Binance's answer: it lives in its own column and is written
+# only by `ExecutionIntentStore.finalize_reconciled_resolution`.
+RESOLUTION_RECONCILED_ABSENT = "RECONCILED_ABSENT"
+RESOLUTION_NEVER_SENT = "NEVER_SENT"
+
+# reason code -> the ONLY status the row may be in when that reason is written (target: REJECTED).
+# RECONCILED_ABSENT concludes "the exchange shows no such order" for a row whose send outcome
+# was unknown; NEVER_SENT concludes "nothing was sent" for a row that was never marked SENT.
+_RECONCILED_SOURCE_STATUS: Mapping[str, ExecutionIntentStatus] = MappingProxyType(
+    {
+        RESOLUTION_RECONCILED_ABSENT: ExecutionIntentStatus.UNKNOWN,
+        RESOLUTION_NEVER_SENT: ExecutionIntentStatus.INTENDED,
+    }
+)
+RESOLUTION_REASON_CODES: frozenset[str] = frozenset(_RECONCILED_SOURCE_STATUS)
+
+
+def required_source_status(reason_code: str) -> ExecutionIntentStatus:
+    """The one status a row must be in for `reason_code` to be written (both stores use this).
+
+    Raises `ValueError` for a code outside `RESOLUTION_REASON_CODES`, before any write.
+    """
+    try:
+        return _RECONCILED_SOURCE_STATUS[reason_code]
+    except KeyError:
+        known = sorted(RESOLUTION_REASON_CODES)
+        raise ValueError(f"unknown resolution reason {reason_code!r}; known: {known}") from None
 
 
 @dataclass(frozen=True)
@@ -70,6 +100,9 @@ class IntentRecord:
     # The sizing-time realized risk (SizedResult.realized_risk), stored once on the ENTRY row at
     # approval consumption (Phase 19, D-22, migration 0005). None = unknown or not an ENTRY row.
     sized_realized_risk: Decimal | None = None
+    # Why a reconciliation closed this row as REJECTED (Phase 20, plan 20-03, migration 0007):
+    # RECONCILED_ABSENT or NEVER_SENT. None = closed by the exchange's own answer, or not closed.
+    resolution_reason_code: str | None = None
 
 
 @runtime_checkable
@@ -151,6 +184,30 @@ class ExecutionIntentStore(Protocol):
         exchange_status: str | None,
         now_utc: datetime,
     ) -> None: ...
+
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        """Close a row by a reconciliation conclusion, with its reason (Phase 20, T-B, D-11).
+
+        The ONLY writer of `resolution_reason_code`; `record_result` keeps its meaning (the
+        exchange response). The target status is always REJECTED:
+
+          - RECONCILED_ABSENT requires the current status UNKNOWN,
+          - NEVER_SENT requires the current status INTENDED.
+
+        `exchange_status` and `exchange_order_id` are written NULL (the application reason never
+        goes into Binance's field), `resolved_at_utc` = `now_utc`. An identical repeat (already
+        REJECTED with the same code) is a no-op. Any other source status, a different code on
+        an already closed row or a missing row raises `IntentStateConflict` and writes nothing;
+        a code outside `RESOLUTION_REASON_CODES` raises `ValueError` before any write.
+        """
+        ...
 
     def finalize_entry_outcome(
         self,

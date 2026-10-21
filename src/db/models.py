@@ -554,6 +554,9 @@ class ExecutionIntentRow(Base):
     # Sizing-time realized risk of a live entry (Phase 19, D-22, G4-008, migration 0005).
     # Written once with the ENTRY INSERT; NULL when never recorded and on protective rows.
     sized_realized_risk: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    # Why a reconciliation closed the row (Phase 20, plan 20-03, T-B, migration 0007): written only
+    # by `finalize_reconciled_resolution`; NULL for every row the exchange's own answer closed.
+    resolution_reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     intended_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sent_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -617,6 +620,11 @@ class ExecutionIntentRow(Base):
         CheckConstraint(
             "sized_realized_risk IS NULL OR (role = 'ENTRY' AND sized_realized_risk > 0)",
             name="ck_execution_intents_sized_realized_risk",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "resolution_reason_code IS NULL OR (intent_status = 'REJECTED' "
+            "AND resolution_reason_code IN ('RECONCILED_ABSENT', 'NEVER_SENT'))",
+            name="ck_execution_intents_resolution_reason",
         ).ddl_if(dialect="postgresql"),
     )
 

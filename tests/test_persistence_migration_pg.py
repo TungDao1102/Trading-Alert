@@ -649,7 +649,8 @@ def test_downgrade_0005_keeps_rows_and_removes_only_the_column(pg_empty_db: str)
     engine = make_sync_engine(pg_empty_db)
     try:
         after = _present_columns(engine)("execution_intents")
-        assert before - after == {"sized_realized_risk"}
+        # Downgrading from head to 0004 also passes through 0007, which owns the second column.
+        assert before - after == {"sized_realized_risk", "resolution_reason_code"}
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             roles = (

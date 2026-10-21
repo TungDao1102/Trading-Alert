@@ -187,9 +187,7 @@ class IntentResultContract:
 
     # -- the two closings cannot be confused ----------------------------------------------
 
-    def test_an_exchange_rejection_has_no_resolution_reason(
-        self, harness: ContractHarness
-    ) -> None:
+    def test_an_exchange_rejection_has_no_resolution_reason(self, harness: ContractHarness) -> None:
         drive_entry(harness, ExecutionIntentStatus.REJECTED)
         row = _entry(harness)
         assert row.intent_status is ExecutionIntentStatus.REJECTED
