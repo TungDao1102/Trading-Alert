@@ -314,3 +314,312 @@ def test_new_modules_read_no_wall_clock_and_build_no_float(module: str) -> None:
     path = SRC_ROOT / "ops" / module
     assert wall_clock_calls(path) == []
     assert float_constructor_calls(path) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: expire_pending_entry, cancel_untriggered_protectives, emergency_manual_close.
+# --------------------------------------------------------------------------- #
+
+PLAN_HASH = "5555555555555555555555555555555555555555555555555555555555555555"
+SYMBOL = "BTCUSDT"
+
+
+class CancelAdapter:
+    """Records every cancel call, in order; `fail_ids` raise a RuntimeError."""
+
+    def __init__(self, *, fail_ids: frozenset[str] = frozenset()) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._fail_ids = fail_ids
+
+    async def cancel_normal_order(self, *, symbol: str, orig_client_order_id: str) -> None:
+        self.calls.append(("cancel_normal_order", orig_client_order_id))
+        if orig_client_order_id in self._fail_ids:
+            raise RuntimeError("simulated network failure")
+
+    async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None:
+        self.calls.append(("cancel_algo_order", client_algo_id))
+        if client_algo_id in self._fail_ids:
+            raise RuntimeError("simulated rate limit")
+
+
+def _ids() -> tuple[str, str, str, str]:
+    from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
+
+    return (
+        derive_client_order_id(plan_hash=PLAN_HASH, role="ENTRY"),
+        derive_algo_client_id(plan_hash=PLAN_HASH, role="STOP_LOSS"),
+        derive_algo_client_id(plan_hash=PLAN_HASH, role="TAKE_PROFIT_1"),
+        derive_algo_client_id(plan_hash=PLAN_HASH, role="TAKE_PROFIT_2"),
+    )
+
+
+def _phases(events: Any) -> list[tuple[str, str]]:
+    return [(e.entity_id, json.loads(e.payload_json)["phase"]) for e in events]
+
+
+async def test_expire_pending_entry_cancels_with_journal_always_raising(tmp_path: Path) -> None:
+    """F-702: the cancel is issued once; pre-image and post-image wait in the spill."""
+    from src.execution.manager import expire_pending_entry
+    from src.ops.spill import LocalSpill
+
+    entry_id, *_ = _ids()
+    spill = LocalSpill(tmp_path / "spill")
+    adapter = CancelAdapter()
+    journal = RaisingJournal()
+
+    await expire_pending_entry(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=adapter,  # type: ignore[arg-type]
+        journal=journal,
+        now_utc=NOW_UTC,
+        trigger_reason="operator_close",
+        spill=spill,
+    )
+
+    assert adapter.calls == [("cancel_normal_order", entry_id)]
+    spilled = [r.event for r in spill.pending()]
+    assert sorted(p for _, p in _phases(spilled)) == ["post_cancel", "pre_cancel"]
+    assert {e.event_type for e in spilled} == {"ENTRY_EXPIRY"}
+
+
+async def test_cancel_untriggered_protectives_cancels_all_legs_with_journal_always_raising(
+    tmp_path: Path,
+) -> None:
+    from src.execution.manager import cancel_untriggered_protectives
+    from src.ops.spill import LocalSpill
+
+    _, sl_id, tp1_id, tp2_id = _ids()
+    spill = LocalSpill(tmp_path / "spill")
+    adapter = CancelAdapter()
+
+    await cancel_untriggered_protectives(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=adapter,  # type: ignore[arg-type]
+        journal=RaisingJournal(),
+        now_utc=NOW_UTC,
+        spill=spill,
+    )
+
+    assert adapter.calls == [
+        ("cancel_algo_order", sl_id),
+        ("cancel_algo_order", tp1_id),
+        ("cancel_algo_order", tp2_id),
+    ]
+    spilled = [r.event for r in spill.pending()]
+    assert sorted(_phases(spilled)) == sorted(
+        [(i, p) for i in (sl_id, tp1_id, tp2_id) for p in ("pre_cancel", "post_cancel")]
+    )
+
+
+async def test_emergency_manual_close_runs_every_step_with_journal_always_raising(
+    tmp_path: Path,
+) -> None:
+    """Disable, SAFE_MODE and both cancel steps all happen during a journal outage."""
+    from src.execution.manager import emergency_manual_close
+    from src.ops.spill import LocalSpill
+    from src.persistence.errors import StoreUnavailable
+    from src.reconcile.safe_mode import SafeModeController
+
+    spill = LocalSpill(tmp_path / "spill")
+    controller = _enabled_controller(RecordingJournal(), spill)
+    controller._journal = RaisingJournal()  # noqa: SLF001 — the outage starts after enabling
+    safe_mode = SafeModeController(adapter=object(), journal=RaisingJournal())  # type: ignore[arg-type]
+    adapter = CancelAdapter()
+
+    # SAFE_MODE journaling is not part of this plan: its StoreUnavailable is the only failure.
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await emergency_manual_close(
+            plan_hash=PLAN_HASH,
+            symbol=SYMBOL,
+            adapter=adapter,  # type: ignore[arg-type]
+            journal=RaisingJournal(),
+            enablement=controller,
+            safe_mode_controller=safe_mode,
+            operator_id="op-1",
+            now_utc=NOW_UTC,
+            spill=spill,
+        )
+
+    assert [type(e) for e in excinfo.value.exceptions] == [StoreUnavailable]
+    assert controller.is_disabled is True
+    assert safe_mode.in_safe_mode is True
+    assert [method for method, _ in adapter.calls] == [
+        "cancel_normal_order",
+        "cancel_algo_order",
+        "cancel_algo_order",
+        "cancel_algo_order",
+    ]
+    # 1 disable record + 2 entry-expiry records + 6 protective-cancel records.
+    assert len(spill.pending()) == 9
+
+
+async def test_a_failing_cancel_is_still_recorded_as_cancel_failed_and_reraised(
+    tmp_path: Path,
+) -> None:
+    from src.execution.manager import expire_pending_entry
+    from src.ops.spill import LocalSpill
+
+    entry_id, *_ = _ids()
+    spill = LocalSpill(tmp_path / "spill")
+    adapter = CancelAdapter(fail_ids=frozenset({entry_id}))
+
+    with pytest.raises(RuntimeError, match="simulated network failure"):
+        await expire_pending_entry(
+            plan_hash=PLAN_HASH,
+            symbol=SYMBOL,
+            adapter=adapter,  # type: ignore[arg-type]
+            journal=RaisingJournal(),
+            now_utc=NOW_UTC,
+            trigger_reason="operator_close",
+            spill=spill,
+        )
+
+    spilled = [r.event for r in spill.pending()]
+    assert sorted(p for _, p in _phases(spilled)) == ["cancel_failed", "pre_cancel"]
+    failed = next(e for e in spilled if json.loads(e.payload_json)["phase"] == "cancel_failed")
+    assert json.loads(failed.payload_json)["error_type"] == "RuntimeError"
+    assert "simulated" not in failed.payload_json  # class name only, never the message
+
+
+async def test_per_leg_isolation_and_the_exception_group_are_unchanged(tmp_path: Path) -> None:
+    from src.execution.manager import cancel_untriggered_protectives
+    from src.ops.spill import LocalSpill
+
+    _, sl_id, tp1_id, tp2_id = _ids()
+    spill = LocalSpill(tmp_path / "spill")
+    adapter = CancelAdapter(fail_ids=frozenset({sl_id}))
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await cancel_untriggered_protectives(
+            plan_hash=PLAN_HASH,
+            symbol=SYMBOL,
+            adapter=adapter,  # type: ignore[arg-type]
+            journal=RaisingJournal(),
+            now_utc=NOW_UTC,
+            spill=spill,
+        )
+
+    assert [type(e) for e in excinfo.value.exceptions] == [RuntimeError]
+    assert [c for _, c in adapter.calls] == [sl_id, tp1_id, tp2_id]
+    phases = _phases([r.event for r in spill.pending()])
+    assert (sl_id, "cancel_failed") in phases
+    assert (tp1_id, "post_cancel") in phases
+    assert (tp2_id, "post_cancel") in phases
+
+
+async def test_a_lost_audit_record_on_one_leg_does_not_stop_the_other_legs() -> None:
+    """No spill and a dead journal: every leg is still cancelled; the losses are collected."""
+    from src.execution.manager import cancel_untriggered_protectives
+    from src.ops.risk_first import AuditRecordLost
+
+    adapter = CancelAdapter()
+
+    with pytest.raises(ExceptionGroup) as excinfo:
+        await cancel_untriggered_protectives(
+            plan_hash=PLAN_HASH,
+            symbol=SYMBOL,
+            adapter=adapter,  # type: ignore[arg-type]
+            journal=RaisingJournal(),
+            now_utc=NOW_UTC,
+        )
+
+    assert len(adapter.calls) == 3
+    assert {type(e) for e in excinfo.value.exceptions} == {AuditRecordLost}
+
+
+async def test_a_healthy_journal_gets_the_same_events_in_the_same_order_and_no_spill_stays(
+    tmp_path: Path,
+) -> None:
+    from src.execution.manager import cancel_untriggered_protectives, expire_pending_entry
+    from src.ops.spill import LocalSpill
+
+    entry_id, sl_id, tp1_id, tp2_id = _ids()
+    spill = LocalSpill(tmp_path / "spill")
+    journal = RecordingJournal()
+    adapter = CancelAdapter()
+
+    await expire_pending_entry(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=adapter,  # type: ignore[arg-type]
+        journal=journal,
+        now_utc=NOW_UTC,
+        trigger_reason="operator_close",
+        spill=spill,
+    )
+    await cancel_untriggered_protectives(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=adapter,  # type: ignore[arg-type]
+        journal=journal,
+        now_utc=NOW_UTC,
+        spill=spill,
+    )
+
+    assert _phases(journal.events) == [
+        (entry_id, "pre_cancel"),
+        (entry_id, "post_cancel"),
+        (sl_id, "pre_cancel"),
+        (sl_id, "post_cancel"),
+        (tp1_id, "pre_cancel"),
+        (tp1_id, "post_cancel"),
+        (tp2_id, "pre_cancel"),
+        (tp2_id, "post_cancel"),
+    ]
+    assert set(json.loads(journal.events[0].payload_json)) == {
+        "symbol",
+        "identifier",
+        "trigger_reason",
+        "phase",
+    }
+    assert _spill_files(tmp_path / "spill") == []
+
+
+async def test_controls_still_work_without_a_spill_keyword() -> None:
+    """The spill keyword defaults to None: existing callers keep working with a healthy journal."""
+    from src.execution.manager import expire_pending_entry
+
+    journal = RecordingJournal()
+    await expire_pending_entry(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=CancelAdapter(),  # type: ignore[arg-type]
+        journal=journal,
+        now_utc=NOW_UTC,
+        trigger_reason="operator_close",
+    )
+    assert len(journal.events) == 2
+
+
+async def test_a_store_outage_blocks_a_new_entry_but_none_of_the_risk_reducing_controls(
+    tmp_path: Path,
+) -> None:
+    """D-16: the consume transaction cannot commit, so the new entry ends NO_TRADE."""
+    from src.execution.manager import cancel_untriggered_protectives
+    from src.ops.spill import LocalSpill
+    from src.persistence.errors import StoreUnavailable
+
+    from tests.support.intent_store_fakes import FailingIntentStore
+    from tests.test_execution_manager import FakeExecutionAdapter, _placement_calls, _run_plan
+
+    entry_adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        entry_adapter,
+        intent_store=FailingIntentStore("consume_and_record_entry_intent", StoreUnavailable("x")),
+    )
+    assert outcome.is_no_trade is True
+    assert _placement_calls(entry_adapter) == []
+
+    # In the same outage a protective cancel still reaches the exchange.
+    cancel_adapter = CancelAdapter()
+    await cancel_untriggered_protectives(
+        plan_hash=PLAN_HASH,
+        symbol=SYMBOL,
+        adapter=cancel_adapter,  # type: ignore[arg-type]
+        journal=RaisingJournal(),
+        now_utc=NOW_UTC,
+        spill=LocalSpill(tmp_path / "spill"),
+    )
+    assert len(cancel_adapter.calls) == 3
