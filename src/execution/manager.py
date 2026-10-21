@@ -52,7 +52,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.approval.binding import check_binding_full, check_binding_identity
 from src.domain.algo_status import is_protection_confirmed
@@ -107,6 +107,7 @@ from src.execution.pre_placement import (
 )
 from src.execution.protection import RestingEntry
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
+from src.ops.risk_first import AuditRecordLost, act_then_record, record_after
 from src.persistence.errors import (
     ApprovedQuantityInconsistent,
     ApprovedQuantityRefused,
@@ -115,6 +116,9 @@ from src.persistence.errors import (
 )
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
+
+if TYPE_CHECKING:
+    from src.ops.spill import LocalSpill
 
 # --------------------------------------------------------------------------- #
 # Live-5 scope guard (09-04): every placement path is scoped to the
@@ -1962,6 +1966,65 @@ def _build_cancel_event(
     )
 
 
+async def _cancel_then_audit(
+    *,
+    action: Callable[[], Awaitable[None]],
+    spill: LocalSpill | None,
+    journal: Any,
+    event_type: str,
+    entity_type: str,
+    identifier: str,
+    symbol: str,
+    trigger_reason: str,
+    now_utc: datetime,
+) -> None:
+    """Run one exchange cancel FIRST, then record its pre-image and post-image (D-16, F-702).
+
+    The pre-image is the write-ahead record: it goes to the local spill before the cancel
+    and to the journal after it (`act_then_record`). The journal is never awaited before the
+    exchange call. A failing cancel records the `cancel_failed` twin (exception TYPE only) and
+    re-raises the cancel's own exception; a lost audit record is attached to it as a note.
+    When the cancel succeeded but an audit record could not reach the journal or the spill,
+    `AuditRecordLost` is raised after the post-image attempt.
+    """
+
+    def event(phase: str, error_type: str | None = None) -> JournalEvent:
+        return _build_cancel_event(
+            event_type=event_type,
+            entity_type=entity_type,
+            identifier=identifier,
+            symbol=symbol,
+            trigger_reason=trigger_reason,
+            phase=phase,
+            now_utc=now_utc,
+            error_type=error_type,
+        )
+
+    lost: AuditRecordLost | None = None
+    try:
+        await act_then_record(
+            spill=spill, journal=journal, event=event("pre_cancel"), action=action
+        )
+    except AuditRecordLost as pre_lost:
+        lost = pre_lost  # the cancel itself succeeded
+    except Exception as exc:
+        try:
+            record_after(
+                spill=spill,
+                journal=journal,
+                event=event("cancel_failed", type(exc).__name__),
+            )
+        except AuditRecordLost as failed_lost:
+            exc.add_note(str(failed_lost))
+        raise
+    try:
+        record_after(spill=spill, journal=journal, event=event("post_cancel"))
+    except AuditRecordLost as post_lost:
+        lost = lost or post_lost
+    if lost is not None:
+        raise lost
+
+
 async def expire_pending_entry(
     *,
     plan_hash: str,
@@ -1970,15 +2033,17 @@ async def expire_pending_entry(
     journal: Any,
     now_utc: datetime,
     trigger_reason: str,
+    spill: LocalSpill | None = None,
 ) -> None:
     """Cancel a stale pending LIMIT entry via its deterministic `x-` id.
 
     Per EXECUTION_SPEC §4: an unfilled entry must be canceled on any of
     five triggers — expiry time, invalidation, superseded plan, mode
-    change, or operator close. Journals the pre-image BEFORE the cancel
-    call and the post-image AFTER (journal-first pattern, D-05
-    extended). A failing cancel journals a `cancel_failed` event and
-    re-raises (never silently swallowed).
+    change, or operator close. Risk-reducing, so it ACTS FIRST (Phase 20
+    plan 20-08, D-16, F-702): the cancel is issued without waiting for the
+    journal, then the pre-image and the post-image are recorded (through the
+    local `spill` when the journal is down). A failing cancel records a
+    `cancel_failed` event and re-raises (never silently swallowed).
 
     The cancel goes through the adapter's real
     `cancel_normal_order(*, symbol, orig_client_order_id)` surface
@@ -1994,11 +2059,15 @@ async def expire_pending_entry(
         now_utc: The current UTC-aware datetime (injected).
         trigger_reason: One of the five canonical EXECUTION_SPEC §4
             triggers.
+        spill: Optional local spill that keeps the audit records while the
+            journal is down.
 
     Raises:
         ValueError: `symbol` is not in the live-5 universe, or
             `trigger_reason` is not a canonical trigger.
-        Exception: the adapter cancel error (after journaling it).
+        Exception: the adapter cancel error (after recording it).
+        AuditRecordLost: the cancel succeeded but neither the journal nor the
+            spill took an audit record.
     """
     _require_live5_symbol(symbol)
     if trigger_reason not in _EXPIRY_TRIGGERS:
@@ -2008,43 +2077,19 @@ async def expire_pending_entry(
         )
     client_order_id = derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value)
 
-    journal.record(
-        _build_cancel_event(
-            event_type="ENTRY_EXPIRY",
-            entity_type="Order",
-            identifier=client_order_id,
-            symbol=symbol,
-            trigger_reason=trigger_reason,
-            phase="pre_cancel",
-            now_utc=now_utc,
-        )
-    )
-    try:
+    async def cancel() -> None:
         await adapter.cancel_normal_order(symbol=symbol, orig_client_order_id=client_order_id)
-    except Exception as exc:
-        journal.record(
-            _build_cancel_event(
-                event_type="ENTRY_EXPIRY",
-                entity_type="Order",
-                identifier=client_order_id,
-                symbol=symbol,
-                trigger_reason=trigger_reason,
-                phase="cancel_failed",
-                now_utc=now_utc,
-                error_type=type(exc).__name__,
-            )
-        )
-        raise
-    journal.record(
-        _build_cancel_event(
-            event_type="ENTRY_EXPIRY",
-            entity_type="Order",
-            identifier=client_order_id,
-            symbol=symbol,
-            trigger_reason=trigger_reason,
-            phase="post_cancel",
-            now_utc=now_utc,
-        )
+
+    await _cancel_then_audit(
+        action=cancel,
+        spill=spill,
+        journal=journal,
+        event_type="ENTRY_EXPIRY",
+        entity_type="Order",
+        identifier=client_order_id,
+        symbol=symbol,
+        trigger_reason=trigger_reason,
+        now_utc=now_utc,
     )
 
 
@@ -2055,18 +2100,22 @@ async def cancel_untriggered_protectives(
     adapter: ExecutionAdapter,
     journal: Any,
     now_utc: datetime,
+    spill: LocalSpill | None = None,
 ) -> None:
     """Cancel the SL/TP1/TP2 algo legs via their deterministic `xa-` ids.
 
     Per EXECUTION_SPEC §11 (manual emergency controls) + §4: cancels
     every protective leg by its deterministic algo client id, one at a
-    time in SL → TP1 → TP2 order, journaling the pre-image BEFORE and
-    the post-image AFTER each cancel call (journal-first pattern).
+    time in SL → TP1 → TP2 order. Risk-reducing, so it ACTS FIRST (Phase 20
+    plan 20-08, D-16, F-702): each cancel is issued without waiting for the
+    journal, then its pre-image and post-image are recorded (through the local
+    `spill` when the journal is down).
 
     Per-leg isolation (09-REVIEW CR-10): one failing cancel never leaves
     the remaining legs live — every leg is attempted, each failure is
-    journaled as `cancel_failed`, and all failures are raised together
-    as an `ExceptionGroup` after the last leg.
+    recorded as `cancel_failed`, and all failures (and any lost audit
+    record, `AuditRecordLost`) are raised together as an `ExceptionGroup`
+    after the last leg.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -2075,10 +2124,12 @@ async def cancel_untriggered_protectives(
         adapter: The Protocol-typed adapter surface.
         journal: The journal layer (duck-typed `.record(event)`).
         now_utc: The current UTC-aware datetime (injected).
+        spill: Optional local spill that keeps the audit records while the
+            journal is down.
 
     Raises:
-        ExceptionGroup: one or more leg cancels failed (all legs were
-            still attempted).
+        ExceptionGroup: one or more leg cancels failed or lost an audit record
+            (all legs were still attempted).
     """
     _require_live5_symbol(symbol)
     errors: list[Exception] = []
@@ -2088,45 +2139,24 @@ async def cancel_untriggered_protectives(
         OrderRole.TAKE_PROFIT_2.value,
     ):
         client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
-        journal.record(
-            _build_cancel_event(
-                event_type="PROTECTIVE_CANCEL",
-                entity_type="OpenAlgoOrder",
-                identifier=client_algo_id,
-                symbol=symbol,
-                trigger_reason=role,
-                phase="pre_cancel",
-                now_utc=now_utc,
-            )
-        )
-        try:
+
+        async def cancel(client_algo_id: str = client_algo_id) -> None:
             await adapter.cancel_algo_order(symbol=symbol, client_algo_id=client_algo_id)
-        except Exception as exc:  # noqa: BLE001 — isolate, journal, raise as group
-            errors.append(exc)
-            journal.record(
-                _build_cancel_event(
-                    event_type="PROTECTIVE_CANCEL",
-                    entity_type="OpenAlgoOrder",
-                    identifier=client_algo_id,
-                    symbol=symbol,
-                    trigger_reason=role,
-                    phase="cancel_failed",
-                    now_utc=now_utc,
-                    error_type=type(exc).__name__,
-                )
-            )
-            continue
-        journal.record(
-            _build_cancel_event(
+
+        try:
+            await _cancel_then_audit(
+                action=cancel,
+                spill=spill,
+                journal=journal,
                 event_type="PROTECTIVE_CANCEL",
                 entity_type="OpenAlgoOrder",
                 identifier=client_algo_id,
                 symbol=symbol,
                 trigger_reason=role,
-                phase="post_cancel",
                 now_utc=now_utc,
             )
-        )
+        except Exception as exc:  # noqa: BLE001 — isolate, record, raise as group
+            errors.append(exc)
     if errors:
         raise ExceptionGroup("cancel_untriggered_protectives: cancel incomplete", errors)
 
@@ -2156,6 +2186,7 @@ async def emergency_manual_close(
     safe_mode_controller: Any,
     operator_id: str,
     now_utc: datetime,
+    spill: LocalSpill | None = None,
 ) -> None:
     """Run the EXECUTION_SPEC §11 manual emergency control sequence.
 
@@ -2167,7 +2198,7 @@ async def emergency_manual_close(
     can ever leave new entries enabled:
 
       1. `enablement.disable(...)` — flip `LIVE_ORDERS_DISABLED` back
-         to true (journal-first, per `LiveEnablementController`).
+         to true (acts first, journals afterwards, per `LiveEnablementController`).
       2. `safe_mode_freeze(...)` — enter SAFE_MODE so monitoring and
          reconciliation continue while entries stay blocked.
       3. `expire_pending_entry` (trigger_reason="operator_close") —
@@ -2201,6 +2232,9 @@ async def emergency_manual_close(
         operator_id: The operator id performing the manual close
             (audit-trail discipline — never empty).
         now_utc: The current UTC-aware datetime (injected).
+        spill: Optional local spill passed to both cancel steps (the enablement
+            controller holds its own). None of the four steps waits for the journal
+            (D-16, F-702).
 
     Raises:
         ExceptionGroup: one or more steps failed (every step was still
@@ -2232,6 +2266,7 @@ async def emergency_manual_close(
             journal=journal,
             now_utc=now_utc,
             trigger_reason="operator_close",
+            spill=spill,
         )
     except Exception as exc:  # noqa: BLE001 — isolate; protectives must still be canceled
         errors.append(exc)
@@ -2242,6 +2277,7 @@ async def emergency_manual_close(
             adapter=adapter,
             journal=journal,
             now_utc=now_utc,
+            spill=spill,
         )
     except Exception as exc:  # noqa: BLE001 — collected below
         errors.append(exc)
