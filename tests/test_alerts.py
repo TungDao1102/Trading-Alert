@@ -251,6 +251,7 @@ def test_the_event_contract_is_closed_and_maps_every_event_to_a_severity() -> No
         "MANUAL_CLOSE_ORPHAN_UNVERIFIED",
         "DAILY_STOP",
         "DAILY_LOSS_WARNING",
+        "SAFE_MODE_ENTERED",
     }
     assert all(isinstance(s, AlertSeverity) for s in ALERT_EVENTS.values())
     assert ALERT_EVENTS["DAILY_STOP"] is AlertSeverity.CRITICAL

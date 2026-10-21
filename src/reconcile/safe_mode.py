@@ -210,6 +210,11 @@ class SafeModeController:
             `src/reconcile/compare.py`). Injected for testability.
         state_store: The durable SAFE_MODE store (D-14). None keeps the controller in-memory
             only (`is_durable` is False); the reconcile loop and startup refuse such a controller.
+        on_enter: Optional observer `(reason, now_utc) -> None` called once per entry and once per
+            re-entry with a NEW reason (plan 20-22, D-24): it is how an operator alert leaves the
+            controller without this module importing `src.ops`. Best-effort: it runs after the
+            flag flip, the journal row and the save attempt (also when the save raised), and an
+            exception from it is swallowed.
     """
 
     def __init__(
@@ -219,10 +224,12 @@ class SafeModeController:
         journal: JournalLike,
         compare_fn: Callable[..., Any] | None = None,
         state_store: SafeModeStateStore | None = None,
+        on_enter: Callable[[str, datetime], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._journal = journal
         self._state_store = state_store
+        self._on_enter = on_enter
         if compare_fn is None:
             from .compare import compare as _compare
 
@@ -253,6 +260,7 @@ class SafeModeController:
         state_store: SafeModeStateStore,
         now_utc: datetime,
         compare_fn: Callable[..., Any] | None = None,
+        on_enter: Callable[[str, datetime], None] | None = None,
     ) -> Self:
         """Start a controller from the durable store, failing closed (D-14, research C14).
 
@@ -269,6 +277,9 @@ class SafeModeController:
             state_store: The durable store; attached to the returned controller.
             now_utc: The current UTC-aware datetime (the entry time of an unreadable start).
             compare_fn: The compare function (as for the constructor).
+            on_enter: The entry observer (as for the constructor). It is also called once for an
+                unreadable start (reason `SAFE_MODE_STATE_UNREADABLE`), the one entry that does not
+                go through `enter_safe_mode`.
 
         Raises:
             ValueError: `now_utc` is naive or not UTC (a caller bug, not a store failure).
@@ -277,11 +288,19 @@ class SafeModeController:
         try:
             state = state_store.load()
             controller = cls.rehydrate(
-                adapter=adapter, journal=journal, compare_fn=compare_fn, state=state
+                adapter=adapter,
+                journal=journal,
+                compare_fn=compare_fn,
+                state=state,
+                on_enter=on_enter,
             )
         except Exception as exc:
             controller = cls(
-                adapter=adapter, journal=journal, compare_fn=compare_fn, state_store=state_store
+                adapter=adapter,
+                journal=journal,
+                compare_fn=compare_fn,
+                state_store=state_store,
+                on_enter=on_enter,
             )
             controller._in_safe_mode = True
             controller._entered_at_utc = now_utc
@@ -294,6 +313,7 @@ class SafeModeController:
                 )
             except Exception:  # noqa: S110 - best-effort audit; the fail-closed state is set
                 pass
+            controller._notify_entered(SAFE_MODE_STATE_UNREADABLE, now_utc)
             return controller
         controller._state_store = state_store
         return controller
@@ -306,6 +326,7 @@ class SafeModeController:
         journal: JournalLike,
         compare_fn: Callable[..., Any] | None = None,
         state: Mapping[str, Any] | None,
+        on_enter: Callable[[str, datetime], None] | None = None,
     ) -> Self:
         """Rebuild a controller from a persisted `state_snapshot()` mapping (D-22, F-606).
 
@@ -321,6 +342,7 @@ class SafeModeController:
             adapter: The exchange-truth adapter (as for the constructor).
             journal: The journal layer (as for the constructor).
             compare_fn: The compare function (as for the constructor).
+            on_enter: The entry observer (as for the constructor); restoring calls it for nothing.
             state: `{"in_safe_mode": bool, "entered_at_utc": ISO UTC text or None,
                 "entered_reason": text or None, "last_exit_operator_id": text or None,
                 "last_exit_at_utc": ISO UTC text or None}`, or None. The three-key row written
@@ -332,7 +354,7 @@ class SafeModeController:
                 type, a datetime is naive or not UTC, SAFE_MODE is set without its entry time
                 or reason, or SAFE_MODE is off while an entry time or reason is still set.
         """
-        controller = cls(adapter=adapter, journal=journal, compare_fn=compare_fn)
+        controller = cls(adapter=adapter, journal=journal, compare_fn=compare_fn, on_enter=on_enter)
         if state is None:
             return controller
         parsed = _parse_state(state)
@@ -424,12 +446,15 @@ class SafeModeController:
             if self._entered_reason != reason:
                 self._entered_reason = reason
                 self._persist_pending = self._state_store is not None
-                self._journal_safe_mode_event(
-                    event_type="SAFE_MODE_REENTER",
-                    reason=reason,
-                    now_utc=effective_now,
-                )
-                self._persist(now_utc=effective_now)
+                try:
+                    self._journal_safe_mode_event(
+                        event_type="SAFE_MODE_REENTER",
+                        reason=reason,
+                        now_utc=effective_now,
+                    )
+                    self._persist(now_utc=effective_now)
+                finally:
+                    self._notify_entered(reason, effective_now)
             elif self._persist_pending:
                 self._persist(now_utc=effective_now)
             return
@@ -437,12 +462,24 @@ class SafeModeController:
         self._entered_at_utc = effective_now
         self._entered_reason = reason
         self._persist_pending = self._state_store is not None
-        self._journal_safe_mode_event(
-            event_type="SAFE_MODE_ENTER",
-            reason=reason,
-            now_utc=effective_now,
-        )
-        self._persist(now_utc=effective_now)
+        try:
+            self._journal_safe_mode_event(
+                event_type="SAFE_MODE_ENTER",
+                reason=reason,
+                now_utc=effective_now,
+            )
+            self._persist(now_utc=effective_now)
+        finally:
+            self._notify_entered(reason, effective_now)
+
+    def _notify_entered(self, reason: str, now_utc: datetime) -> None:
+        """Call the `on_enter` observer; its failure never undoes or masks the entry."""
+        if self._on_enter is None:
+            return
+        try:
+            self._on_enter(reason, now_utc)
+        except Exception:  # noqa: BLE001, S110 - the flag, journal row and save already happened
+            pass
 
     def guard_new_entries(self, trade_plan: Any) -> SafeModeVerdict:
         """Block new entries while in SAFE_MODE.

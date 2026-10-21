@@ -1,7 +1,7 @@
 """Operational alerts: a journal-first sink and a Telegram sender with a bounded message retry.
 
 Phase 20, plan 20-13 (D-22, D-23, T-G, OPS-05). This replaces the rehearsal-only alert sink
-with the real infrastructure; the producers are wired by plan 20-22.
+with the real infrastructure; plan 20-22 wires the producers and publishes `OPS05_MATRIX`.
 
 - `JournalFirstAlertSink` writes every alert to the journal BEFORE anything is sent (the spill
   takes the record when the journal is down, `record_after`, D-16) and then queues it. It
@@ -106,6 +106,8 @@ ALERT_EVENTS = MappingProxyType(
         "MANUAL_CLOSE_ORPHAN_UNVERIFIED": AlertSeverity.HIGH,
         "DAILY_STOP": AlertSeverity.CRITICAL,
         "DAILY_LOSS_WARNING": AlertSeverity.WARNING,
+        # Plan 20-22 (D-24): the catch-all for a SAFE_MODE entry with no event of its own.
+        "SAFE_MODE_ENTERED": AlertSeverity.HIGH,
     }
 )
 
@@ -647,6 +649,69 @@ class TelegramAlertSender:
         return SendReport(delivered=delivered, failed=failed, audit_lost=audit_lost)
 
 
+# --------------------------------------------------------------------------- #
+# SAFE_MODE entries (plan 20-22, D-23, D-24).
+# --------------------------------------------------------------------------- #
+
+# SAFE_MODE reasons that the entry path alerts under an event of the same name.
+_ENTRY_PATH_EVENTS = frozenset({"ENTRY_STATE_UNKNOWN", "PROTECTION_HANDOFF_FAILED", "DB_FAILURE"})
+
+# SAFE_MODE reasons whose own producer already alerts (the coordinator, the closer, the reconcile
+# tick), so the observer stays silent for them and an operator never gets the same event twice.
+# `src.reconcile` may not be imported here: a parity test pins the divergence reasons against
+# `src.reconcile.classify.POLICY_BY_KIND`.
+DEDICATED_PRODUCER_REASONS: frozenset[str] = frozenset(
+    {
+        "CLOSE_REQUIRED",
+        "EMERGENCY_CLOSE_FAILED",
+        "ENTRY_WITHOUT_PROTECTIVE",
+        "ORPHAN_PROTECTIVE",
+        "POSITION_WITHOUT_STOP",
+        "TP_ONLY_POSITION",
+        "SIGN_FLIPPED_POSITION",
+        "DOUBLED_POSITION",
+        "FOREIGN_ORDER",
+        "UNTRACKED_SYSTEM_ORDER",
+        "UNSYNCED_NORMAL",
+        "UNSYNCED_ALGO",
+        "UNSYNCED_POSITION",
+        "DUPLICATE_EXCHANGE_ID",
+        "UNSUPPORTED_POSITION_SIDE",
+        "STREAM_SINK_FAILURE",
+        "SYMBOL_OWNERSHIP_CONFLICT",
+        "USER_DATA_STREAM_HALTED",
+        "STALE_FEED",
+        "AUTH_FAILURE",
+        "API_DEGRADATION",
+    }
+)
+
+SAFE_MODE_ALERT_SUBJECT = "SYSTEM"
+
+
+class SafeModeAlertObserver:
+    """The `on_enter` callable of `SafeModeController`: SAFE_MODE entries become alerts.
+
+    ENTRY_STATE_UNKNOWN, PROTECTION_HANDOFF_FAILED and DB_FAILURE alert under their own event;
+    a reason in `DEDICATED_PRODUCER_REASONS` alerts nothing here; every other reason alerts
+    `SAFE_MODE_ENTERED`, so no SAFE_MODE entry is silent. The subject is `SYSTEM` (the controller
+    knows no plan), the reason is the SAFE_MODE reason code, and the repeats of one reason go
+    through the sink's dedupe window. A reason that is not a code is replaced by the sink.
+    The controller swallows an exception from this callable.
+    """
+
+    def __init__(self, sink: _AlertEmitter) -> None:
+        self._sink = sink
+
+    def __call__(self, reason: str, now_utc: datetime) -> None:
+        if reason in DEDICATED_PRODUCER_REASONS:
+            return
+        event = reason if reason in _ENTRY_PATH_EVENTS else "SAFE_MODE_ENTERED"
+        self._sink.alert(
+            event=event, subject=SAFE_MODE_ALERT_SUBJECT, reason=reason, now_utc=now_utc
+        )
+
+
 class _AlertEmitter(Protocol):
     def alert(
         self,
@@ -698,9 +763,11 @@ __all__ = [
     "INVALID_REASON",
     "AlertSeverity",
     "AlertTextBot",
+    "DEDICATED_PRODUCER_REASONS",
     "JournalFirstAlertSink",
     "RequeueReport",
     "OperationalAlert",
+    "SafeModeAlertObserver",
     "SendReport",
     "TelegramAlertSender",
     "emit_daily_state_alert",
