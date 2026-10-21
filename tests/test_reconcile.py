@@ -26,15 +26,20 @@ The test loads the golden fixture pair
 asserts the reconcile + sweep outcome against the expected counts,
 divergence kinds, cancel calls, and journal events.
 
-A static guard asserts the FakeReconcileAdapter never receives a
-`place_order` call on any path (the reconciler is query/cancel only —
-the no-place-order invariant is the EXEC-02 acceptance proof).
+Placement rule (Phase 20, plan 20-23, F-604, D034/D077): `src/reconcile` itself never calls
+a placement method (static guard `test_no_place_order_path_in_src_reconcile`, kept), while a
+protective action it delegates is placed by the coordinator in `src/execution`. The fake adapter
+therefore RECORDS each placement attempt with the caller's module and does not raise; the tests
+assert that no attempt came from `src.reconcile`. The delegated stop (role, id, plan price) is
+asserted in `tests/test_drills.py` (test_reconcile_never_places_and_delegated_stops_...).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -135,6 +140,10 @@ def _build_position(row: dict[str, Any]) -> Any:
     )
 
 
+async def _already_done() -> None:
+    return None
+
+
 class FakeReconcileAdapter:
     """Fake three-source exchange adapter for reconciler tests.
 
@@ -143,10 +152,10 @@ class FakeReconcileAdapter:
     truth. Tests inject this in place of the real
     `BinanceUsdmAdapter` so unit tests never touch the network.
 
-    The static guard at the end of the file asserts that no test ever
-    invokes `place_order` — the reconciler is query/cancel only and
-    invoking a place-order method on this fake is a hard test failure
-    by construction (the fake raises).
+    Phase 20 (F-604, D034/D077): the placement methods record the module that called them and
+    never raise. A placement by `src.reconcile` is a failure the tests assert on
+    (`placements_from_reconcile`); a placement by another module (the coordinator in
+    `src/execution`) is legitimate and is asserted by role, id and price elsewhere.
     """
 
     def __init__(
@@ -169,8 +178,13 @@ class FakeReconcileAdapter:
         self.query_algo_order_by_client_calls: list[str] = []
         self.cancel_normal_order_calls: list[tuple[str, str]] = []
         self.cancel_algo_order_calls: list[tuple[str, str]] = []
-        # Any place-order method call raises (no-place-order invariant).
+        # Every placement attempt is recorded with the caller's module (F-604); none raises.
         self.place_order_calls = 0
+        self.placement_callers: list[str] = []
+
+    def placements_from_reconcile(self) -> list[str]:
+        """The caller modules under `src.reconcile` that attempted a placement (must be empty)."""
+        return [c for c in self.placement_callers if c.startswith("src.reconcile")]
 
     async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]:
         self.snapshot_open_normal_orders_calls += 1
@@ -240,15 +254,18 @@ class FakeReconcileAdapter:
             if not (o.symbol == symbol and o.client_algo_id == client_algo_id)
         ]
 
-    async def place_order(self, **_kwargs: Any) -> None:
-        """The reconciler must NEVER place a new order (D-03)."""
-        self.place_order_calls += 1
-        raise AssertionError("reconciler must never place a new order — query/cancel only")
+    def place_order(self, **_kwargs: Any) -> Awaitable[None]:
+        """Record a placement attempt with the caller's module (F-604); never raises."""
+        return self._record_placement(sys._getframe(1).f_globals.get("__name__", "?"))
 
-    async def place_algo_order(self, **_kwargs: Any) -> None:
-        """The reconciler must NEVER place a new algo order (D-03)."""
+    def place_algo_order(self, **_kwargs: Any) -> Awaitable[None]:
+        """Record a placement attempt with the caller's module (F-604); never raises."""
+        return self._record_placement(sys._getframe(1).f_globals.get("__name__", "?"))
+
+    def _record_placement(self, caller: str) -> Awaitable[None]:
         self.place_order_calls += 1
-        raise AssertionError("reconciler must never place a new algo order — query/cancel only")
+        self.placement_callers.append(caller)
+        return _already_done()
 
 
 class _FakeJournal:
@@ -520,14 +537,15 @@ def test_orphan_protective_divergence_classified_and_swept() -> None:
     )
     assert len(sweep_result.skipped) == 0
 
-    # Adapter cancel called exactly once (on the orphan algo); no
-    # place-order call (the no-place-order invariant).
+    # Adapter cancel called exactly once (on the orphan algo); the sweep is cancel-only: no
+    # placement attempt from src.reconcile (F-604, D034/D077).
     assert len(adapter.cancel_algo_order_calls) == 1
     assert adapter.cancel_algo_order_calls[0] == (
         "BTCUSDT",
         "xa-1111111111111111111111111111111SL",
     )
-    assert adapter.place_order_calls == 0
+    assert adapter.placements_from_reconcile() == []
+    assert adapter.place_order_calls == 0  # nothing in this flow is a coordinator either
 
     # Position verifier invoked twice (consecutive zero reads).
     assert len(adapter._position_reads) - adapter._position_read_index == 0
@@ -669,7 +687,8 @@ def test_divergence_forces_safe_mode_without_cancel() -> None:
     # No cancel called during the divergence path itself.
     assert adapter.cancel_algo_order_calls == []
     assert adapter.cancel_normal_order_calls == []
-    assert adapter.place_order_calls == 0
+    assert adapter.placements_from_reconcile() == []
+    assert adapter.place_order_calls == 0  # F-604: the divergence path itself places nothing
 
     # The hard-coded SAFE_MODE_TICK_SECONDS = 60 is gone (D-25, plan 20-15): the cadence is the
     # registry key reconcile.tick_interval_ms, owned by the owner and NOT_CONFIGURED until set.
@@ -913,6 +932,22 @@ def test_sweeper_pre_image_event_id_is_deterministic_on_replay() -> None:
 # Static guard — the reconciler never imports or invokes a place-order
 # path on any module under src/reconcile/.
 # --------------------------------------------------------------------------- #
+
+
+async def test_fake_adapter_records_the_calling_module_and_does_not_raise() -> None:
+    """F-604, D034/D077: the replacement for the raising fake. A placement attempt is recorded
+    with the module that made it (here: this test module), nothing is raised, and the
+    `src.reconcile` filter the other tests rely on is therefore armed."""
+    adapter = FakeReconcileAdapter()
+
+    await adapter.place_order(symbol="BTCUSDT")
+    await adapter.place_algo_order(symbol="BTCUSDT")
+
+    assert adapter.place_order_calls == 2
+    assert adapter.placement_callers == [__name__, __name__]
+    assert adapter.placements_from_reconcile() == []
+    adapter.placement_callers.append("src.reconcile.loop")
+    assert adapter.placements_from_reconcile() == ["src.reconcile.loop"]
 
 
 def test_no_place_order_path_in_src_reconcile() -> None:
