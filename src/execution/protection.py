@@ -153,6 +153,14 @@ from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_i
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
 from src.execution.order_ids import derive_algo_client_id
+from src.execution.pending_actions import (
+    BlockedRecorder,
+    IntentSpill,
+    PendingActionStore,
+    PendingKind,
+    gate_reason_text,
+    retry_after_until,
+)
 from src.execution.protection_replay import (
     EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
     EVIDENCE_REST_STOP_CONFIRMED,
@@ -620,6 +628,8 @@ class ProtectionCoordinator:
         emergency_closer: EmergencyCloser,
         limits: ExecutionLimits,
         clock: Callable[[], datetime],
+        pending_actions: PendingActionStore | None = None,
+        spill: IntentSpill | None = None,
     ) -> None:
         limits.require_live_ready()
         max_unprotected_ms = limits.max_unprotected_ms
@@ -651,6 +661,9 @@ class ProtectionCoordinator:
         self._db_failure_reported = False
         self._unknown_fills_journaled: set[tuple[str, str]] = set()
         self.fill_sink_failures = 0
+        # Plan 20-14 (D-19, Q4): the durable intent of an action the REST gate refused.
+        self._pending = pending_actions
+        self._pending_recorder = BlockedRecorder(pending_actions, spill)
 
     # ------------------------------------------------------------------ #
     # Registry surface.
@@ -1153,6 +1166,7 @@ class ProtectionCoordinator:
                 {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
                 self._now(),
             )
+            self._record_blocked(tracked, PendingKind.STOP_NOT_SENT, exc)
             return _PlaceOutcome.NOT_SENT
         except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed by REST
             category = self._classify_placement(exc)
@@ -1171,6 +1185,31 @@ class ProtectionCoordinator:
                 return _PlaceOutcome.NO_POSITION
             return _PlaceOutcome.AMBIGUOUS
         return _PlaceOutcome.PLACED
+
+    def _record_blocked(self, tracked: _Tracked, kind: PendingKind, exc: BaseException) -> None:
+        """Plan 20-14 (D-19): keep the intent of a gate-refused action as a durable PENDING row.
+
+        The intent goes to the local spill first (when one is attached), then to the pending
+        store. This records the refusal only: it never asks the gate for an exemption (D-18)
+        and never stores a price, quantity or side. A store failure enters SAFE_MODE DB_FAILURE
+        once and the step carries on (D-16); the spill record stays.
+        """
+        if not self._pending_recorder.active:
+            return
+        entry = tracked.entry
+        now = self._now()
+        recorded = self._pending_recorder.record(
+            plan_hash=entry.plan_hash,
+            trade_plan_id=entry.trade_plan_id,
+            approval_id=entry.approval_id,
+            symbol=entry.symbol,
+            kind=kind,
+            gate_reason=gate_reason_text(_refusal_reason(exc)),
+            retry_after_until_utc=retry_after_until(now, getattr(exc, "retry_after_seconds", None)),
+            now_utc=now,
+        )
+        if not recorded:
+            self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
 
     def _classify_placement(self, exc: Exception) -> ExchangeErrorCategory | None:
         """The taxonomy category of a placement failure (D-21), from class and code facts only."""

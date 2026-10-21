@@ -17,6 +17,8 @@ names every module of the package):
   - `system_state`         `PgSystemStateStore`: SAFE_MODE, enablement and kill gate (D-22)
   - `safe_mode_store`      `PgSafeModeStateStore`: the SafeModeStateStore seam over `system_state`
                            (durable SAFE_MODE, Phase 20)
+  - `pending_actions`      `PgPendingActionStore`: the durable intent of a protective action the
+                           REST gate refused (Phase 20, plan 20-14)
   - `paper_runtime_state`  `PgRuntimeState`: journal-only paper runtime state (Phase 16)
   - `shadow_stores`        `PgShadowStores`: the SHADOW chain's composed stores (Phase 16)
 

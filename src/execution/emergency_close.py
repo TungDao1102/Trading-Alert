@@ -85,6 +85,11 @@ from src.domain.lot_filters import LotFilters
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.lot_split import next_close_part, plan_close_parts
 from src.execution.order_ids import derive_close_order_id
+from src.execution.pending_actions import (
+    BlockedRecorder,
+    IntentSpill,
+    PendingActionStore,
+)
 from src.execution.protection import (
     POSITION_MODE_HEDGE,
     SAFE_MODE_DB_FAILURE,
@@ -290,6 +295,8 @@ class MarketEmergencyCloser(EmergencyCloser):
         alert_sink: CriticalAlertSink,
         clock: Callable[[], datetime],
         limits: ExecutionLimits,
+        pending_actions: PendingActionStore | None = None,
+        spill: IntentSpill | None = None,
     ) -> None:
         limits.require_live_ready()
         poll_timeout_ms = limits.emergency_close_poll_timeout_ms
@@ -305,6 +312,10 @@ class MarketEmergencyCloser(EmergencyCloser):
         self._journal_failed = False
         # 19-REVIEW WR-03: the attempt of each plan whose end is not proven yet.
         self._pending: dict[str, _PendingAttempt] = {}
+        # Plan 20-14 (D-19, Q4): the durable intent of a close the REST gate refused.
+        self._pending_actions = pending_actions
+        self._blocked = BlockedRecorder(pending_actions, spill)
+        self._pending_store_failed = False
 
     @property
     def last_result(self) -> EmergencyCloseResult | None:

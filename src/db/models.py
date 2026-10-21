@@ -912,6 +912,71 @@ class SystemStateEventRow(Base):
     )
 
 
+# ---------- pending_protective_actions (Phase 20, plan 20-14, migration 0008) ------
+
+
+class PendingProtectiveActionRow(Base):
+    """The durable INTENT of a protective action the REST gate refused (D-19, Q4).
+
+    One row per episode of a refused stop, entry-remainder cancel or emergency close. It stores
+    the intent and never a payload: there is no price, quantity or side column, so a stale
+    request cannot be replayed from it. At most one row per (plan_hash, pending_kind) is open
+    (`state = 'PENDING'`); a closed row is RESOLVED or SUPERSEDED with a fixed-text note.
+    """
+
+    __tablename__ = "pending_protective_actions"
+
+    pending_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    approval_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    pending_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    gate_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_blocked_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_blocked_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    block_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    retry_after_until_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("pending_id", name="pk_pending_protective_actions"),
+        Index(
+            "uq_pending_protective_actions_open",
+            "plan_hash",
+            "pending_kind",
+            unique=True,
+            postgresql_where=text("state = 'PENDING'"),
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "pending_kind IN ('STOP_NOT_SENT', 'PROTECTION_ENTRY_CANCEL_NOT_SENT', "
+            "'CLOSE_NOT_SENT')",
+            name="ck_pending_protective_actions_kind",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "state IN ('PENDING', 'RESOLVED', 'SUPERSEDED')",
+            name="ck_pending_protective_actions_state",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "block_count >= 1", name="ck_pending_protective_actions_block_count"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "last_blocked_at_utc >= first_blocked_at_utc",
+            name="ck_pending_protective_actions_time_order",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(state = 'PENDING' AND resolved_at_utc IS NULL AND resolution_note IS NULL) "
+            "OR (state <> 'PENDING' AND resolved_at_utc IS NOT NULL "
+            "AND resolution_note IS NOT NULL)",
+            name="ck_pending_protective_actions_resolution",
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
 # ---------- engine factory ---------------------------------------------------
 
 
