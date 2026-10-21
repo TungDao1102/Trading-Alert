@@ -675,3 +675,25 @@ def test_protection_replay_is_a_pure_module() -> None:
     assert forbidden_imports(path, forbidden) == []
     assert float_constructor_calls(path) == []
     assert wall_clock_calls(path) == []
+
+
+async def test_a_refused_flat_move_never_sweeps_the_protective_legs() -> None:
+    """A rejected FLAT must not cancel the stop (fail closed): the sweep follows an accepted move.
+
+    No production path reaches this today (every FLAT call site holds a legal edge and its
+    evidence); the guard is for the edges plans 20-09 and 20-17 add. The state is forced to a
+    state with no edge to FLAT only to prove the order.
+    """
+    rig = await make_rig(real_closer=True)
+    tracked = _tracked(rig)
+    assert tracked.state is ProtectionState.AWAITING_FILL  # AWAITING_FILL -> FLAT is not an edge
+    await rig.coordinator.step()  # the entry is open and unfilled: nothing happens
+    cancels_before = len(rig.fake.calls_to("cancel_algo_order"))
+
+    await rig.coordinator._watch_exit(tracked)  # noqa: SLF001 - zero position, two zero reads
+
+    assert tracked.state is ProtectionState.AWAITING_FILL
+    assert [r["to"] for r in _rows(rig, EVENT_REJECTED)] == ["FLAT"]
+    assert SAFE_MODE_INVALID in rig.safe_mode.entered_reasons
+    assert len(rig.fake.calls_to("cancel_algo_order")) == cancels_before
+    assert tracked.sweep_done is False
