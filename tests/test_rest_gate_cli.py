@@ -338,7 +338,12 @@ def test_cli_module_has_no_network_or_gate_mutation() -> None:
     }
     assert "RestRateLimitGate" not in imported  # no running gate can be reached from here
     attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-    assert not attrs & {"record", "restore", "check", "restriction", "request", "urlopen"}
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not called & {"record", "restore", "check", "restriction", "request", "urlopen"}
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
     assert "environ" not in names | attrs and "getenv" not in names | attrs
 

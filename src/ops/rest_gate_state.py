@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -202,6 +203,32 @@ class FileGateStateStore:
             raise GateStateExists
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._write_atomic(encode_record(record))
+        return record
+
+    def reinitialize(
+        self, *, now_utc: datetime, operator_id: str, aside_kind: str
+    ) -> GateStateRecord:
+        """The operator-authorised overwrite used only by `clear` (`rest_gate_cli`).
+
+        Writes a fresh initialized record with no deadline. An existing file is first copied to
+        a sibling ending `.<aside_kind>-<UTC time>` (kept, never deleted), then replaced
+        atomically. On any failure the old file is untouched, no copy is left behind and the
+        error propagates. `initialize()` stays refused while a state file exists.
+        """
+        record = _fresh_record(now_utc, operator_id)
+        if not aside_kind.isalpha():
+            raise ValueError("aside_kind must be alphabetic")
+        aside: Path | None = None
+        try:
+            if self._path.exists():
+                aside = self._aside_path(aside_kind)
+                shutil.copyfile(self._path, aside)
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_atomic(encode_record(record))
+        except BaseException:
+            if aside is not None:
+                aside.unlink(missing_ok=True)
+            raise
         return record
 
 
