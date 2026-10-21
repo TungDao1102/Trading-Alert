@@ -53,7 +53,10 @@ Decisions and open items:
   fallback until the owner decides.
 * Q4 / Phase 18 src/WR-12 (owner-open): a 418/429 pause refuses the close too (the adapter
   raises ``PreSendRefusal`` with nothing sent). No exemption is added; the deadline keeps running
-  in the coordinator and no claim of safety is made.
+  in the coordinator and no claim of safety is made. Plan 20-14 (D-19): with a pending-action
+  store attached the refusal is also kept as a durable ``CLOSE_NOT_SENT`` row (intent only, no
+  side or quantity, spilled first); a later request that passes the gate, or a flat position,
+  resolves it. The next call re-reads the position and sizes the part itself.
 * A4 / A8 (assumptions): a reduce-only MARKET on a flat or smaller position answers -2022 or
   -2024, from the repo taxonomy and not verified on the live page. The closer treats both the
   same: it re-reads the position and never branches on the difference, never resends blindly.
@@ -85,6 +88,16 @@ from src.domain.lot_filters import LotFilters
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.lot_split import next_close_part, plan_close_parts
 from src.execution.order_ids import derive_close_order_id
+from src.execution.pending_actions import (
+    NOTE_CLOSE_CONFIRMED_FLAT,
+    NOTE_CLOSE_SENT_AFTER_GATE,
+    BlockedRecorder,
+    IntentSpill,
+    PendingActionStore,
+    PendingKind,
+    gate_reason_text,
+    retry_after_until,
+)
 from src.execution.protection import (
     POSITION_MODE_HEDGE,
     SAFE_MODE_DB_FAILURE,
@@ -180,6 +193,9 @@ class _Kind(StrEnum):
 class _Outcome:
     kind: _Kind
     error_type: str | None = None
+    # Plan 20-14: what a pre-send refusal said (fixed project text and whole seconds only).
+    gate_reason: str | None = None
+    retry_after_seconds: int | None = None
 
 
 @dataclass
@@ -238,6 +254,13 @@ class CloseAdapter(Protocol):
     def error_facts(self, exc: BaseException) -> Any: ...
 
 
+def _whole_seconds(value: object) -> int | None:
+    """A refusal's ``retry_after_seconds`` when it is a non-negative whole number, else None."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 def _attr(obj: Any, name: str) -> Any:
     """Read ``name`` from a dataclass-style object or a dict-style payload."""
     if isinstance(obj, dict):
@@ -290,6 +313,8 @@ class MarketEmergencyCloser(EmergencyCloser):
         alert_sink: CriticalAlertSink,
         clock: Callable[[], datetime],
         limits: ExecutionLimits,
+        pending_actions: PendingActionStore | None = None,
+        spill: IntentSpill | None = None,
     ) -> None:
         limits.require_live_ready()
         poll_timeout_ms = limits.emergency_close_poll_timeout_ms
@@ -305,6 +330,10 @@ class MarketEmergencyCloser(EmergencyCloser):
         self._journal_failed = False
         # 19-REVIEW WR-03: the attempt of each plan whose end is not proven yet.
         self._pending: dict[str, _PendingAttempt] = {}
+        # Plan 20-14 (D-19, Q4): the durable intent of a close the REST gate refused.
+        self._pending_actions = pending_actions
+        self._blocked = BlockedRecorder(pending_actions, spill)
+        self._pending_store_failed = False
 
     @property
     def last_result(self) -> EmergencyCloseResult | None:
@@ -347,6 +376,7 @@ class MarketEmergencyCloser(EmergencyCloser):
             if parts_sent == 0:
                 self._journal_note(entry, PHASE_ALREADY_FLAT, reason)
             self._last_result = EmergencyCloseResult(EmergencyCloseStatus.FLAT, parts_sent, reason)
+            self._resolve_close_row(entry, NOTE_CLOSE_CONFIRMED_FLAT)
             return True
 
         try:
@@ -413,7 +443,7 @@ class MarketEmergencyCloser(EmergencyCloser):
             )
             attempt_no += 1  # whatever happened, this id is spent
             if outcome.kind is _Kind.NOT_SENT:
-                return self._not_sent(entry, reason, parts_sent, outcome.error_type)
+                return self._not_sent(entry, reason, parts_sent, outcome)
             if outcome.kind is _Kind.PENDING:
                 # The attempt is not proven terminal: nothing else is sent (WR-03, Q5).
                 return self._hold(entry, reason, self._pending[entry.plan_hash], parts_sent)
@@ -437,6 +467,7 @@ class MarketEmergencyCloser(EmergencyCloser):
                 self._last_result = EmergencyCloseResult(
                     EmergencyCloseStatus.FLAT, parts_sent, reason
                 )
+                self._resolve_close_row(entry, NOTE_CLOSE_CONFIRMED_FLAT)
                 return True
             if outcome.kind is _Kind.REJECTED:
                 # The exchange refused the part and the position is still open: -2022 and
@@ -498,8 +529,15 @@ class MarketEmergencyCloser(EmergencyCloser):
             # resend. The coordinator's deadline keeps running (Q4 is owner-open).
             del self._pending[entry.plan_hash]
             journal(PHASE_NOT_SENT, type(exc).__name__)
-            return _Outcome(_Kind.NOT_SENT, error_type=type(exc).__name__)
+            return _Outcome(
+                _Kind.NOT_SENT,
+                error_type=type(exc).__name__,
+                gate_reason=gate_reason_text(getattr(exc, "reason", None) or type(exc).__name__),
+                retry_after_seconds=_whole_seconds(getattr(exc, "retry_after_seconds", None)),
+            )
         except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed
+            # The request got past the REST gate (whatever the exchange then said).
+            self._resolve_close_row(entry, NOTE_CLOSE_SENT_AFTER_GATE)
             error_type = type(exc).__name__
             if self._is_definitive_rejection(exc):
                 del self._pending[entry.plan_hash]
@@ -507,6 +545,7 @@ class MarketEmergencyCloser(EmergencyCloser):
                 return _Outcome(_Kind.REJECTED, error_type=error_type)
             journal(PHASE_AMBIGUOUS, error_type)
         else:
+            self._resolve_close_row(entry, NOTE_CLOSE_SENT_AFTER_GATE)
             if answer is None:
                 journal(PHASE_AMBIGUOUS)
             else:
@@ -706,13 +745,29 @@ class MarketEmergencyCloser(EmergencyCloser):
         return False
 
     def _not_sent(
-        self, entry: RestingEntry, close_reason: str, parts_sent: int, error_type: str | None
+        self, entry: RestingEntry, close_reason: str, parts_sent: int, outcome: _Outcome
     ) -> bool:
-        """A pre-send refusal: critical alert, no claim of safety, no SAFE_MODE from here.
+        """A pre-send refusal: durable CLOSE_NOT_SENT intent, critical alert, no claim of safety.
 
-        The coordinator's unprotected deadline keeps running and decides (Q4 is owner-open).
-        The refusal itself was journaled as ``not_sent`` before this call.
+        The coordinator's unprotected deadline keeps running and decides. The refusal itself
+        was journaled as ``not_sent`` before this call. Plan 20-14 (D-19): the intent goes to
+        the local spill and the pending store (a row without a payload: no side or quantity),
+        so a restart does not forget the close; the next call reads the position again and
+        decides. A store failure enters SAFE_MODE DB_FAILURE once and nothing else changes.
         """
+        now = self._clock()
+        recorded = self._blocked.record(
+            plan_hash=entry.plan_hash,
+            trade_plan_id=entry.trade_plan_id,
+            approval_id=entry.approval_id,
+            symbol=entry.symbol,
+            kind=PendingKind.CLOSE_NOT_SENT,
+            gate_reason=outcome.gate_reason or gate_reason_text(outcome.error_type),
+            retry_after_until_utc=retry_after_until(now, outcome.retry_after_seconds),
+            now_utc=now,
+        )
+        if not recorded:
+            self._pending_store_failure(now)
         try:
             self._alerts.critical(
                 event=ALERT_EMERGENCY_CLOSE_NOT_SENT,
@@ -727,6 +782,42 @@ class MarketEmergencyCloser(EmergencyCloser):
             EmergencyCloseStatus.NOT_SENT, parts_sent, _REASON_PRE_SEND_REFUSED
         )
         return False
+
+    # ------------------------------------------------------------------ #
+    # Pending close row (plan 20-14, D-19).
+    # ------------------------------------------------------------------ #
+
+    def _resolve_close_row(self, entry: RestingEntry, note: str) -> None:
+        """Close the open CLOSE_NOT_SENT row of the plan, if any: the close got through or is moot.
+
+        Called when a close request passed the gate (whatever the exchange answered) and when
+        REST shows the position flat. Nothing is sent from here. A store failure enters
+        SAFE_MODE DB_FAILURE once; the close itself carries on.
+        """
+        store = self._pending_actions
+        if store is None:
+            return
+        now = self._clock()
+        try:
+            store.resolve(
+                plan_hash=entry.plan_hash,
+                kind=PendingKind.CLOSE_NOT_SENT,
+                note=note,
+                now_utc=now,
+            )
+        except Exception:  # noqa: BLE001 - a store failure never blocks the close
+            self._pending_store_failure(now)
+            return
+        self._blocked.forget(entry.plan_hash, PendingKind.CLOSE_NOT_SENT)
+
+    def _pending_store_failure(self, now: datetime) -> None:
+        if self._pending_store_failed:
+            return
+        self._pending_store_failed = True
+        try:
+            self._safe_mode.enter_safe_mode(reason=SAFE_MODE_DB_FAILURE, now_utc=now)
+        except Exception:  # noqa: BLE001, S110 - the flag is set first
+            pass
 
     # ------------------------------------------------------------------ #
     # Journal (scalar payload fields only; exception TYPE names, never messages).

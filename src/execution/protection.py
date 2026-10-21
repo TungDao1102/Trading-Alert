@@ -54,11 +54,22 @@ CLOSE_FAILED, which keeps blocking new entries and retries the close every step;
 entry terminal AND REST flat, after which the plan's protective legs are swept by deterministic id
 (``cancel_untriggered_protectives``).
 
+Pending protective actions (plan 20-14, D-19, Q4): a stop, an entry-remainder cancel or a close
+that the REST gate refuses is journaled as not sent AND kept as a durable PENDING row
+(``STOP_NOT_SENT``, ``PROTECTION_ENTRY_CANCEL_NOT_SENT``, ``CLOSE_NOT_SENT``) when a pending-action
+store is attached, after its intent was written ahead to the local spill. The row is intent only
+(no price, quantity or side): the next step reads the current exchange state and decides, and an
+old request is never replayed. It is RESOLVED when the action got through or the state settled
+(stop read ACTIVE, entry terminal, close sent or flat) and SUPERSEDED, never sent, when the plan
+reaches CLOSE_REQUIRED or CLOSE_FAILED (``_place_stop`` refuses to send in those states and in
+FLAT). A store failure enters SAFE_MODE DB_FAILURE once and the step carries on.
+``blocks_new_entries()`` is also True while any row is PENDING, and when the store cannot be read.
+
 Open, recorded and NOT decided here: Q4 / Phase 18 src/WR-12 (a 418/429 pause refuses the stop,
 the cancel and the close with a pre-send refusal; no exemption is added, every refused call is
 journaled as not sent, the deadline keeps running and the escalation to CLOSE_REQUIRED /
 CLOSE_FAILED with SAFE_MODE and a critical alert is attempted on time, but "never naked" is NOT
-claimed for that window), A3 (whether a closePosition stop is auto-cancelled when the position
+claimed for that window; the pending row does not protect the position), A3 (whether a closePosition stop is auto-cancelled when the position
 closes, probe 6) and A2 (a GTD expiry reported as EXPIRED and terminal). An exception's message
 text is never read (D-21): only its class and int code through the taxonomy.
 
@@ -153,6 +164,20 @@ from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_i
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
 from src.execution.order_ids import derive_algo_client_id
+from src.execution.pending_actions import (
+    NOTE_CLOSE_FAILED_BY_POLICY,
+    NOTE_CLOSE_REQUIRED_BY_POLICY,
+    NOTE_ENTRY_CANCEL_ACCEPTED,
+    NOTE_ENTRY_TERMINAL,
+    NOTE_PLAN_FLAT,
+    NOTE_STOP_CONFIRMED_ACTIVE,
+    BlockedRecorder,
+    IntentSpill,
+    PendingActionStore,
+    PendingKind,
+    gate_reason_text,
+    retry_after_until,
+)
 from src.execution.protection_replay import (
     EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
     EVIDENCE_REST_STOP_CONFIRMED,
@@ -309,6 +334,11 @@ class ProtectionState(str, Enum):
 # A position in one of these states is exposed without a confirmed stop (or being closed).
 # ENTRY_UNRESOLVED is deliberately absent: like AWAITING_FILL it holds no known exposure, and the
 # SAFE_MODE(ENTRY_STATE_UNKNOWN) the manager entered already blocks new entries (19-REVIEW WR-05).
+# Plan 20-14: no stop is placed for a plan in one of these states (a queued stop is superseded).
+_NO_NEW_STOP_STATES: frozenset[ProtectionState] = frozenset(
+    {ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED, ProtectionState.FLAT}
+)
+
 BLOCKING_STATES: frozenset[ProtectionState] = frozenset(
     {
         ProtectionState.UNPROTECTED,
@@ -531,6 +561,8 @@ class _PlaceOutcome(Enum):
     NO_POSITION = "NO_POSITION"
     NOT_SENT = "NOT_SENT"
     AMBIGUOUS = "AMBIGUOUS"
+    # Plan 20-14: the plan no longer wants a stop (policy requires a close, or it is flat).
+    SKIPPED = "SKIPPED"
 
 
 class _StopReading(Enum):
@@ -620,6 +652,8 @@ class ProtectionCoordinator:
         emergency_closer: EmergencyCloser,
         limits: ExecutionLimits,
         clock: Callable[[], datetime],
+        pending_actions: PendingActionStore | None = None,
+        spill: IntentSpill | None = None,
     ) -> None:
         limits.require_live_ready()
         max_unprotected_ms = limits.max_unprotected_ms
@@ -651,6 +685,9 @@ class ProtectionCoordinator:
         self._db_failure_reported = False
         self._unknown_fills_journaled: set[tuple[str, str]] = set()
         self.fill_sink_failures = 0
+        # Plan 20-14 (D-19, Q4): the durable intent of an action the REST gate refused.
+        self._pending = pending_actions
+        self._pending_recorder = BlockedRecorder(pending_actions, spill)
 
     # ------------------------------------------------------------------ #
     # Registry surface.
@@ -686,8 +723,24 @@ class ProtectionCoordinator:
         self._transition(tracked, ProtectionState.AWAITING_FILL, reason, self._now())
 
     def blocks_new_entries(self) -> bool:
-        """True while any registered position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED."""
-        return any(t.state in BLOCKING_STATES for t in self._tracked.values())
+        """True while a position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, or a PENDING
+        risk-reducing action exists.
+
+        Plan 20-14 (fail closed): with a pending-action store attached, any PENDING row blocks
+        new entries (a refused entry cancel can exist while the plan itself is
+        PROTECTED_ENTRY_OPEN, which is not a blocking state), and a store that cannot be read
+        answers True. This is stricter than before and needs no owner number; the order in
+        which the queue is served is plan 20-21 (D-20).
+        """
+        if any(t.state in BLOCKING_STATES for t in self._tracked.values()):
+            return True
+        store = self._pending
+        if store is None:
+            return False
+        try:
+            return len(store.list_open()) > 0
+        except Exception:  # noqa: BLE001 - an unreadable pending store is not "nothing pending"
+            return True
 
     def protection_of(self, plan_hash: str) -> PlanProtection | None:
         tracked = self._tracked.get(plan_hash)
@@ -1108,6 +1161,10 @@ class ProtectionCoordinator:
         through its message text.
         """
         entry = tracked.entry
+        if tracked.state in _NO_NEW_STOP_STATES:
+            # Plan 20-14 (D-19): a queued stop is never sent once policy requires a close (its
+            # pending row is SUPERSEDED) or the plan is flat.
+            return _PlaceOutcome.SKIPPED
         stop_id = self._stop_client_id(tracked)
         try:
             if probe_first:
@@ -1153,6 +1210,7 @@ class ProtectionCoordinator:
                 {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
                 self._now(),
             )
+            self._record_blocked(tracked, PendingKind.STOP_NOT_SENT, exc)
             return _PlaceOutcome.NOT_SENT
         except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed by REST
             category = self._classify_placement(exc)
@@ -1171,6 +1229,81 @@ class ProtectionCoordinator:
                 return _PlaceOutcome.NO_POSITION
             return _PlaceOutcome.AMBIGUOUS
         return _PlaceOutcome.PLACED
+
+    def _record_blocked(self, tracked: _Tracked, kind: PendingKind, exc: BaseException) -> None:
+        """Plan 20-14 (D-19): keep the intent of a gate-refused action as a durable PENDING row.
+
+        The intent goes to the local spill first (when one is attached), then to the pending
+        store. This records the refusal only: it never asks the gate for an exemption (D-18)
+        and never stores a price, quantity or side. A store failure enters SAFE_MODE DB_FAILURE
+        once and the step carries on (D-16); the spill record stays.
+        """
+        if not self._pending_recorder.active:
+            return
+        entry = tracked.entry
+        now = self._now()
+        recorded = self._pending_recorder.record(
+            plan_hash=entry.plan_hash,
+            trade_plan_id=entry.trade_plan_id,
+            approval_id=entry.approval_id,
+            symbol=entry.symbol,
+            kind=kind,
+            gate_reason=gate_reason_text(_refusal_reason(exc)),
+            retry_after_until_utc=retry_after_until(now, getattr(exc, "retry_after_seconds", None)),
+            now_utc=now,
+        )
+        if not recorded:
+            self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
+
+    def _close_pending(
+        self, plan_hash: str, kind: PendingKind, note: str, *, supersede: bool = False
+    ) -> None:
+        """Close the open pending row of ``(plan_hash, kind)``: RESOLVED, or SUPERSEDED.
+
+        RESOLVED means the action got through or became moot because the exchange state
+        settled; SUPERSEDED means policy requires a close, so the queued action is never sent.
+        Nothing is sent from here and the row is never the input of a send: the step decides
+        from the current exchange state. A store failure enters SAFE_MODE DB_FAILURE once and
+        the step carries on (D-16).
+        """
+        store = self._pending
+        if store is None:
+            return
+        now = self._now()
+        try:
+            if supersede:
+                store.supersede(plan_hash=plan_hash, kind=kind, note=note, now_utc=now)
+            else:
+                store.resolve(plan_hash=plan_hash, kind=kind, note=note, now_utc=now)
+        except Exception:  # noqa: BLE001 - a store failure never blocks the protective flow
+            self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
+            return
+        self._pending_recorder.forget(plan_hash, kind)
+
+    def _close_pending_for_transition(self, tracked: _Tracked, new_state: ProtectionState) -> None:
+        """Plan 20-14 (D-19): what a state change does to the plan's open pending rows.
+
+        CLOSE_REQUIRED and CLOSE_FAILED supersede a pending STOP (policy requires a close, so
+        a queued stop is never sent). FLAT ends everything for the plan: the stop is
+        superseded, the entry-cancel and close rows are moot and resolved.
+        """
+        plan_hash = tracked.entry.plan_hash
+        if new_state is ProtectionState.CLOSE_REQUIRED:
+            self._close_pending(
+                plan_hash, PendingKind.STOP_NOT_SENT, NOTE_CLOSE_REQUIRED_BY_POLICY, supersede=True
+            )
+        elif new_state is ProtectionState.CLOSE_FAILED:
+            self._close_pending(
+                plan_hash, PendingKind.STOP_NOT_SENT, NOTE_CLOSE_FAILED_BY_POLICY, supersede=True
+            )
+        elif new_state is ProtectionState.FLAT:
+            self._close_pending(
+                plan_hash, PendingKind.STOP_NOT_SENT, NOTE_PLAN_FLAT, supersede=True
+            )
+            self._close_pending(
+                plan_hash, PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT, NOTE_PLAN_FLAT
+            )
+            self._close_pending(plan_hash, PendingKind.CLOSE_NOT_SENT, NOTE_PLAN_FLAT)
 
     def _classify_placement(self, exc: Exception) -> ExchangeErrorCategory | None:
         """The taxonomy category of a placement failure (D-21), from class and code facts only."""
@@ -1192,12 +1325,21 @@ class ProtectionCoordinator:
                 {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
                 self._now(),
             )
+            self._record_blocked(tracked, PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT, exc)
         except Exception as exc:  # noqa: BLE001 - the REST step reads the entry status
             self._journal_note(
                 tracked,
                 EVENT_ENTRY_CANCEL_FAILED,
                 {"error_type": type(exc).__name__},
                 self._now(),
+            )
+        else:
+            # The gate let the cancel through: a pending refusal of it is moot. Whether the
+            # entry is really terminal is still read by the step (a cancel is not a proof).
+            self._close_pending(
+                entry.plan_hash,
+                PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT,
+                NOTE_ENTRY_CANCEL_ACCEPTED,
             )
 
     # ------------------------------------------------------------------ #
@@ -1440,6 +1582,10 @@ class ProtectionCoordinator:
                     now_utc=self._now(),
                 )
             )
+            # REST read the stop ACTIVE by its deterministic id: a pending refusal is moot.
+            self._close_pending(
+                entry.plan_hash, PendingKind.STOP_NOT_SENT, NOTE_STOP_CONFIRMED_ACTIVE
+            )
             return _StopReading.ACTIVE
         if tracked.stop_confirmed_at is None and not tracked.stop_unknown_recorded:
             tracked.stop_unknown_recorded = True
@@ -1473,7 +1619,15 @@ class ProtectionCoordinator:
             tracked.entry_exchange_order_id = order_id
         status = _optional_text(_attr(answer, "status"))
         if status in TERMINAL_ENTRY_STATUSES:
+            newly_terminal = tracked.entry_terminal_at is None
             tracked.entry_terminal_at = self._now()
+            if newly_terminal:
+                # Nothing is left to cancel: a pending refusal of the cancel is moot.
+                self._close_pending(
+                    tracked.entry.plan_hash,
+                    PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT,
+                    NOTE_ENTRY_TERMINAL,
+                )
 
     def _settle_state(self, tracked: _Tracked) -> None:
         """Move UNPROTECTED / PROTECTED_ENTRY_OPEN to the state the confirmed facts support.
@@ -1876,6 +2030,8 @@ class ProtectionCoordinator:
         tracked.seq += 1
         tracked.state = new_state
         tracked.last_reason = reason
+        # Plan 20-14: a queued stop is superseded the moment policy requires a close.
+        self._close_pending_for_transition(tracked, new_state)
         payload = json.dumps(
             {
                 "approval_id": entry.approval_id,

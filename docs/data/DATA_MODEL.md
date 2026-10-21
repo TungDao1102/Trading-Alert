@@ -470,6 +470,31 @@ recorded_at_utc
 - Each row is written in the same transaction as its `SYSTEM_STATE_CHANGED` journal event (`journal_event_id`), so the audit trail and the current state cannot diverge. "Latest per key" is a query (`PgSystemStateStore.latest`), not a view. Constraints: unique `(state_key, state_version)`, key set CHECK, `state_version >= 1`, foreign key `ON DELETE RESTRICT`; append-only trigger.
 - The controllers rebuild themselves from the latest document (`SafeModeController.rehydrate`, `LiveEnablementController.rehydrate`); malformed state raises instead of defaulting. Nothing writes these rows or reads them at startup yet: the SAFE_MODE wiring is Phase 20 and the enablement and kill-gate wiring is Phase 24.
 
+### 2.17 `pending_protective_actions`
+
+The durable INTENT of a protective action that the REST gate refused (Phase 20, plan 20-14, D-19, owner decision Q4 of 2026-10-20). When an HTTP 418 ban, an HTTP 429 pause or a gate that is not restored refuses a protective stop, an entry-remainder cancel or an emergency close, nothing reaches Binance. Before this table the refusal was only a journal row and the coordinator's in-memory retry, so a restart forgot it. A row here is the explicit record that the action was NOT sent. It is **intent only, never a payload**: there is no column for a trigger price, a quantity or a side, so an old request can never be replayed from it. When sending is allowed again the coordinator's ordinary step reads the current exchange state first and then decides from the plan. The table does not protect the position while the exchange forbids sending, and nothing in it claims that a position always has a stop under every rate-limit condition (the plan stays in its blocking state).
+
+```text
+pending_id             PK, content hash of plan_hash + kind + opening time (one id per episode)
+plan_hash              VARCHAR(64)
+trade_plan_id          VARCHAR(128)
+approval_id            VARCHAR(128)
+symbol                 VARCHAR(32)
+pending_kind           STOP_NOT_SENT / PROTECTION_ENTRY_CANCEL_NOT_SENT / CLOSE_NOT_SENT
+state                  PENDING / RESOLVED / SUPERSEDED
+gate_reason            VARCHAR(64), fixed project text (IP_BAN_418, RATE_LIMIT_PAUSE_429, GATE_NOT_RESTORED, ...)
+first_blocked_at_utc   TIMESTAMPTZ
+last_blocked_at_utc    TIMESTAMPTZ, >= first_blocked_at_utc
+block_count            INTEGER >= 1 (how many steps the gate refused the same action)
+retry_after_until_utc  NULL, TIMESTAMPTZ (the gate's own end, when it knew one)
+resolved_at_utc        NULL while PENDING, set when RESOLVED or SUPERSEDED
+resolution_note        NULL while PENDING, fixed project text when closed
+```
+
+- Alembic revision `0008_pending_protective_actions` (down revision `0007_intent_resolution_reason`). Named constraints: `pk_pending_protective_actions`, `ck_pending_protective_actions_kind`, `ck_pending_protective_actions_state`, `ck_pending_protective_actions_block_count`, `ck_pending_protective_actions_time_order`, `ck_pending_protective_actions_resolution` (open means no resolution time and no note, closed means both). The partial unique index `uq_pending_protective_actions_open` on `(plan_hash, pending_kind) WHERE state = 'PENDING'` allows at most one open row per plan and kind; a refusal of the same action bumps that row, and a block after a resolution opens a new row. There are no foreign keys: the table is an intent log keyed by the plan hash.
+- States: `PENDING` is open. `RESOLVED` means the action got through or became moot because the exchange state settled (the stop was read ACTIVE by its deterministic id, the entry cancel was accepted or the entry is terminal, the close was sent after the gate opened or the position is flat). `SUPERSEDED` means policy now requires a close (`CLOSE_REQUIRED`, `CLOSE_FAILED` or `FLAT`), so a queued stop is never sent (note `CLOSE_REQUIRED_BY_POLICY`). `max_unprotected_ms` running out during the wait moves the plan to `CLOSE_REQUIRED` through the existing deadline.
+- Writers: the protection coordinator (`src/execution/protection.py`: stop and entry-cancel refusals, resolution and supersede) and the emergency closer (`src/execution/emergency_close.py`: `CLOSE_NOT_SENT`), both through `PgPendingActionStore` (`src/persistence/pending_actions.py`). The intent is first written to the local spill (D-16) and then recorded; a store failure enters SAFE_MODE `DB_FAILURE` once and never blocks the protective step. Readers: the coordinator's `blocks_new_entries()` (true while any row is `PENDING`, and true when the store cannot be read), the startup load of open rows (plan 20-19) and the queue order once the gate opens (plan 20-21, D-20). A 418 or 429 pause is never bypassed: the refusal is recorded, not worked around (D-18).
+
 ## 3. Canonical state machines
 
 Canonical states are defined in `GLOSSARY.md`. The legal transitions between them are `GLOSSARY.md` section 11 (six tables: Signal, TradePlan, Order, Position, Approval, ExecutionIntent) and are implemented once in `src/domain/transitions.py`; the Phase 17 persistence status values (`ExecutionIntentStatus`, approval `consumption_status`, `live_inputs_status`, `SystemStateKey`) are `GLOSSARY.md` section 12. The section 11 tables are an auto-mode default awaiting user confirmation (D051).
