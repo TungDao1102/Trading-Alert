@@ -49,8 +49,11 @@ ALERT_UNPROTECTED_POSITION: str = "UNPROTECTED_POSITION"
 ALERT_DIVERGENCE: str = "DIVERGENCE"
 ALERT_FOREIGN_ORDER: str = "FOREIGN_ORDER"
 ALERT_UNKNOWN_ORDER: str = "UNKNOWN_ORDER"
-# Raised by the stale-feed work of plan 20-16; no divergence kind maps to it.
+# Raised by the stale-feed work of plan 20-16 and, through STREAM_TASK_DIED, by a halted stream.
 ALERT_STALE_DATA: str = "STALE_DATA"
+# Raised by the loop when a truth read fails with AUTH_OR_SIGNATURE (plan 20-16, OPS-05); no
+# divergence kind maps to it.
+ALERT_AUTH_FAILURE: str = "AUTH_FAILURE"
 
 #: The SAFE_MODE reason of the supervisor halt (Phase 18 TASK_DIED, D-04).
 SAFE_MODE_USER_DATA_STREAM_HALTED: str = "USER_DATA_STREAM_HALTED"
@@ -153,7 +156,7 @@ POLICY_BY_KIND: Mapping[str, DivergencePolicy] = MappingProxyType(
             ),
             _policy(
                 DIVERGENCE_KIND_STREAM_TASK_DIED,
-                ALERT_DIVERGENCE,
+                ALERT_STALE_DATA,
                 DivergenceAction.ALERT_ONLY,
                 safe_mode_reason=SAFE_MODE_USER_DATA_STREAM_HALTED,
             ),
@@ -173,6 +176,7 @@ def classify(kind: str) -> DivergencePolicy:
 
 
 __all__ = [
+    "ALERT_AUTH_FAILURE",
     "ALERT_DIVERGENCE",
     "ALERT_FOREIGN_ORDER",
     "ALERT_STALE_DATA",

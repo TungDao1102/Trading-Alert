@@ -12,18 +12,29 @@ process; here it is driven by tests with fakes. One tick:
      and the report, so LEGACY_IN_MEMORY (no persistence wired) is visible.
   2. stops with RECONCILE_SKIPPED_RESTORE_PENDING while the coordinator's tracked plans are not
      rebuilt (`restore_complete`), so a half-restored view is never read as "no plans".
-  3. lets the optional `UnknownEntryResolver` step (D-11, D-12: every UNKNOWN exit goes through it
+  3. judges the optional feeds (plan 20-16, D-25): a missing or stale mark price for a tracked
+     symbol, or user-data silence, enters SAFE_MODE STALE_FEED and alerts STALE_DATA; a feed that
+     recovers never exits SAFE_MODE. Steps 1 and 2 come first, so under a gate restriction or a
+     pending restore neither the feeds nor the stream queue is touched.
+     Then the optional stream (D-04): a router SINK_FAILURE and a supervisor halt become the
+     divergences STREAM_SINK_FAILURE and STREAM_TASK_DIED and are acted on at once (the mapping
+     table is in `_check_stream`), and every id a stream item names gets one targeted REST query.
+     These steps run before the truth reads, so a failed read cannot hide them.
+  4. lets the optional `UnknownEntryResolver` step (D-11, D-12: every UNKNOWN exit goes through it
      with REST_RECONCILE evidence; the loop writes no Order or Position row).
-  4. reads the three Binance truth snapshots, then the local side (coordinator views plus
+  5. reads the three Binance truth snapshots, then the local side (coordinator views plus
      unresolved intent rows, see `local_intent`), runs compare v2 and classifies each divergence
      with the pure table of `classify`.
-  5. enters SAFE_MODE once per distinct reason, delegates stop-related exposure to the
+  6. enters SAFE_MODE once per distinct reason, delegates stop-related exposure to the
      coordinator (`notify_divergence`, one decision path), alerts, and finally sweeps ORPHAN
      protectives only; it journals one RECONCILE_TICK row.
 
 Fail closed: a failed truth read, a failed local read or a compare error is never agreement. The
 tick enters SAFE_MODE (API_DEGRADATION for the exchange reads and compare, DB_FAILURE for the
-local source) and compares nothing. A divergence is never explained away.
+local source) and compares nothing. An exchange read that fails with AUTH_OR_SIGNATURE (classified
+from `adapter.error_facts` through `src.domain.exchange_errors.classify`, never from message
+text) enters SAFE_MODE AUTH_FAILURE and alerts AUTH_FAILURE (plan 20-16, OPS-05, D-23). A
+divergence is never explained away.
 
 Staleness of the local side: it is read inside the tick, with no cache, by two synchronous calls
 that follow one another with no await between them; a None, a non-sequence or an exception from
@@ -43,12 +54,15 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
+from src.domain.exchange_errors import CallKind, ExchangeErrorCategory
+from src.domain.exchange_errors import classify as classify_exchange_error
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.execution.execution_limits import (
     ExecutionLimits,
@@ -56,8 +70,19 @@ from src.execution.execution_limits import (
     check_reconcile_cadence,
 )
 from src.execution.order_ids import plan_hash_prefix_of
-from src.reconcile.classify import ALERT_STALE_DATA, DivergenceAction, classify
-from src.reconcile.compare import CompareDiff, Divergence, compare
+from src.reconcile.classify import (
+    ALERT_AUTH_FAILURE,
+    ALERT_STALE_DATA,
+    DivergenceAction,
+    classify,
+)
+from src.reconcile.compare import (
+    DIVERGENCE_KIND_STREAM_SINK_FAILURE,
+    DIVERGENCE_KIND_STREAM_TASK_DIED,
+    CompareDiff,
+    Divergence,
+    compare,
+)
 from src.reconcile.feed_freshness import FeedReading, FeedVerdict, assess_feeds
 from src.reconcile.local_intent import INACTIVE_STATE_NAMES, derive_local_intent
 
@@ -95,6 +120,36 @@ _ENTITY_ID = "reconcile_loop"
 _CORRELATION_ID = "reconcile_loop"
 _UNKNOWN_REASON = "UNKNOWN"
 
+#: SAFE_MODE reason of a truth read that failed with AUTH_OR_SIGNATURE (OPS-05, D-23).
+SAFE_MODE_AUTH_FAILURE: str = "AUTH_FAILURE"
+
+#: Alert subject of an authentication failure (no symbol is involved).
+ALERT_SUBJECT_SYSTEM: str = "SYSTEM"
+#: The `category` journaled for a failed exchange read whose classification itself failed.
+CATEGORY_UNCLASSIFIED: str = "UNCLASSIFIED"
+
+#: A targeted REST query of an id a stream divergence named (plan 20-16, D-04).
+RECONCILE_STREAM_QUERY: str = "RECONCILE_STREAM_QUERY"
+
+# The user-data router's `StreamDivergenceKind` values and the supervisor's halt reason, matched by
+# their string values because src.reconcile imports no adapter. A parity test pins every one of
+# them against the adapter enum and constant.
+STREAM_KIND_SINK_FAILURE: str = "SINK_FAILURE"
+STREAM_HALT_TASK_DIED: str = "TASK_DIED"
+STREAM_KINDS: tuple[str, ...] = (
+    "STREAM_ANOMALY",
+    "STREAM_FILL_TOTAL_MISMATCH",
+    "UNKNOWN_STREAM_ORDER",
+    "UNKNOWN_STREAM_ALGO",
+    "STREAM_ALGO_TERMINAL_FAILED",
+    STREAM_KIND_SINK_FAILURE,
+)
+#: `Divergence.reason` of project-fixed text (never an exception message).
+_REASON_SINK_FAILURE = "the user-data router could not hand an event to its sink"
+_REASON_SOURCE_UNREADABLE = "STREAM_SOURCE_UNREADABLE"
+_STREAM_ORDER_ROLE = "STREAM"
+_HALT_REASON_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}", re.ASCII)
+
 #: How urgent the owner of a divergence is; SAFE_MODE reasons are entered in ascending order.
 _ACTION_URGENCY: dict[DivergenceAction, int] = {
     DivergenceAction.ALERT_ONLY: 0,
@@ -109,13 +164,24 @@ _ACTION_URGENCY: dict[DivergenceAction, int] = {
 
 
 class ReconcileAdapter(Protocol):
-    """The three read-only snapshots a tick makes (the real adapter and the fake have them)."""
+    """The read-only calls a tick makes (the real adapter and the fakes have them).
+
+    The three snapshots are the truth reads; the two by-client queries serve the targeted look at
+    an id a stream divergence named (plan 20-16); `error_facts(exc)` is the SDK-free helper that
+    turns a failed read into `ErrorFacts` for classification (no message text is read).
+    """
 
     async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]: ...
 
     async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> list[Any]: ...
 
     async def snapshot_positions(self, *, symbol: str | None = None) -> list[Any]: ...
+
+    async def query_order_by_client(self, *, symbol: str, orig_client_order_id: str) -> Any: ...
+
+    async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any: ...
+
+    def error_facts(self, exc: BaseException) -> Any: ...
 
 
 class GateRestrictionSource(Protocol):
@@ -184,6 +250,19 @@ class UnknownEntryStepper(Protocol):
     """`UnknownEntryResolver.step`: the only way an UNKNOWN intent leaves UNKNOWN (D-11)."""
 
     async def step(self, *, now_utc: datetime) -> Any: ...
+
+
+class StreamDivergenceSource(Protocol):
+    """The user-data stream as the reconciler sees it (plan 20-16; Phase 24 binds the real one).
+
+    `drain()` hands over, once, the `StreamDivergence` items the router collected (matched by the
+    string value of `kind`); `halted_reason()` is None while the supervisor runs and its halt
+    reason (for example TASK_DIED) while it waits for a resync.
+    """
+
+    def drain(self) -> Sequence[Any]: ...
+
+    def halted_reason(self) -> str | None: ...
 
 
 class FeedSource(Protocol):
@@ -256,6 +335,9 @@ class ReconcileLoop:
         unknown_entries: optional `UnknownEntryResolver`, stepped once per tick (D-11).
         feeds: optional `FeedSource`; when set, every tick judges the mark price of each tracked
             symbol and the user-data feed (plan 20-16, D-25). None means no feed is judged.
+        stream: optional `StreamDivergenceSource`; when set, every tick acts on the stream's
+            SINK_FAILURE items and on a supervisor halt and queries the ids other items name
+            (plan 20-16, D-04). None means the stream is not looked at.
 
     Raises:
         ValueError: `safe_mode` is not durable.
@@ -277,6 +359,7 @@ class ReconcileLoop:
         limits: ExecutionLimits,
         unknown_entries: UnknownEntryStepper | None = None,
         feeds: FeedSource | None = None,
+        stream: StreamDivergenceSource | None = None,
     ) -> None:
         if not safe_mode.is_durable:
             raise ValueError(
@@ -298,6 +381,7 @@ class ReconcileLoop:
         self._journal = journal
         self._unknown_entries = unknown_entries
         self._feeds = feeds
+        self._stream = stream
         self._limits = limits
         self._tick_interval_ms = tick_interval_ms
         self._lock = asyncio.Lock()
@@ -340,7 +424,10 @@ class ReconcileLoop:
             return TickReport(outcome=TICK_SKIPPED_RESTORE_PENDING, now_utc=now_utc)
 
         action_failures: list[str] = []
-        pre = self._check_feeds(now_utc, action_failures)
+        pre = _combine(
+            self._check_feeds(now_utc, action_failures),
+            await self._check_stream(now_utc, action_failures),
+        )
         report = await self._read_and_act(now_utc, gate_status, pre, action_failures)
         return _with_pre(report, pre)
 
@@ -362,9 +449,7 @@ class ReconcileLoop:
                     raise _UnusableRows
                 truth[source] = tuple(rows)
             except Exception as exc:
-                return self._read_failed(
-                    now_utc, source, exc, SAFE_MODE_API_DEGRADATION, action_failures
-                )
+                return self._exchange_read_failed(now_utc, source, exc, action_failures)
 
         try:
             plans = tuple(self._protection.protections())
@@ -446,6 +531,46 @@ class ReconcileLoop:
             self._enter_safe_mode(SAFE_MODE_API_DEGRADATION, now_utc, failures)
             return None
 
+    def _classify_exchange_failure(self, exc: BaseException) -> ExchangeErrorCategory | None:
+        """The category of a failed exchange read, from `ErrorFacts` only (never message text).
+
+        None when the adapter offers no `error_facts` or the classification itself raises: the
+        caller then reads the failure as API_DEGRADATION (fail closed, never a crash).
+        """
+        try:
+            facts = self._adapter.error_facts(exc)
+            return classify_exchange_error(facts, CallKind.QUERY)
+        except Exception:
+            return None
+
+    def _exchange_read_failed(
+        self, now_utc: datetime, source: str, exc: BaseException, failures: list[str]
+    ) -> TickReport:
+        """A failed truth read: AUTH_OR_SIGNATURE is AUTH_FAILURE (and alerted), else degradation.
+
+        OPS-05 / D-23 producer of the authentication-failure alert. Either way the tick is
+        fail-closed: SAFE_MODE, no compare, nothing cancelled.
+        """
+        category = self._classify_exchange_failure(exc)
+        if category is ExchangeErrorCategory.AUTH_OR_SIGNATURE:
+            return self._read_failed(
+                now_utc,
+                source,
+                exc,
+                SAFE_MODE_AUTH_FAILURE,
+                failures,
+                category=category.value,
+                alert_event=ALERT_AUTH_FAILURE,
+            )
+        return self._read_failed(
+            now_utc,
+            source,
+            exc,
+            SAFE_MODE_API_DEGRADATION,
+            failures,
+            category=CATEGORY_UNCLASSIFIED if category is None else category.value,
+        )
+
     def _read_failed(
         self,
         now_utc: datetime,
@@ -453,16 +578,34 @@ class ReconcileLoop:
         exc: BaseException,
         reason: str,
         failures: list[str],
+        *,
+        category: str | None = None,
+        alert_event: str | None = None,
     ) -> TickReport:
         """Fail closed: journal source and exception class, enter SAFE_MODE, compare nothing."""
-        self._journal_row(
-            RECONCILE_READ_FAILED, {"source": source, "error_type": type(exc).__name__}, now_utc
-        )
+        payload: dict[str, Any] = {"source": source, "error_type": type(exc).__name__}
+        if category is not None:
+            payload["category"] = category
+        self._journal_row(RECONCILE_READ_FAILED, payload, now_utc)
         self._enter_safe_mode(reason, now_utc, failures)
+        sent = 0
+        failed = 0
+        if alert_event is not None:
+            delivered = self._alert(
+                event=alert_event,
+                subject=ALERT_SUBJECT_SYSTEM,
+                reason=category if category is not None else reason,
+                symbol=None,
+                plan_hash=None,
+                now_utc=now_utc,
+            )
+            sent, failed = (1, 0) if delivered else (0, 1)
         return TickReport(
             outcome=TICK_READ_FAILED,
             now_utc=now_utc,
             safe_mode_reasons=(reason,),
+            alerts_sent=sent,
+            alerts_failed=failed,
             failed_source=source,
             action_failures=tuple(failures),
         )
@@ -619,6 +762,159 @@ class ReconcileLoop:
             user_data_silent=verdict.user_data_silent,
         )
 
+    async def _check_stream(self, now_utc: datetime, failures: list[str]) -> _Pre:
+        """Act on the stream (D-04): SINK_FAILURE and a halt become divergences, the rest queries.
+
+        Mapping table (the policy itself stays in `classify.POLICY_BY_KIND`):
+
+          drained SINK_FAILURE item      -> Divergence STREAM_SINK_FAILURE (SAFE_MODE
+                                            STREAM_SINK_FAILURE, alert DIVERGENCE) plus a query
+          supervisor halt TASK_DIED, or  -> Divergence STREAM_TASK_DIED (SAFE_MODE
+          any other halt reason, or a       USER_DATA_STREAM_HALTED, alert STALE_DATA): while the
+          stream source that raises         supervisor is halted the stream is not trusted, and a
+                                            source that cannot be read is not trusted either
+          every other drained item       -> one targeted REST query of the ids it names, no
+                                            divergence of its own: the compare decides
+
+        A recovered supervisor (halted_reason None) adds nothing and never exits SAFE_MODE. The
+        queries run before the truth reads, so the compare of the same tick sees the later state.
+        Each id is queried once per tick; a failed query is journaled by exception class name.
+        """
+        if self._stream is None:
+            return _NO_PRE
+        divergences: list[Divergence] = []
+        halt_reason: str | None = None
+        items: tuple[Any, ...] = ()
+        try:
+            drained = self._stream.drain()
+            if not isinstance(drained, (list, tuple)):
+                raise _UnusableRows
+            items = tuple(drained)
+        except Exception as exc:
+            halt_reason = _REASON_SOURCE_UNREADABLE
+            self._stream_source_failed("stream_drain", exc, now_utc, failures)
+        try:
+            halted = self._stream.halted_reason()
+            if halted is not None:
+                halt_reason = _halt_text(halted)
+        except Exception as exc:
+            halt_reason = halt_reason or _REASON_SOURCE_UNREADABLE
+            self._stream_source_failed("stream_halted_reason", exc, now_utc, failures)
+
+        for item in items:
+            if _stream_kind(item) == STREAM_KIND_SINK_FAILURE:
+                divergences.append(
+                    Divergence(
+                        kind=DIVERGENCE_KIND_STREAM_SINK_FAILURE,
+                        symbol=_stream_symbol(item) or ALERT_SUBJECT_USER_DATA,
+                        order_role=_STREAM_ORDER_ROLE,
+                        client_order_id=_stream_id(item, "client_order_id"),
+                        client_algo_id=_stream_id(item, "client_algo_id"),
+                        reason=_REASON_SINK_FAILURE,
+                    )
+                )
+        if halt_reason is not None:
+            divergences.append(
+                Divergence(
+                    kind=DIVERGENCE_KIND_STREAM_TASK_DIED,
+                    symbol=ALERT_SUBJECT_USER_DATA,
+                    order_role=_STREAM_ORDER_ROLE,
+                    client_order_id=None,
+                    client_algo_id=None,
+                    reason=halt_reason,
+                )
+            )
+
+        await self._query_named_ids(items, now_utc, failures)
+
+        reasons: dict[str, None] = {}
+        sent = 0
+        failed = 0
+        for divergence in divergences:
+            reasons.setdefault(classify(divergence.kind).safe_mode_reason)
+        for reason in reasons:
+            self._enter_safe_mode(reason, now_utc, failures)
+        for divergence in divergences:
+            if self._send_alert(classify(divergence.kind).alert_event, divergence, None, now_utc):
+                sent += 1
+            else:
+                failed += 1
+        return _Pre(
+            divergences=tuple(divergences),
+            safe_mode_reasons=tuple(reasons),
+            alerts_sent=sent,
+            alerts_failed=failed,
+        )
+
+    def _stream_source_failed(
+        self, action: str, exc: BaseException, now_utc: datetime, failures: list[str]
+    ) -> None:
+        failures.append(action)
+        self._journal_row(
+            RECONCILE_ACTION_FAILED, {"action": action, "error_type": type(exc).__name__}, now_utc
+        )
+
+    async def _query_named_ids(
+        self, items: tuple[Any, ...], now_utc: datetime, failures: list[str]
+    ) -> None:
+        """One REST query per distinct id the drained items name (order by symbol, algo by id)."""
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            stream_kind = _stream_kind(item)
+            symbol = _stream_symbol(item)
+            order_id = _stream_id(item, "client_order_id")
+            algo_id = _stream_id(item, "client_algo_id")
+            if order_id is not None and ("order", order_id) not in seen:
+                seen.add(("order", order_id))
+                await self._query_one("order", stream_kind, symbol, order_id, now_utc, failures)
+            if algo_id is not None and ("algo", algo_id) not in seen:
+                seen.add(("algo", algo_id))
+                await self._query_one("algo", stream_kind, symbol, algo_id, now_utc, failures)
+
+    async def _query_one(
+        self,
+        id_role: str,
+        stream_kind: str,
+        symbol: str | None,
+        client_id: str,
+        now_utc: datetime,
+        failures: list[str],
+    ) -> None:
+        row: dict[str, Any] = {
+            "stream_kind": stream_kind,
+            "id_role": id_role,
+            "client_id": client_id,
+            "symbol": symbol,
+        }
+        try:
+            if id_role == "order":
+                if symbol is None:
+                    # A normal order is queried by (symbol, id); without a symbol the compare of
+                    # this tick, which reads every open order, is the only look.
+                    row["skipped"] = "NO_SYMBOL"
+                    self._journal_row(RECONCILE_STREAM_QUERY, row, now_utc)
+                    return
+                probe = await self._adapter.query_order_by_client(
+                    symbol=symbol, orig_client_order_id=client_id
+                )
+            else:
+                probe = await self._adapter.query_algo_order_by_client(client_algo_id=client_id)
+        except Exception as exc:
+            failures.append("stream_query")
+            self._journal_row(
+                RECONCILE_ACTION_FAILED,
+                {
+                    "action": "stream_query",
+                    "id_role": id_role,
+                    "error_type": type(exc).__name__,
+                },
+                now_utc,
+            )
+            return
+        found = getattr(probe, "found", None)
+        row["found"] = found if isinstance(found, bool) else None
+        self._journal_row(RECONCILE_STREAM_QUERY, row, now_utc)
+
     def _enter_safe_mode(self, reason: str, now_utc: datetime, failures: list[str]) -> None:
         try:
             self._safe_mode.enter_safe_mode(reason=reason, now_utc=now_utc)
@@ -774,6 +1070,42 @@ class _Pre:
 _NO_PRE = _Pre()
 
 
+def _combine(first: _Pre, second: _Pre) -> _Pre:
+    """Both pre-steps as one: the feed fields come from the first, the stream's from the second."""
+    return _Pre(
+        divergences=first.divergences + second.divergences,
+        safe_mode_reasons=_merge_reasons(first.safe_mode_reasons, second.safe_mode_reasons),
+        alerts_sent=first.alerts_sent + second.alerts_sent,
+        alerts_failed=first.alerts_failed + second.alerts_failed,
+        stale_symbols=first.stale_symbols,
+        user_data_silent=first.user_data_silent,
+    )
+
+
+def _stream_kind(item: Any) -> str:
+    """The string value of a drained item's `kind` ('' when it has none)."""
+    kind = getattr(item, "kind", None)
+    value = getattr(kind, "value", kind)
+    return value if isinstance(value, str) else ""
+
+
+def _stream_symbol(item: Any) -> str | None:
+    symbol = getattr(item, "symbol", None)
+    return symbol if isinstance(symbol, str) and symbol != "" else None
+
+
+def _stream_id(item: Any, name: str) -> str | None:
+    value = getattr(item, name, None)
+    return value if isinstance(value, str) and value != "" else None
+
+
+def _halt_text(reason: object) -> str:
+    """A supervisor halt reason as plain project text, else UNKNOWN (never free text)."""
+    if isinstance(reason, str) and _HALT_REASON_PATTERN.fullmatch(reason) is not None:
+        return reason
+    return _UNKNOWN_REASON
+
+
 def _merge_reasons(first: Sequence[str], second: Sequence[str]) -> tuple[str, ...]:
     """The reasons of both steps in entry order, each once."""
     return tuple(dict.fromkeys((*first, *second)))
@@ -837,7 +1169,14 @@ __all__ = [
     "RECONCILE_SKIPPED_GATE",
     "RECONCILE_SKIPPED_RESTORE_PENDING",
     "RECONCILE_TICK",
+    "ALERT_SUBJECT_SYSTEM",
+    "CATEGORY_UNCLASSIFIED",
+    "RECONCILE_STREAM_QUERY",
     "SAFE_MODE_API_DEGRADATION",
+    "SAFE_MODE_AUTH_FAILURE",
+    "STREAM_HALT_TASK_DIED",
+    "STREAM_KINDS",
+    "STREAM_KIND_SINK_FAILURE",
     "SAFE_MODE_DB_FAILURE",
     "SAFE_MODE_STALE_FEED",
     "TICK_COMPARED",
@@ -854,6 +1193,7 @@ __all__ = [
     "ReconcileAlertSink",
     "ReconcileLoop",
     "SafeModeGate",
+    "StreamDivergenceSource",
     "TickReport",
     "UnknownEntryStepper",
     "UnresolvedIntentSource",
