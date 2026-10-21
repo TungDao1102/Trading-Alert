@@ -14,6 +14,7 @@ Pins, on in-memory fakes (the PostgreSQL adapter is covered by `test_safe_mode_p
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
@@ -23,7 +24,11 @@ from typing import Any
 
 import pytest
 from src.domain.enums import RejectionReason
-from src.reconcile.safe_mode import SafeModeController, SafeModeStateStore
+from src.reconcile.safe_mode import (
+    SAFE_MODE_STATE_UNREADABLE,
+    SafeModeController,
+    SafeModeStateStore,
+)
 
 T0 = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 T1 = T0 + timedelta(minutes=5)
@@ -211,3 +216,168 @@ def test_load_rejects_a_naive_or_non_utc_now() -> None:
 def test_safe_mode_module_imports_nothing_from_the_persistence_layer() -> None:
     source = (REPO_ROOT / "src" / "reconcile" / "safe_mode.py").read_text(encoding="utf-8")
     assert not re.search(r"^\s*(from|import)\s+src\.persistence", source, flags=re.MULTILINE)
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - fail closed: save failure and retry, unreadable or malformed store, empty reason
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failing_save_propagates_but_the_controller_stays_in_safe_mode() -> None:
+    store = FakeStore()
+    store.save_error = ConnectionError("db down")
+    journal = FakeJournal()
+    controller = _controller(store, journal)
+
+    with pytest.raises(ConnectionError, match="db down"):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    assert controller.in_safe_mode is True
+    assert controller.entered_reason == "DB_FAILURE"
+    assert [event.event_type for event in journal.events] == ["SAFE_MODE_ENTER"]
+    assert store.saved == []
+
+
+def test_the_next_same_reason_enter_retries_the_save_until_the_store_recovers() -> None:
+    store = FakeStore()
+    store.save_error = ConnectionError("db down")
+    journal = FakeJournal()
+    controller = _controller(store, journal)
+    with pytest.raises(ConnectionError):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    with pytest.raises(ConnectionError):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T1)  # still down: retried, raises
+    store.save_error = None
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T2)
+
+    assert len(store.saved) == 1
+    assert store.saved[0][0] == controller.state_snapshot()
+    # Only the first entry journals; the retries are not new transitions.
+    assert [event.event_type for event in journal.events] == ["SAFE_MODE_ENTER"]
+    # And once persisted, a further same-reason call is a no-op again.
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T2)
+    assert len(store.saved) == 1
+
+
+def test_a_failed_save_on_a_reentry_is_retried_by_the_next_same_reason_call() -> None:
+    store = FakeStore()
+    controller = _controller(store)
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+    store.save_error = TimeoutError("slow")
+    with pytest.raises(TimeoutError):
+        controller.enter_safe_mode(reason="UNSYNCED_POSITION", now_utc=T1)
+    store.save_error = None
+
+    controller.enter_safe_mode(reason="UNSYNCED_POSITION", now_utc=T2)
+
+    assert store.saved[-1][0]["entered_reason"] == "UNSYNCED_POSITION"
+
+
+def test_a_journal_failure_on_entry_leaves_the_controller_in_safe_mode_and_save_retries() -> None:
+    store = FakeStore()
+    journal = FakeJournal(fail=True)
+    controller = _controller(store, journal)
+    with pytest.raises(RuntimeError, match="journal down"):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+    assert controller.in_safe_mode is True
+    assert store.saved == []
+
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T1)
+
+    assert len(store.saved) == 1
+
+
+def test_a_store_whose_load_raises_starts_the_controller_in_safe_mode_unreadable() -> None:
+    store = FakeStore()
+    store.load_error = ConnectionError("db down")
+    journal = FakeJournal()
+
+    controller = _load(store, journal, now_utc=T2)
+
+    assert controller.in_safe_mode is True
+    assert controller.entered_reason == SAFE_MODE_STATE_UNREADABLE
+    assert SAFE_MODE_STATE_UNREADABLE == "SAFE_MODE_STATE_UNREADABLE"
+    assert controller.entered_at_utc == T2
+    assert controller.is_durable is True
+    assert controller.guard_new_entries(trade_plan=None).is_no_trade is True
+    (event,) = journal.events
+    assert event.event_type == "SAFE_MODE_STATE_UNREADABLE"
+    assert json.loads(event.payload_json) == {"error_type": "ConnectionError"}
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"in_safe_mode": True},
+        {"in_safe_mode": "yes", "entered_at_utc": None, "entered_reason": None},
+        {"in_safe_mode": True, "entered_at_utc": None, "entered_reason": "X"},
+        {"in_safe_mode": True, "entered_at_utc": "2026-09-19T12:00:00", "entered_reason": "X"},
+        {"in_safe_mode": False, "entered_at_utc": T0.isoformat(), "entered_reason": None},
+        {"in_safe_mode": True, "entered_at_utc": T0.isoformat(), "entered_reason": "X", "x": 1},
+    ],
+)
+def test_a_malformed_stored_state_starts_the_controller_in_safe_mode_unreadable(
+    state: dict[str, Any],
+) -> None:
+    journal = FakeJournal()
+
+    controller = _load(FakeStore(loaded=state), journal, now_utc=T2)
+
+    assert controller.in_safe_mode is True
+    assert controller.entered_reason == SAFE_MODE_STATE_UNREADABLE
+    assert controller.entered_at_utc == T2
+    (event,) = journal.events
+    assert json.loads(event.payload_json) == {"error_type": "ValueError"}
+
+
+def test_a_journal_failure_while_reporting_an_unreadable_store_is_swallowed() -> None:
+    store = FakeStore()
+    store.load_error = RuntimeError("boom")
+
+    controller = _load(store, FakeJournal(fail=True))
+
+    assert controller.in_safe_mode is True
+    assert controller.entered_reason == SAFE_MODE_STATE_UNREADABLE
+
+
+def test_an_error_message_is_never_journaled_on_an_unreadable_store() -> None:
+    store = FakeStore()
+    store.load_error = RuntimeError("password=hunter2")
+    journal = FakeJournal()
+
+    controller = _load(store, journal)
+
+    assert controller.in_safe_mode is True
+    assert journal.events
+    for event in journal.events:
+        assert "hunter2" not in event.payload_json
+        assert "hunter2" not in repr(event)
+    assert "hunter2" not in repr(controller.state_snapshot())
+
+
+@pytest.mark.parametrize("reason", ["", None, 7])
+def test_enter_refuses_an_empty_or_non_string_reason_and_changes_nothing(reason: Any) -> None:
+    store = FakeStore()
+    journal = FakeJournal()
+    controller = _controller(store, journal)
+
+    with pytest.raises(ValueError, match="reason"):
+        controller.enter_safe_mode(reason=reason, now_utc=T0)
+
+    assert controller.in_safe_mode is False
+    assert controller.state_snapshot() == SAFE_OFF
+    assert journal.events == []
+    assert store.saved == []
+
+
+def test_a_restart_never_exits_safe_mode() -> None:
+    store = FakeStore()
+    _controller(store).enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    first = _load(store, now_utc=T1)
+    second = _load(store, now_utc=T2)
+
+    assert first.in_safe_mode is True
+    assert second.in_safe_mode is True
+    assert second.entered_at_utc == T0
