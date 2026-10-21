@@ -268,3 +268,58 @@ async def test_a_gate_refused_stop_is_a_durable_row_a_restarted_store_reads(
     assert rows[0].retry_after_until_utc == rig.clock.now() + timedelta(seconds=30)
     assert rows[0].first_blocked_at_utc.tzinfo is not None
     assert rows[0].first_blocked_at_utc.utcoffset() == timedelta(0)
+
+
+async def test_a_gate_refused_close_is_durable_and_resolved_once_it_goes_through(
+    engine: Engine,
+) -> None:
+    store = PgPendingActionStore(OperationalDatabase(engine))
+    rig = await make_rig(real_closer=True, pending_actions=store)
+    rig.fake.reject_next_algo(-2021)
+    rig.fake.fail_next("place_market_close", RateLimitPauseActive(60))
+    rig.coordinator.fill_sink(rig.stream_fill(Decimal("0.004")))
+
+    await rig.coordinator.step()
+
+    restarted = PgPendingActionStore(OperationalDatabase(engine))
+    rows = restarted.list_open()
+    assert [r.kind for r in rows] == [PendingKind.CLOSE_NOT_SENT]
+    assert rows[0].gate_reason == REASON
+    assert rig.coordinator.blocks_new_entries() is True
+
+    await rig.coordinator.step()  # the gate is open: the close goes out, the plan ends FLAT
+
+    assert restarted.list_open() == ()
+    with engine.connect() as conn:
+        closed = conn.execute(
+            text("SELECT state, resolution_note FROM pending_protective_actions")
+        ).all()
+    assert [tuple(row) for row in closed] == [("RESOLVED", "CLOSE_SENT_AFTER_GATE")]
+    assert rig.coordinator.blocks_new_entries() is False
+
+
+async def test_a_pending_stop_is_superseded_in_the_database_and_never_sent(
+    engine: Engine,
+) -> None:
+    store = PgPendingActionStore(OperationalDatabase(engine))
+    rig = await make_rig(pending_actions=store)
+    for _ in range(10):
+        rig.fake.fail_next("place_algo_protective", RateLimitPauseActive(600))
+    rig.coordinator.fill_sink(rig.stream_fill(Decimal("0.004")))
+    await rig.coordinator.step()
+    assert len(store.list_open()) == 1
+
+    await rig.clock.advance(7.777)  # max_unprotected_ms, TEST_ONLY 7777 ms of virtual time
+    await rig.coordinator.step()
+    sent = len(rig.fake.calls_to("place_algo_protective"))
+    for _ in range(3):
+        await rig.clock.advance(1)
+        await rig.coordinator.step()
+
+    assert store.list_open() == ()
+    with engine.connect() as conn:
+        closed = conn.execute(
+            text("SELECT state, resolution_note, block_count FROM pending_protective_actions")
+        ).all()
+    assert [tuple(row) for row in closed] == [("SUPERSEDED", "CLOSE_REQUIRED_BY_POLICY", 2)]
+    assert len(rig.fake.calls_to("place_algo_protective")) == sent
