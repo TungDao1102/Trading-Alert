@@ -143,6 +143,13 @@ from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_i
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
 from src.execution.order_ids import derive_algo_client_id
+from src.execution.protection_replay import (
+    EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+    EVIDENCE_REST_STOP_CONFIRMED,
+    REASON_STOP_LOST,
+    REJECT_ILLEGAL_EDGE,
+    clearing_violation,
+)
 from src.persistence.errors import IntentStateConflict, PersistenceError
 
 POSITION_MODE_ONE_WAY = "ONE_WAY"
@@ -220,7 +227,6 @@ REASON_CLOSE_FAILED = "CLOSE_FAILED"
 REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
 REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
 REASON_STOP_CONSUMED_FLAT = "STOP_CONSUMED_FLAT"
-REASON_STOP_LOST = "STOP_LOST"
 REASON_NO_POSITION_ON_STOP = "NO_POSITION_ON_STOP"
 REASON_TP_LEGS_CONFIRMED = "TP_LEGS_CONFIRMED"
 REASON_TP_UNAVAILABLE = "TP_UNAVAILABLE"
@@ -244,7 +250,11 @@ class ProtectionState(str, Enum):
     ENTRY_STATE_UNKNOWN entry never found by its GTD time plus the grace; it leaves to
     UNPROTECTED on a fill, ENTRY_ENDED_NO_FILL when found ended, or AWAITING_FILL when found open.
     19-REVIEW WR-04 (owner, D077) adds no name: a lost stop moves PROTECTED_ENTRY_OPEN back to
-    UNPROTECTED (reason ``STOP_LOST``), which leaves only to CLOSE_REQUIRED or FLAT.
+    UNPROTECTED (reason ``STOP_LOST``), which leaves only to CLOSE_REQUIRED or FLAT. Plan 20-02
+    audit (T-A): when the entry turns terminal on the same step and REST reads flat twice, the
+    lost-stop path ends the plan FLAT (reason ``STOP_CONSUMED_FLAT``) straight from
+    PROTECTED_ENTRY_OPEN. The allowed moves are the PROTECTION table of
+    ``src.domain.transitions``, enforced by ``ProtectionCoordinator._transition``.
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -815,7 +825,11 @@ class ProtectionCoordinator:
             self._apply_entry_answer(tracked, answer)
             if tracked.entry_terminal_at is not None and await self._second_read_is_flat(tracked):
                 self._transition(
-                    tracked, ProtectionState.FLAT, REASON_NO_POSITION_ON_STOP, self._now()
+                    tracked,
+                    ProtectionState.FLAT,
+                    REASON_NO_POSITION_ON_STOP,
+                    self._now(),
+                    evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
                 )
                 await self._sweep(tracked)
 
@@ -1235,7 +1249,13 @@ class ProtectionCoordinator:
             and tracked.entry_terminal_at is not None
             and await self._second_read_is_flat(tracked)
         ):
-            self._transition(tracked, ProtectionState.FLAT, REASON_STOP_CONSUMED_FLAT, self._now())
+            self._transition(
+                tracked,
+                ProtectionState.FLAT,
+                REASON_STOP_CONSUMED_FLAT,
+                self._now(),
+                evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+            )
             await self._sweep(tracked)
             return
         if tracked.state is not ProtectionState.UNPROTECTED:
@@ -1333,13 +1353,20 @@ class ProtectionCoordinator:
                 if tracked.state is ProtectionState.PROTECTED_ENTRY_OPEN
                 else REASON_STOP_CONFIRMED_ENTRY_TERMINAL
             )
-            self._transition(tracked, ProtectionState.PROTECTED, reason, now)
+            self._transition(
+                tracked,
+                ProtectionState.PROTECTED,
+                reason,
+                now,
+                evidence=EVIDENCE_REST_STOP_CONFIRMED,
+            )
         elif stop_confirmed and tracked.state is ProtectionState.UNPROTECTED:
             self._transition(
                 tracked,
                 ProtectionState.PROTECTED_ENTRY_OPEN,
                 REASON_STOP_CONFIRMED_ENTRY_OPEN,
                 now,
+                evidence=EVIDENCE_REST_STOP_CONFIRMED,
             )
 
     # ------------------------------------------------------------------ #
@@ -1419,7 +1446,13 @@ class ProtectionCoordinator:
         if amount == _ZERO:
             # T-8-30 (19-REVIEW CR-03): one zero read never sweeps the confirmed stop.
             if await self._second_read_is_flat(tracked):
-                self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
+                self._transition(
+                    tracked,
+                    ProtectionState.FLAT,
+                    REASON_POSITION_CLOSED,
+                    self._now(),
+                    evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+                )
                 await self._sweep(tracked)
             return
         if (amount > _ZERO) != (entry.side == "LONG"):
@@ -1520,7 +1553,13 @@ class ProtectionCoordinator:
             return
         if not await self._second_read_is_flat(tracked):
             return
-        self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
+        self._transition(
+            tracked,
+            ProtectionState.FLAT,
+            REASON_POSITION_CLOSED,
+            self._now(),
+            evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+        )
         await self._sweep(tracked)
 
     # ------------------------------------------------------------------ #
@@ -1610,8 +1649,14 @@ class ProtectionCoordinator:
         if not closed:
             return
         if entry_terminal:
+            # The closer answers True only on two consecutive zero reads (T-8-30); the entry was
+            # read terminal before the close.
             self._transition(
-                tracked, ProtectionState.FLAT, REASON_CLOSED_ENTRY_TERMINAL, self._now()
+                tracked,
+                ProtectionState.FLAT,
+                REASON_CLOSED_ENTRY_TERMINAL,
+                self._now(),
+                evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
             )
             await self._sweep(tracked)
         elif tracked.state is ProtectionState.CLOSE_FAILED:
@@ -1651,24 +1696,43 @@ class ProtectionCoordinator:
         return now
 
     def _transition(
-        self, tracked: _Tracked, new_state: ProtectionState, reason: str, now: datetime
+        self,
+        tracked: _Tracked,
+        new_state: ProtectionState,
+        reason: str,
+        now: datetime,
+        *,
+        evidence: str | None = None,
     ) -> bool:
         """The one place a protection state changes (D-29, T-A). True when ``new_state`` holds.
 
         An equal-state request is an idempotent no-op decided before the guard: no ``seq`` bump,
         no journal row. Any other move must be an edge of the PROTECTION table of
         ``src.domain.transitions`` (a plan that has no state yet may only enter
-        ``PROTECTION_INITIAL_STATE``). A refused move changes nothing (``state``, ``seq`` and
-        ``last_reason`` stay), journals one ``PROTECTION_TRANSITION_REJECTED`` row and enters
-        SAFE_MODE with ``PROTECTION_STATE_INVALID``; it returns False. Callers keep their own
-        fail-closed handling and may ignore the result.
+        ``PROTECTION_INITIAL_STATE``) and must satisfy the clearing rules of
+        ``protection_replay.clearing_violation`` (D077): leaving UNPROTECTED for a protected state
+        needs ``EVIDENCE_REST_STOP_CONFIRMED`` and a plan whose stop was never lost, and reaching
+        FLAT from a blocking state needs ``EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL``. The
+        evidence is journaled in the payload key ``evidence`` (null when absent). A refused move
+        changes nothing (``state``, ``seq`` and ``last_reason`` stay), journals one
+        ``PROTECTION_TRANSITION_REJECTED`` row and enters SAFE_MODE with
+        ``PROTECTION_STATE_INVALID``; it returns False. Callers keep their own fail-closed
+        handling and may ignore the result.
         """
         if tracked.state is new_state:
             return True
         entry = tracked.entry
         previous = _NO_STATE if tracked.state is None else tracked.state.value
         if not self._edge_is_legal(tracked, new_state):
-            self._reject_transition(tracked, previous, new_state, reason, now)
+            self._reject_transition(
+                tracked, previous, new_state, reason, now, REJECT_ILLEGAL_EDGE, evidence
+            )
+            return False
+        violation = clearing_violation(
+            previous, new_state.value, evidence, stop_lost=tracked.stop_lost_at is not None
+        )
+        if violation is not None:
+            self._reject_transition(tracked, previous, new_state, reason, now, violation, evidence)
             return False
         tracked.seq += 1
         tracked.state = new_state
@@ -1676,6 +1740,7 @@ class ProtectionCoordinator:
         payload = json.dumps(
             {
                 "approval_id": entry.approval_id,
+                "evidence": evidence,
                 "from": previous,
                 "reason": reason,
                 "seq": tracked.seq,
@@ -1720,14 +1785,18 @@ class ProtectionCoordinator:
         new_state: ProtectionState,
         reason: str,
         now: datetime,
+        rejection: str,
+        evidence: str | None,
     ) -> None:
         """Journal a refused move (state and seq untouched) and enter SAFE_MODE (fail closed)."""
         entry = tracked.entry
         body = json.dumps(
             {
                 "approval_id": entry.approval_id,
+                "evidence": evidence,
                 "from": previous,
                 "reason": reason,
+                "rejection": rejection,
                 "seq": tracked.seq,
                 "symbol": entry.symbol,
                 "to": new_state.value,
@@ -1880,6 +1949,8 @@ __all__ = [
     "EVENT_SWEEP_FAILED",
     "EVENT_TP_UNAVAILABLE",
     "EVENT_UNKNOWN_FILL",
+    "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
+    "EVIDENCE_REST_STOP_CONFIRMED",
     "FILLED_ENTRY_STATUSES",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",

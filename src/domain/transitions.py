@@ -242,7 +242,9 @@ _PROTECTION = _table(
         "AWAITING_FILL": ("UNPROTECTED", "ENTRY_ENDED_NO_FILL", "ENTRY_UNRESOLVED"),
         "ENTRY_UNRESOLVED": ("UNPROTECTED", "ENTRY_ENDED_NO_FILL", "AWAITING_FILL"),
         "UNPROTECTED": ("PROTECTED_ENTRY_OPEN", "PROTECTED", "CLOSE_REQUIRED", "FLAT"),
-        "PROTECTED_ENTRY_OPEN": ("PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED"),
+        # FLAT: audit finding of plan 20-02 (a lost stop that ends flat while the entry turns
+        # terminal on the same step); the coordinator module docstring states it for WR-04.
+        "PROTECTED_ENTRY_OPEN": ("PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED", "FLAT"),
         "PROTECTED": ("COMPLETE", "TP_UNAVAILABLE", "FLAT"),
         "COMPLETE": ("FLAT",),
         "TP_UNAVAILABLE": ("FLAT",),
