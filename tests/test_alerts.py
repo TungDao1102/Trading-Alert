@@ -10,6 +10,7 @@ Task 3: restart re-queue and the daily-state test trigger.
 
 from __future__ import annotations
 
+import ast
 import json
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -18,8 +19,11 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 import pytest
+from src.domain.enums import DailyState
+from src.domain.journal import JournalEvent
 from src.execution.execution_limits import ExecutionLimitsNotConfigured
 from src.execution.protection import CriticalAlertSink
+from src.ops import alerts as alerts_module
 from src.ops.alerts import (
     ALERT_EVENTS,
     INVALID_REASON,
@@ -553,3 +557,193 @@ async def test_a_lost_outcome_row_is_counted_not_raised() -> None:
     report = await sender.drain()
 
     assert (report.delivered, report.failed, report.audit_lost) == (1, 0, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: restart re-queue and the daily-state test trigger.
+# --------------------------------------------------------------------------- #
+
+
+def _alert_at(sink: JournalFirstAlertSink, *, subject: str, at: datetime) -> None:
+    sink.alert(event="STALE_DATA", subject=subject, reason="MARK_PRICE_STALE", now_utc=at)
+
+
+async def _journal_with_one_delivered_and_one_undelivered() -> tuple[list[Any], str, str]:
+    """Rows of alert a1 (delivered) and a2 (never drained); returns (rows, a1 id, a2 id)."""
+    h = Harness()
+    _alert_at(h.sink, subject="BTCUSDT", at=NOW)
+    await h.sender.drain()
+    _alert_at(h.sink, subject="ETHUSDT", at=NOW + timedelta(seconds=1))
+    first, second = (e.entity_id for e in h.rows("OPERATIONAL_ALERT"))
+    assert [e.event_type for e in h.journal.events] == [
+        "OPERATIONAL_ALERT",
+        "ALERT_DELIVERED",
+        "OPERATIONAL_ALERT",
+    ]
+    return list(h.journal.events), first, second
+
+
+async def test_requeue_undelivered_queues_only_the_alert_without_a_delivered_row() -> None:
+    rows, first, second = await _journal_with_one_delivered_and_one_undelivered()
+    restarted = Harness()
+
+    report = restarted.sink.requeue_undelivered(rows)
+    await restarted.sender.drain()
+
+    assert report.requeued == (second,)
+    assert report.invalid == ()
+    assert len(restarted.bot.sent) == 1
+    assert "ETHUSDT" in restarted.bot.sent[0].text
+    assert "BTCUSDT" not in restarted.bot.sent[0].text  # a1 was delivered, it is not re-sent
+    assert first not in {a.alert_id for a in restarted.queue}
+
+
+async def test_requeue_does_not_depend_on_the_order_of_the_rows() -> None:
+    rows, _, second = await _journal_with_one_delivered_and_one_undelivered()
+    restarted = Harness()
+
+    report = restarted.sink.requeue_undelivered(list(reversed(rows)))
+
+    assert report.requeued == (second,)
+
+
+async def test_a_send_failed_alert_without_a_delivered_row_is_requeued() -> None:
+    h = Harness()
+    h.bot.errors = [tg_error.BadRequest("nope")]
+    _close_required(h.sink)
+    await h.sender.drain()
+    assert len(h.rows("ALERT_SEND_FAILED")) == 1
+    restarted = Harness()
+
+    report = restarted.sink.requeue_undelivered(h.journal.events)
+    await restarted.sender.drain()
+
+    assert len(report.requeued) == 1
+    assert len(restarted.bot.sent) == 1
+    assert "CLOSE_REQUIRED" in restarted.bot.sent[0].text
+
+
+async def test_requeue_twice_does_not_queue_an_alert_twice() -> None:
+    rows, _, second = await _journal_with_one_delivered_and_one_undelivered()
+    restarted = Harness()
+
+    restarted.sink.requeue_undelivered(rows)
+    again = restarted.sink.requeue_undelivered(rows)
+
+    assert again.requeued == ()
+    assert [a.alert_id for a in restarted.queue] == [second]
+
+
+async def test_a_corrupt_alert_row_is_reported_and_the_others_are_still_queued() -> None:
+    rows, _, second = await _journal_with_one_delivered_and_one_undelivered()
+    broken = JournalEvent(
+        journal_event_id="alert_broken",
+        occurred_at_utc=NOW,
+        event_type="OPERATIONAL_ALERT",
+        entity_type="OperationalAlert",
+        entity_id="alert_broken",
+        correlation_id="operational_alerts",
+        payload_json='{"event": "NOT_AN_EVENT"}',
+    )
+    restarted = Harness()
+
+    report = restarted.sink.requeue_undelivered([broken, *rows])
+
+    assert report.invalid == ("alert_broken",)
+    assert report.requeued == (second,)
+
+
+async def test_rows_of_other_correlations_and_event_types_are_ignored() -> None:
+    rows, _, _ = await _journal_with_one_delivered_and_one_undelivered()
+    foreign = JournalEvent(
+        journal_event_id="x1",
+        occurred_at_utc=NOW,
+        event_type="OPERATIONAL_ALERT",
+        entity_type="Other",
+        entity_id="x1",
+        correlation_id="some_other_stream",
+        payload_json="{}",
+    )
+    restarted = Harness()
+
+    report = restarted.sink.requeue_undelivered([foreign, *rows])
+
+    assert report.invalid == ()
+    assert len(report.requeued) == 1
+
+
+async def test_after_a_restart_a_repeat_inside_the_window_is_still_suppressed() -> None:
+    h = Harness()
+    _alert_at(h.sink, subject="BTCUSDT", at=NOW)
+    _alert_at(h.sink, subject="BTCUSDT", at=NOW + timedelta(milliseconds=500))  # suppressed, 1
+    restarted = Harness()
+    restarted.sink.requeue_undelivered(h.journal.events)
+    restarted.queue.clear()
+
+    _alert_at(restarted.sink, subject="BTCUSDT", at=NOW + timedelta(milliseconds=900))
+
+    assert len(restarted.queue) == 0  # the same episode, not a new alert
+    counts = [json.loads(r.payload_json)["count"] for r in restarted.rows("ALERT_SUPPRESSED")]
+    assert counts == [2]  # the count continues from the journaled one
+
+
+def test_daily_stop_test_trigger_emits_a_critical_daily_stop() -> None:
+    h = Harness()
+
+    alerts_module.emit_daily_state_alert(
+        h.sink, state=DailyState.DAILY_STOP, subject="SYSTEM", now_utc=NOW
+    )
+
+    alert = h.queue[0]
+    assert (alert.event, alert.severity, alert.subject) == (
+        "DAILY_STOP",
+        AlertSeverity.CRITICAL,
+        "SYSTEM",
+    )
+
+
+def test_daily_loss_warning_test_trigger_emits_a_warning() -> None:
+    h = Harness()
+
+    alerts_module.emit_daily_state_alert(
+        h.sink, state=DailyState.WARNING, subject="SYSTEM", now_utc=NOW
+    )
+
+    alert = h.queue[0]
+    assert (alert.event, alert.severity) == ("DAILY_LOSS_WARNING", AlertSeverity.WARNING)
+
+
+def test_the_daily_state_trigger_refuses_any_other_state() -> None:
+    h = Harness()
+
+    with pytest.raises(ValueError, match="state"):
+        alerts_module.emit_daily_state_alert(
+            h.sink, state=DailyState.NORMAL, subject="SYSTEM", now_utc=NOW
+        )
+
+    assert h.journal.events == []
+
+
+def test_daily_state_trigger_has_no_production_caller() -> None:
+    """`emit_daily_state_alert` is a TEST TRIGGER: no module under src may use it (Phase 21).
+
+    This keeps the OPS-05 matrix of plan 20-22 truthful: DAILY_STOP and the daily-loss WARNING
+    are "contract and test trigger only" until Phase 21 adds a real producer.
+    """
+    src_root = ALERTS_SOURCE.parents[1]
+    offenders: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        if path == ALERTS_SOURCE:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            named = (
+                (isinstance(node, ast.Name) and node.id == "emit_daily_state_alert")
+                or (isinstance(node, ast.Attribute) and node.attr == "emit_daily_state_alert")
+                or (
+                    isinstance(node, ast.ImportFrom)
+                    and any(a.name == "emit_daily_state_alert" for a in node.names)
+                )
+            )
+            if named:
+                offenders.append(f"{path.relative_to(src_root)}:{node.lineno}")  # type: ignore[attr-defined]
+    assert offenders == []
