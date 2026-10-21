@@ -68,6 +68,10 @@ GATE_NOT_RESTORED = "GATE_NOT_RESTORED"
 GATE_STATE_UNKNOWN = "GATE_STATE_UNKNOWN"
 GATE_STATE_SCHEMA_VERSION = 1
 
+# Alert event name handed to the injected `on_alert` hook, once per gate, when the persisted
+# state is lost, unreadable or corrupt (a human must act; see `FileGateStateStore.initialize`).
+REST_GATE_RECOVERY_REQUIRED = "REST_GATE_RECOVERY_REQUIRED"
+
 # A restriction with no known end (not restored, unknown state) reports this many seconds: the
 # smallest whole-second re-check hint. It is never the 259200 s wait: a consumer that sleeps on
 # the value (binance_userdata_supervisor._await_rest_allowed) must not be parked for days.
@@ -245,6 +249,8 @@ class RestRateLimitGate:
         self._ban_until: datetime | None = None
         self._pause_until: datetime | None = None
         self._restore_done = False
+        self._unknown_state = False
+        self._save_failed = False
         self._loaded: GateStateRecord | None = None
 
     @property
@@ -273,8 +279,12 @@ class RestRateLimitGate:
 
     def _blocking_reason(self) -> str | None:
         """The reason the gate refuses without a known end, or None (caller holds the lock)."""
-        if self._state_store is not None and not self._restore_done:
+        if self._state_store is None:
+            return None
+        if not self._restore_done:
             return GATE_NOT_RESTORED
+        if self._unknown_state:
+            return GATE_STATE_UNKNOWN
         return None
 
     def check(self) -> None:
@@ -362,14 +372,26 @@ class RestRateLimitGate:
                 return GateRecoveryStatus.LEGACY_IN_MEMORY
             if not self._restore_done:
                 return GateRecoveryStatus.NOT_RESTORED
+            if self._unknown_state:
+                return GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+            if self._save_failed:
+                return GateRecoveryStatus.PERSISTENCE_FAILED
             return GateRecoveryStatus.RESTORED_DURABLE
 
     def restore(self) -> GateRecoveryStatus:
         """Adopt the persisted deadlines; call once at process start, before any REST call.
 
-        A valid record is adopted (end times only move later) and the status becomes
-        `RESTORED_DURABLE`. Without a store nothing is restored and the status is
-        `LEGACY_IN_MEMORY`.
+        One verdict per gate instance; a second call changes nothing (a running gate is never
+        cleared in process, only by a restart whose `restore()` reads a valid record).
+
+        * a valid record is adopted (end times only move later): `RESTORED_DURABLE`;
+        * no record (loss of initialized state: a first install must have run the explicit
+          bootstrap), a record that does not parse, or a store that cannot be read: the gate
+          is restricted with no known end (`GATE_STATE_UNKNOWN`, status
+          `RESTORED_UNKNOWN_STATE`) until a restart reads a valid record, and `on_alert` is
+          called once with `REST_GATE_RECOVERY_REQUIRED`.
+
+        Without a store nothing is restored and the status is `LEGACY_IN_MEMORY`.
         """
         store = self._state_store
         if store is None:
@@ -377,8 +399,18 @@ class RestRateLimitGate:
         with self._restore_lock:
             if self._restore_done:
                 return self.recovery_status()
-            record = store.load()
+            record: GateStateRecord | None
+            try:
+                record = store.load()
+            except Exception:
+                # A missing record, a corrupt one and an unreadable store are the same verdict:
+                # the persisted state cannot be trusted (D-10: decided by type, never by text).
+                record = None
             if record is None:
+                with self._lock:
+                    self._unknown_state = True
+                    self._restore_done = True
+                self._alert(REST_GATE_RECOVERY_REQUIRED)
                 return self.recovery_status()
             with self._lock:
                 if record.ban_until_utc is not None and (
@@ -391,10 +423,31 @@ class RestRateLimitGate:
                     self._pause_until = record.pause_until_utc
                 self._loaded = record
                 self._restore_done = True
+                merged = (
+                    self._ban_until != record.ban_until_utc
+                    or self._pause_until != record.pause_until_utc
+                )
+            if merged:
+                self._persist()  # a deadline recorded before restore() is saved now
         return self.recovery_status()
 
+    def _alert(self, event: str) -> None:
+        """Tell the injected hook; a failing hook never changes the restriction."""
+        hook = self._on_alert
+        if hook is None:
+            return
+        try:
+            hook(event)
+        except Exception:
+            pass
+
     def _persist(self) -> None:
-        """Save the current end times; a no-op before a valid record was restored."""
+        """Save the current end times; a no-op unless a valid record was restored.
+
+        A failing save never raises into the REST caller: the in-memory restriction stays
+        enforced and the status becomes `PERSISTENCE_FAILED` until a later save succeeds. An
+        unknown state is never saved (a valid-looking file would reopen a closed gate).
+        """
         store = self._state_store
         if store is None:
             return
@@ -410,7 +463,14 @@ class RestRateLimitGate:
                     initialized_at_utc=loaded.initialized_at_utc,
                     initialized_by=loaded.initialized_by,
                 )
-            store.save(record)
+            try:
+                store.save(record)
+            except Exception:
+                failed = True
+            else:
+                failed = False
+            with self._lock:
+                self._save_failed = failed
 
 
 __all__ = [
@@ -419,6 +479,7 @@ __all__ = [
     "GATE_STATE_UNKNOWN",
     "IP_BAN_418",
     "RATE_LIMIT_PAUSE_429",
+    "REST_GATE_RECOVERY_REQUIRED",
     "GateNotRestored",
     "GateRecoveryStatus",
     "GateRestriction",
