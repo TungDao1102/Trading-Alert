@@ -455,3 +455,21 @@ async def test_without_a_pending_store_the_behaviour_is_unchanged() -> None:
     assert _state(rig) is ProtectionState.UNPROTECTED
     assert rig.coordinator.blocks_new_entries() is True
     assert rig.safe_mode.entered_reasons == []
+
+
+async def test_a_gate_that_is_not_restored_is_recorded_like_a_pause() -> None:
+    """Plan 20-07 option a1: GateNotRestored is a RestGateRefusal, so the refusal stays PENDING."""
+    from src.adapters.binance_ratelimit_gate import GateNotRestored
+
+    store = InMemoryPendingActionStore()
+    rig = await make_rig(pending_actions=store)
+    rig.fake.fail_next("place_algo_protective", GateNotRestored("GATE_STATE_UNKNOWN"))
+    rig.coordinator.fill_sink(rig.stream_fill(D("0.004")))
+
+    await rig.coordinator.step()
+
+    row = _rows(store, PendingKind.STOP_NOT_SENT)[0]
+    assert row.state is PendingState.PENDING
+    assert row.gate_reason == "GATE_STATE_UNKNOWN"
+    assert row.retry_after_until_utc == rig.clock.now() + timedelta(seconds=1)
+    assert _state(rig) is ProtectionState.UNPROTECTED
