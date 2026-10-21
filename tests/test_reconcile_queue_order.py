@@ -30,7 +30,9 @@ from src.reconcile.loop import (
     RECONCILE_ACTION_FAILED,
     RECONCILE_BACKGROUND_SKIPPED,
     RECONCILE_READ_FAILED,
+    RECONCILE_RISK_REDUCING_FIRST,
     RECONCILE_SKIPPED_GATE,
+    RISK_REDUCING_KIND_ORDER,
     TICK_COMPARED,
     TICK_SKIPPED_GATE,
     ReconcileLoop,
@@ -178,6 +180,10 @@ def pending_row(kind: PendingKind, *, suffix: str = "a") -> PendingAction:
         gate_reason=RATE_LIMIT_PAUSE_429,
         first_blocked_at_utc=NOW,
         last_blocked_at_utc=NOW,
+        block_count=1,
+        retry_after_until_utc=None,
+        resolved_at_utc=None,
+        resolution_note=None,
     )
 
 
@@ -398,3 +404,246 @@ async def test_a_read_failed_tick_skips_the_background_phase() -> None:
     assert report.outcome != TICK_COMPARED
     assert refresher.calls == []
     assert RECONCILE_READ_FAILED in rig.event_types()
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: risk-reducing work first once the gate allows sending (D-20, O-E accept-queue-order).
+# --------------------------------------------------------------------------- #
+
+
+def rows_close_and_stop() -> list[PendingAction]:
+    # The kinds are deliberately NOT in Q4 order here.
+    return [
+        pending_row(PendingKind.STOP_NOT_SENT),
+        pending_row(PendingKind.CLOSE_NOT_SENT),
+    ]
+
+
+async def test_pause_is_never_bypassed_by_the_queue() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending)
+    refresher = OrderedRefresher(order)
+    rig = make_rig(
+        pending=pending, reducer=reducer, refresher=refresher, gate=restricted_gate(), order=order
+    )
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.outcome == TICK_SKIPPED_GATE
+    assert reducer.awaits == 0
+    assert refresher.calls == []
+    assert pending.calls == 0
+    assert rig.adapter.calls == []
+    assert order == []
+    assert report.order == ("gate",)
+    assert RECONCILE_RISK_REDUCING_FIRST not in rig.event_types()
+
+
+async def test_pause_is_never_bypassed_when_the_gate_cannot_be_read() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending)
+    rig = make_rig(
+        pending=pending, reducer=reducer, gate=FakeGate(raises=RuntimeError("boom")), order=order
+    )
+
+    await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 0
+    assert rig.adapter.calls == []
+
+
+async def test_open_rows_run_the_risk_reducer_before_reads_sweep_and_background() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending, resolves=True)
+    refresher = OrderedRefresher(order)
+    eth_plan = make_plan_protection(H2, symbol="ETHUSDT", state="PROTECTED")
+    rig = make_rig(
+        pending=pending,
+        reducer=reducer,
+        refresher=refresher,
+        orphan=True,
+        plans=(eth_plan,),
+        order=order,
+    )
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 1
+    first_read = min(i for i, step in enumerate(order) if step.startswith("read:"))
+    assert order.index("risk_reducer") < first_read
+    assert order.index("risk_reducer") < order.index("sweep")
+    assert order.index("risk_reducer") < order.index("refresh:ETHUSDT")
+    assert report.order[:3] == ("gate", "restore", "risk_reducing")
+    assert report.order.index("risk_reducing") < report.order.index("reads")
+    first = rig.payloads(RECONCILE_RISK_REDUCING_FIRST)
+    assert len(first) == 1
+    assert first[0]["kinds"] == ["CLOSE_NOT_SENT", "STOP_NOT_SENT"]
+    assert first[0]["open_count"] == 2
+    assert first[0]["reducer_bound"] is True
+
+
+async def test_kinds_are_journaled_in_q4_order() -> None:
+    order: list[str] = []
+    rows = [
+        pending_row(PendingKind.STOP_NOT_SENT),
+        pending_row(PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT),
+        pending_row(PendingKind.CLOSE_NOT_SENT),
+        pending_row(PendingKind.STOP_NOT_SENT, suffix="b"),
+    ]
+    pending = OrderedPending(order, rows)
+    rig = make_rig(pending=pending, reducer=Reducer(order, pending), order=order)
+
+    await rig.loop.tick(now_utc=NOW)
+
+    first = rig.payloads(RECONCILE_RISK_REDUCING_FIRST)
+    assert first[0]["kinds"] == [
+        "CLOSE_NOT_SENT",
+        "PROTECTION_ENTRY_CANCEL_NOT_SENT",
+        "STOP_NOT_SENT",
+    ]
+    assert first[0]["open_count"] == 4
+
+
+def test_q4_kind_order_matches_the_pending_kinds() -> None:
+    assert set(RISK_REDUCING_KIND_ORDER) == {kind.value for kind in PendingKind}
+    assert RISK_REDUCING_KIND_ORDER[0] == PendingKind.CLOSE_NOT_SENT.value
+    assert RISK_REDUCING_KIND_ORDER[-1] == PendingKind.STOP_NOT_SENT.value
+
+
+async def test_no_open_rows_means_no_reducer_call() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, [])
+    reducer = Reducer(order, pending)
+    refresher = OrderedRefresher(order)
+    rig = make_rig(pending=pending, reducer=reducer, refresher=refresher, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 0
+    assert "risk_reducing" not in report.order
+    assert RECONCILE_RISK_REDUCING_FIRST not in rig.event_types()
+    assert report.order[-1] == "background"
+    assert sorted(symbol for symbol, _ in refresher.calls) == ["BTCUSDT", "ETHUSDT"]
+
+
+async def test_background_is_skipped_while_rows_remain_open_after_the_reducer() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending, resolves=False)
+    refresher = OrderedRefresher(order)
+    rig = make_rig(pending=pending, reducer=reducer, refresher=refresher, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 1
+    assert report.outcome == TICK_COMPARED
+    assert refresher.calls == []
+    assert "background" not in report.order
+    skipped = rig.payloads(RECONCILE_BACKGROUND_SKIPPED)
+    assert skipped == [{"open_count": 2, "reason": "OPEN_PENDING_ACTIONS"}]
+
+
+async def test_background_runs_when_the_reducer_resolved_every_row() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending, resolves=True)
+    refresher = OrderedRefresher(order)
+    rig = make_rig(pending=pending, reducer=reducer, refresher=refresher, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 1
+    assert sorted(symbol for symbol, _ in refresher.calls) == ["BTCUSDT", "ETHUSDT"]
+    assert report.order[-1] == "background"
+    assert RECONCILE_BACKGROUND_SKIPPED not in rig.event_types()
+
+
+async def test_unreadable_pending_store_enters_db_failure_and_still_reduces_risk() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, raises=RuntimeError("password=hunter2"))
+    reducer = Reducer(order, pending)
+    refresher = OrderedRefresher(order)
+    rig = make_rig(pending=pending, reducer=reducer, refresher=refresher, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 1
+    first_read = min(i for i, step in enumerate(order) if step.startswith("read:"))
+    assert order.index("risk_reducer") < first_read
+    assert "DB_FAILURE" in rig.safe_mode.enter_calls
+    assert "pending_actions_read" in report.action_failures
+    assert refresher.calls == []
+    assert "background" not in report.order
+    first = rig.payloads(RECONCILE_RISK_REDUCING_FIRST)
+    assert first == [{"kinds": [], "pending_unreadable": True, "reducer_bound": True}]
+    failed = [p for p in rig.payloads(RECONCILE_READ_FAILED) if p["source"] == "pending_actions"]
+    assert failed == [{"error_type": "RuntimeError", "source": "pending_actions"}]
+    skipped = rig.payloads(RECONCILE_BACKGROUND_SKIPPED)
+    assert skipped and skipped[0]["reason"] == "PENDING_UNREADABLE"
+    assert all("hunter2" not in e.payload_json for e in rig.journal.events)
+
+
+async def test_pending_store_unreadable_after_the_reducer_skips_the_background() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop(), raises_after_reducer=True)
+    reducer = Reducer(order, pending, resolves=True)
+    refresher = OrderedRefresher(order)
+    rig = make_rig(pending=pending, reducer=reducer, refresher=refresher, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert reducer.awaits == 1
+    assert refresher.calls == []
+    assert "background" not in report.order
+    skipped = rig.payloads(RECONCILE_BACKGROUND_SKIPPED)
+    assert skipped and skipped[0]["reason"] == "PENDING_UNREADABLE"
+
+
+async def test_a_raising_reducer_is_journaled_by_type_and_the_tick_goes_on() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending, raises=RuntimeError("password=hunter2"))
+    rig = make_rig(pending=pending, reducer=reducer, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.outcome == TICK_COMPARED
+    assert "risk_reducer" in report.action_failures
+    failed = [p for p in rig.payloads(RECONCILE_ACTION_FAILED) if p["action"] == "risk_reducer"]
+    assert failed == [{"action": "risk_reducer", "error_type": "RuntimeError"}]
+    assert all("hunter2" not in e.payload_json for e in rig.journal.events)
+
+
+async def test_open_rows_without_a_bound_reducer_are_journaled_and_nothing_is_sent() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    refresher = OrderedRefresher(order)
+    rig = make_rig(pending=pending, refresher=refresher, order=order)
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    first = rig.payloads(RECONCILE_RISK_REDUCING_FIRST)
+    assert first and first[0]["reducer_bound"] is False
+    assert refresher.calls == []
+    assert report.outcome == TICK_COMPARED
+
+
+async def test_the_loop_itself_places_and_cancels_nothing() -> None:
+    order: list[str] = []
+    pending = OrderedPending(order, rows_close_and_stop())
+    reducer = Reducer(order, pending)
+    rig = make_rig(pending=pending, reducer=reducer, refresher=OrderedRefresher(order), order=order)
+
+    await rig.loop.tick(now_utc=NOW)
+
+    assert rig.adapter.forbidden_calls == []
+    assert rig.adapter.cancelled_algo == []
+    assert rig.adapter.cancelled_normal == []
+    assert set(rig.adapter.calls) <= {
+        "snapshot_open_normal_orders",
+        "snapshot_open_algo_orders",
+        "snapshot_positions",
+    }

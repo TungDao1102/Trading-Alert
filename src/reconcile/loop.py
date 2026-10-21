@@ -12,6 +12,11 @@ process; here it is driven by tests with fakes. One tick:
      and the report, so LEGACY_IN_MEMORY (no persistence wired) is visible.
   2. stops with RECONCILE_SKIPPED_RESTORE_PENDING while the coordinator's tracked plans are not
      rebuilt (`restore_complete`), so a half-restored view is never read as "no plans".
+     Right after steps 1 and 2 (so only while the gate allows sending) the tick hands open pending
+     risk-reducing work to the injected `risk_reducer` (plan 20-21, D-20, Q4; owner decision O-E:
+     reserved priority means queue ORDER only). It is ordering, never a bypass of a 429/418
+     pause, it reserves no request weight, the loop sends nothing itself and nothing promises that
+     a request goes out at once. The close and the remaining-entry cancel go before a stop.
   3. judges the optional feeds (plan 20-16, D-25): a missing or stale mark price for a tracked
      symbol, or user-data silence, enters SAFE_MODE STALE_FEED and alerts STALE_DATA; a feed that
      recovers never exits SAFE_MODE. Steps 1 and 2 come first, so under a gate restriction or a
@@ -28,6 +33,9 @@ process; here it is driven by tests with fakes. One tick:
   6. enters SAFE_MODE once per distinct reason, delegates stop-related exposure to the
      coordinator (`notify_divergence`, one decision path), alerts, and finally sweeps ORPHAN
      protectives only; it journals one RECONCILE_TICK row.
+  7. last, as background work (plan 20-21, D-21): refreshes the last validated lot filters of every
+     tracked symbol when due (`refresh_if_due`). It re-checks the gate first, is skipped while a
+     pending risk-reducing row is still open, and a refresh failure never fails the tick.
 
 Fail closed: a failed truth read, a failed local read or a compare error is never agreement. The
 tick enters SAFE_MODE (API_DEGRADATION for the exchange reads and compare, DB_FAILURE for the
@@ -506,6 +514,7 @@ class ReconcileLoop:
             return TickReport(outcome=TICK_SKIPPED_RESTORE_PENDING, now_utc=now_utc)
 
         action_failures: list[str] = []
+        await self._risk_reducing_first(now_utc, action_failures)
         if self._feeds is not None:
             self._phase(PHASE_FEEDS)
         feeds_pre = self._check_feeds(now_utc, action_failures)
@@ -785,6 +794,60 @@ class ReconcileLoop:
             action_failures=tuple(failures),
             unknown_entries=unknown_report,
         )
+
+    async def _risk_reducing_first(self, now_utc: datetime, failures: list[str]) -> None:
+        """Hand open pending risk-reducing work to the injected `risk_reducer` first (D-20, Q4).
+
+        Runs right after the gate and restore checks, so it only ever runs when the gate allows
+        sending: a pause is never bypassed. It is queue ORDER only (owner decision O-E,
+        accept-queue-order): it reserves no request weight, sends nothing itself and does not
+        promise that anything is sent at once; the reducer's own calls still go through the gate
+        and may be refused again. The emergency close and the remaining-entry cancel come before
+        a stop (`RISK_REDUCING_KIND_ORDER`), so a queued old stop is not sent ahead of a close the
+        current policy already requires. No claim is made that a position always has a stop under
+        every rate-limit condition (Q4).
+
+        An unreadable pending store enters SAFE_MODE DB_FAILURE and the reducer is still awaited
+        (fail toward reducing risk). A raising reducer is journaled by exception class name and
+        the tick goes on. Without a wired store (or without open rows) nothing happens here.
+        """
+        if self._pending_actions is None:
+            return
+        rows: tuple[Any, ...] = ()
+        unreadable = False
+        try:
+            rows = tuple(self._pending_actions.list_open())
+        except Exception as exc:
+            unreadable = True
+            failures.append("pending_actions_read")
+            self._journal_row(
+                RECONCILE_READ_FAILED,
+                {"source": "pending_actions", "error_type": type(exc).__name__},
+                now_utc,
+            )
+            self._enter_safe_mode(SAFE_MODE_DB_FAILURE, now_utc, failures)
+        if not rows and not unreadable:
+            return
+        self._phase(PHASE_RISK_REDUCING)
+        payload: dict[str, Any] = {"reducer_bound": self._risk_reducer is not None}
+        if unreadable:
+            payload["kinds"] = []
+            payload["pending_unreadable"] = True
+        else:
+            payload["kinds"] = list(_ordered_kinds(rows))
+            payload["open_count"] = len(rows)
+        self._journal_row(RECONCILE_RISK_REDUCING_FIRST, payload, now_utc)
+        if self._risk_reducer is None:
+            return
+        try:
+            await self._risk_reducer()
+        except Exception as exc:
+            failures.append("risk_reducer")
+            self._journal_row(
+                RECONCILE_ACTION_FAILED,
+                {"action": "risk_reducer", "error_type": type(exc).__name__},
+                now_utc,
+            )
 
     def _gate_allows_sending(self) -> bool:
         """True only when the gate answers 'no restriction'; an unreadable gate is a restriction."""
@@ -1242,6 +1305,25 @@ def _combine(first: _Pre, second: _Pre) -> _Pre:
     )
 
 
+def _ordered_kinds(rows: Sequence[Any]) -> tuple[str, ...]:
+    """The distinct kinds of the open pending rows in Q4 order (close, entry cancel, stop).
+
+    A kind outside `RISK_REDUCING_KIND_ORDER` (or not text) sorts last, by value.
+    """
+    kinds: set[str] = set()
+    for row in rows:
+        kind = getattr(row, "kind", None)
+        value = getattr(kind, "value", kind)
+        kinds.add(value if isinstance(value, str) and value != "" else _UNKNOWN_REASON)
+
+    def rank(value: str) -> tuple[int, str]:
+        if value in RISK_REDUCING_KIND_ORDER:
+            return (RISK_REDUCING_KIND_ORDER.index(value), value)
+        return (len(RISK_REDUCING_KIND_ORDER), value)
+
+    return tuple(sorted(kinds, key=rank))
+
+
 def _stream_kind(item: Any) -> str:
     """The string value of a drained item's `kind` ('' when it has none)."""
     kind = getattr(item, "kind", None)
@@ -1324,7 +1406,25 @@ def _owner_of(divergence: Divergence, plans: Sequence[Any]) -> str | None:
 
 __all__ = [
     "ALERT_SINK_FAILED",
+    "BACKGROUND_SKIP_GATE_RESTRICTED",
+    "BACKGROUND_SKIP_OPEN_PENDING",
+    "BACKGROUND_SKIP_PENDING_UNREADABLE",
+    "PHASE_ACT",
+    "PHASE_BACKGROUND",
+    "PHASE_COMPARE",
+    "PHASE_FEEDS",
+    "PHASE_GATE",
+    "PHASE_LOCAL",
+    "PHASE_READS",
+    "PHASE_RESTORE",
+    "PHASE_RISK_REDUCING",
+    "PHASE_STREAM",
+    "PHASE_SWEEP",
+    "PHASE_UNKNOWN_ENTRIES",
+    "RISK_REDUCING_KIND_ORDER",
     "RECONCILE_ACTION_FAILED",
+    "RECONCILE_BACKGROUND_SKIPPED",
+    "RECONCILE_RISK_REDUCING_FIRST",
     "RECONCILE_READ_FAILED",
     "RECONCILE_SKIPPED_GATE",
     "RECONCILE_SKIPPED_RESTORE_PENDING",
@@ -1347,11 +1447,14 @@ __all__ = [
     "FeedSource",
     "GateRestrictionSource",
     "JournalSink",
+    "LotFilterRefresher",
+    "OpenPendingSource",
     "OrphanSweeperLike",
     "ProtectionView",
     "ReconcileAdapter",
     "ReconcileAlertSink",
     "ReconcileLoop",
+    "RiskReducer",
     "SafeModeGate",
     "StreamDivergenceSource",
     "TickReport",
