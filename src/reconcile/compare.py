@@ -55,7 +55,11 @@ from typing import Any
 
 from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import OrderRole, OrderStatus
-from src.execution.order_ids import is_system_client_id, role_of_client_id
+from src.execution.order_ids import (
+    is_system_client_id,
+    plan_hash_prefix_of,
+    role_of_client_id,
+)
 
 # --------------------------------------------------------------------------- #
 # Divergence-kind vocabulary.
@@ -392,6 +396,24 @@ def compare(
             continue
         local_position_keys.add((_sym, _get_field(p, "position_side")))
 
+    # Plans whose ENTRY is still resting or partially filled (D-05 code part): locally NEW /
+    # PARTIALLY_FILLED, or still among the exchange open normal orders. Since Phase 19 the
+    # stop is placed after the first fill, so a protective of such a plan is not an orphan.
+    resting_entry_plans: set[str] = set()
+    for entry in local_normal_by_client_id.values():
+        if (
+            _get_field(entry, "order_role") == OrderRole.ENTRY.value
+            and _get_field(entry, "status") in _RESTING_ENTRY_STATUSES
+        ):
+            entry_key = _plan_key(entry, "client_order_id")
+            if entry_key is not None:
+                resting_entry_plans.add(entry_key)
+    for truth_entry_id in truth_normal_by_client_id:
+        if role_of_client_id(truth_entry_id) == OrderRole.ENTRY.value:
+            truth_key = plan_hash_prefix_of(truth_entry_id)
+            if truth_key is not None:
+                resting_entry_plans.add(truth_key)
+
     # Pass 1 — for each local algo intent, classify it.
     for algo_intent in local_algo_by_client_id.values():
         client_algo_id = _get_field(algo_intent, "client_algo_id")
@@ -412,7 +434,8 @@ def compare(
         )
         has_position = has_local_position or has_exchange_position
 
-        if is_protective and not has_position:
+        entry_is_resting = _plan_key(algo_intent, "client_algo_id") in resting_entry_plans
+        if is_protective and not has_position and not entry_is_resting:
             if truth_algo_by_client_id.get(client_algo_id) is None:
                 divergences.append(
                     Divergence(
@@ -720,6 +743,21 @@ def _get_field(entry: Any, field_name: str) -> Any:
 
 
 _HEDGE_POSITION_SIDES: frozenset[str] = frozenset({"LONG", "SHORT"})
+
+# A local ENTRY in one of these states can still fill, so its plan's protective is not an
+# orphan. PLANNED / SUBMITTING are deliberately not listed: the exemption only narrows what
+# the sweeper may cancel, so it stays as small as the plan states it.
+_RESTING_ENTRY_STATUSES: frozenset[str] = frozenset(
+    {OrderStatus.NEW.value, OrderStatus.PARTIALLY_FILLED.value}
+)
+
+
+def _plan_key(intent: Any, id_field: str) -> str | None:
+    """The 29-character plan key of a local intent: its plan_hash when carried, else the id's."""
+    plan_hash = _get_field(intent, "plan_hash")
+    if isinstance(plan_hash, str) and plan_hash != "":
+        return plan_hash[:29]
+    return plan_hash_prefix_of(_get_field(intent, id_field))
 
 
 def _require_sources(**sources: Any) -> None:
