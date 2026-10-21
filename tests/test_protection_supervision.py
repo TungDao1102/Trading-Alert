@@ -555,7 +555,7 @@ async def test_notify_divergence_with_an_unknown_kind_raises_and_leaves_no_trace
     plan_hash: str,
 ) -> None:
     rig, _ = await _checked_rig()
-    await _to_protected(rig)
+    await _to_protected_entry_open(rig)
     journal_before = len(rig.journal.calls)
 
     with pytest.raises(ValueError):
@@ -564,9 +564,9 @@ async def test_notify_divergence_with_an_unknown_kind_raises_and_leaves_no_trace
         rig.coordinator.notify_divergence(plan_hash, "FOREIGN_ORDER")  # not a stop divergence
 
     assert len(rig.journal.calls) == journal_before
-    stop_before = _stop_reads(rig)
+    stop_before, position_before = _stop_reads(rig), _position_reads(rig)
     await rig.coordinator.step()  # nothing was requested: only the ordinary step happens
-    assert _stop_reads(rig) - stop_before == 1
+    assert (_stop_reads(rig) - stop_before, _position_reads(rig) - position_before) == (1, 0)
 
 
 async def test_restore_complete_is_true_for_a_fresh_coordinator() -> None:
@@ -576,8 +576,12 @@ async def test_restore_complete_is_true_for_a_fresh_coordinator() -> None:
 
 def test_the_accepted_divergence_kinds_equal_the_reconcile_vocabulary() -> None:
     """The coordinator keeps its own literals (execution must not import reconcile); pinned here."""
+    import importlib
+
     from src.execution import protection
-    from src.reconcile import compare
+
+    # `src.reconcile` re-exports a function named `compare`, so import the module by name.
+    compare = importlib.import_module("src.reconcile.compare")
 
     assert protection.NOTIFIABLE_DIVERGENCE_KINDS == frozenset(
         {

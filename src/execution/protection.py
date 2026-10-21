@@ -202,6 +202,26 @@ EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
+# Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
+EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
+
+# The divergence kinds ``notify_divergence`` accepts: the stop-related kinds of
+# ``src/reconcile/compare.py``. Literals, not imports: ``src.execution`` must not import
+# ``src.reconcile`` (the dependency runs the other way); a test pins them against compare.py.
+DIVERGENCE_KIND_POSITION_WITHOUT_STOP = "POSITION_WITHOUT_STOP"
+DIVERGENCE_KIND_TP_ONLY_POSITION = "TP_ONLY_POSITION"
+DIVERGENCE_KIND_SIGN_FLIPPED_POSITION = "SIGN_FLIPPED_POSITION"
+DIVERGENCE_KIND_DOUBLED_POSITION = "DOUBLED_POSITION"
+DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
+NOTIFIABLE_DIVERGENCE_KINDS: frozenset[str] = frozenset(
+    {
+        DIVERGENCE_KIND_POSITION_WITHOUT_STOP,
+        DIVERGENCE_KIND_TP_ONLY_POSITION,
+        DIVERGENCE_KIND_SIGN_FLIPPED_POSITION,
+        DIVERGENCE_KIND_DOUBLED_POSITION,
+        DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
+    }
+)
 
 # 19-REVIEW WR-05 (owner): an entry the manager left ENTRY_STATE_UNKNOWN (Q5) that the coordinator
 # has never found by the GTD time plus `protection.entry_unknown_grace_ms` is ENTRY_UNRESOLVED and
@@ -412,6 +432,12 @@ class PlanProtection:
     # 19-REVIEW WR-04: the first detection of a once-confirmed stop that is no longer ACTIVE;
     # set once and never reset (``stop_confirmed_at_utc`` keeps the earlier confirmation).
     stop_lost_at_utc: datetime | None = None
+    # Plan 20-09: what the reconcile loop needs to derive a plan's intent from the local side
+    # (compare v2). Copied from the RestingEntry; defaults keep older constructors working.
+    approval_id: str | None = None
+    side: str | None = None
+    entry_quantity: Decimal | None = None
+    entry_client_order_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -537,6 +563,8 @@ class _Tracked:
         # the steps spent in ENTRY_UNRESOLVED (the low-frequency poll counter).
         self.entry_found = False
         self.unresolved_steps = 0
+        # Plan 20-09 (D-07): set by ``notify_divergence``, consumed by the next step.
+        self.recheck_requested = False
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -549,6 +577,10 @@ class _Tracked:
             entry_terminal_at_utc=self.entry_terminal_at,
             last_reason=self.last_reason,
             stop_lost_at_utc=self.stop_lost_at,
+            approval_id=self.entry.approval_id,
+            side=self.entry.side,
+            entry_quantity=self.entry.entry_quantity,
+            entry_client_order_id=self.entry.entry_client_order_id,
         )
 
 
@@ -661,6 +693,51 @@ class ProtectionCoordinator:
         tracked = self._tracked.get(plan_hash)
         return None if tracked is None else tracked.view()
 
+    def protections(self) -> tuple[PlanProtection, ...]:
+        """A read-only view of every tracked plan, ordered by (registered_at_utc, plan_hash).
+
+        Plan 20-09: the local data source the reconcile loop derives its intent from (compare
+        v2, plan 20-10). Each element is a frozen snapshot; the live records are never exposed.
+        """
+        ordered = sorted(
+            self._tracked.values(), key=lambda t: (t.entry.registered_at_utc, t.entry.plan_hash)
+        )
+        return tuple(t.view() for t in ordered)
+
+    @property
+    def restore_complete(self) -> bool:
+        """Whether the coordinator's tracked plans are complete after a restart (F6 seam).
+
+        Always True today: a fresh coordinator has nothing to restore. Plan 20-19 introduces the
+        rebuild from the journal and holds this False until ``restore()`` has finished, so the
+        reconcile loop never reads a half-restored ``protections()`` as "no plans".
+        """
+        return True
+
+    def notify_divergence(self, plan_hash: str, kind: str) -> bool:
+        """The reconcile loop reports a stop-related divergence of one plan (D-07).
+
+        Only marks the plan for a re-check and journals one ``PROTECTION_DIVERGENCE_NOTIFIED``
+        note. The next ``step`` reads the stop and the position of that plan, and whatever it
+        finds goes through the one existing decision path (D077); nothing is placed, cancelled
+        or closed here. Returns False, without a journal row, for a plan hash that is not
+        tracked.
+
+        Raises:
+            ValueError: ``kind`` is not one of ``NOTIFIABLE_DIVERGENCE_KINDS``.
+        """
+        if kind not in NOTIFIABLE_DIVERGENCE_KINDS:
+            raise ValueError(f"unsupported divergence kind {kind!r}")
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None:
+            return False
+        tracked.recheck_requested = True
+        state = "NONE" if tracked.state is None else tracked.state.value
+        self._journal_note(
+            tracked, EVENT_DIVERGENCE_NOTIFIED, {"kind": kind, "state": state}, self._now()
+        )
+        return True
+
     # ------------------------------------------------------------------ #
     # The router's fill sink: synchronous, non-blocking, infallible.
     # ------------------------------------------------------------------ #
@@ -749,6 +826,8 @@ class ProtectionCoordinator:
     async def _step_plan(self, tracked: _Tracked, evidence: _QueuedFill | None) -> None:
         try:
             state = tracked.state
+            recheck = tracked.recheck_requested
+            tracked.recheck_requested = False
             if state is ProtectionState.AWAITING_FILL:
                 if evidence is not None:
                     await self._on_first_fill(tracked, REASON_FIRST_FILL_STREAM)
@@ -761,7 +840,7 @@ class ProtectionCoordinator:
                 else:
                     await self._poll_unresolved_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
-                await self._confirm(tracked)
+                await self._confirm(tracked, recheck=recheck)
             elif state is ProtectionState.PROTECTED:
                 if await self._supervise_stop(tracked):
                     await self._attach_take_profits(tracked)
@@ -1125,7 +1204,7 @@ class ProtectionCoordinator:
     # REST confirmation (D-11): the stop is protection only when REST answers ACTIVE.
     # ------------------------------------------------------------------ #
 
-    async def _confirm(self, tracked: _Tracked) -> None:
+    async def _confirm(self, tracked: _Tracked, *, recheck: bool = False) -> None:
         """One supervision step of UNPROTECTED / PROTECTED_ENTRY_OPEN (REST is the truth).
 
         Reads the stop (until it is confirmed, and while the entry is open afterwards, so a stop
@@ -1139,6 +1218,11 @@ class ProtectionCoordinator:
         (``_on_stop_lost``), and the one unprotected-deadline branch that covers a stop that was
         never confirmed covers it too, measured from ``stop_lost_at``. Such a plan never settles
         back to PROTECTED_ENTRY_OPEN or PROTECTED.
+
+        ``recheck`` (plan 20-09, ``notify_divergence``) adds one fresh position read to a plan
+        whose stop is still trusted; the stop read of this step already happens. It decides
+        nothing itself: the paths below stay the one decision path, and a failed read is
+        journaled by the read helper.
         """
         entry = tracked.entry
         already_lost = tracked.stop_lost_at is not None
@@ -1176,6 +1260,8 @@ class ProtectionCoordinator:
             # The entry remainder is cancelled again on every step until REST says it is
             # terminal (a failed or ambiguous cancel is never taken as done).
             await self._cancel_entry_remainder(tracked)
+        if recheck and not already_lost:
+            await self._position_is_open(tracked)
 
         # The stop is lost when it was seen lost before, or when a stop confirmed on an earlier
         # step reads ABSENT or NOT_ACTIVE now (triggered, consumed or cancelled).
@@ -1986,9 +2072,15 @@ __all__ = [
     "BRANCH_B4_STOP_LOST_UNRESOLVED",
     "BRANCH_B5_STOP_REJECTED",
     "BRANCH_NO_POSITION_BUT_EXPOSED",
+    "DIVERGENCE_KIND_DOUBLED_POSITION",
+    "DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE",
+    "DIVERGENCE_KIND_POSITION_WITHOUT_STOP",
+    "DIVERGENCE_KIND_SIGN_FLIPPED_POSITION",
+    "DIVERGENCE_KIND_TP_ONLY_POSITION",
     "ERROR_TRANSIENT_POSITION_GAP",
     "EVENT_CLOSE_ATTEMPT_ERROR",
     "EVENT_CLOSE_REQUIRED",
+    "EVENT_DIVERGENCE_NOTIFIED",
     "EVENT_ENTRY_CANCEL_FAILED",
     "EVENT_ENTRY_CANCEL_NOT_SENT",
     "EVENT_ENTRY_UNRESOLVED",
@@ -2005,8 +2097,10 @@ __all__ = [
     "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
     "EVIDENCE_REST_STOP_CONFIRMED",
     "FILLED_ENTRY_STATUSES",
+    "NOTIFIABLE_DIVERGENCE_KINDS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
+    "REASON_STOP_LOST_AFTER_PROTECTED",
     "SAFE_MODE_CLOSE_REQUIRED",
     "SAFE_MODE_DB_FAILURE",
     "SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE",
