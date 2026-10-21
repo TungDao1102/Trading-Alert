@@ -15,6 +15,8 @@ names every module of the package):
                            UNKNOWN exits and the Order exchange-state writer (Phase 18)
   - `snapshots`            `PgPlanConstraintSnapshotStore`: per-plan exchange constraints
   - `system_state`         `PgSystemStateStore`: SAFE_MODE, enablement and kill gate (D-22)
+  - `safe_mode_store`      `PgSafeModeStateStore`: the SafeModeStateStore seam over `system_state`
+                           (durable SAFE_MODE, Phase 20)
   - `paper_runtime_state`  `PgRuntimeState`: journal-only paper runtime state (Phase 16)
   - `shadow_stores`        `PgShadowStores`: the SHADOW chain's composed stores (Phase 16)
 
