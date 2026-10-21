@@ -72,8 +72,17 @@ critical alert ``TP_UNAVAILABLE``, the confirmed stop kept, never a flatten for 
 alone). The legs are placed once after the entry is terminal, so TP1 is never resized by a late
 fill (G2-032). From COMPLETE or TP_UNAVAILABLE, a step that reads a flat REST position goes FLAT
 and sweeps the plan's legs by deterministic id. The manager hand-off is plan 19-15, the emergency
-closer plan 19-12. The stop of a COMPLETE or TP_UNAVAILABLE plan is not supervised any more
-(recorded open item: a stop that stops being ACTIVE while the position stays open is Phase 20/24).
+closer plan 19-12.
+
+Plan 20-09 (D-07, D077) closes the recorded open item "no stop supervision after PROTECTED": each
+step of PROTECTED, COMPLETE and TP_UNAVAILABLE first reads the stop by its deterministic id. ACTIVE
+(or an unreadable answer, journaled, state kept) lets the step carry on. A stop that reads ABSENT
+or NOT_ACTIVE there was confirmed earlier, so it is a lost stop and the existing D077 decision by
+the position runs (``_on_stop_lost``): exposure is CLOSE_REQUIRED (B4) and a reduce-only MARKET
+close, an unreadable position is UNPROTECTED (reason ``STOP_LOST_AFTER_PROTECTED``) with
+``stop_lost_at`` set once, flat on two reads with the entry terminal is FLAT. It is never
+re-placed. The only automatic stop placement left after the first fill is the one for a stop never
+confirmed and proven absent by REST, under the same deterministic id, priced from the plan.
 
 Every FLAT transition (which sweeps every leg, an ACTIVE stop included) needs two consecutive zero
 REST position reads, the T-8-30 rule of ``src/reconcile/sweeper.py`` (19-REVIEW CR-03): a zero
@@ -147,6 +156,7 @@ from src.execution.protection_replay import (
     EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
     EVIDENCE_REST_STOP_CONFIRMED,
     REASON_STOP_LOST,
+    REASON_STOP_LOST_AFTER_PROTECTED,
     REJECT_ILLEGAL_EDGE,
     clearing_violation,
 )
@@ -253,7 +263,12 @@ class ProtectionState(str, Enum):
     UNPROTECTED (reason ``STOP_LOST``), which leaves only to CLOSE_REQUIRED or FLAT. Plan 20-02
     audit (T-A): when the entry turns terminal on the same step and REST reads flat twice, the
     lost-stop path ends the plan FLAT (reason ``STOP_CONSUMED_FLAT``) straight from
-    PROTECTED_ENTRY_OPEN. The allowed moves are the PROTECTION table of
+    PROTECTED_ENTRY_OPEN. Plan 20-09 (D-07, D077) supervises the stop after PROTECTED: a stop
+    confirmed earlier that reads ABSENT or NOT_ACTIVE moves PROTECTED, COMPLETE or TP_UNAVAILABLE
+    to CLOSE_REQUIRED (exposure, B4) or UNPROTECTED (position unreadable, reason
+    ``STOP_LOST_AFTER_PROTECTED``, leaving only to CLOSE_REQUIRED or FLAT), or straight to FLAT
+    (flat on two reads, entry terminal); no edge out of CLOSE_REQUIRED or CLOSE_FAILED to a
+    protected state is added. The allowed moves are the PROTECTION table of
     ``src.domain.transitions``, enforced by ``ProtectionCoordinator._transition``.
     """
 
@@ -747,9 +762,11 @@ class ProtectionCoordinator:
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
                 await self._confirm(tracked)
             elif state is ProtectionState.PROTECTED:
-                await self._attach_take_profits(tracked)
+                if await self._supervise_stop(tracked):
+                    await self._attach_take_profits(tracked)
             elif state in (ProtectionState.COMPLETE, ProtectionState.TP_UNAVAILABLE):
-                await self._watch_exit(tracked)
+                if await self._supervise_stop(tracked):
+                    await self._watch_exit(tracked)
             elif state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
                 await self._close_flow(tracked)
             elif state is ProtectionState.FLAT and not tracked.sweep_done:
@@ -1249,17 +1266,51 @@ class ProtectionCoordinator:
             and tracked.entry_terminal_at is not None
             and await self._second_read_is_flat(tracked)
         ):
+            # Plan 20-09: from a supervised state (PROTECTED / COMPLETE / TP_UNAVAILABLE) the stop
+            # leaving the book beside a flat position is the position being closed (the stop or a
+            # take profit fired, or the exchange auto-cancelled the legs, A3), not a lost stop.
+            flat_reason = (
+                REASON_STOP_CONSUMED_FLAT
+                if tracked.state
+                in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN)
+                else REASON_POSITION_CLOSED
+            )
             if self._transition(
                 tracked,
                 ProtectionState.FLAT,
-                REASON_STOP_CONSUMED_FLAT,
+                flat_reason,
                 self._now(),
                 evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
             ):
                 await self._sweep(tracked)
             return
         if tracked.state is not ProtectionState.UNPROTECTED:
-            self._transition(tracked, ProtectionState.UNPROTECTED, REASON_STOP_LOST, self._now())
+            reason = (
+                REASON_STOP_LOST
+                if tracked.state is ProtectionState.PROTECTED_ENTRY_OPEN
+                else REASON_STOP_LOST_AFTER_PROTECTED
+            )
+            self._transition(tracked, ProtectionState.UNPROTECTED, reason, self._now())
+
+    async def _supervise_stop(self, tracked: _Tracked) -> bool:
+        """Plan 20-09 (D-07): read the stop of a PROTECTED / COMPLETE / TP_UNAVAILABLE plan.
+
+        One REST query by the deterministic STOP_LOSS id on every step. True means the plan
+        carries on in its state (the stop reads ACTIVE, or the answer is unreadable: the failure
+        is journaled with its type name only and the next step reads again). False means the stop
+        is lost: it was confirmed earlier in these states, so ABSENT or NOT_ACTIVE is a loss, and
+        ``_on_stop_lost`` has decided by the position (D077): CLOSE_REQUIRED on exposure, FLAT on
+        two zero reads with the entry terminal, UNPROTECTED with ``stop_lost_at`` set once when
+        the position cannot be read. A lost stop is never re-placed here.
+        """
+        answer = await self._guarded(
+            self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
+        )
+        reading = self._apply_stop_answer(tracked, answer)
+        if reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE):
+            await self._on_stop_lost(tracked)
+            return False
+        return True
 
     @staticmethod
     async def _guarded(awaitable: Any) -> Any:

@@ -245,9 +245,12 @@ _PROTECTION = _table(
         # FLAT: audit finding of plan 20-02 (a lost stop that ends flat while the entry turns
         # terminal on the same step); the coordinator module docstring states it for WR-04.
         "PROTECTED_ENTRY_OPEN": ("PROTECTED", "UNPROTECTED", "CLOSE_REQUIRED", "FLAT"),
-        "PROTECTED": ("COMPLETE", "TP_UNAVAILABLE", "FLAT"),
-        "COMPLETE": ("FLAT",),
-        "TP_UNAVAILABLE": ("FLAT",),
+        # Plan 20-09 (D-07, D077): stop supervision after PROTECTED. A confirmed stop later lost
+        # goes to CLOSE_REQUIRED (exposure) or UNPROTECTED (position unreadable) from the three
+        # supervised states. No edge out of CLOSE_REQUIRED / CLOSE_FAILED to a protected state.
+        "PROTECTED": ("COMPLETE", "TP_UNAVAILABLE", "FLAT", "CLOSE_REQUIRED", "UNPROTECTED"),
+        "COMPLETE": ("FLAT", "CLOSE_REQUIRED", "UNPROTECTED"),
+        "TP_UNAVAILABLE": ("FLAT", "CLOSE_REQUIRED", "UNPROTECTED"),
         "CLOSE_REQUIRED": ("CLOSE_FAILED", "FLAT"),
         "CLOSE_FAILED": ("CLOSE_REQUIRED", "FLAT"),
         "FLAT": (),

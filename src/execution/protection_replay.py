@@ -56,6 +56,10 @@ CLEARING_EVIDENCE: frozenset[str] = frozenset(
 # The reason journaled when a confirmed stop is first seen lost (D077): the replay uses it to know
 # that an UNPROTECTED plan is a stop-lost one.
 REASON_STOP_LOST = "STOP_LOST"
+# Plan 20-09 (D-07): the reason of the same loss detected after PROTECTED, COMPLETE or
+# TP_UNAVAILABLE (stop supervision); it also marks the history as stop-lost.
+REASON_STOP_LOST_AFTER_PROTECTED = "STOP_LOST_AFTER_PROTECTED"
+_STOP_LOST_REASONS: frozenset[str] = frozenset({REASON_STOP_LOST, REASON_STOP_LOST_AFTER_PROTECTED})
 
 # Fixed reason codes of a refused move (the guard) and of an invalid history (the replay).
 REJECT_ILLEGAL_EDGE = "ILLEGAL_EDGE"
@@ -217,7 +221,7 @@ def replay_transitions(
         violation = clearing_violation(row.previous, row.new, row.evidence, stop_lost=stop_lost)
         if violation is not None:
             raise ProtectionReplayInvalid(violation)
-        if row.reason == REASON_STOP_LOST and row.new == _STATE_UNPROTECTED:
+        if row.reason in _STOP_LOST_REASONS and row.new == _STATE_UNPROTECTED:
             stop_lost = True
         current = row.new
 
@@ -236,6 +240,7 @@ __all__ = [
     "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
     "EVIDENCE_REST_STOP_CONFIRMED",
     "REASON_STOP_LOST",
+    "REASON_STOP_LOST_AFTER_PROTECTED",
     "REJECT_EVIDENCE_MISSING",
     "REJECT_ILLEGAL_EDGE",
     "REJECT_STOP_LOST_CLEARED",

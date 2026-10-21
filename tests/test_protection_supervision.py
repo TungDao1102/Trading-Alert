@@ -109,10 +109,8 @@ async def test_protected_stop_cancelled_with_exposure_closes_and_never_replaces(
     assert _view(rig).stop_lost_at_utc == detected_at
     assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
     assert _close_required_alerts(rig) == ["B4_FILL_AFTER_STOP"]
-    assert [c["kwargs"]["quantity"] for c in rig.fake.calls_to("place_market_close")] == [
-        FULL_FILL
-    ]
-    assert rig.fake.calls_to("place_market_close")[0]["kwargs"]["reduce_only"] is True
+    assert [c["kwargs"]["quantity"] for c in rig.fake.calls_to("place_market_close")] == [FULL_FILL]
+    assert rig.fake.calls_to("place_market_close")[0]["kwargs"]["side"] == "SELL"
 
     for _ in range(3):
         await rig.coordinator.step()

@@ -141,9 +141,16 @@ async def test_tp_legs_are_placed_exactly_once_when_step_runs_again() -> None:
     assert _state(rig) is ProtectionState.COMPLETE
     assert _placed_ids(rig) == [STOP_ID, TP1_ID, TP2_ID]
     assert rig.log == log_after_complete, "a repeated step wrote or placed something"
-    reads_only = {"snapshot_positions"}
+    # Plan 20-09 (D-07): one supervision read of the stop (a query by its id) is added per step.
+    reads_only = {"snapshot_positions", "query_algo_order_by_client"}
     new_calls = {c["method"] for c in rig.fake.calls[calls_after_complete:]}
     assert new_calls <= reads_only
+    stop_reads = [
+        c
+        for c in rig.fake.calls_to("query_algo_order_by_client")[-3:]
+        if c["kwargs"]["client_algo_id"] == STOP_ID
+    ]
+    assert len(stop_reads) == 3, "each repeated step reads the stop once"
     assert rig.log.count("store.record_protective_intent:TAKE_PROFIT_1") == 1
 
 
