@@ -70,6 +70,12 @@ class ContractCancelAdapter:
         self.queries.append(("query_algo_order_by_client", kwargs))
         return SimpleNamespace(found=True, algo_status="CANCELED")
 
+    async def snapshot_positions(self, **kwargs: Any) -> list[Any]:
+        """A flat account: the manual close may remove the legs (D-09)."""
+        inspect.signature(BinanceUsdmAdapter.snapshot_positions).bind(None, **kwargs)
+        self.queries.append(("snapshot_positions", kwargs))
+        return []
+
 
 class RecordingEnablement:
     def __init__(self, order: list[str]) -> None:
@@ -157,7 +163,12 @@ async def test_cancel_untriggered_protectives_isolates_each_leg() -> None:
 
 async def test_emergency_close_blocks_first_and_runs_every_step_despite_failures() -> None:
     """CR-10: disable + SAFE_MODE happen BEFORE any cancel, and an entry
-    cancel failure never aborts the protective cancels."""
+    cancel failure never aborts the later steps.
+
+    Phase 20 plan 20-11 (D-09, EXECUTION_SPEC section 11): the later steps are the two position
+    reads and the PROTECTIVES_KEPT record. The entry cancel failed, so the entry is not verified
+    terminal and NO protective leg is cancelled. The Phase 9 pin said all three legs were
+    cancelled right after the failed entry cancel; that was the F1 defect."""
     from src.execution.manager import emergency_manual_close
 
     order: list[str] = []
@@ -181,11 +192,10 @@ async def test_emergency_close_blocks_first_and_runs_every_step_despite_failures
     assert order == ["disable", "safe_mode"]
     assert enablement.disabled is True
     assert safe_mode.reasons == ["MANUAL_CLOSE"]
-    assert [method for method, _ in adapter.calls] == [
-        "cancel_normal_order",
-        "cancel_algo_order",
-        "cancel_algo_order",
-        "cancel_algo_order",
+    assert [method for method, _ in adapter.calls] == ["cancel_normal_order"]
+    assert [method for method, _ in adapter.queries] == ["snapshot_positions"] * 2
+    assert [e.event_type for e in journal.events if e.event_type == "PROTECTIVES_KEPT"] == [
+        "PROTECTIVES_KEPT"
     ]
 
 

@@ -85,8 +85,10 @@ from src.execution.binding import (
     take_profit_levels,
 )
 from src.execution.cancel_verification import (
+    PROVEN_GONE,
     CancelDetail,
     CancelVerdict,
+    confirm_algo_cancel,
     confirm_entry_cancel,
 )
 from src.execution.constraint_snapshot import snapshot_is_valid_for_live
@@ -2168,7 +2170,7 @@ async def cancel_untriggered_protectives(
     journal: Any,
     now_utc: datetime,
     spill: LocalSpill | None = None,
-) -> None:
+) -> dict[str, CancelVerdict]:
     """Cancel the SL/TP1/TP2 algo legs via their deterministic `xa-` ids.
 
     Per EXECUTION_SPEC §11 (manual emergency controls) + §4: cancels
@@ -2184,6 +2186,16 @@ async def cancel_untriggered_protectives(
     record, `AuditRecordLost`) are raised together as an `ExceptionGroup`
     after the last leg.
 
+    Plan 20-11 (D-17): each leg is queried by its algo client id after its cancel
+    and the result is returned as `{role: CancelVerdict}` (roles are the `OrderRole`
+    values STOP_LOSS, TAKE_PROFIT_1, TAKE_PROFIT_2). `post_cancel` is journaled only
+    for CANCELED; any other verdict journals `cancel_unverified` with that verdict.
+    A STOP_LOSS verdict of GONE_NOT_CANCELED, FILLED-like or UNKNOWN is the caller's
+    signal that the stop did not rest where it was expected: the caller decides
+    (the coordinator sweep logs it), this function only reports. Callers that ignored
+    the old `None` return keep working. If a leg raises, no map is returned (the group
+    is).
+
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
         symbol: The live-5 symbol (raises before any adapter call if
@@ -2194,12 +2206,16 @@ async def cancel_untriggered_protectives(
         spill: Optional local spill that keeps the audit records while the
             journal is down.
 
+    Returns:
+        The verdict of every leg, keyed by role.
+
     Raises:
         ExceptionGroup: one or more leg cancels failed or lost an audit record
             (all legs were still attempted).
     """
     _require_live5_symbol(symbol)
     errors: list[Exception] = []
+    verdicts: dict[str, CancelVerdict] = {}
     for role in (
         OrderRole.STOP_LOSS.value,
         OrderRole.TAKE_PROFIT_1.value,
@@ -2210,8 +2226,13 @@ async def cancel_untriggered_protectives(
         async def cancel(client_algo_id: str = client_algo_id) -> None:
             await adapter.cancel_algo_order(symbol=symbol, client_algo_id=client_algo_id)
 
+        async def verify(
+            detail: CancelDetail, client_algo_id: str = client_algo_id
+        ) -> CancelVerdict:
+            return await confirm_algo_cancel(adapter, client_algo_id=client_algo_id, detail=detail)
+
         try:
-            await _cancel_then_audit(
+            verdict = await _cancel_then_audit(
                 action=cancel,
                 spill=spill,
                 journal=journal,
@@ -2221,11 +2242,15 @@ async def cancel_untriggered_protectives(
                 symbol=symbol,
                 trigger_reason=role,
                 now_utc=now_utc,
+                verify=verify,
             )
         except Exception as exc:  # noqa: BLE001 — isolate, record, raise as group
             errors.append(exc)
+        else:
+            verdicts[role] = CancelVerdict.UNKNOWN if verdict is None else verdict
     if errors:
         raise ExceptionGroup("cancel_untriggered_protectives: cancel incomplete", errors)
+    return verdicts
 
 
 # --------------------------------------------------------------------------- #
@@ -2241,6 +2266,90 @@ def safe_mode_freeze(*, safe_mode_controller: Any, reason: str, now_utc: datetim
     controls rather than reconciler internals.
     """
     safe_mode_controller.enter_safe_mode(reason=reason, now_utc=now_utc)
+
+
+_PROTECTIVE_ROLES: tuple[str, ...] = (
+    OrderRole.STOP_LOSS.value,
+    OrderRole.TAKE_PROFIT_1.value,
+    OrderRole.TAKE_PROFIT_2.value,
+)
+
+# PROTECTIVES_KEPT reason codes (Phase 20 plan 20-11, D-09).
+KEEP_FIRST_READ_NONZERO = "FIRST_READ_NONZERO"
+KEEP_SECOND_READ_NONZERO = "SECOND_READ_NONZERO"
+KEEP_READ_FAILED = "READ_FAILED"
+KEEP_ENTRY_NOT_TERMINAL = "ENTRY_NOT_TERMINAL"
+
+
+async def _read_symbol_exposure(adapter: ExecutionAdapter, symbol: str) -> Decimal | None:
+    """The absolute open position of `symbol` from ONE fresh REST read; None if unreadable.
+
+    Every row for the symbol must carry a `Decimal` `position_amt`; a failed call, a result that
+    is not iterable, a row with a missing or non-Decimal amount are all "unreadable" (fail
+    closed). Hedge-mode rows (LONG and SHORT) add up: any non-zero row is exposure.
+    """
+    try:
+        rows = await adapter.snapshot_positions(symbol=symbol)
+        total = Decimal(0)
+        for row in rows:
+            if getattr(row, "symbol", None) != symbol:
+                continue
+            amount = getattr(row, "position_amt", None)
+            if not isinstance(amount, Decimal):
+                return None
+            total += abs(amount)
+    except Exception:  # noqa: BLE001 - any failure of the read means "unreadable", fail closed
+        return None
+    return total
+
+
+async def _protectives_keep_reason(
+    adapter: ExecutionAdapter, symbol: str, entry_verdict: CancelVerdict | None
+) -> str | None:
+    """None only when the protective legs may be cancelled; otherwise the reason code (D-09).
+
+    Two independent fresh position reads, in sequence, must both be zero, and the entry must be
+    verified terminal (its post-cancel verdict is CANCELED or GONE_NOT_CANCELED). The second read
+    is not made once the first one already refuses.
+    """
+    first = await _read_symbol_exposure(adapter, symbol)
+    if first is None:
+        return KEEP_READ_FAILED
+    if first != 0:
+        return KEEP_FIRST_READ_NONZERO
+    second = await _read_symbol_exposure(adapter, symbol)
+    if second is None:
+        return KEEP_READ_FAILED
+    if second != 0:
+        return KEEP_SECOND_READ_NONZERO
+    if entry_verdict not in PROVEN_GONE:
+        return KEEP_ENTRY_NOT_TERMINAL
+    return None
+
+
+def _build_manual_close_event(
+    *, event_type: str, plan_hash: str, payload: dict[str, Any], now_utc: datetime
+) -> JournalEvent:
+    """One manual-close audit event (PROTECTIVES_KEPT, MANUAL_CLOSE_ORPHAN_UNVERIFIED).
+
+    The payload carries codes, verdict values and the symbol only; no exception text.
+    """
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return JournalEvent(
+        journal_event_id=content_hash_event_id(
+            prefix=event_type.lower(),
+            event_type=event_type,
+            entity_id=plan_hash,
+            occurred_at_utc=now_utc,
+            payload_json=payload_json,
+        ),
+        occurred_at_utc=now_utc,
+        event_type=event_type,
+        entity_type="TradePlan",
+        entity_id=plan_hash,
+        correlation_id="execution_manual_close",
+        payload_json=payload_json,
+    )
 
 
 async def emergency_manual_close(
@@ -2260,8 +2369,10 @@ async def emergency_manual_close(
     Per EXECUTION_SPEC §11, the tool must provide a safe way to: cancel
     pending strategy orders, disable new live orders, close strategy-
     generated positions per explicit operator action, and switch to
-    SAFE_MODE. This function runs all four, in fixed order (never
-    reordered) — BLOCKING FIRST (09-REVIEW CR-10), so no cancel failure
+    SAFE_MODE. EXECUTION_SPEC §11 also says that cancelling a protective stop is never
+    part of any of these controls. This function therefore never removes the stop
+    of a position that is, or may still be, open (Phase 20 plan 20-11, D-09, RISK-03,
+    EXEC-06). Fixed order, BLOCKING FIRST (09-REVIEW CR-10), so no cancel failure
     can ever leave new entries enabled:
 
       1. `enablement.disable(...)` — flip `LIVE_ORDERS_DISABLED` back
@@ -2269,22 +2380,27 @@ async def emergency_manual_close(
       2. `safe_mode_freeze(...)` — enter SAFE_MODE so monitoring and
          reconciliation continue while entries stay blocked.
       3. `expire_pending_entry` (trigger_reason="operator_close") —
-         cancel the pending LIMIT entry, if any.
-      4. `cancel_untriggered_protectives` — cancel the SL/TP1/TP2 algo
-         legs, if any.
+         cancel the pending LIMIT entry, if any, and keep its post-cancel verdict (D-17).
+      4. Two independent fresh `snapshot_positions(symbol=...)` reads, in sequence.
+      5. ONLY when both reads succeeded with a zero amount AND the entry verdict is
+         CANCELED or GONE_NOT_CANCELED: `cancel_untriggered_protectives` (each leg verified),
+         then each leg is queried again. A leg that is not CANCELED or GONE_NOT_CANCELED
+         journals `MANUAL_CLOSE_ORPHAN_UNVERIFIED`; SAFE_MODE stays in force.
+      6. Otherwise no protective leg is cancelled and `PROTECTIVES_KEPT` is journaled with
+         a reason code (FIRST_READ_NONZERO, SECOND_READ_NONZERO, READ_FAILED or
+         ENTRY_NOT_TERMINAL).
 
     Every step is isolated: a failure in any step never prevents the
     later steps from running. All failures are raised together as one
     `ExceptionGroup` after the full sequence ran (each cancel failure is
-    also journaled by the step itself).
+    also journaled by the step itself). This control never leaves SAFE_MODE and never
+    changes the status of a TradePlan: an executed plan stays APPROVED (D-09, G4-036).
 
-    Closing the strategy-generated POSITION itself (vs. its pending
-    orders) is an operator-directed exchange action outside this
-    function's adapter surface (`ExecutionAdapter` has no
-    close-position method) — the operator closes the position through
-    the exchange UI/API directly; this function's job is to make that
-    safe by cancelling every order that could otherwise fight the
-    manual close.
+    Closing the strategy-generated POSITION itself is an operator-directed exchange action
+    outside this function's adapter surface (`ExecutionAdapter` has no close-position method):
+    the operator closes it with `operator_close_position` (plan 20-17) or on the exchange,
+    and the legs are removed afterwards by the reconciler's orphan sweeper or by a second call
+    of this control once the position is flat. This control never cancels a protecting stop.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -2299,8 +2415,8 @@ async def emergency_manual_close(
         operator_id: The operator id performing the manual close
             (audit-trail discipline — never empty).
         now_utc: The current UTC-aware datetime (injected).
-        spill: Optional local spill passed to both cancel steps (the enablement
-            controller holds its own). None of the four steps waits for the journal
+        spill: Optional local spill passed to the cancel steps and the two audit events (the
+            enablement controller holds its own). None of the steps waits for the journal
             (D-16, F-702).
 
     Raises:
@@ -2324,9 +2440,22 @@ async def emergency_manual_close(
     except Exception as exc:  # noqa: BLE001 — isolate; cancels must still run
         errors.append(exc)
 
-    # Steps 3-4: cancel pending strategy orders, each step isolated.
+    def record_event(event_type: str, payload: dict[str, Any]) -> None:
+        try:
+            record_after(
+                spill=spill,
+                journal=journal,
+                event=_build_manual_close_event(
+                    event_type=event_type, plan_hash=plan_hash, payload=payload, now_utc=now_utc
+                ),
+            )
+        except AuditRecordLost as lost:
+            errors.append(lost)
+
+    # Step 3: cancel the pending entry and keep what the exchange shows afterwards.
+    entry_verdict: CancelVerdict | None = None
     try:
-        await expire_pending_entry(
+        entry_verdict = await expire_pending_entry(
             plan_hash=plan_hash,
             symbol=symbol,
             adapter=adapter,
@@ -2335,19 +2464,51 @@ async def emergency_manual_close(
             trigger_reason="operator_close",
             spill=spill,
         )
-    except Exception as exc:  # noqa: BLE001 — isolate; protectives must still be canceled
-        errors.append(exc)
-    try:
-        await cancel_untriggered_protectives(
-            plan_hash=plan_hash,
+    except AuditRecordLost as lost:
+        # The cancel succeeded and was verified, but its audit record could not be kept, which
+        # discarded the verdict with the exception. The exchange decides, not the journal: ask
+        # again (D-16, D-17) rather than keep the legs only because the journal is down.
+        errors.append(lost)
+        entry_verdict = await confirm_entry_cancel(
+            adapter,
             symbol=symbol,
-            adapter=adapter,
-            journal=journal,
-            now_utc=now_utc,
-            spill=spill,
+            client_order_id=derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value),
         )
-    except Exception as exc:  # noqa: BLE001 — collected below
+    except Exception as exc:  # noqa: BLE001 — isolate; the position reads must still run
         errors.append(exc)
+
+    # Steps 4-6: the protective legs go only with proof that nothing is left to protect.
+    keep_reason = await _protectives_keep_reason(adapter, symbol, entry_verdict)
+    if keep_reason is not None:
+        record_event(
+            "PROTECTIVES_KEPT",
+            {
+                "symbol": symbol,
+                "reason_code": keep_reason,
+                "entry_verdict": "NONE" if entry_verdict is None else entry_verdict.value,
+            },
+        )
+    else:
+        try:
+            await cancel_untriggered_protectives(
+                plan_hash=plan_hash,
+                symbol=symbol,
+                adapter=adapter,
+                journal=journal,
+                now_utc=now_utc,
+                spill=spill,
+            )
+        except Exception as exc:  # noqa: BLE001 — collected below; the legs are re-queried anyway
+            errors.append(exc)
+        legs: dict[str, str] = {}
+        for role in _PROTECTIVE_ROLES:
+            leg_verdict = await confirm_algo_cancel(
+                adapter, client_algo_id=derive_algo_client_id(plan_hash=plan_hash, role=role)
+            )
+            legs[role] = leg_verdict.value
+        if any(CancelVerdict(v) not in PROVEN_GONE for v in legs.values()):
+            # SAFE_MODE was entered in step 2 and nothing here leaves it.
+            record_event("MANUAL_CLOSE_ORPHAN_UNVERIFIED", {"symbol": symbol, "legs": legs})
 
     if errors:
         raise ExceptionGroup("emergency_manual_close: sequence incomplete", errors)

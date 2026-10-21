@@ -350,6 +350,10 @@ class CancelAdapter:
     async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any:
         return SimpleNamespace(found=True, algo_status="CANCELED")
 
+    # Plan 20-11 (D-09): the manual close reads the position twice before it cancels a leg.
+    async def snapshot_positions(self, *, symbol: str | None = None) -> list[Any]:
+        return []
+
 
 def _ids() -> tuple[str, str, str, str]:
     from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
