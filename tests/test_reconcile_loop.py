@@ -12,6 +12,7 @@ database, and nothing is a Demo observation. The loop is a library; Phase 24 com
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,7 +22,6 @@ from typing import Any
 import pytest
 from src.domain.enums import OrderRole
 from src.execution.order_ids import derive_algo_client_id
-from src.reconcile import compare as compare_module
 from src.reconcile.classify import POLICY_BY_KIND
 from src.reconcile.loop import (
     ALERT_SINK_FAILED,
@@ -294,7 +294,7 @@ async def test_an_overlapping_tick_is_skipped_while_one_is_running() -> None:
 
 
 def test_policy_table_covers_every_divergence_kind() -> None:
-    assert set(POLICY_BY_KIND) == compare_module._DIVERGENCE_KINDS
+    assert set(POLICY_BY_KIND) == importlib.import_module("src.reconcile.compare")._DIVERGENCE_KINDS
 
 
 @pytest.mark.parametrize("module", NEW_MODULES)
