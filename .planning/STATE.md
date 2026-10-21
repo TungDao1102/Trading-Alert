@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 20
-current_phase_name: reconcile-safe-mode-hardening
-current_plan: "65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host"
+current_phase_name: Reconcile + SAFE_MODE Hardening + Alerts
+current_plan: 2
 status: executing
-stopped_at: Phase 20 context gathered
-last_updated: "2026-10-21T04:07:20.270Z"
-last_activity: 2026-10-19
-last_activity_desc: Phase 19 merged into develop; AGENTS.md trimmed to a router
-state_head: d6b3a64942ef7b2c8e28f608106a3546e57f9e40
+stopped_at: Completed 20-01-PLAN.md
+last_updated: "2026-10-21T08:07:29.358Z"
+last_activity: 2026-10-21
+last_activity_desc: Phase 20 execution started
+state_head: 43b873f11a6ad4b8455a5eb0e3b72a0ac585a4ab
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 278
-  completed_plans: 249
+  completed_plans: 250
 milestone_name: milestone
 ---
 
@@ -27,14 +27,15 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 16 close-out (plan 16-43 on the soak host after a fresh full gate on the merged tree); Phase 19 is executed and merged, waiting for the owner read of its gap register
+**Current focus:** Phase 20 — Reconcile + SAFE_MODE Hardening + Alerts
 
 ## Current Position
 
-Phase: 20 (reconcile-safe-mode-hardening) — READY TO EXECUTE
-Current Plan: 65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host
+Phase: 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTING
+Current Plan: 2
+Total Plans in Phase: 26
 Status: Ready to execute
-Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
+Last activity: 2026-10-21 — Phase 20 execution started
 
 Progress: [██████░░░░] 61%
 
@@ -238,6 +239,7 @@ Progress: [██████░░░░] 61%
 | Phase 16 P60 | 3h | 4 tasks | 33 files |
 | Phase 19 P01 | 28 min | 3 tasks | 8 files |
 | Phase 19 P16 | about 30 min (commit clock, 13:45 to 14:13) | 3 tasks | 13 files |
+| Phase 20 P01 | 15 min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -565,6 +567,7 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-63: a plan whose stored TP2 is not above zero is NO_TRADE RR_TOO_LOW (owner Option A, strict reading); simulator semantics 2.3.0, protocol v2.6.0, D075 and D076
 - [Phase 16]: 16-63: research run 1 regenerated under 2.3.0 (240 records, families in parallel by owner decision); the 2.1.0 records are superseded in the owner's wording with only the versions replaced (16-DEC-RUN1-SUPERSEDED.md)
 - [Phase 16]: 16-63: R7: the soak image is rebuilt from a commit containing the TP2 guard and the 16-62 gate repeated before plan 16-43 pins the epoch
+- [Phase 20]: 20-01: Phase 20 ExecutionLimits fields are <section>_<key> (EXECUTION_LIMIT_FIELDS); Phase 19 field names unchanged; the numeric-default guard covers key texts and field names
 
 ### Pending Todos
 
@@ -651,6 +654,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-20T15:45:08.358Z
-Stopped at: Phase 20 context gathered
-Resume file: .planning/phases/20-reconcile-safe-mode-hardening/20-CONTEXT.md
+Last session: 2026-10-21T08:07:12.364Z
+Stopped at: Completed 20-01-PLAN.md
+Resume file: None

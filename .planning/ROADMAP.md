@@ -1032,11 +1032,11 @@ Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
 - [T-06] The reconcile cadence, stale-feed threshold and WS-silence threshold have no values ("configured freshness threshold"); they must be registry parameters with provenance labels (source: docs/operations/RUNBOOK.md:113-115, .planning/audits/2026-09-29-deep-audit/DEEP_AUDIT_REPORT.md:636 (F-026); decision: open user decision, the values)
 - [G3-005] Promote `ENTRY_WITHOUT_PROTECTIVE` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:206, docs/DECISIONS.md D044 item (1); decision: D044)
 
-**Plans:** 26 plans (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
+**Plans:** 1/26 plans executed (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
 
 Plans:
 **Wave 1**
-- [ ] 20-01-PLAN.md - Execution-limit keys for reconcile, stale feed and alerts, all NOT_CONFIGURED; cadence check (T-H, D-25)
+- [x] 20-01-PLAN.md - Execution-limit keys for reconcile, stale feed and alerts, all NOT_CONFIGURED; cadence check (T-H, D-25)
 - [ ] 20-02-PLAN.md - Protection transition guard, clearing evidence and replay validator (T-A, D-29, D077)
 - [ ] 20-03-PLAN.md - Reconciliation-finalization API and resolution_reason_code, migration 0007 (T-B)
 - [ ] 20-04-PLAN.md - Compare v2: reverse pass, bound check, STOP required, entry-aware orphan, duplicate ids (D-01..D-03, D-05)
@@ -1368,7 +1368,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
 | 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
-| 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
+| 20. Reconcile + SAFE_MODE Hardening + Alerts | 1/26 | In Progress|  |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |
