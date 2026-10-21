@@ -31,21 +31,6 @@ from typing import Any, Protocol, Self
 
 from src.domain.enums import RejectionReason, SystemMode
 
-# --------------------------------------------------------------------------- #
-# Scheduled tick cadence (FLAGGED ASSUMPTION, RECON-01 unclassified).
-#
-# The operator tunes this only before a soak epoch starts, never
-# mid-epoch. The value is a documented constant — not an env var —
-# so a mid-soak change is a code change, not a config drift.
-#
-# 60s default per RESEARCH A2: a 4H/1H swing-trading system has
-# orders of magnitude of headroom for a 60s REST tick; tighter
-# cadences waste rate-limit budget without changing the safety
-# posture.
-# --------------------------------------------------------------------------- #
-
-SAFE_MODE_TICK_SECONDS: int = 60
-
 #: The `entered_reason` of a controller whose persisted state could not be read or parsed at start
 #: (D-14, research C14): an unreadable store must only ever make the system more restricted.
 SAFE_MODE_STATE_UNREADABLE: str = "SAFE_MODE_STATE_UNREADABLE"
@@ -818,7 +803,6 @@ def _build_payload_json(payload: dict[str, Any]) -> str:
 
 __all__ = [
     "SAFE_MODE_STATE_UNREADABLE",
-    "SAFE_MODE_TICK_SECONDS",
     "AdapterLike",
     "ExitDecision",
     "ExitReadiness",

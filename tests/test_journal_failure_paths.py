@@ -39,7 +39,8 @@ from src.execution.manager import (
 )
 from src.execution.order_ids import derive_client_order_id
 from src.persistence.errors import StoreUnavailable
-from src.reconcile.safe_mode import SafeModeController
+from src.reconcile.local_intent import LocalIntent
+from src.reconcile.safe_mode import ExitReadiness, SafeModeController
 
 NOW_UTC = datetime(2026, 9, 29, 10, 30, tzinfo=UTC)
 PLAN_HASH = "4444444444444444444444444444444444444444444444444444444444444444"
@@ -317,6 +318,15 @@ class _CleanTruthAdapter:
         return []
 
 
+async def _operator_exit(controller: SafeModeController) -> Any:
+    return await controller.exit_safe_mode(
+        operator_id="operator-1",
+        local_intent_fn=lambda: LocalIntent(orders=(), algos=(), positions=()),
+        readiness=lambda: ExitReadiness(0, 0, 0),
+        now_utc=NOW_UTC,
+    )
+
+
 async def test_exit_safe_mode_with_a_failing_journal_stays_in_safe_mode_and_can_retry() -> None:
     journal = ToggleJournal()
     controller = SafeModeController(adapter=_CleanTruthAdapter(), journal=journal)  # type: ignore[arg-type]
@@ -324,7 +334,7 @@ async def test_exit_safe_mode_with_a_failing_journal_stays_in_safe_mode_and_can_
     journal.down = True
 
     with pytest.raises(StoreUnavailable):
-        await controller.exit_safe_mode(now_utc=NOW_UTC)
+        await _operator_exit(controller)
 
     # Fail closed: the un-journaled exit did not happen, so entries stay blocked.
     assert controller.in_safe_mode is True
@@ -335,7 +345,7 @@ async def test_exit_safe_mode_with_a_failing_journal_stays_in_safe_mode_and_can_
 
     # The retry after the journal recovers exits and records exactly one exit event.
     journal.down = False
-    assert await controller.exit_safe_mode(now_utc=NOW_UTC) is True
+    assert (await _operator_exit(controller)).exited is True
     assert controller.in_safe_mode is False
     assert controller.entered_reason is None
     assert [e.event_type for e in journal.events] == ["SAFE_MODE_ENTER", "SAFE_MODE_EXIT"]

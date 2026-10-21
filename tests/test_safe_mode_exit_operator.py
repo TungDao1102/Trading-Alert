@@ -433,3 +433,385 @@ def test_a_load_of_a_malformed_five_key_row_fails_closed_into_safe_mode() -> Non
 
     assert controller.in_safe_mode is True
     assert controller.entered_reason == "SAFE_MODE_STATE_UNREADABLE"
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - one failure test per readiness row 1-5
+# --------------------------------------------------------------------------- #
+
+
+def _assert_still_in_safe_mode(rig: Rig, *, saves: int = 1) -> None:
+    """A refused or failed exit changed nothing: memory, journal and store."""
+    assert rig.controller.in_safe_mode is True
+    assert rig.controller.entered_reason == "DB_FAILURE"
+    assert rig.journal.of("SAFE_MODE_EXIT") == []
+    assert len(rig.store.saved) == saves
+    assert rig.controller.guard_new_entries(trade_plan=None).is_no_trade is True
+
+
+@pytest.mark.parametrize("operator_id", ["", "   ", "\t\n", None, 7, b"op"])
+async def test_row1_a_missing_operator_id_refuses(operator_id: Any) -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, operator_id=operator_id)
+
+    assert decision == ExitDecision(exited=False, refusals=("OPERATOR_ID_MISSING",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row1_the_operator_id_is_audit_metadata_not_authentication() -> None:
+    """Any non-blank text is accepted: there is no allow-list yet (Phase 23/24, T-20-38)."""
+    rig = _rig()
+
+    decision = await _exit(rig, operator_id="anyone-at-all")
+
+    assert decision.exited is True
+    payload = json.loads(rig.journal.of("SAFE_MODE_EXIT")[0].payload_json)
+    assert payload["operator_id"] == "anyone-at-all"
+
+
+async def test_row2_a_raising_source_never_becomes_an_empty_list() -> None:
+    """The F-711 case: truth is empty, so an empty list would have agreed. It must not."""
+    rig = _rig(adapter=FakeAdapter())
+
+    decision = await _exit(rig, local_intent_fn=_raises(RuntimeError("password=hunter2")))
+
+    assert decision.refusals == ("LOCAL_SOURCE_UNREADABLE",)
+    _assert_still_in_safe_mode(rig)
+    payloads = [e.payload_json for e in rig.journal.events]
+    assert not any("hunter2" in payload for payload in payloads)
+
+
+@pytest.mark.parametrize("which", ["normal", "algos", "positions"])
+@pytest.mark.parametrize("failure", ["raises", "none"])
+async def test_row3_each_binance_read_failing_refuses(which: str, failure: str) -> None:
+    adapter = FakeAdapter()
+    # Set after construction: the constructor maps None to an empty list.
+    setattr(adapter, which, RuntimeError("binance down") if failure == "raises" else None)
+    rig = _rig(adapter=adapter)
+
+    decision = await _exit(rig)
+
+    assert decision == ExitDecision(exited=False, refusals=("BINANCE_READ_FAILED",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row3_the_reads_happen_inside_the_exit_call() -> None:
+    rig = _rig()
+    reads_before = rig.adapter.reads
+
+    await _exit(rig)
+
+    assert rig.adapter.reads == reads_before + 3
+
+
+async def test_row3_an_unreadable_binance_side_skips_the_compare() -> None:
+    calls: list[Any] = []
+
+    def compare_fn(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        raise AssertionError("compare must not run on unreadable inputs")
+
+    adapter = FakeAdapter(positions=RuntimeError("down"))
+    controller = SafeModeController(
+        adapter=adapter, journal=FakeJournal(), compare_fn=compare_fn, state_store=FakeStore()
+    )
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    decision = await controller.exit_safe_mode(
+        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+    )
+
+    assert decision.refusals == ("BINANCE_READ_FAILED",)
+    assert calls == []
+
+
+async def test_row4_an_exchange_position_with_an_empty_successful_local_read_refuses() -> None:
+    """The vacuous exit of F-711: the local read worked and is empty, Binance holds a position."""
+    rig = _rig(adapter=FakeAdapter(positions=[_position()]))
+
+    decision = await _exit(rig, local_intent_fn=lambda: EMPTY_INTENT)
+
+    assert decision == ExitDecision(exited=False, refusals=("COMPARE_NOT_CLEAN",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row4_a_compare_that_raises_is_never_clean() -> None:
+    def compare_fn(**_kwargs: Any) -> Any:
+        raise TypeError("a source was None")
+
+    controller = SafeModeController(
+        adapter=FakeAdapter(), journal=FakeJournal(), compare_fn=compare_fn
+    )
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    decision = await controller.exit_safe_mode(
+        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+    )
+
+    assert decision.refusals == ("COMPARE_NOT_CLEAN",)
+    assert controller.in_safe_mode is True
+
+
+async def test_row4_a_compare_result_without_agreement_is_never_clean() -> None:
+    controller = SafeModeController(
+        adapter=FakeAdapter(), journal=FakeJournal(), compare_fn=lambda **_k: object()
+    )
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    decision = await controller.exit_safe_mode(
+        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+    )
+
+    assert decision.refusals == ("COMPARE_NOT_CLEAN",)
+
+
+def _not_a_count() -> Any:
+    return ExitReadiness(True, 0, 0)  # type: ignore[arg-type]  # a bool is not a count
+
+
+ROW5: list[Any] = [
+    pytest.param(ExitReadiness(1, 0, 0), ("UNKNOWN_INTENT_PRESENT",), id="unknown-intent"),
+    pytest.param(ExitReadiness(0, 1, 0), ("BLOCKING_PROTECTION_STATE",), id="blocking-plan"),
+    pytest.param(ExitReadiness(0, 0, 1), ("PENDING_ACTION_PRESENT",), id="pending-action"),
+    pytest.param(ExitReadiness(None, 0, 0), ("READINESS_UNREADABLE",), id="intents-unread"),
+    pytest.param(ExitReadiness(0, None, 0), ("READINESS_UNREADABLE",), id="plans-unread"),
+    pytest.param(ExitReadiness(0, 0, None), ("READINESS_UNREADABLE",), id="pending-unread"),
+    pytest.param(ExitReadiness(-1, 0, 0), ("READINESS_UNREADABLE",), id="negative-count"),
+    pytest.param(_not_a_count(), ("READINESS_UNREADABLE",), id="bool-is-not-a-count"),
+    pytest.param(
+        ExitReadiness(None, 2, 3),
+        ("READINESS_UNREADABLE", "BLOCKING_PROTECTION_STATE", "PENDING_ACTION_PRESENT"),
+        id="partly-unread-and-blocking",
+    ),
+]
+
+
+@pytest.mark.parametrize(("counts", "expected"), ROW5)
+async def test_row5_a_dirty_or_unreadable_readiness_refuses(
+    counts: ExitReadiness, expected: tuple[str, ...]
+) -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, readiness=lambda: counts)
+
+    assert decision == ExitDecision(exited=False, refusals=expected)
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row5_a_raising_readiness_refuses() -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, readiness=_raises(RuntimeError("db down")))
+
+    assert decision == ExitDecision(exited=False, refusals=("READINESS_UNREADABLE",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row5_a_readiness_without_the_fields_refuses() -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, readiness=lambda: object())  # type: ignore[arg-type,return-value]
+
+    assert decision.refusals == ("READINESS_UNREADABLE",)
+
+
+async def test_every_refusal_found_in_one_pass_is_reported_and_journaled_once() -> None:
+    rig = _rig(adapter=FakeAdapter(positions=[_position()]))
+
+    decision = await _exit(rig, operator_id="", readiness=lambda: ExitReadiness(1, 1, 1))
+
+    assert decision.refusals == (
+        "OPERATOR_ID_MISSING",
+        "COMPARE_NOT_CLEAN",
+        "UNKNOWN_INTENT_PRESENT",
+        "BLOCKING_PROTECTION_STATE",
+        "PENDING_ACTION_PRESENT",
+    )
+    refused = rig.journal.of("SAFE_MODE_EXIT_REFUSED")
+    assert len(refused) == 1
+    assert json.loads(refused[0].payload_json)["refusals"] == list(decision.refusals)
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_a_failing_refusal_journal_does_not_change_the_decision() -> None:
+    rig = _rig()
+    rig.journal.fail_on.add("SAFE_MODE_EXIT_REFUSED")
+
+    decision = await _exit(rig, operator_id="")
+
+    assert decision.refusals == ("OPERATOR_ID_MISSING",)
+    assert rig.controller.in_safe_mode is True
+
+
+async def test_an_exit_of_a_controller_that_is_not_in_safe_mode_is_a_noop() -> None:
+    rig = _rig(enter=False)
+
+    decision = await _exit(rig, operator_id="")
+
+    assert decision == ExitDecision(exited=True, refusals=())
+    assert rig.journal.events == []
+    assert rig.store.saved == []
+    assert rig.adapter.reads == 0
+
+
+async def test_a_naive_now_is_a_caller_bug() -> None:
+    rig = _rig()
+
+    with pytest.raises(ValueError, match="UTC"):
+        await _exit(rig, now_utc=datetime(2026, 9, 19, 12, 0))
+
+    assert rig.controller.in_safe_mode is True
+
+
+# --------------------------------------------------------------------------- #
+# Write order: journal first, store second, memory last
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_failing_exit_journal_keeps_safe_mode_and_a_retry_can_exit() -> None:
+    rig = _rig()
+    rig.journal.fail_on.add("SAFE_MODE_EXIT")
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        await _exit(rig)
+
+    _assert_still_in_safe_mode(rig)  # the store was never written either
+    rig.journal.fail_on.clear()
+    assert (await _exit(rig, now_utc=T2)).exited is True
+    assert rig.controller.in_safe_mode is False
+
+
+async def test_a_failing_state_save_keeps_safe_mode_and_a_retry_can_exit() -> None:
+    rig = _rig()
+    rig.trace.calls.clear()
+    rig.store.save_error = RuntimeError("store down")
+
+    with pytest.raises(RuntimeError, match="store down"):
+        await _exit(rig)
+
+    # The journal row was written first; memory was not flipped and the store kept SAFE_MODE.
+    assert rig.trace.calls == ["journal:SAFE_MODE_EXIT"]
+    assert rig.controller.in_safe_mode is True
+    assert rig.controller.entered_reason == "DB_FAILURE"
+    assert rig.controller.guard_new_entries(trade_plan=None).is_no_trade is True
+    assert rig.controller.state_snapshot()["last_exit_operator_id"] is None
+    assert rig.store.loaded is not None and rig.store.loaded["in_safe_mode"] is True
+
+    rig.store.save_error = None
+    assert (await _exit(rig, now_utc=T2)).exited is True
+    assert rig.controller.in_safe_mode is False
+    assert rig.store.loaded is not None and rig.store.loaded["in_safe_mode"] is False
+    assert rig.store.loaded["last_exit_at_utc"] == T2.isoformat()
+
+
+async def test_the_exit_state_is_saved_before_memory_flips() -> None:
+    """The store sees the exit while the controller still reports SAFE_MODE."""
+    observed: list[bool] = []
+    rig = _rig()
+    original_save = rig.store.save
+
+    def spying_save(state: Mapping[str, str | bool | None], *, now_utc: datetime) -> None:
+        observed.append(rig.controller.in_safe_mode)
+        original_save(state, now_utc=now_utc)
+
+    rig.store.save = spying_save  # type: ignore[method-assign]
+
+    await _exit(rig)
+
+    assert observed == [True]
+    assert rig.controller.in_safe_mode is False
+
+
+async def test_an_exit_without_a_store_still_journals_and_flips() -> None:
+    journal = FakeJournal()
+    controller = SafeModeController(adapter=FakeAdapter(), journal=journal)
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    decision = await controller.exit_safe_mode(
+        operator_id=OPERATOR, local_intent_fn=_local, readiness=_readiness, now_utc=T1
+    )
+
+    assert decision.exited is True
+    assert controller.state_snapshot()["last_exit_operator_id"] == OPERATOR
+    assert len(journal.of("SAFE_MODE_EXIT")) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Nothing but the operator call exits
+# --------------------------------------------------------------------------- #
+
+
+def test_a_restart_never_exits_safe_mode() -> None:
+    rig = _rig()
+
+    restored = SafeModeController.load(
+        adapter=FakeAdapter(), journal=FakeJournal(), state_store=rig.store, now_utc=T2
+    )
+
+    assert restored.in_safe_mode is True
+    assert restored.entered_reason == "DB_FAILURE"
+    assert restored.guard_new_entries(trade_plan=None).is_no_trade is True
+
+
+def test_time_passing_and_a_reentry_never_exit_safe_mode() -> None:
+    rig = _rig()
+    for hours in (1, 24, 24 * 30):
+        rig.controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0 + timedelta(hours=hours))
+        assert rig.controller.in_safe_mode is True
+    assert rig.controller.entered_at_utc == T0
+    assert rig.journal.of("SAFE_MODE_EXIT") == []
+
+
+def test_the_public_api_has_no_way_to_flip_the_flag() -> None:
+    rig = _rig()
+
+    with pytest.raises(AttributeError):
+        rig.controller.in_safe_mode = False  # type: ignore[misc]
+    public = {name for name in dir(SafeModeController) if not name.startswith("_")}
+    assert "exit_safe_mode" in public
+    assert not {"set_safe_mode", "clear_safe_mode", "reset", "force_exit"} & public
+    assert rig.controller.in_safe_mode is True
+
+
+def test_a_state_row_that_says_off_does_not_change_a_live_controller() -> None:
+    """A row written by someone else is only read at the next load, never by the live object."""
+    rig = _rig()
+    rig.store.loaded = dict(FIVE_KEY_OFF)
+
+    assert rig.controller.in_safe_mode is True
+
+
+# --------------------------------------------------------------------------- #
+# The restore drill is a caller of the operator exit
+# --------------------------------------------------------------------------- #
+
+
+def test_the_restore_drill_exits_with_an_operator_id() -> None:
+    from src.ops.drills import DRILL_OPERATOR_ID, DrillLog, make_restore_drill, run_drill
+
+    rig = _rig(enter=False)
+    drill = make_restore_drill(safe_mode_controller=rig.controller, now_utc=T0)
+
+    outcome = run_drill(drill, journal=DrillLog(), now_utc=T0)
+
+    assert outcome.outcome == "restore_clean_exit"
+    assert rig.controller.in_safe_mode is False
+    payload = json.loads(rig.journal.of("SAFE_MODE_EXIT")[0].payload_json)
+    assert payload["operator_id"] == DRILL_OPERATOR_ID == "drill-operator"
+
+
+def test_the_restore_drill_fails_when_the_local_source_is_unreadable() -> None:
+    from src.ops.drills import DrillLog, make_restore_drill, run_drill
+
+    rig = _rig(enter=False)
+    drill = make_restore_drill(
+        safe_mode_controller=rig.controller,
+        now_utc=T0,
+        local_intent_fn=_raises(RuntimeError("down")),
+    )
+
+    with pytest.raises(AssertionError, match="LOCAL_SOURCE_UNREADABLE"):
+        run_drill(drill, journal=DrillLog(), now_utc=T0)
+
+    assert rig.controller.in_safe_mode is True
