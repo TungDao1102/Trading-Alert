@@ -24,6 +24,7 @@ from binance_common.errors import (
     TooManyRequestsError,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    AccountInformationV3Response,
     AccountTradeListResponseInner,
     CancelAlgoOrderResponse,
     CancelAllAlgoOpenOrdersResponse,
@@ -35,11 +36,17 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
     FuturesAccountBalanceV3Response,
+    FuturesAccountConfigurationResponse,
+    GetIncomeHistoryResponse,
+    MarkPriceResponse,
+    MarkPriceResponse1,
     NewAlgoOrderResponse,
     NewOrderResponse,
+    NotionalAndLeverageBracketsResponse,
     PositionInformationV3ResponseInner,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
+    SymbolConfigurationResponse,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
     NewAlgoOrderAlgoTypeEnum,
@@ -895,6 +902,7 @@ _READ_AND_MUTATING_CALLS = [
     lambda a: a.cancel_algo_order(client_algo_id=TEST_ONLY_CLIENT_ALGO_ID),
     lambda a: a.cancel_all_open_orders(symbol=TEST_ONLY_SYMBOL),
     lambda a: a.cancel_all_algo_open_orders(symbol=TEST_ONLY_SYMBOL),
+    lambda a: _gtd(a),  # quick task 261021-sj0
 ]
 
 
@@ -1234,6 +1242,7 @@ async def test_user_trades_give_the_trade_id_key_space_as_text() -> None:
         "row_0_commission_asset": "USDT",
         "row_0_maker": "false",
         "row_0_time_ms": str(TEST_ONLY_UPDATE_MS),
+        "row_0_side": "BUY",  # quick task 261021-sj0: the trade summary gained its side
     }
 
 
@@ -1454,6 +1463,15 @@ _READ_CALLS = [
     lambda a: a.account_balance(),
     lambda a: a.mark_price(symbol=TEST_ONLY_SYMBOL),
     lambda a: a.symbol_filters(symbol=TEST_ONLY_SYMBOL),
+    # quick task 261021-sj0: the capture reads
+    lambda a: a.account_information(),
+    lambda a: a.account_balance_all(),
+    lambda a: a.account_config(),
+    lambda a: a.symbol_config(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.leverage_brackets(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=TEST_ONLY_UPDATE_MS),
+    lambda a: a.query_algo_order_by_algo_id(algo_id=1000000001),
+    lambda a: a.live_mark_price(symbol=TEST_ONLY_SYMBOL),
 ]
 
 
@@ -1492,6 +1510,469 @@ async def test_a_public_refusal_raced_by_another_holder_becomes_probe_banned() -
 
     assert caught.value.reason == IP_BAN_418
     assert rest.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261021-sj0: the capture operations (flattened account reads, income history,
+# the algo query by id, the GTD limit and the live mark price).
+# --------------------------------------------------------------------------- #
+
+_RECV = TEST_ONLY_RECV_WINDOW_MS
+
+
+async def test_account_information_flattens_every_present_field() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "account_information_v3",
+        AccountInformationV3Response.from_dict(
+            {
+                "totalWalletBalance": "5000.12345678",
+                "availableBalance": "4800.00000000",
+                "totalCrossUnPnl": None,
+                "assets": [
+                    {"asset": "USDT", "walletBalance": "5000.12345678", "marginBalance": "5001"},
+                    {"asset": "BNB", "walletBalance": "0.00000000"},
+                ],
+                "positions": [{"symbol": "BTCUSDT", "positionSide": "BOTH", "leverage": "20"}],
+                "unlisted": "kept-as-additional-property",
+            }
+        ),
+    )
+
+    observation = await adapter.account_information()
+
+    assert rest.calls == [("account_information_v3", {"recv_window": _RECV})]
+    assert observation.ok is True and observation.operation == "account_information"
+    assert dict(observation.summary) == {
+        "totalWalletBalance": "5000.12345678",
+        "availableBalance": "4800.00000000",
+        "assets.0.asset": "USDT",
+        "assets.0.walletBalance": "5000.12345678",
+        "assets.0.marginBalance": "5001",
+        "assets.1.asset": "BNB",
+        "assets.1.walletBalance": "0.00000000",
+        "positions.0.symbol": "BTCUSDT",
+        "positions.0.positionSide": "BOTH",
+        "positions.0.leverage": "20",
+        "unlisted": "kept-as-additional-property",
+    }  # None dropped, zero balance kept, no truncated key
+
+
+async def test_account_balance_all_keeps_every_asset_and_every_field() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "futures_account_balance_v3",
+        FuturesAccountBalanceV3Response.from_dict(
+            [
+                {"asset": "USDT", "balance": "5000", "availableBalance": "4800", "updateTime": 7},
+                {"asset": "BNB", "balance": "0.00000000", "crossUnPnl": "0"},
+            ]
+        ),
+    )
+
+    observation = await adapter.account_balance_all()
+
+    assert rest.calls == [("futures_account_balance_v3", {"recv_window": _RECV})]
+    assert observation.operation == "account_balance_all"
+    assert dict(observation.summary) == {
+        "0.asset": "USDT",
+        "0.balance": "5000",
+        "0.availableBalance": "4800",
+        "0.updateTime": "7",
+        "1.asset": "BNB",
+        "1.balance": "0.00000000",
+        "1.crossUnPnl": "0",
+    }
+
+
+async def test_account_config_gives_the_wire_names_with_booleans_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "futures_account_configuration",
+        FuturesAccountConfigurationResponse.from_dict(
+            {"feeTier": 0, "canTrade": True, "dualSidePosition": False, "multiAssetsMargin": False}
+        ),
+    )
+
+    observation = await adapter.account_config()
+
+    assert rest.calls == [("futures_account_configuration", {"recv_window": _RECV})]
+    assert observation.operation == "account_config"
+    assert dict(observation.summary) == {
+        "feeTier": "0",
+        "canTrade": "true",
+        "dualSidePosition": "false",
+        "multiAssetsMargin": "false",
+    }
+
+
+async def test_symbol_config_sends_the_symbol_and_flattens_the_rows() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "symbol_configuration",
+        SymbolConfigurationResponse.from_dict(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "marginType": "CROSSED",
+                    "isAutoAddMargin": False,
+                    "leverage": 20,
+                }
+            ]
+        ),
+    )
+
+    observation = await adapter.symbol_config(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        ("symbol_configuration", {"symbol": TEST_ONLY_SYMBOL, "recv_window": _RECV})
+    ]
+    assert observation.operation == "symbol_config"
+    assert dict(observation.summary) == {
+        "0.symbol": "BTCUSDT",
+        "0.marginType": "CROSSED",
+        "0.isAutoAddMargin": "false",
+        "0.leverage": "20",
+    }
+
+
+async def test_leverage_brackets_unwrap_the_one_of_wrapper() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "notional_and_leverage_brackets",
+        NotionalAndLeverageBracketsResponse.from_dict(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "brackets": [
+                        {"bracket": 1, "initialLeverage": 125, "notionalCap": 50000},
+                        {"bracket": 2, "initialLeverage": 100},
+                    ],
+                }
+            ]
+        ),
+    )
+
+    observation = await adapter.leverage_brackets(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        ("notional_and_leverage_brackets", {"symbol": TEST_ONLY_SYMBOL, "recv_window": _RECV})
+    ]
+    assert observation.operation == "leverage_brackets"
+    assert dict(observation.summary) == {
+        "0.symbol": "BTCUSDT",
+        "0.brackets.0.bracket": "1",
+        "0.brackets.0.initialLeverage": "125",
+        "0.brackets.0.notionalCap": "50000",
+        "0.brackets.1.bracket": "2",
+        "0.brackets.1.initialLeverage": "100",
+    }
+
+
+async def test_a_single_symbol_bracket_answer_flattens_too() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "notional_and_leverage_brackets",
+        NotionalAndLeverageBracketsResponse.from_dict(
+            {"symbol": "BTCUSDT", "brackets": [{"bracket": 1, "initialLeverage": 125}]}
+        ),
+    )
+
+    observation = await adapter.leverage_brackets(symbol=TEST_ONLY_SYMBOL)
+
+    assert dict(observation.summary) == {
+        "symbol": "BTCUSDT",
+        "brackets.0.bracket": "1",
+        "brackets.0.initialLeverage": "125",
+    }
+
+
+async def test_the_flat_summary_scrubs_caps_and_truncates() -> None:
+    register_runtime_secret(TEST_ONLY_SECRET)
+    adapter, rest, _ = _adapter()
+    long_text = "x" * (ERROR_MESSAGE_MAX_CHARS + 50)
+    rest.script(
+        "futures_account_configuration",
+        FuturesAccountConfigurationResponse.from_dict(
+            {"feeTier": 0, "note": f"has {TEST_ONLY_SECRET} inside", "long": long_text}
+        ),
+    )
+    observation = await adapter.account_config()
+    assert TEST_ONLY_SECRET not in observation.summary["note"]
+    assert REDACTED in observation.summary["note"]
+    assert observation.summary["long"] == "x" * ERROR_MESSAGE_MAX_CHARS
+
+    many = [{"asset": f"A{index}"} for index in range(binance_probe.FLAT_SUMMARY_MAX_KEYS + 25)]
+    rest.script("futures_account_balance_v3", FuturesAccountBalanceV3Response.from_dict(many))
+    big = await adapter.account_balance_all()
+    assert big.summary["truncated"] == "true"
+    assert len(big.summary) == binance_probe.FLAT_SUMMARY_MAX_KEYS + 1
+    assert "0.asset" in big.summary and f"{len(many) - 1}.asset" not in big.summary
+
+
+async def test_the_flat_summary_of_an_empty_answer_is_empty() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("futures_account_balance_v3", [])
+    observation = await adapter.account_balance_all()
+    assert observation.ok is True and dict(observation.summary) == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "sdk", "call"),
+    [
+        ("account_information", "account_information_v3", lambda a: a.account_information()),
+        ("account_balance_all", "futures_account_balance_v3", lambda a: a.account_balance_all()),
+        ("account_config", "futures_account_configuration", lambda a: a.account_config()),
+        (
+            "symbol_config",
+            "symbol_configuration",
+            lambda a: a.symbol_config(symbol=TEST_ONLY_SYMBOL),
+        ),
+        (
+            "leverage_brackets",
+            "notional_and_leverage_brackets",
+            lambda a: a.leverage_brackets(symbol=TEST_ONLY_SYMBOL),
+        ),
+    ],
+)
+async def test_the_flat_reads_record_an_exchange_error_as_data(
+    name: str, sdk: str, call: Any
+) -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(sdk, BadRequestError(status_code=-2015, error_message="Invalid API-key."))
+    observation = await call(adapter)
+    assert observation.ok is False and observation.operation == name
+    assert observation.error is not None and observation.error.code == -2015
+
+
+async def test_income_history_sends_symbol_and_start_time_only() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "get_income_history",
+        [
+            GetIncomeHistoryResponse(
+                symbol="BTCUSDT",
+                income_type="COMMISSION",
+                income="-0.02400000",
+                asset="USDT",
+                info=f"8389765492 {TEST_ONLY_SECRET}",
+                time=TEST_ONLY_UPDATE_MS,
+                tran_id=9001,
+                trade_id="4411",
+            ),
+            GetIncomeHistoryResponse(
+                symbol="BTCUSDT",
+                income_type="REALIZED_PNL",
+                income="0.50000000",
+                asset="USDT",
+                time=TEST_ONLY_UPDATE_MS + 1,
+                tran_id=9002,
+                trade_id="4411",
+            ),
+        ],
+    )
+    register_runtime_secret(TEST_ONLY_SECRET)
+
+    observation = await adapter.income_history(
+        symbol=TEST_ONLY_SYMBOL, start_time_ms=TEST_ONLY_UPDATE_MS
+    )
+
+    assert rest.calls == [
+        (
+            "get_income_history",
+            {"symbol": TEST_ONLY_SYMBOL, "start_time": TEST_ONLY_UPDATE_MS, "recv_window": _RECV},
+        )
+    ]
+    assert observation.operation == "income_history"
+    summary = dict(observation.summary)
+    assert TEST_ONLY_SECRET not in summary["row_0_info"]
+    summary.pop("row_0_info")
+    assert summary == {
+        "count": "2",
+        "row_0_symbol": "BTCUSDT",
+        "row_0_income_type": "COMMISSION",
+        "row_0_income": "-0.02400000",
+        "row_0_asset": "USDT",
+        "row_0_time_ms": str(TEST_ONLY_UPDATE_MS),
+        "row_0_tran_id": "9001",
+        "row_0_trade_id": "4411",
+        "row_1_symbol": "BTCUSDT",
+        "row_1_income_type": "REALIZED_PNL",
+        "row_1_income": "0.50000000",
+        "row_1_asset": "USDT",
+        "row_1_time_ms": str(TEST_ONLY_UPDATE_MS + 1),
+        "row_1_tran_id": "9002",
+        "row_1_trade_id": "4411",
+    }
+
+
+@pytest.mark.parametrize("bad", [True, 0, -5])
+async def test_income_history_refuses_a_bad_start_time(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=bad)
+    with pytest.raises(TypeError):
+        await adapter.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=1.5)  # type: ignore[arg-type]
+    assert rest.calls == []
+
+
+async def test_query_algo_order_by_algo_id_sends_the_int_id() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "query_algo_order",
+        QueryAlgoOrderResponse(
+            algo_id=1000000001, client_algo_id=TEST_ONLY_CLIENT_ALGO_ID, algo_status="NEW"
+        ),
+    )
+
+    observation = await adapter.query_algo_order_by_algo_id(algo_id=1000000001)
+
+    assert rest.calls == [("query_algo_order", {"algo_id": 1000000001, "recv_window": _RECV})]
+    assert observation.operation == "query_algo_order_by_algo_id"
+    assert dict(observation.summary) == {
+        "algo_id": "1000000001",
+        "client_algo_id": TEST_ONLY_CLIENT_ALGO_ID,
+        "algo_status": "NEW",
+    }
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, "1000000001", 1.0])
+async def test_query_algo_order_by_algo_id_refuses_a_bool_or_a_non_positive_id(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.query_algo_order_by_algo_id(algo_id=bad)
+    assert rest.calls == []
+
+
+async def test_new_gtd_limit_order_sends_gtd_and_the_int_good_till_date() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "new_order",
+        NewOrderResponse(
+            order_id=1,
+            client_order_id=TEST_ONLY_CLIENT_ORDER_ID,
+            status="NEW",
+            time_in_force="GTD",
+            good_till_date=TEST_ONLY_UPDATE_MS + 660_000,
+        ),
+    )
+
+    observation = await adapter.new_gtd_limit_order(
+        symbol=TEST_ONLY_SYMBOL,
+        side="BUY",
+        quantity=Decimal("0.0008"),
+        price=Decimal("50000.10"),
+        client_order_id=TEST_ONLY_CLIENT_ORDER_ID,
+        position_side="BOTH",
+        good_till_date_ms=TEST_ONLY_UPDATE_MS + 660_000,
+    )
+
+    assert rest.calls == [
+        (
+            "new_order",
+            {
+                "symbol": TEST_ONLY_SYMBOL,
+                "side": NewOrderSideEnum.BUY,
+                "type": NewOrderTypeEnum.LIMIT,
+                "position_side": "BOTH",
+                "time_in_force": NewOrderTimeInForceEnum.GTD,
+                "quantity": "0.0008",
+                "price": "50000.10",
+                "new_client_order_id": TEST_ONLY_CLIENT_ORDER_ID,
+                "good_till_date": TEST_ONLY_UPDATE_MS + 660_000,
+                "recv_window": _RECV,
+            },
+        )
+    ]
+    assert "reduce_only" not in rest.calls[0][1]
+    assert isinstance(rest.calls[0][1]["good_till_date"], int)
+    assert observation.operation == "new_gtd_limit_order"
+    assert observation.summary["good_till_date"] == str(TEST_ONLY_UPDATE_MS + 660_000)
+    assert observation.summary["time_in_force"] == "GTD"
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1791360660000", None])
+async def test_new_gtd_limit_order_refuses_a_non_int_good_till_date(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(TypeError):
+        await _gtd(adapter, good_till_date_ms=bad)
+    assert rest.calls == []
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+async def test_new_gtd_limit_order_refuses_a_non_positive_good_till_date(bad: int) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(ValueError):
+        await _gtd(adapter, good_till_date_ms=bad)
+    assert rest.calls == []
+
+
+async def test_new_gtd_limit_order_keeps_the_money_and_enum_rules() -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(TypeError):
+        await _gtd(adapter, quantity=0.0008)
+    with pytest.raises(ValueError):
+        await _gtd(adapter, price=Decimal(0))
+    with pytest.raises(ValueError):
+        await _gtd(adapter, side="HOLD")
+    assert rest.calls == []
+
+
+async def _gtd(adapter: BinanceProbeAdapter, **overrides: Any) -> ProbeObservation:
+    arguments: dict[str, Any] = {
+        "symbol": TEST_ONLY_SYMBOL,
+        "side": "BUY",
+        "quantity": Decimal("0.0008"),
+        "price": Decimal("50000.10"),
+        "client_order_id": TEST_ONLY_CLIENT_ORDER_ID,
+        "position_side": "BOTH",
+        "good_till_date_ms": TEST_ONLY_UPDATE_MS + 660_000,
+    }
+    arguments.update(overrides)
+    return await adapter.new_gtd_limit_order(**arguments)
+
+
+async def test_a_gtd_placement_timeout_is_recorded_once_and_never_retried() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("new_order", NetworkError("FAKE: connection reset"))
+    observation = await _gtd(adapter)
+    assert observation.ok is False
+    assert rest.names() == ["new_order"]
+
+
+async def test_live_mark_price_is_the_premium_index_mark_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "mark_price",
+        MarkPriceResponse(
+            actual_instance=MarkPriceResponse1(
+                symbol=TEST_ONLY_SYMBOL, mark_price="83748.12345678", time=TEST_ONLY_UPDATE_MS
+            )
+        ),
+    )
+
+    observation = await adapter.live_mark_price(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [("mark_price", {"symbol": TEST_ONLY_SYMBOL})]  # public: no recvWindow
+    assert observation.ok is True and observation.operation == "live_mark_price"
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "mark_price": "83748.12345678",
+        "exchange_time_utc": "2026-10-07T08:00:00+00:00",
+    }
+
+
+async def test_live_mark_price_records_an_unreadable_answer_as_data() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "mark_price",
+        MarkPriceResponse(
+            actual_instance=MarkPriceResponse1(symbol="ETHUSDT", mark_price="1", time=1)
+        ),
+    )
+    observation = await adapter.live_mark_price(symbol=TEST_ONLY_SYMBOL)
+    assert observation.ok is False
+    assert observation.error is not None and observation.error.message == "ValueError"
 
 
 # --------------------------------------------------------------------------- #
@@ -1554,6 +2035,16 @@ def test_every_public_coroutine_returns_observations_only() -> None:
         "account_balance",
         "mark_price",
         "symbol_filters",
+        # quick task 261021-sj0
+        "account_information",
+        "account_balance_all",
+        "account_config",
+        "symbol_config",
+        "leverage_brackets",
+        "income_history",
+        "query_algo_order_by_algo_id",
+        "new_gtd_limit_order",
+        "live_mark_price",
     }
     assert {name: text for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {}
 

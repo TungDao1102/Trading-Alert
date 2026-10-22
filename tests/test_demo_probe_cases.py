@@ -20,6 +20,7 @@ import pytest
 from scripts import demo_probe as dp
 from src.adapters.binance_probe import ProbeBanned
 from src.adapters.binance_ratelimit_gate import IP_BAN_418
+from src.ops import operator_evidence as oe
 
 from tests.probe_fakes import (
     TEST_ONLY_CASE_TIMEOUT_SECONDS,
@@ -53,9 +54,34 @@ EXPECTED_ORDER = (
     "explicit_time_in_force_variant",
     "stream_gap_during_case",
     "market_lot_size_out_of_range",
+    # quick task 261021-sj0: the ten owner opt-in evidence-capture cases
+    "account_read_only_capture",
+    "algo_query_timing_after_new",
+    "close_position_stop_with_position",
+    "stop_would_trigger_after_fill",
+    "stop_query_absent_then_same_id",
+    "manual_close_with_open_legs",
+    "commission_vs_realized_pnl",
+    "triggered_close_position_bracket",
+    "tp1_quantity_from_fill",
+    "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
-ALL_OPTIONAL = ("explicit_time_in_force", "stream_gap", "market_lot_size_out_of_range")
+ALL_OPTIONAL = (
+    "explicit_time_in_force",
+    "stream_gap",
+    "market_lot_size_out_of_range",
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "gtd_expiry",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +156,8 @@ def test_case_order_is_the_d16_order_of_risk() -> None:
     assert tuple(dp.OPTIONAL_CASES) == ALL_OPTIONAL
     assert tuple(dp.OPTIONAL_CASES.values()) == EXPECTED_ORDER[16:]
     assert dp.READ_ONLY_CASES == READ_ONLY
+    assert tuple(dp.OPTIONAL_CASES) == oe.OPTIONAL_CASE_KEYS + oe.EVIDENCE_CASE_KEYS
+    assert dp.CAPTURE_CASES == EXPECTED_ORDER[19:]
 
 
 def test_this_plan_registers_the_four_read_only_handlers() -> None:
@@ -1853,6 +1881,9 @@ def _function_nodes(tree: ast.Module) -> dict[str, ast.AST]:
     return found
 
 
+GTD_HANDLER = "_gtd_entry_expiry_status"
+
+
 def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> None:
     tree = ast.parse(Path(dp.__file__).read_text(encoding="utf-8"))
     functions = _function_nodes(tree)
@@ -1875,8 +1906,14 @@ def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> N
         assert rig.endswith("rig"), (name, rig)
         if name == "cleanup_symbol":
             assert timeout == "timeout_seconds"
+        elif name == GTD_HANDLER:
+            # quick task 261021-sj0: the one handler that waits the owner GTD expiry wait
+            assert timeout.endswith("gtd_expiry_wait_seconds"), (name, timeout)
         else:
             assert timeout.endswith("case_timeout_seconds"), (name, timeout)
+    assert {name for name, _, timeout in waits if timeout.endswith("gtd_expiry_wait_seconds")} == {
+        GTD_HANDLER
+    }
     for handler in dp.CASE_HANDLERS.values():
         source = inspect.getsource(handler)
         assert "asyncio.sleep" not in source and "time.sleep" not in source

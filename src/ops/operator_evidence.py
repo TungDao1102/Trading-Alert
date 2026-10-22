@@ -18,7 +18,9 @@ change it.
   exact phrase.
 * `DemoOrderLimits` and `load_demo_order_limits`: the owner-approved order size and waits of a
   Demo run, from a TOML file. Kind "smoke" (plan 18-16) and kind "probe" (plans 18-17, 18-23).
-  Nothing has a default: every missing, unknown or malformed key refuses the file.
+  Nothing has a default: every missing, unknown or malformed key refuses the file. Quick task
+  261021-sj0 adds ten owner opt-in evidence cases (`EVIDENCE_CASE_KEYS`) and three keys that are
+  required exactly when their case is enabled; the Phase 18 file loads unchanged.
 * `sha256_lf`: the sha256 of a text file with CRLF normalized to LF.
 
 Standard library and `src.ops.redaction` only: no SDK, no adapter, no network.
@@ -179,6 +181,27 @@ OPTIONAL_CASE_KEYS: tuple[str, ...] = (
 _MARKET_LOT_CASE = "market_lot_size_out_of_range"
 _MARKET_LOT_QUANTITY = "market_lot_probe_quantity"
 
+# Quick task 261021-sj0: the owner opt-in evidence-capture cases of `scripts/demo_probe.py`, in
+# the order the script runs them. They are optional in `[optional_cases]` (absent = not enabled,
+# not stored), so a file written for Phase 18 keeps its exact meaning.
+EVIDENCE_CASE_KEYS: tuple[str, ...] = (
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "gtd_expiry",
+)
+_NEAR_TRIGGER_FRACTION = "near_trigger_fraction"
+_NEAR_TRIGGER_CASES: tuple[str, ...] = ("triggered_bracket", "tp1_from_fill")
+_GTD_CASE = "gtd_expiry"
+_GTD_LIFETIME = "gtd_lifetime_seconds"
+_GTD_WAIT = "gtd_expiry_wait_seconds"
+
 # Per kind: section -> the keys it must carry (exactly).
 _LAYOUT: Mapping[str, Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
@@ -218,6 +241,11 @@ class DemoOrderLimits:
     `market_lot_probe_quantity` and `case_timeout_seconds` for the smoke; `event_wait_seconds`
     for the probe); `optional_cases` is empty for the smoke. `market_lot_probe_quantity` is set
     exactly when the optional case `market_lot_size_out_of_range` is enabled.
+    `near_trigger_fraction` is set exactly when `triggered_bracket` or `tp1_from_fill` is
+    enabled (a decimal strictly between 0 and 1: how close to the live mark the trigger sits),
+    `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds` exactly when `gtd_expiry` is enabled
+    (the wait exceeds the lifetime). The 600 second exchange floor of goodTillDate is not
+    checked: the exchange's answer to a shorter lifetime is itself evidence.
     """
 
     kind: str
@@ -230,11 +258,18 @@ class DemoOrderLimits:
     case_timeout_seconds: int | None
     cleanup_timeout_seconds: int
     optional_cases: Mapping[str, bool]
+    near_trigger_fraction: Decimal | None
+    gtd_lifetime_seconds: int | None
+    gtd_expiry_wait_seconds: int | None
 
     @property
     def enabled_optional_cases(self) -> tuple[str, ...]:
-        """The enabled optional cases, in `OPTIONAL_CASE_KEYS` order."""
-        return tuple(key for key in OPTIONAL_CASE_KEYS if self.optional_cases.get(key) is True)
+        """The enabled optional cases: `OPTIONAL_CASE_KEYS` order, then `EVIDENCE_CASE_KEYS`."""
+        return tuple(
+            key
+            for key in (*OPTIONAL_CASE_KEYS, *EVIDENCE_CASE_KEYS)
+            if self.optional_cases.get(key) is True
+        )
 
 
 def _decimal(section: Mapping[str, Any], dotted: str, key: str, problems: list[str]) -> Decimal:
@@ -287,6 +322,57 @@ def _check_keys(
     return sections
 
 
+def _near_trigger_fraction(
+    order: Mapping[str, Any], enabled: Mapping[str, bool], problems: list[str]
+) -> Decimal | None:
+    """`order.near_trigger_fraction`: required exactly when a near-trigger case is enabled."""
+    needed = any(enabled.get(case) is True for case in _NEAR_TRIGGER_CASES)
+    dotted = f"order.{_NEAR_TRIGGER_FRACTION}"
+    cases = " or ".join(f"optional_cases.{case}" for case in _NEAR_TRIGGER_CASES)
+    if not needed:
+        if _NEAR_TRIGGER_FRACTION in order:
+            problems.append(f"{dotted} (only allowed when {cases} is true)")
+        return None
+    if _NEAR_TRIGGER_FRACTION not in order:
+        problems.append(f"{dotted} (missing key: required when {cases} is true)")
+        return None
+    value = _decimal(order, dotted, _NEAR_TRIGGER_FRACTION, problems)
+    if value >= 1:
+        problems.append(f"{dotted} (must be strictly between 0 and 1)")
+    return value
+
+
+def _gtd_limits(
+    order: Mapping[str, Any],
+    waits: Mapping[str, Any],
+    enabled: Mapping[str, bool],
+    problems: list[str],
+) -> tuple[int | None, int | None]:
+    """The GTD lifetime and expiry wait: required exactly when `gtd_expiry` is enabled."""
+    lifetime_dotted = f"order.{_GTD_LIFETIME}"
+    wait_dotted = f"waits.{_GTD_WAIT}"
+    case = f"optional_cases.{_GTD_CASE}"
+    if enabled.get(_GTD_CASE) is not True:
+        if _GTD_LIFETIME in order:
+            problems.append(f"{lifetime_dotted} (only allowed when {case} is true)")
+        if _GTD_WAIT in waits:
+            problems.append(f"{wait_dotted} (only allowed when {case} is true)")
+        return None, None
+    lifetime: int | None = None
+    wait: int | None = None
+    if _GTD_LIFETIME not in order:
+        problems.append(f"{lifetime_dotted} (missing key: required when {case} is true)")
+    else:
+        lifetime = _positive_int(order, lifetime_dotted, _GTD_LIFETIME, problems)
+    if _GTD_WAIT not in waits:
+        problems.append(f"{wait_dotted} (missing key: required when {case} is true)")
+    else:
+        wait = _positive_int(waits, wait_dotted, _GTD_WAIT, problems)
+    if lifetime and wait and wait <= lifetime:
+        problems.append(f"{wait_dotted} (must be greater than {lifetime_dotted})")
+    return lifetime, wait
+
+
 def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     """Load the owner's order-limits file of `kind` ("smoke" or "probe").
 
@@ -306,7 +392,15 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         raise DemoOrderLimitsRefused(["the order limits file is not valid TOML"]) from None
 
     problems: list[str] = []
-    optional_keys = {"order": (_MARKET_LOT_QUANTITY,)} if kind == KIND_PROBE else {}
+    optional_keys: Mapping[str, tuple[str, ...]] = (
+        {
+            "order": (_MARKET_LOT_QUANTITY, _NEAR_TRIGGER_FRACTION, _GTD_LIFETIME),
+            "waits": (_GTD_WAIT,),
+            "optional_cases": EVIDENCE_CASE_KEYS,
+        }
+        if kind == KIND_PROBE
+        else {}
+    )
     sections = _check_keys(raw, _LAYOUT[kind], optional_keys, problems)
     order = sections["order"]
     waits = sections["waits"]
@@ -327,6 +421,9 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     lot_quantity: Decimal | None = None
     event_wait: int | None = None
     case_timeout: int | None = None
+    near_trigger: Decimal | None = None
+    gtd_lifetime: int | None = None
+    gtd_wait: int | None = None
     optional_cases: dict[str, bool] = {}
     if kind == KIND_SMOKE:
         event_wait = _positive_int(
@@ -358,6 +455,13 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
                 f"order.{_MARKET_LOT_QUANTITY} (only allowed when "
                 f"optional_cases.{_MARKET_LOT_CASE} is true)"
             )
+        for key in EVIDENCE_CASE_KEYS:
+            if key in cases:
+                if not isinstance(cases[key], bool):
+                    problems.append(f"optional_cases.{key} (must be true or false)")
+                optional_cases[key] = cases[key] is True
+        near_trigger = _near_trigger_fraction(order, optional_cases, problems)
+        gtd_lifetime, gtd_wait = _gtd_limits(order, waits, optional_cases, problems)
 
     if problems:
         raise DemoOrderLimitsRefused(problems)
@@ -372,6 +476,9 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         case_timeout_seconds=case_timeout,
         cleanup_timeout_seconds=cleanup,
         optional_cases=MappingProxyType(optional_cases),
+        near_trigger_fraction=near_trigger,
+        gtd_lifetime_seconds=gtd_lifetime,
+        gtd_expiry_wait_seconds=gtd_wait,
     )
 
 
@@ -387,6 +494,7 @@ def sha256_lf(path: Path | str) -> str:
 
 
 __all__ = [
+    "EVIDENCE_CASE_KEYS",
     "EXIT_ABORTED",
     "EXIT_FAILED",
     "EXIT_OK",

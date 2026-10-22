@@ -29,6 +29,13 @@ installed SDK is imported only for the request enums, as `binance_usdm.py` does.
 
 SDK methods (installed `binance-sdk-derivatives-trading-usds-futures` 17.4.0, bound offline by
 `tests/test_binance_probe_contract.py`): see `SDK_REST_METHODS`.
+
+Quick task 261021-sj0 adds nine owner-run evidence-capture operations (`account_information`,
+`account_balance_all`, `account_config`, `symbol_config`, `leverage_brackets`, `income_history`,
+`query_algo_order_by_algo_id`, `new_gtd_limit_order`, `live_mark_price`). Each makes one SDK
+call and is never retried. The five account reads use `_flat_summary`, which deliberately
+extends T-18-34 (the named-field rule) to these read-only account answers: they carry no
+credential field, and every value still goes through the shared redactor and the length cap.
 """
 
 from __future__ import annotations
@@ -102,6 +109,12 @@ SDK_REST_METHODS: frozenset[str] = frozenset(
         "position_information_v3",
         "account_trade_list",
         "futures_account_balance_v3",
+        # quick task 261021-sj0
+        "account_information_v3",
+        "futures_account_configuration",
+        "symbol_configuration",
+        "notional_and_leverage_brackets",
+        "get_income_history",
     }
 )
 
@@ -142,6 +155,7 @@ _ORDER_FIELDS: tuple[str, ...] = (
     "working_type",
     "reduce_only",
     "close_position",
+    "good_till_date",
 )
 _ALGO_ORDER_FIELDS: tuple[str, ...] = (
     "algo_id",
@@ -220,12 +234,35 @@ _TRADE_ROW_FIELDS: tuple[tuple[str, str], ...] = (
     ("commission_asset", "commission_asset"),
     ("maker", "maker"),
     ("time_ms", "time"),
+    # quick task 261021-sj0 (additive): realized PnL and the fill's identity
+    ("realized_pnl", "realized_pnl"),
+    ("side", "side"),
+    ("position_side", "position_side"),
+    ("buyer", "buyer"),
+    ("quote_qty", "quote_qty"),
+    ("margin_asset", "margin_asset"),
+)
+# (summary name, SDK field) of one income row (quick task 261021-sj0); `info` is free text.
+_INCOME_ROW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("symbol", "symbol"),
+    ("income_type", "income_type"),
+    ("income", "income"),
+    ("asset", "asset"),
+    ("info", "info"),
+    ("time_ms", "time"),
+    ("tran_id", "tran_id"),
+    ("trade_id", "trade_id"),
 )
 _BALANCE_ROW_FIELDS: tuple[str, ...] = ("asset", "balance", "available_balance")
 _ZERO = Decimal(0)
 # Free-text response fields: passed through the shared redactor and capped like an error
 # message (threat T-18-34).
 _FREE_TEXT_FIELDS: frozenset[str] = frozenset({"msg"})
+
+# `_flat_summary` stops after this many data keys and adds `truncated` = `true` (quick task
+# 261021-sj0). The account answer lists one row per asset and per position.
+FLAT_SUMMARY_MAX_KEYS: int = 2000
+_FLAT_MAX_DEPTH: int = 8
 
 
 def _is_strict_int(value: object) -> bool:
@@ -469,6 +506,67 @@ def _balance_summary(raw: Any) -> dict[str, str]:
         if getattr(row, "balance", None) is not None and Decimal(str(row.balance)) != _ZERO
     ]
     return _rows_summary(kept, _same_names(_BALANCE_ROW_FIELDS))
+
+
+def _income_summary(raw: Any) -> dict[str, str]:
+    """Income rows as text; the free-text `info` goes through the redactor and the cap."""
+    out = _rows_summary(_rows(raw), _INCOME_ROW_FIELDS)
+    for key in [name for name in out if name.endswith("_info")]:
+        out[key] = scrub(out[key])[:ERROR_MESSAGE_MAX_CHARS]
+    return out
+
+
+def _flat_summary(raw: Any) -> dict[str, str]:
+    """Every present field of an account answer as `<path>` -> text (quick task 261021-sj0).
+
+    The path joins the wire (alias) names with dots and list positions as numbers, for example
+    ``assets.0.walletBalance``. SDK models are read through ``to_dict()`` (wire names, extra
+    fields kept), a oneOf wrapper through its ``actual_instance``; None is dropped. Every
+    value is the evidence text of the field, passed through the shared redactor and capped at
+    `ERROR_MESSAGE_MAX_CHARS`. After `FLAT_SUMMARY_MAX_KEYS` data keys it stops and adds
+    ``truncated`` = ``true``.
+
+    This deliberately extends T-18-34 (named response fields only) to the five read-only
+    account answers of the capture task: they carry no credential field, and the owner wants
+    every field the exchange returns (for example the equity field names).
+    """
+    out: dict[str, str] = {}
+    full = False
+
+    def clip(text: str) -> str:
+        return scrub(text)[:ERROR_MESSAGE_MAX_CHARS]
+
+    def walk(value: object, path: str, depth: int) -> None:
+        nonlocal full
+        if full or value is None:
+            return
+        inner = getattr(value, "actual_instance", None)
+        if inner is not None:
+            walk(inner, path, depth)
+            return
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict) and not isinstance(value, Mapping):
+            walk(to_dict(), path, depth)
+            return
+        children: list[tuple[str, object]] | None = None
+        if depth < _FLAT_MAX_DEPTH:
+            if isinstance(value, Mapping):
+                children = [(clip(str(key)), item) for key, item in value.items()]
+            elif isinstance(value, list | tuple):
+                children = [(str(index), item) for index, item in enumerate(value)]
+        if children is not None:
+            for name, item in children:
+                walk(item, f"{path}.{name}" if path else name, depth + 1)
+            return
+        if len(out) >= FLAT_SUMMARY_MAX_KEYS:
+            full = True
+            return
+        out[path or "value"] = clip(_text(value))
+
+    walk(raw, "", 0)
+    if full:
+        out["truncated"] = "true"
+    return out
 
 
 def _mark_price_summary(symbol: str, klines: Sequence[MarkKline]) -> dict[str, str]:
@@ -930,11 +1028,151 @@ class BinanceProbeAdapter:
             lambda filters: _symbol_filters_summary(symbol, filters),
         )
 
+    # ----- capture operations (quick task 261021-sj0; each sent once, never retried) -- #
+
+    async def account_information(self) -> ProbeObservation:
+        """GET /fapi/v3/account: every present field, flattened (equity field names)."""
+        return await self._call(
+            "account_information",
+            sdk_method_name="account_information_v3",
+            call_kind=CallKind.QUERY,
+            kwargs={},
+            summarize=_flat_summary,
+        )
+
+    async def account_balance_all(self) -> ProbeObservation:
+        """GET /fapi/v3/balance: every asset and every field (unlike `account_balance`)."""
+        return await self._call(
+            "account_balance_all",
+            sdk_method_name="futures_account_balance_v3",
+            call_kind=CallKind.QUERY,
+            kwargs={},
+            summarize=_flat_summary,
+        )
+
+    async def account_config(self) -> ProbeObservation:
+        """GET /fapi/v1/accountConfig: dualSidePosition, multiAssetsMargin, fee tier."""
+        return await self._call(
+            "account_config",
+            sdk_method_name="futures_account_configuration",
+            call_kind=CallKind.QUERY,
+            kwargs={},
+            summarize=_flat_summary,
+        )
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation:
+        """GET /fapi/v1/symbolConfig for one symbol: margin type and leverage."""
+        return await self._call(
+            "symbol_config",
+            sdk_method_name="symbol_configuration",
+            call_kind=CallKind.QUERY,
+            kwargs={"symbol": symbol},
+            summarize=_flat_summary,
+        )
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation:
+        """GET /fapi/v1/leverageBracket for one symbol (the oneOf answer is unwrapped)."""
+        return await self._call(
+            "leverage_brackets",
+            sdk_method_name="notional_and_leverage_brackets",
+            call_kind=CallKind.QUERY,
+            kwargs={"symbol": symbol},
+            summarize=_flat_summary,
+        )
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation:
+        """GET /fapi/v1/income from `start_time_ms`: no type filter, no limit (exchange default)."""
+        if not _is_strict_int(start_time_ms):
+            raise TypeError("start_time_ms must be an int (not a bool)")
+        if start_time_ms <= 0:
+            raise ValueError("start_time_ms must be positive")
+        return await self._call(
+            "income_history",
+            sdk_method_name="get_income_history",
+            call_kind=CallKind.QUERY,
+            kwargs={"symbol": symbol, "start_time": start_time_ms},
+            summarize=_income_summary,
+        )
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation:
+        """GET /fapi/v1/algoOrder by the exchange's algo id (the id of the placement answer)."""
+        if not _is_strict_int(algo_id):
+            raise TypeError("algo_id must be an int (not a bool)")
+        if algo_id <= 0:
+            raise ValueError("algo_id must be positive")
+        return await self._call(
+            "query_algo_order_by_algo_id",
+            sdk_method_name="query_algo_order",
+            call_kind=CallKind.QUERY,
+            kwargs={"algo_id": algo_id},
+            summarize=_algo_order_summary,
+        )
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation:
+        """POST /fapi/v1/order LIMIT with timeInForce GTD and goodTillDate (epoch ms, an int).
+
+        No reduce-only parameter. Whether the exchange accepts a goodTillDate below its own
+        floor is itself evidence, so the value is checked for type and sign only.
+        """
+        if not _is_strict_int(good_till_date_ms):
+            raise TypeError("good_till_date_ms must be an int (not a bool)")
+        if good_till_date_ms <= 0:
+            raise ValueError("good_till_date_ms must be positive")
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": _member(NewOrderSideEnum, "side", side),
+            "type": NewOrderTypeEnum.LIMIT,
+            "position_side": position_side,
+            "time_in_force": NewOrderTimeInForceEnum.GTD,
+            "quantity": _money("quantity", quantity),
+            "price": _money("price", price),
+            "new_client_order_id": client_order_id,
+            "good_till_date": good_till_date_ms,
+        }
+        return await self._call(
+            "new_gtd_limit_order",
+            sdk_method_name="new_order",
+            call_kind=CallKind.PLACEMENT,
+            kwargs=kwargs,
+            summarize=_order_summary,
+        )
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
+        """The live premiumIndex mark price and the exchange time, through the public reader.
+
+        Unlike `mark_price` (the last one-minute mark-kline close, which stayed unchanged for
+        seconds on Demo), this is the current mark the trigger cases price against.
+        """
+
+        async def read() -> Any:
+            return await self._public.mark_price(symbol)
+
+        return await self._public_read(
+            "live_mark_price",
+            read,
+            lambda reading: {
+                "symbol": reading.symbol,
+                "mark_price": _text(reading.mark_price),
+                "exchange_time_utc": _text(reading.exchange_time_utc),
+            },
+        )
+
 
 __all__ = [
     "MARK_PRICE_INTERVAL",
     "CONDITIONAL_ORDER_TYPES",
     "ERROR_MESSAGE_MAX_CHARS",
+    "FLAT_SUMMARY_MAX_KEYS",
     "SDK_REST_METHODS",
     "BinanceProbeAdapter",
     "ErrorObservation",

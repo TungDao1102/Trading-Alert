@@ -267,6 +267,9 @@ def test_the_smoke_kind_loads_every_value_with_decimal_strings(tmp_path: Path) -
         case_timeout_seconds=None,
         cleanup_timeout_seconds=60,
         optional_cases=MappingProxyType({}),
+        near_trigger_fraction=None,
+        gtd_lifetime_seconds=None,
+        gtd_expiry_wait_seconds=None,
     )
     assert limits.enabled_optional_cases == ()
 
@@ -410,6 +413,203 @@ def test_the_probe_kind_refuses_every_missing_unknown_or_malformed_key(
 ) -> None:
     with pytest.raises(oe.DemoOrderLimitsRefused):
         oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261021-sj0: the ten owner opt-in evidence cases.
+# --------------------------------------------------------------------------- #
+
+PHASE18_PROBE_LIMITS = (
+    Path(__file__).resolve().parents[1]
+    / ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-probe-limits.toml"
+)
+NEW_KEYS = (
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "gtd_expiry",
+)
+
+
+def _with_new_keys(*pairs: tuple[str, str]) -> str:
+    """The TEST_ONLY probe file with `key = value` lines added to [optional_cases]."""
+    return TEST_ONLY_PROBE_LIMITS + "".join(f"{key} = {value}\n" for key, value in pairs)
+
+
+def test_the_evidence_case_keys_are_the_ten_in_script_order() -> None:
+    assert oe.EVIDENCE_CASE_KEYS == NEW_KEYS
+    assert "EVIDENCE_CASE_KEYS" in oe.__all__
+    assert not set(oe.EVIDENCE_CASE_KEYS) & set(oe.OPTIONAL_CASE_KEYS)
+
+
+def test_the_real_phase18_probe_file_loads_to_the_unchanged_values() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.enabled_optional_cases == ()
+    assert dict(limits.optional_cases) == {
+        "explicit_time_in_force": False,
+        "stream_gap": False,
+        "market_lot_size_out_of_range": False,
+    }
+    assert limits.symbol == "BTCUSDT"
+    assert limits.quantity == Decimal("0.0008")
+    assert limits.max_notional_quote == Decimal("100")
+    assert limits.far_price_fraction == Decimal("0.96")
+    assert limits.case_timeout_seconds == 30
+    assert limits.cleanup_timeout_seconds == 60
+    assert limits.near_trigger_fraction is None
+    assert limits.gtd_lifetime_seconds is None
+    assert limits.gtd_expiry_wait_seconds is None
+
+
+def test_an_evidence_key_enables_its_case_and_follows_the_phase18_keys(tmp_path: Path) -> None:
+    text = _with_new_keys(("account_capture", "true"), ("algo_query_timing", "false"))
+    text = text.replace("stream_gap = false", "stream_gap = true")
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert limits.optional_cases["account_capture"] is True
+    assert limits.optional_cases["algo_query_timing"] is False
+    assert "close_position_with_position" not in limits.optional_cases  # absent: not stored
+    assert limits.enabled_optional_cases == (
+        "explicit_time_in_force",
+        "stream_gap",
+        "account_capture",
+    )
+
+
+def test_a_non_bool_evidence_key_is_refused_by_name(tmp_path: Path) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _with_new_keys(("account_capture", '"true"'))), kind="probe"
+        )
+    assert "optional_cases.account_capture" in str(info.value)
+    assert "true" not in str(info.value).replace("must be true or false", "")
+
+
+def test_an_unknown_key_in_optional_cases_is_still_refused(tmp_path: Path) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _with_new_keys(("mystery_capture", "true"))), kind="probe"
+        )
+    assert "optional_cases.mystery_capture (unknown key)" in str(info.value)
+
+
+_NEAR = 'near_trigger_fraction = "0.999"\n'
+
+
+@pytest.mark.parametrize("key", ["triggered_bracket", "tp1_from_fill"])
+def test_the_near_trigger_fraction_is_required_exactly_when_its_cases_are_on(
+    tmp_path: Path, key: str
+) -> None:
+    on = _with_new_keys((key, "true")).replace(
+        'symbol = "BTCUSDT"\n', 'symbol = "BTCUSDT"\n' + _NEAR
+    )
+    limits = oe.load_demo_order_limits(_write(tmp_path, on), kind="probe")
+    assert limits.near_trigger_fraction == Decimal("0.999")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as missing:
+        oe.load_demo_order_limits(_write(tmp_path, _with_new_keys((key, "true"))), kind="probe")
+    assert "order.near_trigger_fraction (missing key" in str(missing.value)
+    off = TEST_ONLY_PROBE_LIMITS.replace('symbol = "BTCUSDT"\n', 'symbol = "BTCUSDT"\n' + _NEAR)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as present:
+        oe.load_demo_order_limits(_write(tmp_path, off), kind="probe")
+    assert "order.near_trigger_fraction (only allowed when" in str(present.value)
+
+
+@pytest.mark.parametrize(
+    "value", ['"0"', '"1"', '"1.5"', '"-0.5"', "0.999", '"abc"', '"9E-1"', "1"]
+)
+def test_the_near_trigger_fraction_must_be_a_plain_decimal_strictly_between_0_and_1(
+    tmp_path: Path, value: str
+) -> None:
+    text = _with_new_keys(("triggered_bracket", "true")).replace(
+        'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\nnear_trigger_fraction = {value}\n'
+    )
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert "order.near_trigger_fraction" in str(info.value)
+
+
+def _gtd_text(lifetime: str | None, wait: str | None, *, enabled: bool = True) -> str:
+    text = _with_new_keys(("gtd_expiry", "true" if enabled else "false"))
+    if lifetime is not None:
+        text = text.replace(
+            'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\ngtd_lifetime_seconds = {lifetime}\n'
+        )
+    if wait is not None:
+        text = text.replace(
+            "case_timeout_seconds = 45\n",
+            f"case_timeout_seconds = 45\ngtd_expiry_wait_seconds = {wait}\n",
+        )
+    return text
+
+
+def test_the_gtd_lifetime_and_wait_come_with_their_case(tmp_path: Path) -> None:
+    limits = oe.load_demo_order_limits(_write(tmp_path, _gtd_text("660", "720")), kind="probe")
+    assert limits.gtd_lifetime_seconds == 660
+    assert limits.gtd_expiry_wait_seconds == 720
+    assert "gtd_expiry" in limits.enabled_optional_cases
+
+
+@pytest.mark.parametrize(
+    ("lifetime", "wait", "enabled", "named"),
+    [
+        (None, "720", True, "order.gtd_lifetime_seconds"),
+        ("660", None, True, "waits.gtd_expiry_wait_seconds"),
+        ("660", "660", True, "waits.gtd_expiry_wait_seconds (must be greater"),
+        ("660", "600", True, "waits.gtd_expiry_wait_seconds (must be greater"),
+        ("0", "720", True, "order.gtd_lifetime_seconds (must be a positive integer)"),
+        ("true", "720", True, "order.gtd_lifetime_seconds (must be a positive integer)"),
+        ('"660"', "720", True, "order.gtd_lifetime_seconds (must be a positive integer)"),
+        ("660", "7.5", True, "waits.gtd_expiry_wait_seconds (must be a positive integer)"),
+        ("660", "720", False, "order.gtd_lifetime_seconds (only allowed when"),
+        (None, "720", False, "waits.gtd_expiry_wait_seconds (only allowed when"),
+    ],
+)
+def test_the_gtd_keys_are_refused_unless_valid_and_only_with_their_case(
+    tmp_path: Path, lifetime: str | None, wait: str | None, enabled: bool, named: str
+) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _gtd_text(lifetime, wait, enabled=enabled)), kind="probe"
+        )
+    assert named in str(info.value)
+
+
+def test_a_lifetime_below_the_exchange_floor_is_not_refused(tmp_path: Path) -> None:
+    """The exchange's answer to a short lifetime is itself evidence (A1): no floor here."""
+    limits = oe.load_demo_order_limits(_write(tmp_path, _gtd_text("30", "60")), kind="probe")
+    assert limits.gtd_lifetime_seconds == 30
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("order", 'near_trigger_fraction = "0.999"\n'),
+        ("order", "gtd_lifetime_seconds = 660\n"),
+        ("waits", "gtd_expiry_wait_seconds = 720\n"),
+        ("optional_cases", "account_capture = true\n"),
+    ],
+)
+def test_the_smoke_kind_refuses_the_new_keys_as_unknown(
+    tmp_path: Path, extra: tuple[str, str]
+) -> None:
+    section, line = extra
+    text = TEST_ONLY_SMOKE_LIMITS.replace(f"[{section}]\n", f"[{section}]\n{line}", 1)
+    if section == "optional_cases":
+        text += f"\n[optional_cases]\n{line}"
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+
+
+def test_the_refusals_of_the_new_keys_never_carry_a_value(tmp_path: Path) -> None:
+    text = _gtd_text("123456", "123457", enabled=False)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert "123456" not in str(info.value) and "123457" not in str(info.value)
 
 
 def test_a_smoke_file_is_refused_as_a_probe_file_and_the_reverse(tmp_path: Path) -> None:

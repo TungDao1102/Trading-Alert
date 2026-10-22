@@ -23,6 +23,7 @@ from typing import Any
 from src.adapters.binance_probe import ErrorObservation, ProbeObservation
 from src.adapters.binance_public import BinancePublicMarketData
 from src.adapters.binance_ratelimit_gate import RestRateLimitGate
+from src.ops.operator_evidence import EVIDENCE_CASE_KEYS
 
 from tests.support.limits import test_only_rate_limit_policy
 
@@ -111,7 +112,27 @@ class FakeProbeRest:
     def futures_account_balance_v3(self, **kwargs: Any) -> FakeResponse:
         return self._answer("futures_account_balance_v3", kwargs)
 
+    # ----- capture reads (quick task 261021-sj0) -------------------------- #
+
+    def account_information_v3(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("account_information_v3", kwargs)
+
+    def futures_account_configuration(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("futures_account_configuration", kwargs)
+
+    def symbol_configuration(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("symbol_configuration", kwargs)
+
+    def notional_and_leverage_brackets(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("notional_and_leverage_brackets", kwargs)
+
+    def get_income_history(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("get_income_history", kwargs)
+
     # ----- public reads, reached through BinancePublicMarketData --------- #
+
+    def mark_price(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("mark_price", kwargs)
 
     def mark_price_kline_candlestick_data(self, **kwargs: Any) -> FakeResponse:
         return self._answer("mark_price_kline_candlestick_data", kwargs)
@@ -192,10 +213,13 @@ MUTATING_OPERATIONS: frozenset[str] = frozenset(
         "cancel_algo_order",
         "cancel_all_open_orders",
         "cancel_all_algo_open_orders",
+        "new_gtd_limit_order",
     }
 )
 # The per-case requests (reads a case sends about one id): recorded as planned in a dry run.
-CASE_QUERY_OPERATIONS: frozenset[str] = frozenset({"query_order", "query_algo_order"})
+CASE_QUERY_OPERATIONS: frozenset[str] = frozenset(
+    {"query_order", "query_algo_order", "query_algo_order_by_algo_id"}
+)
 
 
 def ok_observation(operation: str, summary: dict[str, str] | None = None) -> ProbeObservation:
@@ -240,8 +264,66 @@ def fake_symbol_filters(symbol: str) -> ProbeObservation:
     )
 
 
+# FAKE flat summaries of the capture reads (quick task 261021-sj0): the shape of
+# `_flat_summary`, never Binance data.
+FAKE_EXCHANGE_TIME = "2026-10-16T06:00:00+00:00"
+
+
+def fake_account_information() -> ProbeObservation:
+    return ok_observation(
+        "account_information",
+        {
+            "totalWalletBalance": FAKE_BALANCE,
+            "availableBalance": FAKE_BALANCE,
+            "assets.0.asset": FAKE_BALANCE_ASSET,
+            "assets.0.walletBalance": FAKE_BALANCE,
+            "positions.0.symbol": "BTCUSDT",
+        },
+    )
+
+
+def fake_account_balance_all() -> ProbeObservation:
+    return ok_observation(
+        "account_balance_all",
+        {
+            "0.asset": FAKE_BALANCE_ASSET,
+            "0.balance": FAKE_BALANCE,
+            "0.availableBalance": FAKE_BALANCE,
+        },
+    )
+
+
+def fake_account_config(dual_side: bool = False) -> ProbeObservation:
+    flag = "true" if dual_side else "false"
+    return ok_observation(
+        "account_config",
+        {"feeTier": "0", "dualSidePosition": flag, "multiAssetsMargin": "false"},
+    )
+
+
+def fake_symbol_config(symbol: str) -> ProbeObservation:
+    return ok_observation(
+        "symbol_config", {"0.symbol": symbol, "0.marginType": "CROSSED", "0.leverage": "20"}
+    )
+
+
+def fake_leverage_brackets(symbol: str) -> ProbeObservation:
+    return ok_observation(
+        "leverage_brackets",
+        {
+            "0.symbol": symbol,
+            "0.brackets.0.bracket": "1",
+            "0.brackets.0.initialLeverage": "125",
+            "0.brackets.1.bracket": "2",
+        },
+    )
+
+
 TEST_ONLY_CASE_TIMEOUT_SECONDS = 30
 TEST_ONLY_CLEANUP_TIMEOUT_SECONDS = 60
+TEST_ONLY_NEAR_TRIGGER_FRACTION = "0.999"
+TEST_ONLY_GTD_LIFETIME_SECONDS = 660
+TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS = 720
 
 _TEST_ONLY_PROBE_LIMITS = """
 [order]
@@ -253,12 +335,12 @@ far_price_fraction = "0.80"
 [waits]
 case_timeout_seconds = {case_timeout}
 cleanup_timeout_seconds = {cleanup_timeout}
-
+{extra_waits}
 [optional_cases]
 explicit_time_in_force = {explicit_time_in_force}
 stream_gap = {stream_gap}
 market_lot_size_out_of_range = {market_lot}
-"""
+{evidence_cases}"""
 
 
 def write_probe_limits(
@@ -268,16 +350,32 @@ def write_probe_limits(
     optional: tuple[str, ...] = (),
     name: str = "probe-limits.toml",
 ) -> Path:
-    """A TEST_ONLY probe limits file (the owner writes the real one at plan 18-20)."""
+    """A TEST_ONLY probe limits file (the owner writes the real one at plan 18-20).
+
+    `optional` names the enabled optional cases. The ten evidence keys of quick task
+    261021-sj0 are written (as `true`) only when named; the keys they need get TEST_ONLY values
+    (`near_trigger_fraction` for the two near-trigger cases, the GTD lifetime and wait for
+    `gtd_expiry`). The text of the three Phase 18 keys is unchanged.
+    """
     market_lot = "market_lot_size_out_of_range" in optional
+    extra_order = 'market_lot_probe_quantity = "200"\n' if market_lot else ""
+    if "triggered_bracket" in optional or "tp1_from_fill" in optional:
+        extra_order += f'near_trigger_fraction = "{TEST_ONLY_NEAR_TRIGGER_FRACTION}"\n'
+    extra_waits = ""
+    if "gtd_expiry" in optional:
+        extra_order += f"gtd_lifetime_seconds = {TEST_ONLY_GTD_LIFETIME_SECONDS}\n"
+        extra_waits = f"gtd_expiry_wait_seconds = {TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS}\n"
+    evidence = "".join(f"{key} = true\n" for key in EVIDENCE_CASE_KEYS if key in optional)
     text = _TEST_ONLY_PROBE_LIMITS.format(
         symbol=symbol,
-        extra_order='market_lot_probe_quantity = "200"\n' if market_lot else "",
+        extra_order=extra_order,
+        extra_waits=extra_waits,
         case_timeout=TEST_ONLY_CASE_TIMEOUT_SECONDS,
         cleanup_timeout=TEST_ONLY_CLEANUP_TIMEOUT_SECONDS,
         explicit_time_in_force=str("explicit_time_in_force" in optional).lower(),
         stream_gap=str("stream_gap" in optional).lower(),
         market_lot=str(market_lot).lower(),
+        evidence_cases=evidence,
     )
     path = directory / name
     path.write_text(text, encoding="utf-8")
@@ -365,6 +463,11 @@ class FakeProbePort:
         )
         self.on_wait: list[Any] = []
         self.banned = False
+        # Quick task 261021-sj0: the exchange algo ids, scriptable income rows, GTD record.
+        self.algo_ids: dict[str, int] = {}
+        self._next_algo_id = 1_000_000_000
+        self.income_rows: list[dict[str, str]] = []
+        self.good_till_dates: dict[str, int] = {}
 
     # ----- scenario helpers (plan 18-23) -------------------------------------- #
 
@@ -400,6 +503,27 @@ class FakeProbePort:
                 "algo_status": status,
             }
         )
+
+    def expire_order(
+        self,
+        client_order_id: str,
+        *,
+        raw: object | None = None,
+        expire_reason: str | None = None,
+    ) -> None:
+        """The exchange expires an open GTD order (FAKE): status, a frame and a raw payload."""
+        if client_order_id in self.open_order_ids:
+            self.open_order_ids.remove(client_order_id)
+        self.order_status[client_order_id] = "EXPIRED"
+        record = {
+            "event_type": "OrderUpdateEvent",
+            "client_order_id": client_order_id,
+            "order_status": "EXPIRED",
+            "execution_type": "EXPIRED",
+        }
+        if expire_reason is not None:
+            record["expire_reason"] = expire_reason
+        self.emit_frame(record, raw=raw)
 
     def trigger_algo(
         self,
@@ -453,6 +577,10 @@ class FakeProbePort:
         if raw is not None:
             self.raw_log.append((self._sequence.next(), raw))
 
+    def emit_raw(self, payload: object) -> None:
+        """A raw user-data payload without a typed record (quick task 261021-sj0)."""
+        self.raw_log.append((self._sequence.next(), payload))
+
     def emit_state(self, state: str) -> None:
         self.state_log.append((self._sequence.next(), state))
 
@@ -498,6 +626,29 @@ class FakeProbePort:
             return error_observation("query_algo_order", code=-2013, category="ORDER_ABSENT")
 
         return self._answer("query_algo_order", {"client_algo_id": client_algo_id}, default)
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation:
+        def default() -> ProbeObservation:
+            client_algo_id = next(
+                (cid for cid, aid in self.algo_ids.items() if aid == algo_id), None
+            )
+            if client_algo_id is None:
+                return error_observation(
+                    "query_algo_order_by_algo_id", code=-2013, category="ORDER_ABSENT"
+                )
+            status = self.algo_status.get(client_algo_id)
+            if status is None and client_algo_id in self.open_algo_ids:
+                status = "NEW"
+            if status is None:
+                return error_observation(
+                    "query_algo_order_by_algo_id", code=-2013, category="ORDER_ABSENT"
+                )
+            return ok_observation(
+                "query_algo_order_by_algo_id",
+                {"algo_id": str(algo_id), "client_algo_id": client_algo_id, "algo_status": status},
+            )
+
+        return self._answer("query_algo_order_by_algo_id", {"algo_id": algo_id}, default)
 
     async def new_limit_order(
         self,
@@ -629,9 +780,15 @@ class FakeProbePort:
             self.algo_status[client_id] = "NEW"
             quantity = kwargs.get("quantity")
             self.algo_quantity[client_id] = format(quantity, "f") if quantity is not None else ""
+            self._next_algo_id += 1
+            self.algo_ids[client_id] = self._next_algo_id
             return ok_observation(
                 "new_conditional_order",
-                {"client_algo_id": client_id, "algo_status": "NEW"},
+                {
+                    "client_algo_id": client_id,
+                    "algo_status": "NEW",
+                    "algo_id": str(self._next_algo_id),
+                },
             )
 
         return self._answer("new_conditional_order", kwargs, default)
@@ -750,6 +907,86 @@ class FakeProbePort:
             )
 
         return self._answer("position_mode", {}, default)
+
+    # ----- quick task 261021-sj0: the capture operations --------------------------- #
+
+    async def account_information(self) -> ProbeObservation:
+        return self._answer("account_information", {}, fake_account_information)
+
+    async def account_balance_all(self) -> ProbeObservation:
+        return self._answer("account_balance_all", {}, fake_account_balance_all)
+
+    async def account_config(self) -> ProbeObservation:
+        return self._answer("account_config", {}, lambda: fake_account_config(self.dual_side))
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation:
+        return self._answer("symbol_config", {"symbol": symbol}, lambda: fake_symbol_config(symbol))
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation:
+        return self._answer(
+            "leverage_brackets", {"symbol": symbol}, lambda: fake_leverage_brackets(symbol)
+        )
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation:
+        def default() -> ProbeObservation:
+            return ok_observation("income_history", _rows(list(self.income_rows)))
+
+        return self._answer(
+            "income_history", {"symbol": symbol, "start_time_ms": start_time_ms}, default
+        )
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation:
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "client_order_id": client_order_id,
+            "position_side": position_side,
+            "good_till_date_ms": good_till_date_ms,
+        }
+
+        def default() -> ProbeObservation:
+            self._require_own_symbol(kwargs)
+            if client_order_id in self.open_order_ids:
+                return self.duplicate_order_answer
+            self.open_order_ids.append(client_order_id)
+            self.order_status[client_order_id] = "NEW"
+            self.good_till_dates[client_order_id] = good_till_date_ms
+            return ok_observation(
+                "new_gtd_limit_order",
+                {
+                    "client_order_id": client_order_id,
+                    "status": "NEW",
+                    "time_in_force": "GTD",
+                    "good_till_date": str(good_till_date_ms),
+                },
+            )
+
+        return self._answer("new_gtd_limit_order", kwargs, default)
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
+        def default() -> ProbeObservation:
+            return ok_observation(
+                "live_mark_price",
+                {
+                    "symbol": symbol,
+                    "mark_price": format(self.mark, "f"),
+                    "exchange_time_utc": FAKE_EXCHANGE_TIME,
+                },
+            )
+
+        return self._answer("live_mark_price", {"symbol": symbol}, default)
 
     # ----- the stream accessors ---------------------------------------------- #
 
@@ -932,6 +1169,63 @@ class RecordingProbePort:
     async def position_mode(self) -> ProbeObservation:
         return self._read("position_mode", {"dual_side_position": "false"})
 
+    # ----- quick task 261021-sj0: the capture operations ----------------------------- #
+
+    async def account_information(self) -> ProbeObservation:
+        return self._read("account_information", dict(fake_account_information().summary))
+
+    async def account_balance_all(self) -> ProbeObservation:
+        return self._read("account_balance_all", dict(fake_account_balance_all().summary))
+
+    async def account_config(self) -> ProbeObservation:
+        return self._read("account_config", dict(fake_account_config().summary))
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation:
+        return self._read("symbol_config", dict(fake_symbol_config(symbol).summary))
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation:
+        return self._read("leverage_brackets", dict(fake_leverage_brackets(symbol).summary))
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation:
+        return self._read("income_history", {"count": "0"})
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation:
+        return self._plan("query_algo_order_by_algo_id", {"algo_id": algo_id})
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation:
+        return self._plan(
+            "new_gtd_limit_order",
+            {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "client_order_id": client_order_id,
+                "position_side": position_side,
+                "good_till_date_ms": good_till_date_ms,
+            },
+        )
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
+        return self._read(
+            "live_mark_price",
+            {
+                "symbol": symbol,
+                "mark_price": FAKE_MARK_PRICE,
+                "exchange_time_utc": FAKE_EXCHANGE_TIME,
+            },
+        )
+
     def marker(self) -> int:
         return 0
 
@@ -951,6 +1245,7 @@ class RecordingProbePort:
 __all__ = [
     "CASE_QUERY_OPERATIONS",
     "FAKE_BALANCE",
+    "FAKE_EXCHANGE_TIME",
     "FAKE_LABEL",
     "FAKE_MARK_PRICE",
     "FAKE_SYMBOL_FILTERS",
@@ -963,6 +1258,9 @@ __all__ = [
     "RecordingProbePort",
     "TEST_ONLY_CASE_TIMEOUT_SECONDS",
     "TEST_ONLY_CLEANUP_TIMEOUT_SECONDS",
+    "TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS",
+    "TEST_ONLY_GTD_LIFETIME_SECONDS",
+    "TEST_ONLY_NEAR_TRIGGER_FRACTION",
     "VirtualClock",
     "error_observation",
     "fake_mark_price",
