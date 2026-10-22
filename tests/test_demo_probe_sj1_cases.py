@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import ast
 import json
+import re
+import shlex
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +22,7 @@ from typing import Any
 
 import pytest
 from scripts import demo_probe as dp
+from src.ops import operator_evidence as oe
 
 from tests.probe_fakes import (
     TEST_ONLY_CASE_TIMEOUT_SECONDS,
@@ -823,3 +826,114 @@ def test_the_script_docstring_and_the_new_handlers_have_no_float_and_no_new_faul
     assert not {"connect", "close", "send", "recv", "socket"} & called
     # nothing but the 599 and 601 second points of the boundary case are spelled as numbers
     assert dp.GTD_BOUNDARY_MARGINS_SECONDS == (599, 601)
+
+
+# --------------------------------------------------------------------------- #
+# The runbook: "One session: all cases" and "Not covered here".
+# --------------------------------------------------------------------------- #
+
+RUNBOOK = Path(dp.__file__).resolve().parents[1] / ".planning" / "DEMO-EVIDENCE-PLAN.md"
+SESSION_VALUES = {
+    "symbol": '"BTCUSDT"',
+    "quantity": '"0.002"',
+    "max_notional_quote": '"150"',
+    "far_price_fraction": '"0.80"',
+    "near_trigger_fraction": '"0.999"',
+    "gtd_lifetime_seconds": "660",
+    "race_repeats": "3",
+    "case_timeout_seconds": "30",
+    "cleanup_timeout_seconds": "60",
+    "gtd_expiry_wait_seconds": "720",
+}
+
+
+def session_section() -> str:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    start = text.index("## One session: all cases")
+    end = text.index("\n## ", start + 1)
+    return text[start:end]
+
+
+def session_toml() -> str:
+    section = session_section()
+    return section.split("```toml\n", 1)[1].split("```", 1)[0]
+
+
+def test_the_session_list_is_the_case_order_of_the_optional_cases() -> None:
+    items = re.findall(r"^\d+\. `(\w+)` \(key `(\w+)`\)", session_section(), flags=re.M)
+    expected = [(cid, key) for key, cid in dp.OPTIONAL_CASES.items() if cid in dp.CASE_ORDER[19:]]
+    assert items == expected
+    assert [cid for cid, _ in items] == list(dp.CASE_ORDER[19:])
+    assert items[-1][0] == "gtd_entry_expiry_status"  # the long one is last
+    assert set(NEW_CASES) <= {cid for cid, _ in items}
+
+
+def test_the_session_toml_has_every_key_and_only_owner_placeholders() -> None:
+    text = session_toml()
+    keys = re.findall(r"^(\w+) = ", text, flags=re.M)
+    on = {key for key in re.findall(r"^(\w+) = true$", text, flags=re.M)}
+    assert on == set(oe.EVIDENCE_CASE_KEYS)  # every evidence key, and no other, is on
+    for line in text.splitlines():
+        match = re.match(r"^(\w+) = (.+)$", line)
+        if match and match.group(2) not in {"true", "false"}:
+            assert "<OWNER:" in match.group(2), line  # never an invented number
+    assert {"race_repeats", "gtd_lifetime_seconds", "near_trigger_fraction"} <= set(keys)
+    assert re.search(r"^\d", text, flags=re.M) is None
+
+
+def test_the_session_toml_loads_once_the_placeholders_are_replaced(tmp_path: Path) -> None:
+    lines = []
+    for line in session_toml().splitlines():
+        match = re.match(r"^(\w+) = .*<OWNER:", line)
+        lines.append(f"{match.group(1)} = {SESSION_VALUES[match.group(1)]}" if match else line)
+    path = tmp_path / "session.toml"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    limits = oe.load_demo_order_limits(path, kind="probe")
+    assert limits.enabled_optional_cases == oe.EVIDENCE_CASE_KEYS
+    assert limits.race_repeats == 3 and limits.gtd_expiry_wait_seconds == 720
+
+
+def test_the_session_command_has_no_only_and_runs_every_enabled_case(tmp_path: Path) -> None:
+    command = re.search(r"^uv run python -m scripts\.demo_probe .*$", session_section(), flags=re.M)
+    assert command is not None
+    words = shlex.split(command.group(0))
+    assert "--only" not in words and "--execute" in words
+    limits = tmp_path / "session.toml"
+    limits.write_text(
+        "\n".join(
+            f"{m.group(1)} = {SESSION_VALUES[m.group(1)]}"
+            if (m := re.match(r"^(\w+) = .*<OWNER:", line))
+            else line
+            for line in session_toml().splitlines()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    argv = words[words.index("scripts.demo_probe") + 1 :]
+    argv[argv.index("--probe-limits-file") + 1] = str(limits)
+    argv[argv.index("--evidence-dir") + 1] = str(tmp_path / "evidence")
+    argv[argv.index("--fixtures-dir") + 1] = str(tmp_path / "fixtures")
+    config = dp.parse_config(argv)
+    assert config.only is None
+    assert config.case_ids == (*dp.REQUIRED_CASES, *dp.CASE_ORDER[19:])
+
+
+def test_the_runbook_says_what_the_new_cases_cannot_answer() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    not_covered = text[text.index("## Not covered here") : text.index("## After a run")]
+    for needle in ("P3", "P5", "P7", "NOT_OBSERVED", "best effort", "418", "429", "never provoked"):
+        assert needle in not_covered, needle
+    assert "does not reproduce a deterministic race" in text
+    for case_id in NEW_CASES:
+        assert case_id in text, case_id
+    for key in ("exchange_info_read", "gtd_min_lifetime", "cancel_fill_race", "stream_loss"):
+        assert key in text, key
+    assert "race_repeats" in text and "RACE_REPEATS_MAX" in text
+    # nothing of the sj0 text that is still true was dropped
+    for kept in (
+        "Hedge Mode",
+        "stream states of SAFE_MODE",
+        "partial_fill",
+        "stream_gap_during_case",
+    ):
+        assert kept in not_covered, kept
