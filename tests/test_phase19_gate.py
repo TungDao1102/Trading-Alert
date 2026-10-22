@@ -681,9 +681,14 @@ def test_glossary_91_and_the_rejection_reason_enum_are_unchanged() -> None:
 
 OWNER_GAPS = PHASE_DIR / "19-OWNER-GAPS.md"
 ROADMAP = ROOT / ".planning" / "ROADMAP.md"
-# The commit after which the Phase 19 and 20 success criteria must stay byte-identical (the
-# last commit of the Q5 change, before the hand-off notes touched the ROADMAP).
+# The commit after which the Phase 19 success criteria must stay byte-identical (the last
+# commit of the Q5 change, before the hand-off notes touched the ROADMAP). The Phase 20
+# criteria left this pin on 2026-10-22: the owner accepted new wording of criterion 2 (O-A,
+# plan 20-26) and `test_phase20_criteria_match_the_owner_accepted_wording` pins it instead.
 ROADMAP_CRITERIA_BASELINE = "fffdb6e"
+PROPOSED_WORDING = (
+    ROOT / ".planning" / "phases" / "20-reconcile-safe-mode-hardening" / "20-PROPOSED-WORDING.md"
+)
 
 # Owner decisions that are still OPEN (the row's status cell says so).
 OPEN_OWNER_ITEMS: tuple[str, ...] = ("O-01", "O-02", "O-03", "O-04", "O-05", "Q3", "Q4")
@@ -797,10 +802,31 @@ def test_roadmap_success_criteria_of_phases_19_and_20_are_unchanged() -> None:
     )
     before = shown.stdout.decode("utf-8")
     now = ROADMAP.read_text(encoding="utf-8")
-    for phase in (19, 20):
+    for phase in (19,):
         assert _success_criteria(now, phase) == _success_criteria(before, phase), (
             f"Phase {phase} success criteria changed since {ROADMAP_CRITERIA_BASELINE}"
         )
+
+
+@pytest.mark.skipif(
+    not PROPOSED_WORDING.is_file(),
+    reason="the Phase 20 planning directory is not in this checkout (archived or filtered)",
+)
+def test_phase20_criteria_match_the_owner_accepted_wording() -> None:
+    """ROADMAP Phase 20 criteria equal the ACCEPTED-CRITERIA block of the proposal.
+
+    The owner accepted that block as proposed (checkpoint O-A of plan 20-26, answered
+    "approved" and "B2/B3: confirm" on 2026-10-22). Criterion 2 therefore replaces the
+    fffdb6e text; any later edit of the Phase 20 criteria needs a new owner answer and a new
+    ACCEPTED-CRITERIA block, not a quiet edit of the ROADMAP.
+    """
+    proposal = PROPOSED_WORDING.read_text(encoding="utf-8").replace("\r\n", "\n")
+    match = re.search(r"```text ACCEPTED-CRITERIA\n(.*?)\n```", proposal, flags=re.DOTALL)
+    assert match is not None, "20-PROPOSED-WORDING.md has no ACCEPTED-CRITERIA block"
+    accepted = [line.rstrip() for line in match.group(1).strip().splitlines()]
+    now = ROADMAP.read_text(encoding="utf-8").replace("\r\n", "\n")
+    actual = [line.rstrip() for line in _success_criteria(now, 20).strip().splitlines()]
+    assert actual == accepted
 
 
 @requires_phase19_planning
