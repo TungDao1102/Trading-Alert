@@ -110,12 +110,12 @@ SAFE_MODE blocks new entry orders only, meaning orders that can open or increase
 - Protective and reduce-only orders are always allowed, after an authoritative position query;
 - existing exchange-side protective orders remain active;
 - monitoring, reconciliation and journaling continue;
-- a missing or canceled stop-loss is automatically re-placed at the original plan stop-loss, never wider (D034);
+- a stop-loss that was never confirmed ACTIVE and that REST proved absent is placed again under the same client id at the plan stop-loss, never wider, at most once per coordinator step and only until `max_unprotected_ms` (D034 clause (1)); a stop that was confirmed ACTIVE and is later lost is never re-placed, neither automatically nor by an operator action: the exposure is closed by a reduce-only order (D077);
 - a stop-loss that is rejected or not acknowledged leads to a reduce-only market close, then a HIGH-priority alert (D034);
 - a database failure must not block risk-reducing actions (D034);
 - nothing depends on the operator reacting within minutes, because the operator works full-time (D034).
 
-Implementation status: the automatic stop re-placement, the reduce-only close and the DB-outage guarantee above are the target behaviour (D034), built in Phase 20 (EXEC-06, OPS-05). Until then the system enters SAFE_MODE and alerts on an unprotected position but does not re-place the stop-loss or close the position itself, so the operator must place the stop-loss or close the position manually.
+Implementation status (Phase 20): the never-confirmed stop rule, the reduce-only close and the D077 handling of a lost stop, the act-first risk-reducing controls with the local spill (a risk-reducing action does not wait for the journal) and the five EXEC-06 controls are built and tested with fakes and a local PostgreSQL `[DESIGN]`. They are not run by any deployed process yet: the composition is Phase 24, the controls have no command surface and no authentication (the operator id is audit metadata), and no behavior is observed on Binance `[NOT_TESTED]`: assumption A3 (does a closePosition stop leave with its position), probe P6 and the same-id placement of case (1) against the exchange are open. Until the composition exists the operator uses `RUNBOOK.md` section 3: place the stop-loss or close the position manually on the exchange.
 
 This supersedes the earlier "no new live order placement" wording and the cancel-only reconciler decision (Phase 08 D-03 / Phase 09 D-02), per D034.
 

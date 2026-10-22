@@ -85,7 +85,7 @@ Once a live position is protected, the system must not silently widen the protec
 
 Any stop modification must be explicit, logged, and permitted by the strategy/execution contract.
 
-Automatic re-placement of a missing or canceled stop-loss restores the original plan SL, never a wider one (D034).
+Re-placement of a stop is limited to a stop that was never confirmed ACTIVE and that REST proved absent: it is placed again under the same client id at the original plan SL, never a wider one (D034 clause (1)). A stop that was confirmed and later lost is never re-placed, neither automatically nor by an operator action (D077); its exposure is closed by a reduce-only order.
 
 ## 7. No revenge/compensation logic
 

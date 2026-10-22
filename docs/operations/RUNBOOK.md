@@ -39,14 +39,14 @@ SAFE_MODE
 → alert immediately
 → query Binance authoritative position
 → query protective/algo orders
-→ if stop is absent or canceled, automatically re-place it at the original plan SL after risk validation (never wider)
+→ if the stop was never confirmed ACTIVE and REST proves it absent, the system places it again under the same client id at the original plan SL (never wider), at most once per coordinator step and only until `max_unprotected_ms`; if the stop was confirmed ACTIVE and is later lost, it is never re-placed: the position is closed with a reduce-only order (D077)
 → if the SL is rejected or not acknowledged, close the position with a reduce-only order, then send a HIGH alert
 → manual intervention is optional, not required
 ```
 
-The automatic ladder is per D034: the operator works full-time and cannot be assumed to react within minutes.
+The automatic ladder is per D034 and D077: the operator works full-time and cannot be assumed to react within minutes. The operator's control for a confirmed-then-lost stop is the close (`operator_close_position`, `EXECUTION_SPEC.md` section 11); there is no operator re-placement of that stop.
 
-**Implementation status:** the ladder above is the target behaviour (D034) and is built in Phase 20 (EXEC-06, OPS-05). Until then the system does not re-place a stop-loss or close the position by itself: on an entry without a protective stop it enters SAFE_MODE and alerts, and the operator must place the stop-loss or close the position manually on the exchange. Do not wait for an automatic action.
+**Implementation status:** the ladder above (D034, narrowed by D077) is built in Phase 20 and tested with fakes `[DESIGN]`; no deployed process runs it yet (the composition is Phase 24), the controls have no command surface and nothing is observed on Binance `[NOT_TESTED]`. Until the composition exists the system does not place or close anything by itself on the host: on an entry without a protective stop the operator places the stop-loss or closes the position manually on the exchange. Do not wait for an automatic action.
 
 Never assume a locally stored order ID means the exchange order exists.
 
