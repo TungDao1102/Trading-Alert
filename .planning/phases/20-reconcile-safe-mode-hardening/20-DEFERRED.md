@@ -80,3 +80,18 @@ The owner runs Demo on another machine with network access; this machine cannot 
 | Manual-close behavior (G4-035) | `[NOT_TESTED]` | plans 20-11, 20-23 | What Binance does with a closePosition leg when the position is closed outside the system, and the sweep after it |
 | The user-data stream states used by SAFE_MODE exit row 7 | `[NOT_TESTED]` | plan 20-25 | That a real stream reports exactly `LIVE` when healthy and another state otherwise |
 | The 11 Demo probes (O-05) and the D055 closure draft (O-01) | `[NOT_TESTED]` | Phase 19, kept by the owner | Run by the owner as in `19-OWNER-GAPS.md` section 2 (probe list copied there, not restated here) |
+
+## Demo results of 2026-10-22
+
+The owner ran the new probe cases on Binance Demo (demo-observed, not mainnet, not verified on mainnet). Evidence: `19-execution-plan-binding-price-check/evidence/demo-probe-EVIDENCE-20261022T115616Z.json`, `...T120055Z.json`, `...T120704Z.json`, `...T121349Z.json`, `...T124048Z.json`, `...T125303Z.json` and the smoke `18-user-data-stream-error-taxonomy/evidence/user-data-smoke-EVIDENCE-20261022T115052Z.json`; the detail is in `19-OWNER-GAPS.md` section 2a. The table above is left as written; this section updates it.
+
+| Item | Result |
+|------|--------|
+| A2: GTD expiry ends the entry with a terminal status | Not confirmed. A GTD entry was still `NEW` 840 s after `goodTillDate` and was cancelled by the probe. The coordinator's wait to `entry_terminal_timeout` stays the only path; a GTD expiry must not be treated as proof of a terminal order. |
+| A3: closePosition legs when the position closes | Observed: both legs end `EXPIRED` (ALGO_UPDATE) and REST answers ABSENT; none is orphaned. The sweeper path for an orphan leg was not exercised by Demo. |
+| 418 ban longer than 259200 s | Not tested, on purpose (no ban is provoked). |
+| 429/418 queue order | Not tested, same reason. |
+| Stop re-place with the same id (B2/B3) | Observed: while the first stop is open, a second placement with the same id gets -4116. A query by client id right after placement answers -2013 although the stop is `NEW`, so `found=False` is not proof that the id is free. |
+| Manual close (G4-035) | Observed: no orphan; the legs end `EXPIRED`. |
+| Stream states for SAFE_MODE exit row 7 | Partly: after a forced drop the supervisor reports `UNKNOWN`, `SYNCING`, `LIVE`. Frames sent during the gap were not delivered after the reconnect; REST showed the state. |
+| The 11 Demo probes (O-05) and the D055 closure draft (O-01) | O-05: partly observed, see `19-OWNER-GAPS.md` section 2a (not observed: P3, a GTD expiry, `rm`). O-01: unchanged, the owner has not recorded an acceptance. |
