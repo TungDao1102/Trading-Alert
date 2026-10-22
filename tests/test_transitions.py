@@ -2,8 +2,8 @@
 
 Plan 20-02 adds a seventh kind, PROTECTION (T-A, D-29): its table is copied from the
 ``ProtectionState`` docstring of ``src/execution/protection.py``. It is not persisted (no table,
-no trigger) and its GLOSSARY section 11 block waits for the owner's acceptance of the D055
-closure draft (19-OWNER-GAPS section 5), so it is exempt from the GLOSSARY parity tests below.
+no trigger). Its GLOSSARY section 11.7 block was added on 2026-10-22, after D079 (quick task
+261022-t2l), and is held to the same GLOSSARY parity tests below as the other six.
 The enum parity of its keys lives in ``tests/test_protection_transitions.py`` because the
 state enum is on the execution side and ``src/domain`` never imports ``src.execution``.
 """
@@ -153,9 +153,9 @@ KINDS = list(TransitionKind)
 # by the ProtectionState values, an execution-side enum pinned by test_protection_transitions.py.
 ENUM_KINDS = [kind for kind in KINDS if kind in ENUM_FOR_KIND]
 
-# Kinds without a GLOSSARY section 11 block yet: 19-OWNER-GAPS section 5 says the ProtectionState
-# block waits for the owner's acceptance of the D055 closure draft (O-01).
-GLOSSARY_DEFERRED_KINDS = {TransitionKind.PROTECTION}
+# Kinds without a GLOSSARY section 11 block: none since 2026-10-22. The 11.7 ProtectionState block
+# was added after D079 (quick task 261022-t2l) and is held to the same parity tests.
+GLOSSARY_DEFERRED_KINDS: set[TransitionKind] = set()
 GLOSSARY_KINDS = [kind for kind in KINDS if kind not in GLOSSARY_DEFERRED_KINDS]
 
 
@@ -329,10 +329,11 @@ SECTION_11_TITLES: dict[TransitionKind, str] = {
     TransitionKind.POSITION: "11.4 Position transitions",
     TransitionKind.APPROVAL: "11.5 Approval transitions",
     TransitionKind.EXECUTION_INTENT: "11.6 ExecutionIntent transitions",
+    TransitionKind.PROTECTION: "11.7 Protection transitions",
 }
 
 
-def test_glossary_section_11_has_the_six_subsections() -> None:
+def test_glossary_section_11_has_the_seven_subsections() -> None:
     subsections = _subsections(_glossary_section(11), 11)
     assert list(subsections) == [SECTION_11_TITLES[kind] for kind in GLOSSARY_KINDS]
 

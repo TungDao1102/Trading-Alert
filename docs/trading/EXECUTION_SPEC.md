@@ -22,6 +22,8 @@ Place/attach protective exits
 Monitor user-data events
 ```
 
+Since Phase 19 the protective exits are placed after the first fill, never beside the entry (section 6.3, D079).
+
 The approval must expire; it must not be possible to approve an invalid or stale plan accidentally.
 
 ## 2. Preferred V1 order style
@@ -133,7 +135,19 @@ Grounding and confidence: the official Event-Algo-Order-Update page could not be
 
 The user-data stream is a low-latency hint plus evidence, never the authority (D-05, D-10, D-11, D-20). REST is the authority: the state of an order, a fill, a position and a protective stop is read from Binance by REST before it is acted on, and a stream event alone never marks an order resolved, a position protected or an entry allowed. A gap in the stream (a disconnect, a rotation, a missed keepalive, a dropped frame) makes the stream UNKNOWN until a REST snapshot has been taken and the stream is live again; the smoke on Demo observed that sequence, UNKNOWN then SYNCING then LIVE (demo-observed, not mainnet, `BINANCE.md` section 5). An event for an unknown order, an unknown event type, a malformed payload, a status outside the table of section 6.1 and a field that fails Decimal or UTC validation are journaled as stream anomalies and surfaced as divergences for the reconciler: they never become state and are never silently dropped or coerced (D-05). Silence of the stream is not a staleness criterion by itself. Failed REST calls are classified by the taxonomy of `BINANCE.md` section 6.2, never by message text.
 
-The finding of D055 (code -4509 on a `closePosition` stop placed while flat) is a recorded observation, not a choice: the execution model, protection placed after the entry fill or a protective stop pre-placed before it, stays an open decision of the user (D055), and nothing in this section or in the Demo-observed facts of section 6.1 chooses it. Until that decision is recorded no document and no code may treat a protective order as confirmed because a call returned success or because an event arrived; only a status of class ACTIVE read from Binance counts (section 6.1). Verify against current Binance docs before implementation.
+The finding of D055 (code -4509 on a `closePosition` stop placed while flat) was a recorded observation; the execution model is decided by D079 (2026-10-22): protection is placed after the entry fill (section 6.3), and the Demo-observed facts of section 6.1 chose nothing by themselves. No document and no code may treat a protective order as confirmed because a call returned success or because an event arrived; only a status of class ACTIVE read from Binance counts (section 6.1). Verify against current Binance docs before implementation.
+
+### 6.3 Fill-driven protection (D079)
+
+Decided by D079 (2026-10-22), the closure of D055. Execution model (a) is the only V1 model: the entry is a GTD LIMIT placed with no protective stop beside it, and the protective stop is STOP_MARKET `closePosition=true`, placed by the protection coordinator (`src/execution/protection.py`) after the first fill with positive quantity and confirmed by a REST query (only a status of class ACTIVE counts, section 6.1). Model (b), a stop pre-placed before the fill, is not built.
+
+- No new entry opens while any position is unprotected.
+- A stop not confirmed before `protection.max_unprotected_ms`, or an entry not terminal before `protection.entry_terminal_timeout_ms`, leads to CLOSE_REQUIRED and an automatic reduce-only MARKET close by the emergency closer (`src/execution/emergency_close.py`; D034 approves the principle). Both keys are `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml`, and the live path refuses while they are unset.
+- A GTD expiry is not confirmed on Demo and unknown on mainnet; the system does not rely on it (`entry_terminal_timeout_ms` is the path).
+- Hedge Mode is unsupported in V1 (section 8).
+- No continuous TP1 resizing: TP legs are placed after the entry is terminal and the position is reconciled.
+- A missing or lost stop follows the four cases of section 9 (D034, D077); a placement is never re-sent (D080).
+- LIVE stays blocked: live placement is disabled (`src/execution/enablement.py`), and what Demo cannot show (a partial fill P3, the order of a cancel against a fill P7, a GTD expiry A2) is left to the Phase 25 campaign and the Phase 26 canary (D079 item 6).
 
 ## 7. Idempotency
 
@@ -187,6 +201,8 @@ A crash between any two steps leaves a readable row. An intent left INTENDED or 
 The tool must explicitly detect and support the chosen Binance position mode.
 
 Do not assume One-way Mode or Hedge Mode.
+
+V1 supports One-way Mode only: Hedge Mode is unsupported (D079 item 4), and the pre-placement check refuses it (`HEDGE_MODE_UNSUPPORTED`, `src/execution/pre_placement.py`).
 
 Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text was not retrievable on 2026-09-30 nor by the plan 18-01 executor on 2026-10-16; later on 2026-10-16 it was read at its new location (the Change Position Mode section of the REST `trade` group) with WebFetch, a small-model summary that is not character-exact (`SOURCES.md`, section "Facts read for Phase 18"): `POST /fapi/v1/positionSide/dual` has weight 1, `dualSidePosition` is required and `recvWindow` is at most 60000; after the CM migration UM and CM share the same setting, so one change flips both; the change is rejected when either side has an open order (-4067) or an open position (-4068). The Phase 18 research summary (2026-10-15) and the installed SDK docstring for the endpoint state the same. Not verified live; verify against current Binance docs before implementation (F-057).
 

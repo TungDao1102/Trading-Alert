@@ -388,6 +388,38 @@ REJECTED -> (terminal)
 
 Execution intent states are the values of section 12.1. An intent left `INTENDED`, `SENT` or `UNKNOWN` is unresolved and is resolved only by querying the exchange by its deterministic client id; it is never re-sent blindly.
 
+### 11.7 Protection transitions
+
+This is the `ProtectionState` machine of the protection coordinator (`src/execution/protection.py`), which implements the execution model of D079. Its table is `TransitionKind.PROTECTION` in `src/domain/transitions.py` (plan 20-02, D-29), keyed by the eleven `ProtectionState` string values and copied from the `ProtectionState` docstring; it is enforced by `ProtectionCoordinator._transition`. Unlike 11.1 to 11.6 it is not persisted as a table and has no database trigger. A plan is first registered in the state `PROTECTION_INITIAL_STATE`, which is `AWAITING_FILL`.
+
+```text
+AWAITING_FILL -> CLOSE_REQUIRED, ENTRY_ENDED_NO_FILL, ENTRY_UNRESOLVED, UNPROTECTED
+ENTRY_UNRESOLVED -> AWAITING_FILL, CLOSE_REQUIRED, ENTRY_ENDED_NO_FILL, UNPROTECTED
+UNPROTECTED -> CLOSE_REQUIRED, FLAT, PROTECTED, PROTECTED_ENTRY_OPEN
+PROTECTED_ENTRY_OPEN -> CLOSE_REQUIRED, FLAT, PROTECTED, UNPROTECTED
+PROTECTED -> CLOSE_REQUIRED, COMPLETE, FLAT, TP_UNAVAILABLE, UNPROTECTED
+COMPLETE -> CLOSE_REQUIRED, FLAT, UNPROTECTED
+TP_UNAVAILABLE -> CLOSE_REQUIRED, FLAT, UNPROTECTED
+CLOSE_REQUIRED -> CLOSE_FAILED, FLAT
+CLOSE_FAILED -> CLOSE_REQUIRED, FLAT
+FLAT -> (terminal)
+ENTRY_ENDED_NO_FILL -> (terminal)
+```
+
+State meanings (from the `ProtectionState` docstring and the comments beside it; a state without a stated meaning is described by its edges only):
+
+- `AWAITING_FILL`: the state a plan is first registered in; it holds no known exposure; a fill leads to `UNPROTECTED`.
+- `UNPROTECTED`: a position exposed without a confirmed stop; a confirmed stop that is lost leads here (reasons `STOP_LOST`, `STOP_LOST_AFTER_PROTECTED`), and from there the plan leaves only to `CLOSE_REQUIRED` or `FLAT`.
+- `PROTECTED_ENTRY_OPEN`: reached from `UNPROTECTED`; a lost stop moves it back to `UNPROTECTED`.
+- `PROTECTED`: reached from `UNPROTECTED`; leaves to `COMPLETE` or `TP_UNAVAILABLE`, or to `FLAT` when REST reads flat.
+- `COMPLETE`: reached from `PROTECTED`; leaves to `FLAT`.
+- `TP_UNAVAILABLE`: reached from `PROTECTED`; leaves to `FLAT`.
+- `CLOSE_REQUIRED`: a close is required; it moves to `CLOSE_FAILED` and back, and ends `FLAT`; no edge leads from `CLOSE_REQUIRED` or `CLOSE_FAILED` to a protected state.
+- `CLOSE_FAILED`: a close attempt failed; see `CLOSE_REQUIRED`.
+- `FLAT`: terminal; the plan ended flat.
+- `ENTRY_ENDED_NO_FILL`: terminal; reached from `AWAITING_FILL` or `ENTRY_UNRESOLVED` when the entry ended with no fill.
+- `ENTRY_UNRESOLVED`: an `ENTRY_STATE_UNKNOWN` entry never found by its GTD time plus the grace (19-REVIEW WR-05); it leaves to `UNPROTECTED` on a fill, to `ENTRY_ENDED_NO_FILL` when found ended, or to `AWAITING_FILL` when found open.
+
 ## 12. Persistence status values (Phase 17)
 
 Value sets of the four enums the Phase 17 persistence layer adds. Each text block lists one value per line and `tests/test_transitions.py` compares it with the enum in `src/domain/enums.py`, so a value cannot be added in one place only (D016, D031). These are explicit status columns (D-21): a state is never inferred from a nullable timestamp.

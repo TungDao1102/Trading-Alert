@@ -914,7 +914,7 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 
 ## 21. Reconcile loop, SAFE_MODE exit and recovery (Phase 20)
 
-Status: everything in this section is built and tested with fakes (a Binance-semantics fake exchange, in-memory and local PostgreSQL stores). Nothing is wired into a running process yet (composition is Phase 24), nothing was observed against Binance Demo, and the real-stack rehearsal is Phases 25 and 26. Reading this section is not a statement that live execution is safe or ready; D055 stays open and live placement stays disabled.
+Status: everything in this section is built and tested with fakes (a Binance-semantics fake exchange, in-memory and local PostgreSQL stores). Nothing is wired into a running process yet (composition is Phase 24), nothing was observed against Binance Demo, and the real-stack rehearsal is Phases 25 and 26. Reading this section is not a statement that live execution is safe or ready; the execution model is decided by D079 (2026-10-22) and live placement stays disabled.
 
 ### 21.1 Leaving SAFE_MODE (operator exit)
 

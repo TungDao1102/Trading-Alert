@@ -119,8 +119,8 @@ None of these is verified against Binance mainnet; section 2a records what Binan
 
 Not edited by Phase 19, listed so that nobody assumes it was done:
 
-- `docs/trading/EXECUTION_SPEC.md` sections that describe the fill-driven model (stop after the first fill, the two deadlines, the emergency close).
-- A GLOSSARY section for the `ProtectionState` names (GLOSSARY 9.3 and 9.4 list only the new reason codes and SAFE_MODE reasons).
+- `docs/trading/EXECUTION_SPEC.md` sections that describe the fill-driven model (stop after the first fill, the two deadlines, the emergency close). Done 2026-10-22 (quick task 261022-t2l): section 6.3 (new) and notes in sections 1, 6.2 and 8.
+- A GLOSSARY section for the `ProtectionState` names (GLOSSARY 9.3 and 9.4 list only the new reason codes and SAFE_MODE reasons). Done 2026-10-22 (quick task 261022-t2l): GLOSSARY section 11.7.
 - ROADMAP Phase 19 success criteria 1 and 3 and the inherited items `[D055]` and `[G2-032]`; ROADMAP Phase 20 success criterion 2 (it speaks of an entry-time stop that Phase 19 removed) and the inherited item `[D055]`. Done 2026-10-22 (quick task 261022-t2l): a D079 note on Phase 19 criteria 1 and 3, updates on `[D055]` and `[G2-032]` of Phase 19 and `[D055]` of Phase 20; Phase 20 criterion 2 was already reworded by plan 20-26 (O-A) and is not edited.
 - The `docs/DECISIONS.md` rows for D055 and Q5 (drafts: `19-DEC-D055-DRAFT.md`, provisional id D079; `19-DEC-Q5-DRAFT.md`, provisional id D080). Done 2026-10-22: written as D079 and D080.
 
