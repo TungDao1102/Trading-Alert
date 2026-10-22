@@ -1,6 +1,6 @@
 # 20-DEC-ERR1003-DRAFT: proposed D-10 exception for the HTTP 418 ban end time (draft for the owner)
 
-Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` has no row for it. The owner accepts, edits or rejects it and writes the row. Nothing is built. Written 2026-10-22 after the owner agreed with the recommendation in the orchestrating session ("ok tôi đồng ý với khuyên nghị của bạn"); the agreement is to this direction, not yet to this wording.
+Status: ACCEPTED as D083 on 2026-10-22; text unchanged. The owner's instruction of 2026-10-22 ('làm 1 và 2 trước đi') adopted the assistant's recommendation, with the condition that the clock-margin key stays NOT_CONFIGURED until the owner sets it; nothing is built; build in Phase 24. Earlier the same day the owner agreed with the direction ("ok tôi đồng ý với khuyên nghị của bạn").
 
 ## Problem
 

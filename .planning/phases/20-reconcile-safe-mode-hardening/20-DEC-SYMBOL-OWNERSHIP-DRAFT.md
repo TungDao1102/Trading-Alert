@@ -1,6 +1,6 @@
 # 20-DEC-SYMBOL-OWNERSHIP-DRAFT: proposed symbol-ownership decision (draft for the owner)
 
-Status: DRAFT. Not a DECISIONS row. `docs/DECISIONS.md` has no row for it. The owner accepts, edits or rejects it and writes the row (provisional id: the next free id after D078; D079 and D080 are reserved by the unwritten D055 and Q3-Q4 drafts of `19-OWNER-GAPS.md`, so the number is the owner's to assign). Nothing in the code or the docs treats this text as an adopted decision. The owner answered O-D "accept-narrow" for the implementation (plan 20-20); that answer accepted the narrow scope for the code, it did not write this row.
+Status: ACCEPTED as D082 on 2026-10-22; text unchanged. The owner's instruction of 2026-10-22 ('làm 1 và 2 trước đi') adopted the assistant's recommendation; `docs/DECISIONS.md` D082 carries the proposed text below as written (D079 is the D055 closure, D080 Q5, D081 Q3 and Q4). The owner had answered O-D "accept-narrow" for the implementation (plan 20-20) on 2026-10-21.
 
 Basis: the owner's answer of 2026-10-21, recorded verbatim in `20-20-SUMMARY.md` ("Owner decision O-D"): "O-D: accept-narrow" (reconcile-time detection only, no extra condition); the review resolution T-F in `20-REVIEW-RESOLUTIONS.md` (a NEW policy, not part of D-13; narrow scope, a SAFE_MODE with its own reason); plan 20-20.
 

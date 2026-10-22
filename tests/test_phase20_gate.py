@@ -13,11 +13,13 @@ This file asserts, against the real tree and without any network or live evidenc
 - the `RejectionReason` enum has 21 members and GLOSSARY 9.1 lists exactly those;
 - each Phase 20 requirement has its named automated tests, resolved with `ast` and never
   imported or run (`REQUIREMENT_TESTS`);
-- `docs/DECISIONS.md` gained no row in Phase 20 (the last row is D078) and D055 stays OPEN.
+- no Phase 20 plan wrote a `docs/DECISIONS.md` row; the rows after D078 are D079 to D083, written
+  by quick task 261022-t2l at the owner's instruction of 2026-10-22, and the D055 row names D079.
 
 A failure message names the missing path, symbol or test. Nothing here changes behavior and
-nothing here claims an owner item is solved: the 11 Demo probes, the `NOT_CONFIGURED` limit keys
-and D055 stay with the owner (`19-OWNER-GAPS.md`). The ROADMAP success criteria of Phase 20 stay
+nothing here claims an owner item is solved: the `NOT_CONFIGURED` limit keys and what Demo
+cannot show (a partial fill P3, the order of a cancel against a fill P7, a GTD expiry A2; D079
+item 6) stay with the owner (`19-OWNER-GAPS.md`). The ROADMAP success criteria of Phase 20 stay
 pinned by `tests/test_phase19_gate.py`.
 
 Evidence label: executed structural tests. Nothing here touches Binance, Telegram or a database.
@@ -387,7 +389,7 @@ def test_invariant_5b_every_requirement_name_is_a_known_requirement() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# DECISIONS: no new row in Phase 20, D055 stays open.
+# DECISIONS: no Phase 20 plan wrote a row; D079 to D083 come from quick task 261022-t2l.
 # --------------------------------------------------------------------------- #
 
 
@@ -395,11 +397,17 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
     lines = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8").splitlines()
     rows = [line for line in lines if re.match(r"\| D\d+ \|", line)]
     ids = [re.match(r"\| (D\d+) \|", row).group(1) for row in rows]  # type: ignore[union-attr]
-    assert ids[-1] == "D078", f"DECISIONS.md last row is {ids[-1]}: Phase 20 adds none (D-10)"
+    after_d078 = ids[ids.index("D078") + 1 :]
+    assert after_d078 == ["D079", "D080", "D081", "D082", "D083"], (
+        f"the rows after D078 are {after_d078}: only quick task 261022-t2l wrote D079 to D083"
+    )
+    for row in rows[ids.index("D078") + 1 :]:
+        assert "2026-10-22, owner instruction" in row, row[:40]
     assert len(ids) == len(set(ids)), "a DECISIONS row id is duplicated"
     d055 = [row for row in rows if row.startswith("| D055 |")]
     assert len(d055) == 1
-    assert "stays OPEN" in d055[0], "D055 execution model must still be recorded as OPEN"
+    assert "stays OPEN" in d055[0], "the D055 row must keep its 2026-10-07 text"
+    assert "decided by D079" in d055[0], "the D055 row must name D079"
     lowered = d055[0].lower()
     for claim in ("closes d055", "d055 is closed", "d055 closed", "closing d055"):
         assert claim not in lowered, f"the D055 row claims it is closed: {claim!r}"

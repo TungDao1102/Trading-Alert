@@ -103,7 +103,7 @@ Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
 (`--healthcheck` / `--pin-epoch` / `--hold-on-refusal` / `--liveness`),
 `python -m src.ops.backup scheduled`, `python -m src.research.run`, `src/analytics/cli.py`.
 
-## Execution model since Phase 19 (D-10; the DECISIONS row is not written yet)
+## Execution model since Phase 19 (D-10; DECISIONS D079, D080)
 
 - The entry is a **GTD LIMIT** with **no entry-time stop** (Demo rejects a conditional stop with no
   position, -4509). Protection is **fill-driven**: the coordinator in `src/execution/protection.py`
@@ -112,8 +112,8 @@ Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
 - **A placement is never re-sent** (owner, 2026-10-20): one `place_entry` POST per approval; an
   ambiguous result is probed once by client order id; not found or probe error ⇒ UNKNOWN + SAFE_MODE.
 - Plan binding: symbol and side come from the hashed plan; quantity may be ≤ approved, never larger.
-- Still open (owner): D055 closure, the `NOT_CONFIGURED` limit keys in
-  `config/execution/execution-limits-v1.toml`, the 11 Demo probes. Register:
+- Still open (owner): the `NOT_CONFIGURED` limit keys in `config/execution/execution-limits-v1.toml`;
+  what Demo cannot show (P3, P7, A2) waits for Phases 25/26. Register:
   `.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`.
 
 ## Invariants that are machine-enforced

@@ -497,10 +497,20 @@ def test_invariant_7_the_decisions_row_pins_the_limits_file() -> None:
 
 
 def test_invariant_8_d055_stays_open() -> None:
+    """The D055 row keeps its 2026-10-07 text; since 2026-10-22 it names D079 (261022-t2l)."""
     lines = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8").splitlines()
     d055 = [line for line in lines if line.startswith("| D055 |")]
     assert len(d055) == 1
-    assert "stays OPEN" in d055[0], "D055 execution model must still be recorded as OPEN"
+    assert "the execution model stays OPEN" in d055[0], (
+        "the D055 row must keep its 2026-10-07 text (append-only)"
+    )
+    assert "the execution model is decided by D079" in d055[0], (
+        "the D055 row must point at D079, the closure of 2026-10-22"
+    )
+    d079 = [line for line in lines if line.startswith("| D079 |")]
+    assert len(d079) == 1, "DECISIONS.md must have exactly one D079 row"
+    assert "D055" in d079[0]
+    assert "Accepted (2026-10-22, owner instruction" in d079[0]
     phase18_row = ratified_file_tests._phase18_row()
     assert "OPEN" in phase18_row
     lowered = phase18_row.lower()

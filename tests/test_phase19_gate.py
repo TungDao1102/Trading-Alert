@@ -548,7 +548,18 @@ def test_invariant_8_d055_stays_open_and_the_phase18_gate_is_green() -> None:
     phase18_gate.test_invariant_7_the_decisions_row_pins_the_limits_file()
     lines = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8").splitlines()
     d055 = [line for line in lines if line.startswith("| D055 |")]
-    assert len(d055) == 1 and "OPEN" in d055[0]
+    assert len(d055) == 1 and "OPEN" in d055[0] and "decided by D079" in d055[0]
+    d079 = [line for line in lines if line.startswith("| D079 |")]
+    assert len(d079) == 1
+    for needle in (
+        "every Demo probe that Demo can produce",
+        "48a26473",
+        "the system does not rely on it",
+        "NOT_CONFIGURED",
+    ):
+        assert needle in d079[0], f"the D079 row lacks {needle!r}"
+    d080 = [line for line in lines if line.startswith("| D080 |")]
+    assert len(d080) == 1 and "19-DEC-Q5-DRAFT.md" in d080[0]
 
 
 def test_invariant_9_every_requirement_name_is_a_known_requirement() -> None:
