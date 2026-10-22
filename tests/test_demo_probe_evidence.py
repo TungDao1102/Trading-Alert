@@ -497,6 +497,59 @@ async def test_an_enabled_optional_case_is_required_by_the_verdict(
     assert verdict["overall"]["result"] == dp.VERDICT_FAIL
 
 
+async def test_an_enabled_capture_case_is_required_by_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quick task 261021-sj0: each of the ten new keys makes its case expected."""
+    document = await _executed_document(tmp_path, monkeypatch)
+    for key, case_id in dp.OPTIONAL_CASES.items():
+        if case_id not in dp.CAPTURE_CASES:
+            continue
+        assert case_id not in dp.probe_acceptance_verdict(document)  # absent key: not expected
+        document["settings"]["optional_cases"][key] = True
+        verdict = dp.probe_acceptance_verdict(document)
+        assert verdict[case_id]["result"] == dp.VERDICT_FAIL, case_id  # enabled but not run
+        assert verdict["overall"]["result"] == dp.VERDICT_FAIL
+
+
+def test_the_dry_run_settings_carry_the_new_owner_keys(tmp_path: Path, offline: list[str]) -> None:
+    from tests.probe_fakes import (
+        TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS,
+        TEST_ONLY_GTD_LIFETIME_SECONDS,
+        TEST_ONLY_NEAR_TRIGGER_FRACTION,
+    )
+
+    code, evidence = _dry_run(tmp_path, optional=tuple(dp.OPTIONAL_CASES))
+    assert code == dp.EXIT_OK and offline == []
+    document = _load_only(evidence)
+    assert dp.check_probe_evidence(document) == []
+    settings = document["settings"]
+    assert settings["near_trigger_fraction"] == TEST_ONLY_NEAR_TRIGGER_FRACTION
+    assert settings["gtd_lifetime_seconds"] == TEST_ONLY_GTD_LIFETIME_SECONDS
+    assert settings["gtd_expiry_wait_seconds"] == TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS
+    assert all(settings["optional_cases"][key] is True for key in dp.OPTIONAL_CASES)
+    assert document["schema"] == "demo-probe-evidence/schema-1"  # the schema id is unchanged
+    assert [item["case_id"] for item in document["cases"]] == list(dp.CASE_ORDER)
+    for item in document["cases"]:
+        assert item["status"] == dp.NOT_REHEARSED
+    assert [
+        fixture for item in document["cases"] for fixture in item.get("rest_fixtures", [])
+    ] == []
+
+
+def test_a_dry_run_without_the_new_keys_keeps_the_phase18_settings_and_cases(
+    tmp_path: Path, offline: list[str]
+) -> None:
+    code, evidence = _dry_run(tmp_path)
+    assert code == dp.EXIT_OK and offline == []
+    document = _load_only(evidence)
+    assert document["settings"]["near_trigger_fraction"] is None
+    assert document["settings"]["gtd_lifetime_seconds"] is None
+    assert document["settings"]["gtd_expiry_wait_seconds"] is None
+    assert set(document["settings"]["optional_cases"]) == set(list(dp.OPTIONAL_CASES)[:3])
+    assert document["case_order"] == list(dp.REQUIRED_CASES)
+
+
 @pytest.mark.parametrize(
     ("path", "value", "rule"),
     [

@@ -20,6 +20,7 @@ import pytest
 from scripts import demo_probe as dp
 from src.adapters.binance_probe import ProbeBanned
 from src.adapters.binance_ratelimit_gate import IP_BAN_418
+from src.ops import operator_evidence as oe
 
 from tests.probe_fakes import (
     TEST_ONLY_CASE_TIMEOUT_SECONDS,
@@ -53,9 +54,36 @@ EXPECTED_ORDER = (
     "explicit_time_in_force_variant",
     "stream_gap_during_case",
     "market_lot_size_out_of_range",
+    # quick task 261021-sj0: the ten owner opt-in evidence-capture cases
+    "account_read_only_capture",
+    "algo_query_timing_after_new",
+    "close_position_stop_with_position",
+    "stop_would_trigger_after_fill",
+    "stop_query_absent_then_same_id",
+    "manual_close_with_open_legs",
+    "commission_vs_realized_pnl",
+    "triggered_close_position_bracket",
+    "tp1_quantity_from_fill",
+    "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
-ALL_OPTIONAL = ("explicit_time_in_force", "stream_gap", "market_lot_size_out_of_range")
+# The ids of quick task 261021-sj0 whose handler has not landed yet (emptied by its last task).
+PENDING_HANDLERS = frozenset(EXPECTED_ORDER[21:])
+ALL_OPTIONAL = (
+    "explicit_time_in_force",
+    "stream_gap",
+    "market_lot_size_out_of_range",
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "gtd_expiry",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +158,8 @@ def test_case_order_is_the_d16_order_of_risk() -> None:
     assert tuple(dp.OPTIONAL_CASES) == ALL_OPTIONAL
     assert tuple(dp.OPTIONAL_CASES.values()) == EXPECTED_ORDER[16:]
     assert dp.READ_ONLY_CASES == READ_ONLY
+    assert tuple(dp.OPTIONAL_CASES) == oe.OPTIONAL_CASE_KEYS + oe.EVIDENCE_CASE_KEYS
+    assert dp.CAPTURE_CASES == EXPECTED_ORDER[19:]
 
 
 def test_this_plan_registers_the_four_read_only_handlers() -> None:
@@ -1780,10 +1810,11 @@ async def test_a_rate_limit_answer_in_a_write_case_stops_the_case_and_the_run(
 
 
 def test_every_case_id_has_a_registered_handler() -> None:
-    assert set(dp.CASE_HANDLERS) == set(dp.REQUIRED_CASES) | set(dp.OPTIONAL_CASES.values())
-    assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
+    registered = set(dp.CASE_ORDER) - PENDING_HANDLERS
+    assert set(dp.CASE_HANDLERS) == registered
+    assert set(dp.CASE_HANDLERS) <= set(dp.REQUIRED_CASES) | set(dp.OPTIONAL_CASES.values())
     for case_id in dp.OPTIONAL_CASES.values():
-        assert case_id in dp.CASE_HANDLERS
+        assert (case_id in dp.CASE_HANDLERS) is (case_id not in PENDING_HANDLERS)
 
 
 async def test_the_dry_run_with_every_optional_case_rehearses_every_handler_without_error(
@@ -1807,11 +1838,12 @@ async def test_the_dry_run_with_every_optional_case_rehearses_every_handler_with
     code = await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
     document = recorder.document(config)
     assert code == dp.EXIT_OK and document["outcome"] == dp.OUTCOME_COMPLETE
-    assert invoked == list(dp.CASE_ORDER)  # every handler once, in CASE_ORDER
+    registered = [cid for cid in dp.CASE_ORDER if cid not in PENDING_HANDLERS]
+    assert invoked == registered  # every handler once, in CASE_ORDER
     assert [item["case_id"] for item in document["cases"]] == list(dp.CASE_ORDER)
     for item in document["cases"]:
         assert item["status"] == dp.NOT_REHEARSED
-        assert item["handler_registered"] is True
+        assert item["handler_registered"] is (item["case_id"] not in PENDING_HANDLERS)
     assert not [cid for cid, result in recorder.results.items() if result.status == dp.ERROR], {
         cid: result.reason for cid, result in recorder.results.items()
     }

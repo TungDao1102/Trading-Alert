@@ -25,6 +25,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api import (
     DerivativesTradingUsdsFuturesRestAPI as SdkRestApi,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    AccountInformationV3Response,
     CancelAlgoOrderResponse,
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
@@ -32,10 +33,16 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
+    FuturesAccountConfigurationResponse,
+    GetIncomeHistoryResponse,
+    MarkPriceResponse,
+    MarkPriceResponse1,
     NewAlgoOrderResponse,
     NewOrderResponse,
+    NotionalAndLeverageBracketsResponse,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
+    SymbolConfigurationResponse,
 )
 from src.adapters import binance_probe
 from src.adapters.binance_probe import SDK_REST_METHODS, BinanceProbeAdapter
@@ -47,10 +54,13 @@ MODULE_PATH = Path(binance_probe.__file__)
 
 _Op = Callable[[BinanceProbeAdapter], Awaitable[Any]]
 
-# The two public SDK reads the adapter makes through `BinancePublicMarketData` (mark price and
-# symbol filters). They are unsigned, so they are not in `SDK_REST_METHODS` and carry no
-# recvWindow, but a mistyped keyword there would surface at the same user checkpoint.
-PUBLIC_SDK_METHODS = frozenset({"mark_price_kline_candlestick_data", "exchange_information"})
+# The public SDK reads the adapter makes through `BinancePublicMarketData` (the mark-price kline,
+# the symbol filters and, since quick task 261021-sj0, the premiumIndex `mark_price`). They are
+# unsigned, so they are not in `SDK_REST_METHODS` and carry no recvWindow, but a mistyped keyword
+# there would surface at the same user checkpoint.
+PUBLIC_SDK_METHODS = frozenset(
+    {"mark_price_kline_candlestick_data", "exchange_information", "mark_price"}
+)
 
 # Plain text is accepted for these enum-annotated parameters: the installed SDK copies the
 # value into the request payload unchanged (`MarketDataApi.mark_price_kline_candlestick_data`
@@ -118,6 +128,24 @@ _SUCCESS_PAYLOADS: dict[str, Any] = {
     "position_information_v3": [],
     "account_trade_list": [],
     "futures_account_balance_v3": [],
+    "account_information_v3": AccountInformationV3Response.from_dict(
+        {"totalWalletBalance": "1", "assets": [{"asset": "USDT"}]}
+    ),
+    "futures_account_configuration": FuturesAccountConfigurationResponse.from_dict(
+        {"dualSidePosition": False, "multiAssetsMargin": False}
+    ),
+    "symbol_configuration": SymbolConfigurationResponse.from_dict(
+        [{"symbol": "BTCUSDT", "leverage": 20}]
+    ),
+    "notional_and_leverage_brackets": NotionalAndLeverageBracketsResponse.from_dict(
+        [{"symbol": "BTCUSDT", "brackets": [{"bracket": 1, "initialLeverage": 125}]}]
+    ),
+    "get_income_history": [GetIncomeHistoryResponse(symbol="BTCUSDT", income_type="COMMISSION")],
+    "mark_price": MarkPriceResponse(
+        actual_instance=MarkPriceResponse1(
+            symbol="BTCUSDT", mark_price="83748.10", time=1791360000000
+        )
+    ),
     "mark_price_kline_candlestick_data": [_MARK_ROW],
     "exchange_information": _exchange_information(),
 }
@@ -204,6 +232,24 @@ _OPERATIONS: dict[str, _Op] = {
     "account_balance": lambda a: a.account_balance(),
     "mark_price": lambda a: a.mark_price(symbol="BTCUSDT"),
     "symbol_filters": lambda a: a.symbol_filters(symbol="BTCUSDT"),
+    # quick task 261021-sj0: the capture operations
+    "account_information": lambda a: a.account_information(),
+    "account_balance_all": lambda a: a.account_balance_all(),
+    "account_config": lambda a: a.account_config(),
+    "symbol_config": lambda a: a.symbol_config(symbol="BTCUSDT"),
+    "leverage_brackets": lambda a: a.leverage_brackets(symbol="BTCUSDT"),
+    "income_history": lambda a: a.income_history(symbol="BTCUSDT", start_time_ms=1791360000000),
+    "query_algo_order_by_algo_id": lambda a: a.query_algo_order_by_algo_id(algo_id=1000000001),
+    "new_gtd_limit_order": lambda a: a.new_gtd_limit_order(
+        symbol="BTCUSDT",
+        side="BUY",
+        quantity=_Q,
+        price=_T,
+        client_order_id="c9",
+        position_side="BOTH",
+        good_till_date_ms=1791360660000,
+    ),
+    "live_mark_price": lambda a: a.live_mark_price(symbol="BTCUSDT"),
 }
 
 

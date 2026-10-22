@@ -77,7 +77,7 @@ import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -261,9 +261,34 @@ OPTIONAL_CASES: Mapping[str, str] = MappingProxyType(
         "explicit_time_in_force": "explicit_time_in_force_variant",
         "stream_gap": "stream_gap_during_case",
         "market_lot_size_out_of_range": "market_lot_size_out_of_range",
+        # Quick task 261021-sj0: the ten owner opt-in evidence-capture cases (CAPTURE_CASES).
+        "account_capture": "account_read_only_capture",
+        "algo_query_timing": "algo_query_timing_after_new",
+        "close_position_with_position": "close_position_stop_with_position",
+        "stop_trigger_after_fill": "stop_would_trigger_after_fill",
+        "stop_absent_same_id": "stop_query_absent_then_same_id",
+        "manual_close_open_legs": "manual_close_with_open_legs",
+        "commission_realized_pnl": "commission_vs_realized_pnl",
+        "triggered_bracket": "triggered_close_position_bracket",
+        "tp1_from_fill": "tp1_quantity_from_fill",
+        "gtd_expiry": "gtd_entry_expiry_status",
     }
 )
 CASE_ORDER: tuple[str, ...] = (*REQUIRED_CASES, *OPTIONAL_CASES.values())
+# The ten cases of quick task 261021-sj0, in CASE_ORDER order. In an executed run with
+# `--fixtures-dir` each REST answer of these cases is also written as a scrubbed fixture file.
+CAPTURE_CASES: tuple[str, ...] = (
+    "account_read_only_capture",
+    "algo_query_timing_after_new",
+    "close_position_stop_with_position",
+    "stop_would_trigger_after_fill",
+    "stop_query_absent_then_same_id",
+    "manual_close_with_open_legs",
+    "commission_vs_realized_pnl",
+    "triggered_close_position_bracket",
+    "tp1_quantity_from_fill",
+    "gtd_entry_expiry_status",
+)
 
 # Client ids of the probe: the exchange's documented id shape (at most 36 characters).
 CLIENT_ID_PREFIX = "dprobe-"
@@ -284,6 +309,7 @@ MUTATING_OPERATIONS: frozenset[str] = frozenset(
         "cancel_algo_order",
         "cancel_all_open_orders",
         "cancel_all_algo_open_orders",
+        "new_gtd_limit_order",
     }
 )
 
@@ -580,6 +606,36 @@ class ProbePort(Protocol):
 
     async def position_mode(self) -> ProbeObservation: ...
 
+    # Quick task 261021-sj0: the evidence-capture operations of the owner opt-in cases.
+
+    async def account_information(self) -> ProbeObservation: ...
+
+    async def account_balance_all(self) -> ProbeObservation: ...
+
+    async def account_config(self) -> ProbeObservation: ...
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation: ...
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation: ...
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation: ...
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation: ...
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation: ...
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation: ...
+
     def marker(self) -> int: ...
 
     def frames_since(self, marker: int) -> list[dict[str, str]]: ...
@@ -778,6 +834,9 @@ class ProbeRecorder:
                 "market_lot_probe_quantity": order.market_lot_probe_quantity,
                 "case_timeout_seconds": order.case_timeout_seconds,
                 "cleanup_timeout_seconds": order.cleanup_timeout_seconds,
+                "near_trigger_fraction": order.near_trigger_fraction,
+                "gtd_lifetime_seconds": order.gtd_lifetime_seconds,
+                "gtd_expiry_wait_seconds": order.gtd_expiry_wait_seconds,
                 "optional_cases": dict(order.optional_cases),
                 "only": list(config.only) if config.only is not None else None,
             },
@@ -1453,6 +1512,18 @@ class _WriteCase:
             return answer.summary.get("algo_status", "")
         error = answer.error
         return ALGO_ABSENT if error is not None and error.category == CATEGORY_ORDER_ABSENT else ""
+
+    async def algo_status_by_id(self, label: str, algo_id: int) -> str:
+        """Like `algo_status`, but by the exchange's algo id (quick task 261021-sj0)."""
+        answer = await self.ask(label, self.port.query_algo_order_by_algo_id(algo_id=algo_id))
+        if answer.ok:
+            return answer.summary.get("algo_status", "")
+        error = answer.error
+        return ALGO_ABSENT if error is not None and error.category == CATEGORY_ORDER_ABSENT else ""
+
+    def elapsed_ms(self, since: datetime) -> int:
+        """Whole milliseconds on the rig clock since `since` (integer arithmetic only)."""
+        return (_checked_now(self.rig) - since) // timedelta(milliseconds=1)
 
     async def open_long(self, market: _Market, tag: str) -> tuple[ProbeObservation, str]:
         """A marketable BUY LIMIT of the approved quantity; one wait for FILLED.
@@ -2309,6 +2380,160 @@ async def case_id_reuse_after_filled(context: CaseContext) -> CaseResult:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Quick task 261021-sj0: the owner opt-in evidence-capture cases (`CAPTURE_CASES`).
+#
+# Facts only: each case records what the exchange answered (and the frames it produced) and
+# decides nothing; D055 stays OPEN and no parameter is chosen (D-17). They run only when the
+# owner enables their key in the probe limits file, go through `run_write_case` (so the
+# one-way, bound and cleanup rules apply) and never retry a request.
+# --------------------------------------------------------------------------- #
+
+
+def _positive_int_text(summary: Mapping[str, str], key: str) -> int | None:
+    text = summary.get(key, "")
+    if not (text.isascii() and text.isdigit()):
+        return None
+    value = int(text)
+    return value if value > 0 else None
+
+
+def _algo_id_of(answer: ProbeObservation) -> int | None:
+    """The exchange's algo id of an accepted answer (ASCII digits, positive), else None."""
+    return _positive_int_text(answer.summary, "algo_id") if answer.ok else None
+
+
+def _order_id_of(answer: ProbeObservation) -> int | None:
+    """The exchange's order id of an accepted answer (ASCII digits, positive), else None."""
+    return _positive_int_text(answer.summary, "order_id") if answer.ok else None
+
+
+def _field_set(summary: Mapping[str, str]) -> str:
+    """The sorted unique field names of a flat summary, list positions shown as ``*``."""
+    names = {
+        ".".join("*" if part.isascii() and part.isdigit() else part for part in key.split("."))
+        for key in summary
+    }
+    return ",".join(sorted(names))
+
+
+async def _account_read_only_capture(case: _WriteCase) -> CaseResult:
+    port = case.port
+    symbol = case.symbol
+    steps: tuple[tuple[str, Callable[[], Awaitable[ProbeObservation]]], ...] = (
+        ("account_information", lambda: port.account_information()),
+        ("account_balance_all", lambda: port.account_balance_all()),
+        ("account_config", lambda: port.account_config()),
+        ("symbol_config", lambda: port.symbol_config(symbol=symbol)),
+        ("leverage_brackets", lambda: port.leverage_brackets(symbol=symbol)),
+        ("position_mode", lambda: port.position_mode()),
+    )
+    for label, call in steps:
+        answer = await case.ask(label, call())
+        if not answer.ok:
+            continue
+        case.detail(f"{label}_fields", _field_set(answer.summary))
+        case.detail(f"{label}_field_count", str(len(answer.summary)))
+        if answer.summary.get("truncated") == _TRUE:
+            case.detail(f"{label}_truncated", _TRUE)
+    return case.observed()
+
+
+async def _timing_variant(
+    case: _WriteCase, prefix: str, leg_id: str, placed: ProbeObservation
+) -> None:
+    """Query a just-placed algo leg by client id and by algo id, wait once, cancel, query."""
+    placed_at = _checked_now(case.rig)
+    algo_id = _algo_id_of(placed)
+    if algo_id is None:
+        case.detail(
+            f"{prefix}_algo_id",
+            "NOT_OBSERVED: the placement answer carried no algo id; "
+            "no query by algo id was sent for this leg",
+        )
+    else:
+        case.detail(f"{prefix}_algo_id", str(algo_id))
+    attempts = 0
+
+    async def query_both(phase: str) -> bool:
+        """One query by client id and, when the id is known, one by algo id; all answered OK?"""
+        answers = []
+        elapsed = case.elapsed_ms(placed_at)
+        by_client = await case.ask(
+            f"{prefix}_{phase}_by_client_id", case.port.query_algo_order(client_algo_id=leg_id)
+        )
+        case.detail(f"{prefix}_{phase}_by_client_id_elapsed_ms", str(elapsed))
+        answers.append(by_client)
+        if algo_id is not None:
+            elapsed = case.elapsed_ms(placed_at)
+            by_id = await case.ask(
+                f"{prefix}_{phase}_by_algo_id",
+                case.port.query_algo_order_by_algo_id(algo_id=algo_id),
+            )
+            case.detail(f"{prefix}_{phase}_by_algo_id_elapsed_ms", str(elapsed))
+            answers.append(by_id)
+        return all(answer.ok for answer in answers)
+
+    async def found() -> bool:
+        nonlocal attempts
+        attempts += 1
+        return await query_both(f"query{attempts}")
+
+    await wait_up_to(case.rig, found, case.case_timeout_seconds)
+    case.detail(f"{prefix}_queries_before_all_ok", str(attempts))
+    listed = await case.ask(
+        f"{prefix}_open_algo_orders", case.port.open_algo_orders(symbol=case.symbol)
+    )
+    row = _row_values(listed, "client_algo_id", leg_id)
+    case.detail(
+        f"{prefix}_listed_in_open_algo_orders",
+        _flag_text(row is not None) if _count(listed) is not None else "unknown",
+    )
+    await case.cancel_algo(f"{prefix}_cancel", leg_id)
+    await query_both("after_cancel")
+
+
+async def _algo_query_timing_after_new(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    carrier_trigger = market.far_above(case.fraction)
+    case.check_bounds([(case.quantity, trigger), (case.quantity, carrier_trigger)])
+    for prefix, tag in (("ro", "aqr"), ("carrier", "aqc")):
+        leg_id = case.client_id(tag)
+        case.detail(f"{prefix}_client_algo_id", leg_id)
+        if prefix == "ro":
+            placed = await _place_flat_leg(
+                case, f"{prefix}_place", leg_id, trigger, time_in_force=None
+            )
+        else:
+            placed = await _place_carrier(case, market, f"{prefix}_place", leg_id)
+        case.detail(f"{prefix}_placement_accepted", _flag_text(placed.ok))
+        if not placed.ok:
+            continue
+        await _timing_variant(case, prefix, leg_id, placed)
+    return case.observed()
+
+
+async def case_account_read_only_capture(context: CaseContext) -> CaseResult:
+    """Owner opt-in (O-05, G2-042, Phase 21 SC1, Phase 22): the six read-only account answers."""
+    return await run_write_case(
+        context,
+        _account_read_only_capture,
+        case_id="account_read_only_capture",
+        reduce_only=False,
+    )
+
+
+async def case_algo_query_timing_after_new(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P5, P11): an algo leg queried at once, after one wait, by both ids."""
+    return await run_write_case(
+        context,
+        _algo_query_timing_after_new,
+        case_id="algo_query_timing_after_new",
+        reduce_only=True,
+    )
+
+
 # The registry the runner walks in CASE_ORDER. A handler never raises for an exchange answer
 # (answers are data); `ProbeBanned` propagates on purpose (the run stops) and any other
 # exception is a bug the runner records as ERROR.
@@ -2332,6 +2557,8 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "explicit_time_in_force_variant": case_explicit_time_in_force_variant,
     "stream_gap_during_case": case_stream_gap_during_case,
     "market_lot_size_out_of_range": case_market_lot_size_out_of_range,
+    "account_read_only_capture": case_account_read_only_capture,
+    "algo_query_timing_after_new": case_algo_query_timing_after_new,
 }
 
 
@@ -2491,6 +2718,7 @@ class _ProbeRun:
         planned: list[dict[str, Any]],
         cleanup: Mapping[str, Any],
         frames: Mapping[str, Any],
+        rest_fixtures: Sequence[str] = (),
     ) -> None:
         self.recorder.results[case_id] = result
         self.recorder.records[case_id] = {
@@ -2507,6 +2735,31 @@ class _ProbeRun:
             "cleanup": dict(cleanup),
             "frames": dict(frames),
         }
+        if rest_fixtures:
+            self.recorder.records[case_id]["rest_fixtures"] = list(rest_fixtures)
+
+    def _rest_fixtures(self, case_id: str, result: CaseResult) -> list[str]:
+        """Write each REST answer of a capture case as a scrubbed fixture (executed runs only).
+
+        One file per observation, `<case_id>-rest-<NNN>-<operation>.json`, beside the raw frame
+        fixtures; the names go to `recorder.fixtures` (so `provenance.md` lists them). Other
+        cases and dry runs write nothing.
+        """
+        directory = self.config.fixtures_dir
+        if case_id not in CAPTURE_CASES or self.dry_run or directory is None:
+            return []
+        names: list[str] = []
+        for index, observation in enumerate(result.observations, start=1):
+            document = {
+                "label": FIXTURE_LABEL_EXECUTE,
+                "case_id": case_id,
+                "index": index,
+                "observation": observation,
+            }
+            stem = f"{case_id}-rest-{index:03d}-{_FIXTURE_EVENT_RE.sub('_', observation.operation)}"
+            names.append(write_evidence_atomic(directory, stem, document, self.redactor).name)
+        self.recorder.fixtures.extend(names)
+        return names
 
     def _record_not_run(self, case_id: str, reason: str) -> None:
         moment = self.now()
@@ -2588,6 +2841,7 @@ class _ProbeRun:
             planned=planned,
             cleanup=cleanup,
             frames=self._frames(case_id, marker),
+            rest_fixtures=self._rest_fixtures(case_id, result),
         )
 
     async def _final(self) -> None:
@@ -3050,6 +3304,73 @@ class GuardedProbePort:
     async def symbol_filters(self, *, symbol: str) -> ProbeObservation:
         self._enter("symbol_filters")
         result: ProbeObservation = await self._adapter.symbol_filters(symbol=symbol)
+        return result
+
+    # ----- quick task 261021-sj0: the capture operations ---------------------- #
+
+    async def account_information(self) -> ProbeObservation:
+        self._enter("account_information")
+        result: ProbeObservation = await self._adapter.account_information()
+        return result
+
+    async def account_balance_all(self) -> ProbeObservation:
+        self._enter("account_balance_all")
+        result: ProbeObservation = await self._adapter.account_balance_all()
+        return result
+
+    async def account_config(self) -> ProbeObservation:
+        self._enter("account_config")
+        result: ProbeObservation = await self._adapter.account_config()
+        return result
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation:
+        self._enter("symbol_config")
+        result: ProbeObservation = await self._adapter.symbol_config(symbol=symbol)
+        return result
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation:
+        self._enter("leverage_brackets")
+        result: ProbeObservation = await self._adapter.leverage_brackets(symbol=symbol)
+        return result
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation:
+        self._enter("income_history")
+        result: ProbeObservation = await self._adapter.income_history(
+            symbol=symbol, start_time_ms=start_time_ms
+        )
+        return result
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation:
+        self._enter("query_algo_order_by_algo_id")
+        result: ProbeObservation = await self._adapter.query_algo_order_by_algo_id(algo_id=algo_id)
+        return result
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation:
+        self._enter("new_gtd_limit_order")
+        result: ProbeObservation = await self._adapter.new_gtd_limit_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            client_order_id=client_order_id,
+            position_side=position_side,
+            good_till_date_ms=good_till_date_ms,
+        )
+        return result
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
+        self._enter("live_mark_price")
+        result: ProbeObservation = await self._adapter.live_mark_price(symbol=symbol)
         return result
 
     async def position_mode(self) -> ProbeObservation:
