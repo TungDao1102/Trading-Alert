@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import src.adapters.binance_public as public_mod
 import src.adapters.binance_usdm as usdm_mod
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
@@ -26,6 +27,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     ExchangeInformationResponseSymbolsInnerFiltersInner,
     GetFundingRateHistoryResponseInner,
     OpenInterestResponse,
+    OrderBookResponse,
 )
 from src.adapters.binance_public import BinancePublicMarketData
 from src.adapters.binance_usdm import BinanceUsdmAdapter
@@ -310,6 +312,8 @@ ALLOWED_REST_CALLS = frozenset(
         "check_server_time",
         "exchange_information",
         "mark_price",
+        # Quick task 261022-sj1: GET /fapi/v1/depth, public market data (no credentials).
+        "order_book",
         # Quick task 261020-l4p: GET /fapi/v1/ticker/price, public market data (no credentials).
         "symbol_price_ticker",
     }
@@ -637,3 +641,75 @@ def test_exchange_info_without_symbols_keeps_the_strict_all_symbols_behaviour() 
         pass
     else:
         raise AssertionError("the order adapter's exchange_info must stay strict")
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261022-sj1: the unsigned depth read of the Demo probe (`order_book`).
+# --------------------------------------------------------------------------- #
+
+
+class _BookRest(_FakeRest):
+    def __init__(self, payload: Any) -> None:
+        super().__init__([])
+        self._payload = payload
+
+    def order_book(self, **kwargs: Any) -> _FakeResponse:
+        self.calls.append(("order_book", kwargs))
+        return _FakeResponse(self._payload)
+
+
+def _book(payload: Any) -> tuple[BinancePublicMarketData, _BookRest]:
+    rest = _BookRest(payload)
+    return BinancePublicMarketData(sdk_client=_FakeSdk(rest)), rest  # type: ignore[arg-type]
+
+
+def _book_response(**overrides: Any) -> OrderBookResponse:
+    fields: dict[str, Any] = {
+        "last_update_id": 7,
+        "E": 1791360123456,
+        "T": 1791360123450,
+        "bids": [["83900.10", "1.500"], ["83900.00", "2"]],
+        "asks": [["83900.20", "0.250"], ["83900.30", "2"]],
+    }
+    fields.update(overrides)
+    return OrderBookResponse(**fields)
+
+
+def test_order_book_returns_decimal_levels_best_first_and_passes_the_limit() -> None:
+    public, rest = _book(_book_response())
+    book = asyncio.run(public.order_book("BTCUSDT", limit=20))
+    assert rest.calls == [("order_book", {"symbol": "BTCUSDT", "limit": 20})]
+    assert book.symbol == "BTCUSDT"
+    assert book.last_update_id == 7
+    assert book.bids == (
+        (Decimal("83900.10"), Decimal("1.500")),
+        (Decimal("83900.00"), Decimal("2")),
+    )
+    assert book.asks == (
+        (Decimal("83900.20"), Decimal("0.250")),
+        (Decimal("83900.30"), Decimal("2")),
+    )
+
+
+def test_order_book_refuses_a_malformed_answer_instead_of_fabricating() -> None:
+    bad = [
+        None,
+        _book_response(asks=None),
+        _book_response(bids=None),
+        _book_response(asks=[["abc", "1"]]),
+        _book_response(asks=[["83900.20", "-1"]]),
+        _book_response(asks=[["0", "1"]]),
+        _book_response(bids=[["NaN", "1"]]),
+        _book_response(last_update_id=None),
+    ]
+    for payload in bad:
+        public, _ = _book(payload)
+        with pytest.raises(ValueError):
+            asyncio.run(public.order_book("BTCUSDT", limit=20))
+
+
+def test_order_book_is_one_gated_unsigned_sdk_call() -> None:
+    public, rest = _book(_book_response())
+    asyncio.run(public.order_book("BTCUSDT", limit=5))
+    assert [name for name, _ in rest.calls] == ["order_book"]
+    assert all("recv_window" not in kwargs for _, kwargs in rest.calls)

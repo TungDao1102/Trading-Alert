@@ -36,6 +36,10 @@ Quick task 261021-sj0 adds nine owner-run evidence-capture operations (`account_
 call and is never retried. The five account reads use `_flat_summary`, which deliberately
 extends T-18-34 (the named-field rule) to these read-only account answers: they carry no
 credential field, and every value still goes through the shared redactor and the length cap.
+
+Quick task 261022-sj1 adds two unsigned public reads through the gated reader: `server_time`
+(the exchange clock, for the goodTillDate boundary case) and `order_book` (the top
+`ORDER_BOOK_LIMIT` levels, for the partial-fill and cancel-race cases).
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
@@ -64,7 +68,12 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
 )
 from src.adapters.binance_errors import error_facts_from_exception
 from src.adapters.binance_limits import SignedCallPolicy
-from src.adapters.binance_public import BinancePublicMarketData, MarkKline, SymbolFilters
+from src.adapters.binance_public import (
+    BinancePublicMarketData,
+    MarkKline,
+    OrderBookReading,
+    SymbolFilters,
+)
 from src.adapters.binance_ratelimit_gate import (
     IP_BAN_418,
     RATE_LIMIT_PAUSE_429,
@@ -117,6 +126,10 @@ SDK_REST_METHODS: frozenset[str] = frozenset(
         "get_income_history",
     }
 )
+
+# `order_book` reads this many levels per side (a depth limit the exchange accepts).
+ORDER_BOOK_LIMIT: int = 20
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # `mark_price` reads the latest mark-price kline of this interval (one row: the latest).
 MARK_PRICE_INTERVAL: str = "1m"
@@ -576,6 +589,26 @@ def _mark_price_summary(symbol: str, klines: Sequence[MarkKline]) -> dict[str, s
         out["close"] = _text(latest.close)
         out["open_time_utc"] = _text(latest.open_time_utc)
         out["close_time_utc"] = _text(latest.close_time_utc)
+    return out
+
+
+def _server_time_summary(moment: datetime) -> dict[str, str]:
+    """The exchange clock as whole epoch milliseconds (integer arithmetic) and UTC text."""
+    millis = (moment - _EPOCH + timedelta(microseconds=500)) // timedelta(milliseconds=1)
+    return {"server_time_ms": str(millis), "server_time_utc": _text(moment)}
+
+
+def _order_book_summary(book: OrderBookReading) -> dict[str, str]:
+    out = {
+        "symbol": book.symbol,
+        "last_update_id": str(book.last_update_id),
+        "bid_count": str(len(book.bids)),
+        "ask_count": str(len(book.asks)),
+    }
+    for side, levels in (("bid", book.bids), ("ask", book.asks)):
+        for index, (price, quantity) in enumerate(levels):
+            out[f"{side}_{index}_price"] = _text(price)
+            out[f"{side}_{index}_quantity"] = _text(quantity)
     return out
 
 
@@ -1147,6 +1180,22 @@ class BinanceProbeAdapter:
             summarize=_order_summary,
         )
 
+    async def server_time(self) -> ProbeObservation:
+        """GET /fapi/v1/time through the public reader: the exchange clock (261022-sj1)."""
+
+        async def read() -> datetime:
+            return await self._public.server_time()
+
+        return await self._public_read("server_time", read, _server_time_summary)
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation:
+        """GET /fapi/v1/depth, the top `ORDER_BOOK_LIMIT` levels per side (public, unsigned)."""
+
+        async def read() -> OrderBookReading:
+            return await self._public.order_book(symbol, ORDER_BOOK_LIMIT)
+
+        return await self._public_read("order_book", read, _order_book_summary)
+
     async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
         """The live premiumIndex mark price and the exchange time, through the public reader.
 
@@ -1173,6 +1222,7 @@ __all__ = [
     "CONDITIONAL_ORDER_TYPES",
     "ERROR_MESSAGE_MAX_CHARS",
     "FLAT_SUMMARY_MAX_KEYS",
+    "ORDER_BOOK_LIMIT",
     "SDK_REST_METHODS",
     "BinanceProbeAdapter",
     "ErrorObservation",

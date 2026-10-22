@@ -1,8 +1,8 @@
 # Demo evidence plan: the owner runs the capture cases
 
-Written for the owner by quick task 261021-sj0. It tells you which commands to run on Binance Demo, which files each run leaves behind and which later phase or open item reads them. It decides nothing. Every result is labelled "demo-observed, not mainnet" (D-17); no result may choose a trading parameter, a model or a limit number; D055 stays OPEN (the closure is yours, see `19-DEC-D055-DRAFT.md`).
+Written for the owner by quick task 261021-sj0 and extended by quick task 261022-sj1 (five more cases and the section "One session: all cases"). It tells you which commands to run on Binance Demo, which files each run leaves behind and which later phase or open item reads them. It decides nothing. Every result is labelled "demo-observed, not mainnet" (D-17); no result may choose a trading parameter, a model or a limit number; D055 stays OPEN (the closure is yours, see `19-DEC-D055-DRAFT.md`).
 
-The tool is `scripts/demo_probe.py` (ten new opt-in cases, `CAPTURE_CASES`) plus the existing `scripts/user_data_smoke.py` (one re-run, Step 2). The code and its offline tests were written without any network call: no agent ran `--execute` of anything.
+The tool is `scripts/demo_probe.py` (ten opt-in cases of 261021-sj0, `CAPTURE_CASES`, and five more of 261022-sj1, `SJ1_CASES`) plus the existing `scripts/user_data_smoke.py` (one re-run, Step 2). The code and its offline tests were written without any network call: no agent ran `--execute` of anything.
 
 ## Safety
 
@@ -18,7 +18,7 @@ The tool is `scripts/demo_probe.py` (ten new opt-in cases, `CAPTURE_CASES`) plus
 
 You create and approve `.planning/phases/19-execution-plan-binding-price-check/decisions/19-probe-limits.toml` and record the approval in a decision note of your own. The agent did not create or approve it, and the Phase 18 files (`18-probe-limits.toml`, `18-smoke-limits.toml`) are unchanged.
 
-Layout: the Phase 18 keys, the ten new `[optional_cases]` keys, and three new keys that are required exactly when their case is on. Every number is yours: nothing is proposed here, and every placeholder below is written `<OWNER: ...>`, so the loader refuses the file until you replace each one.
+Layout: the Phase 18 keys, the fifteen new `[optional_cases]` keys (ten of 261021-sj0 and five of 261022-sj1), and four new keys that are required exactly when their case is on. Every number is yours: nothing is proposed here, and every placeholder below is written `<OWNER: ...>`, so the loader refuses the file until you replace each one.
 
 ```toml
 [order]
@@ -30,6 +30,8 @@ far_price_fraction = "<OWNER: strictly between 0 and 1>"
 near_trigger_fraction = "<OWNER: strictly between 0 and 1>"
 # only with gtd_expiry:
 gtd_lifetime_seconds = <OWNER: whole seconds>
+# only with cancel_fill_race:
+race_repeats = <OWNER: a whole number, at most 5>
 
 [waits]
 case_timeout_seconds = <OWNER: whole seconds>
@@ -50,6 +52,11 @@ manual_close_open_legs = <OWNER: true or false>
 commission_realized_pnl = <OWNER: true or false>
 triggered_bracket = <OWNER: true or false>
 tp1_from_fill = <OWNER: true or false>
+exchange_info_read = <OWNER: true or false>
+gtd_min_lifetime = <OWNER: true or false>
+partial_fill_attempt = <OWNER: true or false>
+cancel_fill_race = <OWNER: true or false>
+stream_loss = <OWNER: true or false>
 gtd_expiry = <OWNER: true or false>
 ```
 
@@ -57,7 +64,8 @@ What the loader enforces (it names keys, never values, when it refuses):
 
 - `near_trigger_fraction` is a plain decimal strictly between 0 and 1, required exactly when `triggered_bracket` or `tp1_from_fill` is true and refused otherwise. The closer to 1, the closer the trigger sits to the live mark price; a trigger case ends NOT_OBSERVED when the price does not reach it within `case_timeout_seconds`.
 - `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds` are positive integers, required exactly when `gtd_expiry` is true and refused otherwise; the wait must be greater than the lifetime. Binance requires `goodTillDate` greater than now plus 600 seconds; the loader does not check that floor, so a lifetime below it is allowed and the exchange answer to it is evidence (A1).
-- A larger `case_timeout_seconds` (your choice) gives the trigger cases more time. A key that is absent means the case is off, and a file with none of the ten keys behaves exactly like the Phase 18 file.
+- `race_repeats` is a positive integer of at most 5 (`RACE_REPEATS_MAX`, a cap on the number of probe orders, not a trading number), required exactly when `cancel_fill_race` is true and refused otherwise.
+- A larger `case_timeout_seconds` (your choice) gives the trigger cases and the stream-loss case more time. A key that is absent means the case is off, and a file with none of the fifteen keys behaves exactly like the Phase 18 file.
 
 ## Step 1: dry run first (offline)
 
@@ -65,7 +73,7 @@ What the loader enforces (it names keys, never values, when it refuses):
 uv run python -m scripts.demo_probe --environment DEMO --probe-limits-file .planning/phases/19-execution-plan-binding-price-check/decisions/19-probe-limits.toml --evidence-dir <a temporary directory>
 ```
 
-Nothing is sent: the dry run uses fakes and virtual time and writes `demo-probe-DRYRUN-<stamp>.json` with every case NOT_REHEARSED. Expect `acceptance: FAIL` (FAKE evidence never passes). Expect the dry run to end `FAILED` with exit 1 when your quantity is not on the step grid of the FAKE market (step 0.001; the Phase 18 quantity 0.0008 is not): the order cases then show an "order bound" error. That is an artifact of the FAKE step (the real Demo step is 0.0001), not a defect; read only that the ten case ids are listed and that no case says "script error".
+Nothing is sent: the dry run uses fakes and virtual time and writes `demo-probe-DRYRUN-<stamp>.json` with every case NOT_REHEARSED. Expect `acceptance: FAIL` (FAKE evidence never passes). Expect the dry run to end `FAILED` with exit 1 when your quantity is not on the step grid of the FAKE market (step 0.001; the Phase 18 quantity 0.0008 is not): the order cases then show an "order bound" error. That is an artifact of the FAKE step (the real Demo step is 0.0001), not a defect; read only that the case ids you enabled are listed and that no case says "script error".
 
 ## Step 2: re-run the user-data smoke (18-UAT item 11)
 
@@ -93,7 +101,7 @@ Typed phrase: `DEMO PROBE BTCUSDT` (the symbol of your file). Running all enable
 Files every run leaves (in the evidence directory unless noted):
 
 - `demo-probe-EVIDENCE-<stamp>.json`: the evidence document, schema `demo-probe-evidence/schema-1`. Each case has `details` (the facts named below), `observations` (every exchange answer: HTTP class, code, category, message), `frames` and `cleanup`.
-- In the `--fixtures-dir`: the raw user-data payloads `<case_id>-<NNN>-<event>.json` (scrubbed), and for the ten new cases the REST answers `<case_id>-rest-<NNN>-<operation>.json` (scrubbed), and `provenance.md` listing every file of the run with its label. A dry run writes none of these.
+- In the `--fixtures-dir`: the raw user-data payloads `<case_id>-<NNN>-<event>.json` (scrubbed), and for the fifteen opt-in cases (the ten of 261021-sj0 and the five of 261022-sj1) the REST answers `<case_id>-rest-<NNN>-<operation>.json` (scrubbed), and `provenance.md` listing every file of the run with its label. A dry run writes none of these.
 
 ### 1. account_read_only_capture (key `account_capture`)
 
@@ -156,6 +164,109 @@ Files every run leaves (in the evidence directory unless noted):
 - Read: `good_till_date_ms`, `good_till_date_echoed`, `placed_at_utc`, `rest_statuses`, `frame_statuses` (`order_status/execution_type/expire_reason` per frame), `terminal_status`, `seconds_to_terminal`, `raw_order_updates` (`X|x|T` of the raw frames).
 - Consumers: 19 P4, A2 and part of A1; the 20-DEFERRED A2 row (`UnknownEntryResolver`, restart recovery).
 
+### 11. exchange_info_read_for_close (key `exchange_info_read`; added by 261022-sj1)
+
+- Sends no order and runs in hedge mode too. One read of the exchangeInfo filters of the symbol, through the same public reader the paper path uses, timed with the tool clock.
+- Read in `details`: `filter_LOT_SIZE_min_qty`, `filter_LOT_SIZE_max_qty`, `filter_LOT_SIZE_step_size`, `filter_MARKET_LOT_SIZE_min_qty`, `filter_MARKET_LOT_SIZE_max_qty`, `filter_MARKET_LOT_SIZE_step_size`, `filter_PRICE_FILTER_tick_size`, `filter_MIN_NOTIONAL_notional`, `symbol_status`, `read_elapsed_ms` and `read_endpoint`. `matches_run_start_snapshot` and `snapshot_differences` compare the read with the filters the run itself read at its start; the plan-time snapshot is the planner's, compare it yourself. `price_filter_min_price_max_price` is NOT_OBSERVED: the project port reads the tick size of PRICE_FILTER only.
+- Files: `exchange_info_read_for_close-rest-001-symbol_filters.json`.
+- Consumers: A10 and Q3 (the emergency close may read the filters afresh and may fall back to the plan-time snapshot); `src/execution/emergency_close.py`. The read time is one sample on your connection; it says nothing about how long a failing read takes.
+
+### 12. gtd_min_lifetime_boundary (key `gtd_min_lifetime`; added by 261022-sj1)
+
+- Sends two far BUY LIMIT GTD entries of the approved quantity, each once: `goodTillDate` = the public server time (GET /fapi/v1/time, read right before each send) plus 599 seconds, then plus 601 seconds. Every accepted order is cancelled at once. It never waits for expiry (that is `gtd_entry_expiry_status`).
+- Read, for the points `plus_599s` and `plus_601s`: `_margin_seconds`, `_server_time_ms`, `_local_clock_before_utc` and `_local_clock_after_utc` (the tool clock around the server time read), `_local_minus_server_ms`, `_good_till_date_ms`, `_good_till_date_minus_server_ms`, `_good_till_date_minus_local_ms`, `_accepted`; on a rejection `_error_code` (the exact code), `_error_class`, `_error_category`, `_error_message`; on an acceptance `_good_till_date_echoed` and `_cancel_accepted`.
+- How to read it: the tool gives no verdict. If only the plus 601 point is accepted, a floor of 600 seconds is consistent with it; which clock the floor uses can only be inferred when `_local_minus_server_ms` is large compared with the 2 second gap between the points. A point whose server time could not be read is skipped and says so in `_skipped`.
+- Consumers: A1; `src/execution/pre_placement.py` (`good_till_date_ms`, the clock margin).
+
+### 13. partial_fill_attempt (key `partial_fill_attempt`; added by 261022-sj1; best effort, may stay NOT_OBSERVED)
+
+- Reads the depth (top 20 levels), then sends ONE BUY LIMIT of the approved quantity, never more, priced as high as your notional cap allows but never above the marketable price the entry cases already use. If that price does not reach the best ask nothing is sent. Afterwards: one status query, a cancel of the remainder if the order is still open, a final query, and a reduce-only MARKET close of the held quantity.
+- OBSERVED only when a partial fill was seen (status PARTIALLY_FILLED, an executed quantity strictly between zero and the original, or a PARTIALLY_FILLED user-data frame). A complete fill, no fill and a rejection are valid answers: the case ends NOT_OBSERVED with the reason `no partial fill produced` and the raw numbers.
+- Read: `approved_quantity`, `notional_cap`, `cap_price`, `band_price`, `limit_price`, `best_bid`, `best_ask`, `ask_levels_read`, `ask_quantity_within_limit_price`, `depth_expects_partial` (true, false or unknown), `placement_accepted`, `placement_status`, `orig_qty`, `executed_qty`, `avg_price`, `query_status`, `query_executed_qty`, `final_status`, `final_executed_qty`, `partial_fill_seen`, `partial_seen_in` (rest, frames), `flatten_quantity`, `not_sent`.
+- Honest limit: a small order against a book with ample depth fills completely, and the tool never raises the quantity to force a partial fill, so Demo may never give you one.
+- Consumers: P3, A5 and A2 (is `t` present on a partial fill).
+
+### 14. entry_cancel_fill_race (key `cancel_fill_race`; needs `race_repeats`; added by 261022-sj1; best effort)
+
+- Repeats `race_repeats` times: reads the depth, sends one BUY LIMIT of the approved quantity at the best ask (the touch: the price a BUY executes against; it must lie within your `far_price_fraction` band around the mark, else the case stops), cancels it as soon as the placement answer arrives, queries the final status once and, if any fill happened, closes it at once with one reduce-only MARKET order. A rejected placement stops the repeats; nothing is re-sent.
+- Plainly: this does not reproduce a deterministic race. It records what the cancel and the final status say for orders placed at the touch (for example -2011, FILLED, CANCELED). Whether a cancel ever crosses a fill in flight depends on exchange timing and may never happen on Demo.
+- Read: `race_repeats`, `repeats_completed`, `note`, `touch_price_side`, `stopped`; per repeat `r<n>_touch_price`, `r<n>_place_status`, `r<n>_place_executed_qty`, `r<n>_cancel` and `r<n>_cancel_code` (accepted or the exact code), `r<n>_final_status`, `r<n>_filled`, `r<n>_outcome`; the tallies `outcome_canceled_in_time`, `outcome_cancel_rejected` and `outcome_filled`.
+- Consumers: P7, the branch B4 order, A5.
+
+### 15. stream_loss_during_case (key `stream_loss`; added by 261022-sj1; needs the user-data stream)
+
+- Reuses the stream-gap mechanism of `stream_gap_during_case` (it closes the private connection once; there is no new fault injection). Order: drop first (nothing is sent when no stream runs or the drop is not possible); then, while the stream is down or reconnecting, a marketable BUY LIMIT entry (its fill is read over REST) and a closePosition STOP_MARKET far below, with REST reads of both; one wait of `case_timeout_seconds` for the stream to return to LIVE; then what the stream delivered after the drop is compared with what REST said. The stop is cancelled and the cleanup flattens the position.
+- Ends NOT_OBSERVED when no stream runs, when the drop is not possible, when the entry does not fill, or when the stream does not return to LIVE (the later deliveries cannot be compared).
+- Binance is not assumed to replay what a dropped stream missed: the case records whether it did.
+- Read: `transport_dropped`, `stream_states_at_entry_send`, `stream_states_when_stop_answered`, `stream_states_after_drop`, `stream_recovered_live`, `rest_entry_status_during_gap`, `rest_stop_status_during_gap`, `frames_before_drop_count`, `frames_after_drop_entry`, `frames_after_drop_stop`, `entry_fill_frame_delivered`, `stop_frame_delivered`, `comparison_entry`, `comparison_stop`, and `end_open_orders`, `end_open_algo_orders`, `end_position`.
+- Consumers: P5 (the branch timing of B2 and B3, reconciliation when the stream is lost or late).
+
+## One session: all cases
+
+The order of the case ids in one run without `--only` is the `CASE_ORDER` of the tool. The sixteen required Phase 18 cases run first; the cases below run only when their key is true in your file; the one case that waits more than ten minutes is last.
+
+1. `account_read_only_capture` (key `account_capture`)
+2. `algo_query_timing_after_new` (key `algo_query_timing`)
+3. `close_position_stop_with_position` (key `close_position_with_position`)
+4. `stop_would_trigger_after_fill` (key `stop_trigger_after_fill`)
+5. `stop_query_absent_then_same_id` (key `stop_absent_same_id`)
+6. `manual_close_with_open_legs` (key `manual_close_open_legs`)
+7. `commission_vs_realized_pnl` (key `commission_realized_pnl`)
+8. `triggered_close_position_bracket` (key `triggered_bracket`)
+9. `tp1_quantity_from_fill` (key `tp1_from_fill`)
+10. `exchange_info_read_for_close` (key `exchange_info_read`)
+11. `gtd_min_lifetime_boundary` (key `gtd_min_lifetime`)
+12. `partial_fill_attempt` (key `partial_fill_attempt`)
+13. `entry_cancel_fill_race` (key `cancel_fill_race`)
+14. `stream_loss_during_case` (key `stream_loss`)
+15. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
+
+A complete probe-limits file with every one of these keys on. Every number is yours: nothing is proposed, every placeholder is written `<OWNER: ...>`, and the loader refuses the file until you replace each one. The three Phase 18 optional cases stay off here (they are your earlier decisions; enabling `market_lot_size_out_of_range` also needs `market_lot_probe_quantity`).
+
+```toml
+[order]
+symbol = "<OWNER: the Demo symbol>"
+quantity = "<OWNER: approved quantity>"
+max_notional_quote = "<OWNER: notional cap in quote currency>"
+far_price_fraction = "<OWNER: strictly between 0 and 1>"
+near_trigger_fraction = "<OWNER: strictly between 0 and 1>"
+gtd_lifetime_seconds = <OWNER: whole seconds>
+race_repeats = <OWNER: a whole number, at most 5>
+
+[waits]
+case_timeout_seconds = <OWNER: whole seconds>
+cleanup_timeout_seconds = <OWNER: whole seconds>
+gtd_expiry_wait_seconds = <OWNER: whole seconds, greater than gtd_lifetime_seconds>
+
+[optional_cases]
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
+account_capture = true
+algo_query_timing = true
+close_position_with_position = true
+stop_trigger_after_fill = true
+stop_absent_same_id = true
+manual_close_open_legs = true
+commission_realized_pnl = true
+triggered_bracket = true
+tp1_from_fill = true
+exchange_info_read = true
+gtd_min_lifetime = true
+partial_fill_attempt = true
+cancel_fill_race = true
+stream_loss = true
+gtd_expiry = true
+```
+
+The single command for one session (no `--only`), typed phrase `DEMO PROBE BTCUSDT` (the symbol of your file):
+
+```
+uv run python -m scripts.demo_probe --environment DEMO --probe-limits-file .planning/phases/19-execution-plan-binding-price-check/decisions/19-probe-limits.toml --evidence-dir .planning/phases/19-execution-plan-binding-price-check/evidence --fixtures-dir .planning/phases/19-execution-plan-binding-price-check/evidence/fixtures --execute
+```
+
+Before it: the dry run of Step 1 and the smoke re-run of Step 2. The session takes more than ten minutes (the last case alone waits `gtd_expiry_wait_seconds`). If a ban or a rate limit stops the run (`ABORTED_BAN`), wait out the `retry_after_seconds` the evidence records and re-run only the cases that did not run, once, with `--only`.
+
 ## Consumers table
 
 | Case | What it answers | Who reads it |
@@ -170,15 +281,20 @@ Files every run leaves (in the evidence directory unless noted):
 | triggered_close_position_bracket | The ALGO_UPDATE lifecycle after a real trigger, the child order, the other leg | 19 P2, P11, A3; 20-DEFERRED A3; `18-VERIFICATION.md` line 66; Phase 24 G2-030 |
 | tp1_quantity_from_fill | A7: MARKET_LOT_SIZE at trigger, the TP1 quantity from the real fill | 19 P10, A7, O-03 |
 | gtd_entry_expiry_status | A2: a GTD entry that expires is `EXPIRED` and terminal; part of A1 | 19 P4, A2, A1; 20-DEFERRED A2 row |
+| exchange_info_read_for_close | A10, Q3: the live filters and the read time, for the emergency close fallback | `emergency_close.py`; your comparison with the plan-time snapshot |
+| gtd_min_lifetime_boundary | A1: accepted or rejected at server time + 599 s and + 601 s, with the exact codes and both clocks | 19 A1; `pre_placement.py` clock margin |
+| partial_fill_attempt | P3, A5: can Demo produce a partial fill (best effort; NOT_OBSERVED is a valid answer) | 19 P3, A5, A2 |
+| entry_cancel_fill_race | P7: the cancel answer, the final status and the fill of orders placed at the touch (not a deterministic race) | 19 P7, B4 order, A5 |
+| stream_loss_during_case | P5: REST during a user-data gap against what the stream delivers after it | 19 P5, B2 and B3 timing |
 
 ## Not covered here
 
 Listed so nobody assumes otherwise:
 
-- P3 partial fill: only the existing derived `partial_fill` case.
-- P5 stream loss: only the existing optional `stream_gap_during_case`.
-- P7 fill, cancel and trigger race.
-- The real 418 duration and the 429 queue order of plan 20-21: never provoked, by your instruction.
+- P3 partial fill: best effort only. The existing derived `partial_fill` case reads the entries of the run; `partial_fill_attempt` (261022-sj1) sends one crossing limit order at the approved quantity. Demo may never produce a partial fill, so P3 can stay NOT_OBSERVED for ever (the tool never raises the quantity to force one).
+- P5 stream loss: `stream_loss_during_case` (261022-sj1) runs one entry and stop cycle across a dropped user-data stream, next to the existing optional `stream_gap_during_case`. It ends NOT_OBSERVED when the stream does not return; a stream lost for longer than one `case_timeout_seconds`, and "stop rejected or timed out" under a lost stream, are not covered.
+- P7 fill, cancel and trigger race: best effort only. `entry_cancel_fill_race` (261022-sj1) captures the -2011, FILLED and CANCELED answers of cancels sent right after placements at the touch price; it does not reproduce a deterministic race, and P7 can stay NOT_OBSERVED on Demo. The trigger part of the race (a stop triggering while a cancel is in flight) has no case.
+- The real 418 duration and the 429 queue order of plan 20-21: never provoked, by your instruction and your decision not to provoke a ban; there is no case for either.
 - The stream states of SAFE_MODE exit row 7: the smoke and stream evidence only.
 - Hedge Mode.
 

@@ -647,9 +647,12 @@ async def test_reads_are_guarded_and_delegated() -> None:
     await port.income_history(symbol="BTCUSDT", start_time_ms=1791360000000)
     await port.query_algo_order_by_algo_id(algo_id=1000000001)
     await port.live_mark_price(symbol="BTCUSDT")
-    assert len(inner.calls) == 17
-    assert len(guard_calls) == 17
-    assert port.call_count == 17
+    # quick task 261022-sj1: the exchange clock and the depth of the book
+    await port.server_time()
+    await port.order_book(symbol="BTCUSDT")
+    assert len(inner.calls) == 19
+    assert len(guard_calls) == 19
+    assert port.call_count == 19
 
 
 def test_the_guarded_port_has_no_attribute_passthrough() -> None:

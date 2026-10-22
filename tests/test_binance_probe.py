@@ -30,6 +30,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    CheckServerTimeResponse,
     CurrentAllAlgoOpenOrdersResponseInner,
     CurrentAllOpenOrdersResponseInner,
     ExchangeInformationResponse,
@@ -43,6 +44,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     NewAlgoOrderResponse,
     NewOrderResponse,
     NotionalAndLeverageBracketsResponse,
+    OrderBookResponse,
     PositionInformationV3ResponseInner,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
@@ -1472,6 +1474,9 @@ _READ_CALLS = [
     lambda a: a.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=TEST_ONLY_UPDATE_MS),
     lambda a: a.query_algo_order_by_algo_id(algo_id=1000000001),
     lambda a: a.live_mark_price(symbol=TEST_ONLY_SYMBOL),
+    # quick task 261022-sj1
+    lambda a: a.server_time(),
+    lambda a: a.order_book(symbol=TEST_ONLY_SYMBOL),
 ]
 
 
@@ -2045,6 +2050,9 @@ def test_every_public_coroutine_returns_observations_only() -> None:
         "query_algo_order_by_algo_id",
         "new_gtd_limit_order",
         "live_mark_price",
+        # quick task 261022-sj1
+        "server_time",
+        "order_book",
     }
     assert {name: text for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {}
 
@@ -2059,3 +2067,84 @@ def test_the_return_walk_catches_a_raw_sdk_return(tmp_path: Path) -> None:
     )
     returns = _public_coroutine_returns(seeded)
     assert {name for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {"leak"}
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261022-sj1: the server time and the depth read.
+# --------------------------------------------------------------------------- #
+
+
+async def test_server_time_is_the_exchange_clock_as_milliseconds_and_utc_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("check_server_time", CheckServerTimeResponse(server_time=1791360123456))
+
+    observation = await adapter.server_time()
+
+    assert rest.calls == [("check_server_time", {})]  # public: no recvWindow
+    assert observation.ok is True and observation.operation == "server_time"
+    assert dict(observation.summary) == {
+        "server_time_ms": "1791360123456",
+        "server_time_utc": "2026-10-07T08:02:03.456000+00:00",
+    }
+
+
+async def test_server_time_keeps_every_millisecond_digit() -> None:
+    adapter, rest, _ = _adapter()
+    for ms in (1791360123001, 1791360123999, 1791360123123):
+        rest.script("check_server_time", CheckServerTimeResponse(server_time=ms))
+        observation = await adapter.server_time()
+        assert observation.summary["server_time_ms"] == str(ms)
+
+
+async def test_server_time_records_an_unreadable_answer_as_data() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("check_server_time", CheckServerTimeResponse(server_time=None))
+    observation = await adapter.server_time()
+    assert observation.ok is False
+    assert observation.error is not None and observation.error.message == "ValueError"
+
+
+async def test_order_book_summarises_the_levels_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "order_book",
+        OrderBookResponse(
+            last_update_id=7,
+            E=1791360123456,
+            T=1791360123450,
+            bids=[["83900.10", "1.500"], ["83900.00", "2"]],
+            asks=[["83900.20", "0.250"], ["83900.30", "2"], ["83900.40", "10"]],
+        ),
+    )
+
+    observation = await adapter.order_book(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [("order_book", {"symbol": TEST_ONLY_SYMBOL, "limit": 20})]
+    assert observation.ok is True and observation.operation == "order_book"
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "last_update_id": "7",
+        "bid_count": "2",
+        "ask_count": "3",
+        "bid_0_price": "83900.10",
+        "bid_0_quantity": "1.500",
+        "bid_1_price": "83900.00",
+        "bid_1_quantity": "2",
+        "ask_0_price": "83900.20",
+        "ask_0_quantity": "0.250",
+        "ask_1_price": "83900.30",
+        "ask_1_quantity": "2",
+        "ask_2_price": "83900.40",
+        "ask_2_quantity": "10",
+    }
+
+
+async def test_order_book_records_a_malformed_answer_as_data() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "order_book",
+        OrderBookResponse(last_update_id=7, E=1, T=1, bids=[["1", "1"]], asks=[["x", "1"]]),
+    )
+    observation = await adapter.order_book(symbol=TEST_ONLY_SYMBOL)
+    assert observation.ok is False
+    assert observation.error is not None and observation.error.message == "ValueError"

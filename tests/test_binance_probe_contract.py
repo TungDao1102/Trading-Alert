@@ -30,6 +30,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    CheckServerTimeResponse,
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
@@ -40,6 +41,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     NewAlgoOrderResponse,
     NewOrderResponse,
     NotionalAndLeverageBracketsResponse,
+    OrderBookResponse,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
     SymbolConfigurationResponse,
@@ -59,7 +61,14 @@ _Op = Callable[[BinanceProbeAdapter], Awaitable[Any]]
 # unsigned, so they are not in `SDK_REST_METHODS` and carry no recvWindow, but a mistyped keyword
 # there would surface at the same user checkpoint.
 PUBLIC_SDK_METHODS = frozenset(
-    {"mark_price_kline_candlestick_data", "exchange_information", "mark_price"}
+    {
+        "mark_price_kline_candlestick_data",
+        "exchange_information",
+        "mark_price",
+        # quick task 261022-sj1: the server time and the depth read
+        "check_server_time",
+        "order_book",
+    }
 )
 
 # Plain text is accepted for these enum-annotated parameters: the installed SDK copies the
@@ -148,6 +157,14 @@ _SUCCESS_PAYLOADS: dict[str, Any] = {
     ),
     "mark_price_kline_candlestick_data": [_MARK_ROW],
     "exchange_information": _exchange_information(),
+    "check_server_time": CheckServerTimeResponse(server_time=1791360123456),
+    "order_book": OrderBookResponse(
+        last_update_id=7,
+        E=1791360123456,
+        T=1791360123450,
+        bids=[["83900.10", "1.500"]],
+        asks=[["83900.20", "0.250"]],
+    ),
 }
 
 _Q = Decimal("0.010")
@@ -250,6 +267,9 @@ _OPERATIONS: dict[str, _Op] = {
         good_till_date_ms=1791360660000,
     ),
     "live_mark_price": lambda a: a.live_mark_price(symbol="BTCUSDT"),
+    # quick task 261022-sj1: the server time and the depth read
+    "server_time": lambda a: a.server_time(),
+    "order_book": lambda a: a.order_book(symbol="BTCUSDT"),
 }
 
 

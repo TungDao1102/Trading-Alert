@@ -64,6 +64,12 @@ EXPECTED_ORDER = (
     "commission_vs_realized_pnl",
     "triggered_close_position_bracket",
     "tp1_quantity_from_fill",
+    # quick task 261022-sj1: five more owner opt-in cases, before the long GTD case
+    "exchange_info_read_for_close",
+    "gtd_min_lifetime_boundary",
+    "partial_fill_attempt",
+    "entry_cancel_fill_race",
+    "stream_loss_during_case",
     "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
@@ -80,6 +86,11 @@ ALL_OPTIONAL = (
     "commission_realized_pnl",
     "triggered_bracket",
     "tp1_from_fill",
+    "exchange_info_read",
+    "gtd_min_lifetime",
+    "partial_fill_attempt",
+    "cancel_fill_race",
+    "stream_loss",
     "gtd_expiry",
 )
 
@@ -157,7 +168,10 @@ def test_case_order_is_the_d16_order_of_risk() -> None:
     assert tuple(dp.OPTIONAL_CASES.values()) == EXPECTED_ORDER[16:]
     assert dp.READ_ONLY_CASES == READ_ONLY
     assert tuple(dp.OPTIONAL_CASES) == oe.OPTIONAL_CASE_KEYS + oe.EVIDENCE_CASE_KEYS
-    assert dp.CAPTURE_CASES == EXPECTED_ORDER[19:]
+    # the sj0 ten keep their relative order; the sj1 five sit before the last (long) one
+    assert dp.CAPTURE_CASES == tuple(c for c in EXPECTED_ORDER[19:] if c in dp.CAPTURE_CASES)
+    assert dp.SJ1_CASES == EXPECTED_ORDER[28:33]
+    assert EXPECTED_ORDER[-1] == "gtd_entry_expiry_status"
 
 
 def test_this_plan_registers_the_four_read_only_handlers() -> None:
