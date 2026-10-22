@@ -67,8 +67,6 @@ EXPECTED_ORDER = (
     "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
-# The ids of quick task 261021-sj0 whose handler has not landed yet (emptied by its last task).
-PENDING_HANDLERS = frozenset(EXPECTED_ORDER[28:])
 ALL_OPTIONAL = (
     "explicit_time_in_force",
     "stream_gap",
@@ -1810,11 +1808,10 @@ async def test_a_rate_limit_answer_in_a_write_case_stops_the_case_and_the_run(
 
 
 def test_every_case_id_has_a_registered_handler() -> None:
-    registered = set(dp.CASE_ORDER) - PENDING_HANDLERS
-    assert set(dp.CASE_HANDLERS) == registered
-    assert set(dp.CASE_HANDLERS) <= set(dp.REQUIRED_CASES) | set(dp.OPTIONAL_CASES.values())
+    assert set(dp.CASE_HANDLERS) == set(dp.REQUIRED_CASES) | set(dp.OPTIONAL_CASES.values())
+    assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
     for case_id in dp.OPTIONAL_CASES.values():
-        assert (case_id in dp.CASE_HANDLERS) is (case_id not in PENDING_HANDLERS)
+        assert case_id in dp.CASE_HANDLERS
 
 
 async def test_the_dry_run_with_every_optional_case_rehearses_every_handler_without_error(
@@ -1838,12 +1835,11 @@ async def test_the_dry_run_with_every_optional_case_rehearses_every_handler_with
     code = await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
     document = recorder.document(config)
     assert code == dp.EXIT_OK and document["outcome"] == dp.OUTCOME_COMPLETE
-    registered = [cid for cid in dp.CASE_ORDER if cid not in PENDING_HANDLERS]
-    assert invoked == registered  # every handler once, in CASE_ORDER
+    assert invoked == list(dp.CASE_ORDER)  # every handler once, in CASE_ORDER
     assert [item["case_id"] for item in document["cases"]] == list(dp.CASE_ORDER)
     for item in document["cases"]:
         assert item["status"] == dp.NOT_REHEARSED
-        assert item["handler_registered"] is (item["case_id"] not in PENDING_HANDLERS)
+        assert item["handler_registered"] is True
     assert not [cid for cid, result in recorder.results.items() if result.status == dp.ERROR], {
         cid: result.reason for cid, result in recorder.results.items()
     }
@@ -1885,6 +1881,9 @@ def _function_nodes(tree: ast.Module) -> dict[str, ast.AST]:
     return found
 
 
+GTD_HANDLER = "_gtd_entry_expiry_status"
+
+
 def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> None:
     tree = ast.parse(Path(dp.__file__).read_text(encoding="utf-8"))
     functions = _function_nodes(tree)
@@ -1907,8 +1906,14 @@ def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> N
         assert rig.endswith("rig"), (name, rig)
         if name == "cleanup_symbol":
             assert timeout == "timeout_seconds"
+        elif name == GTD_HANDLER:
+            # quick task 261021-sj0: the one handler that waits the owner GTD expiry wait
+            assert timeout.endswith("gtd_expiry_wait_seconds"), (name, timeout)
         else:
             assert timeout.endswith("case_timeout_seconds"), (name, timeout)
+    assert {name for name, _, timeout in waits if timeout.endswith("gtd_expiry_wait_seconds")} == {
+        GTD_HANDLER
+    }
     for handler in dp.CASE_HANDLERS.values():
         source = inspect.getsource(handler)
         assert "asyncio.sleep" not in source and "time.sleep" not in source

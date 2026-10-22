@@ -10,13 +10,17 @@ cap 150, far_price_fraction 0.80 (a far BUY rests at 48000.00, a far up-trigger 
 
 from __future__ import annotations
 
+import ast
 import json
+import re
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 from scripts import demo_probe as dp
+from scripts import user_data_smoke
 
 from tests.probe_fakes import (
     FakeProbePort,
@@ -24,7 +28,8 @@ from tests.probe_fakes import (
     ok_observation,
     write_probe_limits,
 )
-from tests.support.virtual_time import VirtualTime
+from tests.support.ast_guards import float_constructor_calls
+from tests.support.virtual_time import TEST_ONLY_VIRTUAL_START, VirtualTime
 
 CASE_KEYS = {case_id: key for key, case_id in dp.OPTIONAL_CASES.items()}
 ABSENT = {"code": -2013, "category": "ORDER_ABSENT"}
@@ -1180,3 +1185,302 @@ async def test_the_tp1_case_with_a_held_quantity_that_quantizes_to_zero(tmp_path
     record = case(document, TP1)
     assert record["status"] == dp.NOT_OBSERVED and record["reason"] == dp.REASON_TP1_ZERO
     assert sent(port, "new_conditional_order") == []
+
+
+# =========================================================================== #
+# Task 3: gtd_entry_expiry_status (A2, P4), the script docstring and the runbook.
+# =========================================================================== #
+
+GTD = "gtd_entry_expiry_status"
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+GTD_LIFETIME = 660
+GTD_WAIT = 720
+
+
+def gtd_id(port: FakeProbePort) -> str:
+    (call,) = sent(port, "new_gtd_limit_order")
+    return str(call["client_order_id"])
+
+
+def expire_when_waiting(port: FakeProbePort, *, reason: str | None = "FAKE_REASON") -> Any:
+    def hook() -> None:
+        client_id = gtd_id(port)
+        raw = {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 5,
+            "T": 5,
+            "o": {"c": client_id, "X": "EXPIRED", "x": "EXPIRED", "T": 123},
+        }
+        port.expire_order(client_id, raw=raw, expire_reason=reason)
+
+    return hook
+
+
+async def test_the_gtd_case_sends_one_gtd_limit_with_a_whole_second_good_till_date(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.on_wait.append(expire_when_waiting(port))
+    start = TEST_ONLY_VIRTUAL_START + timedelta(microseconds=987654)  # sub-second part dropped
+    vt = VirtualTime(start)
+    document, _ = await run_cases(tmp_path, port, GTD, vt=vt)
+    record = case(document, GTD)
+    (call,) = sent(port, "new_gtd_limit_order")
+    expected = ((start - EPOCH) // timedelta(seconds=1) + GTD_LIFETIME) * 1000
+    assert call["good_till_date_ms"] == expected and isinstance(call["good_till_date_ms"], int)
+    assert call["good_till_date_ms"] % 1000 == 0
+    assert (call["side"], call["price"], call["quantity"]) == ("BUY", FAR_BELOW, APPROVED)
+    assert call["position_side"] == "BOTH" and "-gtd-" in call["client_order_id"]
+    assert vt.sleeps == [GTD_WAIT]  # exactly one wait, the owner GTD wait
+    details = record["details"]
+    assert details["good_till_date_ms"] == str(expected)
+    assert details["good_till_date_echoed"] == str(expected)
+    assert details["placed_at_utc"] == start.isoformat()
+    assert details["good_till_date_lifetime_seconds"] == str(GTD_LIFETIME)
+    assert sent(port, "new_limit_order") == [] and sent(port, "new_market_order") == []
+
+
+async def test_an_expired_entry_records_the_terminal_status_the_frames_and_the_time(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.on_wait.append(expire_when_waiting(port))
+    document, _ = await run_cases(tmp_path, port, GTD)
+    record = case(document, GTD)
+    details = record["details"]
+    assert record["status"] == dp.OBSERVED
+    assert details["terminal_status"] == "EXPIRED"
+    assert details["rest_statuses"] == "NEW,EXPIRED"
+    assert details["frame_statuses"] == "EXPIRED/EXPIRED/FAKE_REASON"
+    assert details["seconds_to_terminal"] == str(GTD_WAIT)
+    assert details["raw_order_updates"] == "EXPIRED|EXPIRED|123"
+    assert sent(port, "cancel_order") == []  # nothing left to cancel
+
+
+async def test_an_entry_that_stays_open_is_cancelled_once_and_not_observed(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    vt = VirtualTime()
+    document, _ = await run_cases(tmp_path, port, GTD, vt=vt)
+    record = case(document, GTD)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == dp.REASON_GTD_NOT_TERMINAL
+    assert "gtd_expiry_wait_seconds" in record["reason"]
+    assert len(sent(port, "cancel_order")) == 1
+    assert record["details"]["rest_statuses"] == "NEW,NEW"
+    assert record["details"]["terminal_status"] == "none"
+    assert vt.sleeps == [GTD_WAIT]
+    assert port.open_order_ids == []
+
+
+async def test_a_rejected_gtd_placement_is_observed_with_its_code_and_never_waits(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_gtd_limit_order",
+        error_observation("new_gtd_limit_order", code=-4023, category="REJECTED_DEFINITIVE"),
+    )
+    vt = VirtualTime()
+    document, _ = await run_cases(tmp_path, port, GTD, vt=vt)
+    record = case(document, GTD)
+    assert record["status"] == dp.OBSERVED
+    assert "-4023" in record["details"]["gtd_limit"]
+    assert vt.sleeps == []
+    assert sent(port, "cancel_order") == []
+
+
+async def test_an_absent_answer_is_recorded_but_is_not_terminal(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script_call("query_order", 0, error_observation("query_order", **ABSENT))
+    port.on_wait.append(expire_when_waiting(port))
+    vt = VirtualTime()
+    document, _ = await run_cases(tmp_path, port, GTD, vt=vt)
+    details = case(document, GTD)["details"]
+    assert vt.sleeps == [GTD_WAIT]
+    assert details["rest_statuses"] == "unreadable,EXPIRED"
+    assert "-2013" in details["order_status_query"]
+
+
+async def test_a_terminal_frame_alone_ends_the_wait(tmp_path: Path) -> None:
+    port = FakeProbePort()
+
+    def frame_only() -> None:
+        port.emit_frame(
+            {
+                "event_type": "OrderUpdateEvent",
+                "client_order_id": gtd_id(port),
+                "order_status": "EXPIRED",
+                "execution_type": "EXPIRED",
+            }
+        )
+
+    port.on_wait.append(frame_only)
+    document, _ = await run_cases(tmp_path, port, GTD)
+    record = case(document, GTD)
+    assert record["status"] == dp.OBSERVED
+    assert record["details"]["terminal_status"] == "EXPIRED"
+    assert record["details"]["rest_statuses"] == "NEW,NEW"
+
+
+async def test_the_gtd_case_checks_the_bound_first_and_refuses_hedge_mode(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, GTD, cap="1")
+    record = case(document, GTD)
+    assert record["status"] == dp.ERROR and record["reason"].startswith("order bound")
+    assert sent(port, "new_gtd_limit_order") == []
+    hedge = FakeProbePort(dual_side=True)
+    (tmp_path / "h").mkdir()
+    document, _ = await run_cases(tmp_path / "h", hedge, GTD)
+    assert case(document, GTD)["reason"] == dp.REASON_HEDGE_MODE
+    assert sent(hedge, "new_gtd_limit_order") == []
+
+
+async def test_the_gtd_case_in_a_dry_run_plans_the_far_buy_and_the_good_till_date(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path, case_ids=(GTD,), execute=False)
+    recorder = dp.ProbeRecorder()
+    rig = dp.build_dry_run_rig(config)
+    await dp.run_probe(config, rig, recorder)
+    document = recorder.document(config)
+    planned = [r for r in case(document, GTD)["planned_requests"] if r["mutating"]]
+    assert [r["operation"] for r in planned[:1]] == ["new_gtd_limit_order"]
+    kwargs = planned[0]["kwargs"]
+    assert kwargs["price"] == "48000.00" and kwargs["quantity"] == "0.002"
+    assert isinstance(kwargs["good_till_date_ms"], int)
+    assert kwargs["good_till_date_ms"] % 1000 == 0
+    assert case(document, GTD)["status"] == dp.NOT_REHEARSED
+
+
+# ----- the dry run with every key, the Phase 18 list, the AST guards, the runbook ---------- #
+
+
+def test_a_main_dry_run_with_all_ten_keys_exits_0_and_lists_the_ten_not_rehearsed(
+    tmp_path: Path,
+) -> None:
+    limits = write_probe_limits(tmp_path, optional=tuple(CASE_KEYS[c] for c in dp.CAPTURE_CASES))
+    code = dp.main(
+        [
+            "--environment",
+            "DEMO",
+            "--probe-limits-file",
+            str(limits),
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+        ],
+        environ={},
+    )
+    assert code == dp.EXIT_OK
+    (path,) = (tmp_path / "evidence").glob("demo-probe-DRYRUN-*.json")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    by_id = {item["case_id"]: item for item in document["cases"]}
+    assert [cid for cid in by_id if cid in dp.CAPTURE_CASES] == list(dp.CAPTURE_CASES)
+    for cid in dp.CAPTURE_CASES:
+        assert by_id[cid]["status"] == dp.NOT_REHEARSED and by_id[cid]["handler_registered"]
+    assert document["mode"] == dp.MODE_DRY_RUN and document["proof_class"] == dp.PROOF_FAKE
+    assert document["outcome"] == dp.OUTCOME_COMPLETE
+
+
+async def test_every_capture_handler_runs_in_a_dry_run_without_an_error(tmp_path: Path) -> None:
+    config = make_config(tmp_path, case_ids=dp.CAPTURE_CASES, execute=False)
+    recorder = dp.ProbeRecorder()
+    code = await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
+    assert code == dp.EXIT_OK
+    assert [cid for cid in dp.CAPTURE_CASES if cid not in recorder.results] == []
+    assert {cid: r.reason for cid, r in recorder.results.items() if r.status == dp.ERROR} == {}
+
+
+def test_without_a_new_key_the_case_list_is_the_phase18_list(tmp_path: Path) -> None:
+    config = make_config(tmp_path, execute=False)
+    assert config.case_ids == dp.REQUIRED_CASES
+    optional = ("explicit_time_in_force", "stream_gap", "market_lot_size_out_of_range")
+    limits = write_probe_limits(tmp_path, optional=optional, name="phase18.toml")
+    full = dp.parse_config(
+        [
+            "--environment",
+            "DEMO",
+            "--probe-limits-file",
+            str(limits),
+            "--evidence-dir",
+            str(tmp_path),
+        ]
+    )
+    assert full.case_ids == (*dp.REQUIRED_CASES, *tuple(dp.OPTIONAL_CASES.values())[:3])
+    assert not set(full.case_ids) & set(dp.CAPTURE_CASES)
+
+
+def test_every_case_id_has_a_handler_and_the_gtd_wait_is_the_only_extra_timeout() -> None:
+    assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
+    tree = ast.parse(Path(dp.__file__).read_text(encoding="utf-8"))
+    gtd_waits = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and ast.unparse(call.func) == "wait_up_to"
+        and ast.unparse(call.args[2]).endswith("gtd_expiry_wait_seconds")
+    }
+    assert gtd_waits == {"_gtd_entry_expiry_status"}
+
+
+def test_the_script_has_no_float_constructor_and_documents_the_capture_cases() -> None:
+    path = Path(dp.__file__)
+    assert float_constructor_calls(path) == []
+    doc = dp.__doc__ or ""
+    for needle in ("261021-sj0", "CAPTURE_CASES", "--fixtures-dir", "--only", "acceptance.overall"):
+        assert needle in doc, needle
+
+
+RUNBOOK = Path(dp.__file__).resolve().parents[1] / ".planning" / "DEMO-EVIDENCE-PLAN.md"
+
+
+def test_the_runbook_names_every_case_command_and_consumer() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    needed = [
+        *dp.CAPTURE_CASES,
+        *(CASE_KEYS[cid] for cid in dp.CAPTURE_CASES),
+        "user_data_smoke",
+        "18-UAT",
+        "DEMO SMOKE BTCUSDT",
+        "DEMO PROBE BTCUSDT",
+        "19-probe-limits.toml",
+        "G2-042",
+        "G4-035",
+        "A6",
+        "A3",
+        "A2",
+        "A7",
+        "A9",
+        "P10",
+        "ia",
+        "--execute",
+        "--only",
+        "--fixtures-dir",
+        "demo-probe-EVIDENCE-",
+        "-rest-",
+        "provenance.md",
+        "demo-observed, not mainnet",
+        "D055",
+    ]
+    assert [name for name in needed if name not in text] == []
+    assert "<OWNER:" in text  # every owner number is a placeholder: the file is not parseable
+    for forbidden in ("http://", "https://", "BINANCE_", "api_key", "secret ="):
+        assert forbidden not in text, forbidden
+
+
+def test_the_runbook_commands_use_the_real_flags() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    parser_flags = {
+        option
+        for parser in (dp._build_parser(), user_data_smoke._build_parser())
+        for action in parser._actions
+        for option in action.option_strings
+        if option.startswith("--")
+    }
+    used = set(re.findall(r"(--[a-z][a-z-]+)", text))
+    assert used <= parser_flags, used - parser_flags
+    assert {"--execute", "--only", "--fixtures-dir", "--probe-limits-file"} <= used
+    assert "--smoke-limits-file" in used

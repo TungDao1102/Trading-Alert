@@ -25,6 +25,15 @@ passes one shared bound first (``order_bound_refusal``: never above the owner's 
 quantity or notional cap; the owner-approved ``market_lot_probe_quantity`` of the optional
 MARKET_LOT_SIZE case is the single exception). The live run is plan 18-20 (blocking-human).
 
+Quick task 261021-sj0 adds ten owner opt-in evidence cases (``CAPTURE_CASES``), each enabled by
+its own key in the owner's probe limits file (the Phase 18 file enables none, so its run is
+unchanged). They record raw, scrubbed Binance Demo answers and user-data frames as evidence and
+fixtures for Phases 19 to 25. In an executed run with ``--fixtures-dir`` the REST answers of
+these cases are written as ``<case_id>-rest-<NNN>-<operation>.json`` beside the raw frames and
+listed in ``provenance.md``; a dry run writes none. An ``--only`` run of a few cases leaves
+``acceptance.overall`` at FAIL because the required set did not run: by design, read the
+per-case verdicts. The owner runbook is ``.planning/DEMO-EVIDENCE-PLAN.md``.
+
 Safety posture (read before running anything):
 
 * Dry run is the default. Without ``--execute`` every registered handler runs against
@@ -1139,6 +1148,12 @@ REASON_LOT_FILTERS_UNREADABLE = (
     "a LOT_SIZE or MARKET_LOT_SIZE filter value is unreadable: TP1 cannot be sized"
 )
 REASON_TP1_ZERO = "the TP1 quantity is zero after quantization to the lot grid"
+REASON_GTD_NOT_TERMINAL = "not terminal within gtd_expiry_wait_seconds"
+# Order statuses that end an order (the GTD case waits for one of them).
+ORDER_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
+)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The case whose leg the dependent D055 cases need, and the cases that open an entry.
 PREPLACED_CASE = "preplaced_stop_reduce_only_flat"
@@ -1350,6 +1365,22 @@ class _WriteCase:
         return value
 
     @property
+    def gtd_lifetime_seconds(self) -> int:
+        """The owner's GTD lifetime (quick task 261021-sj0)."""
+        value = self.limits.gtd_lifetime_seconds
+        if value is None:
+            raise ValueError("gtd_lifetime_seconds is not set in the probe limits file")
+        return value
+
+    @property
+    def gtd_expiry_wait_seconds(self) -> int:
+        """The owner's wait for the GTD order to end (longer than its lifetime)."""
+        value = self.limits.gtd_expiry_wait_seconds
+        if value is None:
+            raise ValueError("gtd_expiry_wait_seconds is not set in the probe limits file")
+        return value
+
+    @property
     def hedge_mode(self) -> bool:
         return self.context.recorder.dual_side is True
 
@@ -1457,6 +1488,27 @@ class _WriteCase:
                 position_side=self.position_side(long=long),
                 time_in_force=TIME_IN_FORCE_GTC,
                 reduce_only=None,
+            ),
+        )
+        if answer.ok and answer.summary.get("status") != ORDER_STATUS_FILLED:
+            self.open_orders.append(client_id)
+        return answer
+
+    async def gtd_limit(
+        self, label: str, *, client_id: str, price: Decimal, good_till_date_ms: int
+    ) -> ProbeObservation:
+        """A GTD LIMIT BUY of the approved quantity (bound-checked again just before sending)."""
+        self.check_bounds([(self.quantity, price)])
+        answer = await self.ask(
+            label,
+            self.port.new_gtd_limit_order(
+                symbol=self.symbol,
+                side=SIDE_BUY,
+                quantity=self.quantity,
+                price=price,
+                client_order_id=client_id,
+                position_side=self.position_side(long=True),
+                good_till_date_ms=good_till_date_ms,
             ),
         )
         if answer.ok and answer.summary.get("status") != ORDER_STATUS_FILLED:
@@ -3325,6 +3377,94 @@ async def _tp1_quantity_from_fill(case: _WriteCase) -> CaseResult:
     return case.observed()
 
 
+def _order_frames(
+    frames: Sequence[Mapping[str, str]], client_order_id: str
+) -> list[Mapping[str, str]]:
+    return [
+        frame
+        for frame in frames
+        if frame.get("event_type") == EVENT_ORDER_UPDATE
+        and frame.get("client_order_id") == client_order_id
+    ]
+
+
+def _raw_order_updates(case: _WriteCase, client_order_id: str) -> list[str]:
+    """``X|x|T`` of every raw ORDER_TRADE_UPDATE of one client order id, in delivery order."""
+    items: list[str] = []
+    for raw in case.port.raw_frames_since(case.marker):
+        if not isinstance(raw, Mapping) or raw.get("e") != WIRE_ORDER_UPDATE:
+            continue
+        order = raw.get("o")
+        if isinstance(order, Mapping) and order.get("c") == client_order_id:
+            items.append("|".join(_raw_text(order.get(key)) for key in ("X", "x", "T")))
+    return items
+
+
+async def _gtd_entry_expiry_status(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price)])
+    client_id = case.client_id("gtd")
+    case.detail("client_order_id", client_id)
+    placed_at = _checked_now(case.rig)
+    lifetime = case.gtd_lifetime_seconds
+    # Whole epoch seconds of the rig clock plus the owner lifetime, in milliseconds: integer
+    # timedelta floor division only (no float).
+    good_till_date_ms = ((placed_at - _EPOCH) // timedelta(seconds=1) + lifetime) * 1000
+    case.detail("placed_at_utc", placed_at.isoformat())
+    case.detail("good_till_date_lifetime_seconds", str(lifetime))
+    case.detail("good_till_date_ms", str(good_till_date_ms))
+    placed = await case.gtd_limit(
+        "gtd_limit", client_id=client_id, price=price, good_till_date_ms=good_till_date_ms
+    )
+    echoed = placed.summary.get("good_till_date") if placed.ok else None
+    if echoed:
+        case.detail("good_till_date_echoed", echoed)
+    if not placed.ok:
+        return case.observed()  # the exchange answer to this GTD is the A1 fact itself
+    rest: list[str] = []
+
+    def frame_terminal() -> list[str]:
+        return [
+            frame.get("order_status", "")
+            for frame in _order_frames(case.frames(), client_id)
+            if frame.get("order_status", "") in ORDER_TERMINAL_STATUSES
+        ]
+
+    async def terminal() -> bool:
+        # An ORDER_ABSENT answer is recorded ('' in `rest`) but never ends the wait.
+        rest.append(await case.order_status("order_status_query", client_id))
+        return rest[-1] in ORDER_TERMINAL_STATUSES or bool(frame_terminal())
+
+    ended = await wait_up_to(case.rig, terminal, case.gtd_expiry_wait_seconds)
+    streamed = _order_frames(case.frames(), client_id)
+    case.detail("rest_statuses", ",".join(status or "unreadable" for status in rest))
+    case.detail(
+        "frame_statuses",
+        ";".join(
+            f"{frame.get('order_status', '')}/{frame.get('execution_type', '')}/"
+            f"{frame.get('expire_reason', '')}"
+            for frame in streamed
+        )
+        or "none",
+    )
+    raw_updates = _raw_order_updates(case, client_id)
+    case.detail(
+        "raw_order_updates", ";".join(raw_updates) or "NOT_OBSERVED: no raw ORDER_TRADE_UPDATE"
+    )
+    if rest[-1] in ORDER_TERMINAL_STATUSES:
+        terminal_status = rest[-1]
+    else:
+        terminal_status = (frame_terminal() or ["none"])[-1]
+    case.detail("terminal_status", terminal_status)
+    if ended:
+        elapsed = (_checked_now(case.rig) - placed_at) // timedelta(seconds=1)
+        case.detail("seconds_to_terminal", str(elapsed))
+        return case.observed()
+    await case.cancel("gtd_cancel", client_id)
+    return case.not_observed(REASON_GTD_NOT_TERMINAL)
+
+
 async def case_account_read_only_capture(context: CaseContext) -> CaseResult:
     """Owner opt-in (O-05, G2-042, Phase 21 SC1, Phase 22): the six read-only account answers."""
     return await run_write_case(
@@ -3405,6 +3545,16 @@ async def case_triggered_close_position_bracket(context: CaseContext) -> CaseRes
     )
 
 
+async def case_gtd_entry_expiry_status(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A2, P4, part of A1): a far GTD entry and the status it ends with."""
+    return await run_write_case(
+        context,
+        _gtd_entry_expiry_status,
+        case_id="gtd_entry_expiry_status",
+        reduce_only=True,
+    )
+
+
 async def case_tp1_quantity_from_fill(context: CaseContext) -> CaseResult:
     """Owner opt-in (P10, A7, O-03): a TP1 sized from the fill, triggered near the mark."""
     return await run_write_case(
@@ -3447,6 +3597,7 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "commission_vs_realized_pnl": case_commission_vs_realized_pnl,
     "triggered_close_position_bracket": case_triggered_close_position_bracket,
     "tp1_quantity_from_fill": case_tp1_quantity_from_fill,
+    "gtd_entry_expiry_status": case_gtd_entry_expiry_status,
 }
 
 
