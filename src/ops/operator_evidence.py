@@ -20,7 +20,9 @@ change it.
   Demo run, from a TOML file. Kind "smoke" (plan 18-16) and kind "probe" (plans 18-17, 18-23).
   Nothing has a default: every missing, unknown or malformed key refuses the file. Quick task
   261021-sj0 adds ten owner opt-in evidence cases (`EVIDENCE_CASE_KEYS`) and three keys that are
-  required exactly when their case is enabled; the Phase 18 file loads unchanged.
+  required exactly when their case is enabled; quick task 261022-sj1 adds five more cases and the
+  key `race_repeats` (required exactly with `cancel_fill_race`, at most `RACE_REPEATS_MAX`); the
+  Phase 18 file loads unchanged.
 * `sha256_lf`: the sha256 of a text file with CRLF normalized to LF.
 
 Standard library and `src.ops.redaction` only: no SDK, no adapter, no network.
@@ -181,9 +183,10 @@ OPTIONAL_CASE_KEYS: tuple[str, ...] = (
 _MARKET_LOT_CASE = "market_lot_size_out_of_range"
 _MARKET_LOT_QUANTITY = "market_lot_probe_quantity"
 
-# Quick task 261021-sj0: the owner opt-in evidence-capture cases of `scripts/demo_probe.py`, in
-# the order the script runs them. They are optional in `[optional_cases]` (absent = not enabled,
-# not stored), so a file written for Phase 18 keeps its exact meaning.
+# Quick task 261021-sj0 (ten) and 261022-sj1 (five): the owner opt-in evidence-capture cases of
+# `scripts/demo_probe.py`, in the order the script runs them (`gtd_expiry`, the only case that
+# waits more than ten minutes, stays last). They are optional in `[optional_cases]` (absent = not
+# enabled, not stored), so a file written for Phase 18 keeps its exact meaning.
 EVIDENCE_CASE_KEYS: tuple[str, ...] = (
     "account_capture",
     "algo_query_timing",
@@ -194,6 +197,11 @@ EVIDENCE_CASE_KEYS: tuple[str, ...] = (
     "commission_realized_pnl",
     "triggered_bracket",
     "tp1_from_fill",
+    "exchange_info_read",
+    "gtd_min_lifetime",
+    "partial_fill_attempt",
+    "cancel_fill_race",
+    "stream_loss",
     "gtd_expiry",
 )
 _NEAR_TRIGGER_FRACTION = "near_trigger_fraction"
@@ -201,6 +209,11 @@ _NEAR_TRIGGER_CASES: tuple[str, ...] = ("triggered_bracket", "tp1_from_fill")
 _GTD_CASE = "gtd_expiry"
 _GTD_LIFETIME = "gtd_lifetime_seconds"
 _GTD_WAIT = "gtd_expiry_wait_seconds"
+_RACE_CASE = "cancel_fill_race"
+_RACE_REPEATS = "race_repeats"
+# The most place-and-cancel pairs the owner may ask of `cancel_fill_race`: a tool cap on the
+# number of probe orders (each repeat may open and close a position), not a trading number.
+RACE_REPEATS_MAX = 5
 
 # Per kind: section -> the keys it must carry (exactly).
 _LAYOUT: Mapping[str, Mapping[str, tuple[str, ...]]] = MappingProxyType(
@@ -245,7 +258,9 @@ class DemoOrderLimits:
     enabled (a decimal strictly between 0 and 1: how close to the live mark the trigger sits),
     `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds` exactly when `gtd_expiry` is enabled
     (the wait exceeds the lifetime). The 600 second exchange floor of goodTillDate is not
-    checked: the exchange's answer to a shorter lifetime is itself evidence.
+    checked: the exchange's answer to a shorter lifetime is itself evidence. `race_repeats`
+    (quick task 261022-sj1) is set exactly when `cancel_fill_race` is enabled: a positive
+    integer of at most `RACE_REPEATS_MAX`.
     """
 
     kind: str
@@ -261,6 +276,7 @@ class DemoOrderLimits:
     near_trigger_fraction: Decimal | None
     gtd_lifetime_seconds: int | None
     gtd_expiry_wait_seconds: int | None
+    race_repeats: int | None
 
     @property
     def enabled_optional_cases(self) -> tuple[str, ...]:
@@ -373,6 +389,25 @@ def _gtd_limits(
     return lifetime, wait
 
 
+def _race_repeats(
+    order: Mapping[str, Any], enabled: Mapping[str, bool], problems: list[str]
+) -> int | None:
+    """`order.race_repeats`: required exactly when `cancel_fill_race` is enabled, small."""
+    dotted = f"order.{_RACE_REPEATS}"
+    case = f"optional_cases.{_RACE_CASE}"
+    if enabled.get(_RACE_CASE) is not True:
+        if _RACE_REPEATS in order:
+            problems.append(f"{dotted} (only allowed when {case} is true)")
+        return None
+    if _RACE_REPEATS not in order:
+        problems.append(f"{dotted} (missing key: required when {case} is true)")
+        return None
+    value = _positive_int(order, dotted, _RACE_REPEATS, problems)
+    if value > RACE_REPEATS_MAX:
+        problems.append(f"{dotted} (must be at most {RACE_REPEATS_MAX})")
+    return value
+
+
 def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     """Load the owner's order-limits file of `kind` ("smoke" or "probe").
 
@@ -394,7 +429,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     problems: list[str] = []
     optional_keys: Mapping[str, tuple[str, ...]] = (
         {
-            "order": (_MARKET_LOT_QUANTITY, _NEAR_TRIGGER_FRACTION, _GTD_LIFETIME),
+            "order": (_MARKET_LOT_QUANTITY, _NEAR_TRIGGER_FRACTION, _GTD_LIFETIME, _RACE_REPEATS),
             "waits": (_GTD_WAIT,),
             "optional_cases": EVIDENCE_CASE_KEYS,
         }
@@ -424,6 +459,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     near_trigger: Decimal | None = None
     gtd_lifetime: int | None = None
     gtd_wait: int | None = None
+    race_repeats: int | None = None
     optional_cases: dict[str, bool] = {}
     if kind == KIND_SMOKE:
         event_wait = _positive_int(
@@ -462,6 +498,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
                 optional_cases[key] = cases[key] is True
         near_trigger = _near_trigger_fraction(order, optional_cases, problems)
         gtd_lifetime, gtd_wait = _gtd_limits(order, waits, optional_cases, problems)
+        race_repeats = _race_repeats(order, optional_cases, problems)
 
     if problems:
         raise DemoOrderLimitsRefused(problems)
@@ -479,6 +516,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         near_trigger_fraction=near_trigger,
         gtd_lifetime_seconds=gtd_lifetime,
         gtd_expiry_wait_seconds=gtd_wait,
+        race_repeats=race_repeats,
     )
 
 
@@ -502,6 +540,7 @@ __all__ = [
     "KIND_PROBE",
     "KIND_SMOKE",
     "OPTIONAL_CASE_KEYS",
+    "RACE_REPEATS_MAX",
     "ConfirmationRefused",
     "DemoOrderLimits",
     "DemoOrderLimitsRefused",

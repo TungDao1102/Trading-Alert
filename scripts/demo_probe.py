@@ -34,6 +34,15 @@ listed in ``provenance.md``; a dry run writes none. An ``--only`` run of a few c
 ``acceptance.overall`` at FAIL because the required set did not run: by design, read the
 per-case verdicts. The owner runbook is ``.planning/DEMO-EVIDENCE-PLAN.md``.
 
+Quick task 261022-sj1 adds five more owner opt-in cases on the same framework (``SJ1_CASES``):
+``exchange_info_read_for_close`` (A10), ``gtd_min_lifetime_boundary`` (A1: goodTillDate at the
+public server time plus 599 s and plus 601 s), ``partial_fill_attempt`` (P3, best effort),
+``entry_cancel_fill_race`` (P7, best effort, ``race_repeats`` place-and-cancel pairs) and
+``stream_loss_during_case`` (P5, the ``stream_gap_during_case`` drop around an entry and stop
+cycle). Three of them can stay NOT_OBSERVED on Demo for ever (the partial fill, the race, and
+the stream comparison when the stream does not return). The runbook section "One session: all
+cases" lists every case id in run order.
+
 Safety posture (read before running anything):
 
 * Dry run is the default. Without ``--execute`` every registered handler runs against
@@ -119,6 +128,7 @@ from src.adapters.binance_limits import (  # noqa: E402
     load_binance_limits,
 )
 from src.adapters.binance_probe import (  # noqa: E402
+    ORDER_BOOK_LIMIT,
     BinanceProbeAdapter,
     ErrorObservation,
     ProbeBanned,
@@ -283,6 +293,13 @@ OPTIONAL_CASES: Mapping[str, str] = MappingProxyType(
         "commission_realized_pnl": "commission_vs_realized_pnl",
         "triggered_bracket": "triggered_close_position_bracket",
         "tp1_from_fill": "tp1_quantity_from_fill",
+        # Quick task 261022-sj1: five more (SJ1_CASES); gtd_expiry, the only case that waits
+        # more than ten minutes, stays last.
+        "exchange_info_read": "exchange_info_read_for_close",
+        "gtd_min_lifetime": "gtd_min_lifetime_boundary",
+        "partial_fill_attempt": "partial_fill_attempt",
+        "cancel_fill_race": "entry_cancel_fill_race",
+        "stream_loss": "stream_loss_during_case",
         "gtd_expiry": "gtd_entry_expiry_status",
     }
 )
@@ -301,6 +318,16 @@ CAPTURE_CASES: tuple[str, ...] = (
     "tp1_quantity_from_fill",
     "gtd_entry_expiry_status",
 )
+# The five cases of quick task 261022-sj1, in CASE_ORDER order (before gtd_entry_expiry_status).
+SJ1_CASES: tuple[str, ...] = (
+    "exchange_info_read_for_close",
+    "gtd_min_lifetime_boundary",
+    "partial_fill_attempt",
+    "entry_cancel_fill_race",
+    "stream_loss_during_case",
+)
+# The cases whose REST answers are also written as fixture files in an executed run.
+FIXTURE_CASES: tuple[str, ...] = (*CAPTURE_CASES, *SJ1_CASES)
 
 # Client ids of the probe: the exchange's documented id shape (at most 36 characters).
 CLIENT_ID_PREFIX = "dprobe-"
@@ -648,6 +675,12 @@ class ProbePort(Protocol):
 
     async def live_mark_price(self, *, symbol: str) -> ProbeObservation: ...
 
+    # Quick task 261022-sj1: the exchange clock and the depth of the book (unsigned reads).
+
+    async def server_time(self) -> ProbeObservation: ...
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation: ...
+
     def marker(self) -> int: ...
 
     def frames_since(self, marker: int) -> list[dict[str, str]]: ...
@@ -849,6 +882,7 @@ class ProbeRecorder:
                 "near_trigger_fraction": order.near_trigger_fraction,
                 "gtd_lifetime_seconds": order.gtd_lifetime_seconds,
                 "gtd_expiry_wait_seconds": order.gtd_expiry_wait_seconds,
+                "race_repeats": order.race_repeats,
                 "optional_cases": dict(order.optional_cases),
                 "only": list(config.only) if config.only is not None else None,
             },
@@ -1149,6 +1183,21 @@ REASON_LOT_FILTERS_UNREADABLE = (
 )
 REASON_TP1_ZERO = "the TP1 quantity is zero after quantization to the lot grid"
 REASON_GTD_NOT_TERMINAL = "not terminal within gtd_expiry_wait_seconds"
+REASON_NO_PARTIAL_PRODUCED = "no partial fill produced"
+REASON_STREAM_NOT_RECOVERED = (
+    "the stream did not return to LIVE within case_timeout_seconds: the later deliveries "
+    "cannot be compared with what REST said during the gap"
+)
+# The two points of `gtd_min_lifetime_boundary`: goodTillDate = public server time + this many
+# seconds, one just below and one just above the exchange's documented floor of 600 seconds
+# (assumption A1). Tool vocabulary of the probe, not a trading threshold.
+GTD_BOUNDARY_MARGINS_SECONDS: tuple[int, int] = (599, 601)
+RACE_NOTE = (
+    "this case does not reproduce a deterministic race: each repeat places a BUY LIMIT at the "
+    "best ask and cancels it as soon as the placement answer arrives; the exchange timing "
+    "decides whether the cancel meets a NEW, FILLED or CANCELED order, so the outcomes below are "
+    "samples of the exchange answers (for example -2011 or FILLED), not a proof of their order"
+)
 # Order statuses that end an order (the GTD case waits for one of them).
 ORDER_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
@@ -1378,6 +1427,14 @@ class _WriteCase:
         value = self.limits.gtd_expiry_wait_seconds
         if value is None:
             raise ValueError("gtd_expiry_wait_seconds is not set in the probe limits file")
+        return value
+
+    @property
+    def race_repeats(self) -> int:
+        """The owner's `race_repeats` (quick task 261022-sj1): place-and-cancel pairs."""
+        value = self.limits.race_repeats
+        if value is None:
+            raise ValueError("race_repeats is not set in the probe limits file")
         return value
 
     @property
@@ -3465,6 +3522,465 @@ async def _gtd_entry_expiry_status(case: _WriteCase) -> CaseResult:
     return case.not_observed(REASON_GTD_NOT_TERMINAL)
 
 
+# ----- quick task 261022-sj1: five more owner opt-in cases ------------------------------- #
+
+# The four exchangeInfo filters the emergency close fallback depends on (A10, Q3):
+# (filter, detail suffix, key of the `symbol_filters` summary).
+_EXCHANGE_INFO_FILTERS: tuple[tuple[str, str, str], ...] = (
+    ("LOT_SIZE", "min_qty", "min_quantity"),
+    ("LOT_SIZE", "max_qty", "max_quantity"),
+    ("LOT_SIZE", "step_size", "step_size"),
+    ("MARKET_LOT_SIZE", "min_qty", "market_lot_min_quantity"),
+    ("MARKET_LOT_SIZE", "max_qty", "market_lot_max_quantity"),
+    ("MARKET_LOT_SIZE", "step_size", "market_lot_step_size"),
+    ("PRICE_FILTER", "tick_size", "tick_size"),
+    ("MIN_NOTIONAL", "notional", "min_notional"),
+)
+# The summary keys compared with the filters the run read at its start.
+_SNAPSHOT_COMPARED: tuple[str, ...] = (
+    "status",
+    "tick_size",
+    "step_size",
+    "min_quantity",
+    "max_quantity",
+    "min_notional",
+    "market_lot_min_quantity",
+    "market_lot_max_quantity",
+    "market_lot_step_size",
+)
+_RACE_FILLED_STATUSES: frozenset[str] = frozenset(
+    {ORDER_STATUS_FILLED, ORDER_STATUS_PARTIALLY_FILLED}
+)
+
+
+def _ms_of(moment: datetime) -> int:
+    """Whole epoch milliseconds of an aware datetime (integer arithmetic only)."""
+    return (moment - _EPOCH) // timedelta(milliseconds=1)
+
+
+def _code_text(answer: ProbeObservation) -> str:
+    """The exact error code of an answer as text: ``accepted``, the int, or ``none``."""
+    error = answer.error
+    if answer.ok or error is None:
+        return "accepted"
+    return "none" if error.code is None else str(error.code)
+
+
+def _book_side(book: ProbeObservation, side: str) -> list[tuple[Decimal, Decimal]] | None:
+    """The (price, quantity) levels of one side of an `order_book` answer, best first.
+
+    None when the answer is not OK or its count is unreadable; a level whose price or quantity
+    is unreadable ends the list (nothing is guessed).
+    """
+    if not book.ok:
+        return None
+    count_text = book.summary.get(f"{side}_count", "")
+    if not (count_text.isascii() and count_text.isdigit()):
+        return None
+    levels: list[tuple[Decimal, Decimal]] = []
+    for index in range(int(count_text)):
+        price = _positive_decimal(book.summary, f"{side}_{index}_price")
+        quantity = _positive_decimal(book.summary, f"{side}_{index}_quantity")
+        if price is None or quantity is None:
+            break
+        levels.append((price, quantity))
+    return levels
+
+
+async def _exchange_info_read_for_close(case: _WriteCase) -> CaseResult:
+    started = _checked_now(case.rig)
+    answer = await case.ask("symbol_filters_read", case.port.symbol_filters(symbol=case.symbol))
+    case.detail("read_elapsed_ms", str(case.elapsed_ms(started)))
+    case.detail(
+        "read_endpoint",
+        "GET /fapi/v1/exchangeInfo through BinancePublicMarketData.exchange_info",
+    )
+    if not answer.ok:
+        return case.not_observed(f"the exchangeInfo read failed: {_class_code(answer)}")
+    if answer.summary.get("found") != _TRUE:
+        return case.not_observed("the symbol is not listed in the exchangeInfo answer")
+    for name, suffix, key in _EXCHANGE_INFO_FILTERS:
+        case.detail(f"filter_{name}_{suffix}", answer.summary.get(key, "not listed"))
+    case.detail("symbol_status", answer.summary.get("status", "not listed"))
+    case.detail(
+        "price_filter_min_price_max_price",
+        "NOT_OBSERVED: the project port reads the tick size of PRICE_FILTER only",
+    )
+    snapshot = case.context.recorder.market.get("symbol_filters")
+    if isinstance(snapshot, ProbeObservation) and snapshot.ok:
+        differing = [
+            key
+            for key in _SNAPSHOT_COMPARED
+            if snapshot.summary.get(key) != answer.summary.get(key)
+        ]
+        case.detail("matches_run_start_snapshot", _flag_text(not differing))
+        case.detail("snapshot_differences", ",".join(differing) or "none")
+    else:
+        case.detail("matches_run_start_snapshot", "unknown")
+        case.detail("snapshot_differences", "unknown: no run-start snapshot")
+    return case.observed()
+
+
+async def _gtd_min_lifetime_boundary(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price)])
+    case.detail("far_price", format(price, "f"))
+    sent_any = False
+    for margin in GTD_BOUNDARY_MARGINS_SECONDS:
+        prefix = f"plus_{margin}s"
+        local_before = _checked_now(case.rig)
+        clock = await case.ask(f"{prefix}_server_time", case.port.server_time())
+        local_after = _checked_now(case.rig)
+        server_ms = _positive_int_text(clock.summary, "server_time_ms") if clock.ok else None
+        if server_ms is None:
+            case.detail(
+                f"{prefix}_skipped",
+                "NOT_OBSERVED: the server time was unreadable: nothing was sent for this point",
+            )
+            continue
+        good_till_date_ms = server_ms + margin * 1000
+        local_ms = _ms_of(local_after)
+        case.detail(f"{prefix}_margin_seconds", str(margin))
+        case.detail(f"{prefix}_server_time_ms", str(server_ms))
+        case.detail(f"{prefix}_local_clock_before_utc", local_before.isoformat())
+        case.detail(f"{prefix}_local_clock_after_utc", local_after.isoformat())
+        case.detail(f"{prefix}_local_minus_server_ms", str(local_ms - server_ms))
+        case.detail(f"{prefix}_good_till_date_ms", str(good_till_date_ms))
+        case.detail(f"{prefix}_good_till_date_minus_server_ms", str(good_till_date_ms - server_ms))
+        case.detail(f"{prefix}_good_till_date_minus_local_ms", str(good_till_date_ms - local_ms))
+        client_id = case.client_id(f"gtd{margin}")
+        sent_any = True
+        placed = await case.gtd_limit(
+            f"{prefix}_gtd_limit",
+            client_id=client_id,
+            price=price,
+            good_till_date_ms=good_till_date_ms,
+        )
+        case.detail(f"{prefix}_accepted", _flag_text(placed.ok))
+        if placed.ok:
+            echoed = placed.summary.get("good_till_date")
+            if echoed:
+                case.detail(f"{prefix}_good_till_date_echoed", echoed)
+            canceled = await case.cancel(f"{prefix}_cancel", client_id)
+            case.detail(f"{prefix}_cancel_accepted", _flag_text(canceled.ok))
+            continue
+        error = placed.error
+        case.detail(f"{prefix}_error_code", _code_text(placed))
+        if error is not None:
+            case.detail(f"{prefix}_error_class", error.http_class)
+            case.detail(f"{prefix}_error_category", error.category)
+            case.detail(f"{prefix}_error_message", error.message)
+    if not sent_any:
+        return case.not_observed("the server time was unreadable: no order was sent")
+    return case.observed()
+
+
+def _is_partial(summary: Mapping[str, str]) -> bool:
+    """PARTIALLY_FILLED, or an executed quantity strictly between zero and the original."""
+    if summary.get("status") == ORDER_STATUS_PARTIALLY_FILLED:
+        return True
+    executed = _decimal_or_none(summary.get("executed_qty", ""))
+    original = _decimal_or_none(summary.get("orig_qty", ""))
+    return executed is not None and original is not None and 0 < executed < original
+
+
+def _record_numbers(case: _WriteCase, prefix: str, answer: ProbeObservation) -> None:
+    """The raw status and quantities of one order answer (text as the exchange gave it)."""
+    for key in ("status", "orig_qty", "executed_qty", "avg_price"):
+        case.detail(f"{prefix}{key}", answer.summary.get(key, "NOT_OBSERVED: not answered"))
+
+
+async def _partial_fill_attempt(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    cap = case.limits.max_notional_quote
+    if cap is None:
+        raise _StopCase("max_notional_quote is not approved in the probe limits file")
+    # As far as the owner bound allows: the highest tick-grid price under the notional cap,
+    # but never past the price a marketable entry already uses (halfway to the PERCENT_PRICE
+    # edge, the first live probe having met -4016 at the edge).
+    cap_price = market.floor(cap / case.quantity)
+    limit_price = min(market.marketable_buy(), cap_price)
+    case.check_bounds([(case.quantity, limit_price)])
+    case.detail("approved_quantity", format(case.quantity, "f"))
+    case.detail("notional_cap", format(cap, "f"))
+    case.detail("cap_price", format(cap_price, "f"))
+    case.detail("band_price", format(market.marketable_buy(), "f"))
+    case.detail("limit_price", format(limit_price, "f"))
+    book = await case.ask("order_book_read", case.port.order_book(symbol=case.symbol))
+    asks = _book_side(book, "ask")
+    bids = _book_side(book, "bid")
+    expects = "unknown"
+    if asks:
+        within = sum((qty for price, qty in asks if price <= limit_price), Decimal(0))
+        case.detail("best_ask", format(asks[0][0], "f"))
+        case.detail("ask_levels_read", str(len(asks)))
+        case.detail("ask_quantity_within_limit_price", format(within, "f"))
+        if within >= case.quantity:
+            expects = _FALSE
+        elif len(asks) < ORDER_BOOK_LIMIT:
+            expects = _TRUE
+    if bids:
+        case.detail("best_bid", format(bids[0][0], "f"))
+    case.detail("depth_expects_partial", expects)
+    if asks and asks[0][0] > limit_price:
+        case.detail(
+            "not_sent",
+            f"the limit price {format(limit_price, 'f')} does not reach the best ask "
+            f"{format(asks[0][0], 'f')}: the owner notional cap stops the order short of the book",
+        )
+        return case.not_observed(REASON_NO_PARTIAL_PRODUCED)
+    client_id = case.client_id("pfa")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit("limit_order", client_id=client_id, side=SIDE_BUY, price=limit_price)
+    case.detail("placement_accepted", _flag_text(placed.ok))
+    if not placed.ok:
+        return case.not_observed(REASON_NO_PARTIAL_PRODUCED)
+    _record_numbers(case, "", placed)
+    case.detail("placement_status", placed.summary.get("status", "NOT_OBSERVED: not answered"))
+    seen_in: list[str] = []
+    rest_partial = _is_partial(placed.summary)
+    queried = await case.ask(
+        "order_query", case.port.query_order(symbol=case.symbol, client_order_id=client_id)
+    )
+    if queried.ok:
+        case.detail("query_status", queried.summary.get("status", "unreadable"))
+        case.detail("query_executed_qty", queried.summary.get("executed_qty", "not answered"))
+        rest_partial = rest_partial or _is_partial(queried.summary)
+    if client_id in case.open_orders and not (
+        queried.ok and queried.summary.get("status") == ORDER_STATUS_FILLED
+    ):
+        await case.cancel("remainder_cancel", client_id)
+        final = await case.ask(
+            "final_query", case.port.query_order(symbol=case.symbol, client_order_id=client_id)
+        )
+        if final.ok:
+            case.detail("final_status", final.summary.get("status", "unreadable"))
+            case.detail("final_executed_qty", final.summary.get("executed_qty", "not answered"))
+            rest_partial = rest_partial or _is_partial(final.summary)
+    frame_partial = any(
+        frame.get("order_status") == ORDER_STATUS_PARTIALLY_FILLED
+        for frame in _order_frames(case.frames(), client_id)
+    )
+    if rest_partial:
+        seen_in.append("rest")
+    if frame_partial:
+        seen_in.append("frames")
+    case.detail("partial_fill_seen", _flag_text(bool(seen_in)))
+    if seen_in:
+        case.detail("partial_seen_in", ",".join(seen_in))
+    try:
+        held = await case.held_quantity("position_after")
+    except _StopCase as stop:
+        held = Decimal(0)
+        case.detail("flatten", f"skipped: {stop.reason}")
+    if held > 0:
+        case.detail("flatten_quantity", format(held, "f"))
+        await case.market_close("flatten", held, limit_price, "pff")
+    if seen_in:
+        return case.observed()
+    return case.not_observed(REASON_NO_PARTIAL_PRODUCED)
+
+
+async def _entry_cancel_fill_race(case: _WriteCase) -> CaseResult:
+    repeats = case.race_repeats
+    case.detail("race_repeats", str(repeats))
+    case.detail("note", RACE_NOTE)
+    case.detail("touch_price_side", "best ask (the price a BUY LIMIT executes against)")
+    market = await case.market()
+    lower = market.far_below(case.fraction)
+    upper = market.far_above(case.fraction)
+    tally = {"canceled_in_time": 0, "cancel_rejected": 0, "filled": 0}
+    completed = 0
+    for number in range(1, repeats + 1):
+        prefix = f"r{number}"
+        book = await case.ask(f"{prefix}_order_book", case.port.order_book(symbol=case.symbol))
+        asks = _book_side(book, "ask")
+        if not asks:
+            case.detail("stopped", f"{prefix}: the best ask is unreadable")
+            break
+        touch = asks[0][0]
+        if not lower <= touch <= upper:
+            case.detail(
+                "stopped",
+                f"{prefix}: the best ask {format(touch, 'f')} is outside the far_price_fraction "
+                f"band {format(lower, 'f')} to {format(upper, 'f')}",
+            )
+            break
+        client_id = case.client_id(f"rc{number}")
+        placed = await case.limit(
+            f"{prefix}_place", client_id=client_id, side=SIDE_BUY, price=touch
+        )
+        if not placed.ok:
+            case.detail("stopped", f"{prefix}: placement rejected {_class_code(placed)}")
+            break
+        place_status = placed.summary.get("status", "")
+        case.detail(f"{prefix}_touch_price", format(touch, "f"))
+        case.detail(f"{prefix}_place_status", place_status or "unreadable")
+        case.detail(
+            f"{prefix}_place_executed_qty", placed.summary.get("executed_qty", "not answered")
+        )
+        canceled = await case.cancel(f"{prefix}_cancel", client_id)
+        case.detail(f"{prefix}_cancel_code", _code_text(canceled))
+        final = await case.ask(
+            f"{prefix}_final_query",
+            case.port.query_order(symbol=case.symbol, client_order_id=client_id),
+        )
+        final_status = final.summary.get("status", "") if final.ok else ""
+        case.detail(f"{prefix}_final_status", final_status or "unreadable")
+        if place_status in _RACE_FILLED_STATUSES or final_status in _RACE_FILLED_STATUSES:
+            filled = _TRUE
+        elif place_status and final_status:
+            filled = _FALSE
+        else:
+            filled = "unknown"
+        case.detail(f"{prefix}_filled", filled)
+        cancel_text = (
+            "canceled in time" if canceled.ok else f"cancel rejected {_code_text(canceled)}"
+        )
+        case.detail(f"{prefix}_outcome", f"{cancel_text}; final {final_status or 'unreadable'}")
+        tally["canceled_in_time" if canceled.ok else "cancel_rejected"] += 1
+        completed += 1
+        if filled == _TRUE:
+            tally["filled"] += 1
+            try:
+                held = await case.held_quantity(f"{prefix}_position")
+            except _StopCase as stop:
+                case.detail("stopped", f"{prefix}: cannot flatten: {stop.reason}")
+                break
+            if held > 0:
+                await case.market_close(f"{prefix}_flatten", held, touch, f"rf{number}")
+    case.detail("repeats_completed", str(completed))
+    for name, count in tally.items():
+        case.detail(f"outcome_{name}", str(count))
+    if completed == 0:
+        stopped = case.details.get("stopped", "no repeat ran")
+        return case.not_observed(f"no place-and-cancel pair was completed: {stopped}")
+    return case.observed()
+
+
+def _frame_texts(frames: Sequence[Mapping[str, str]], *fields: str) -> str:
+    """``a/b`` per frame (the named fields, in order), ``;``-joined, or ``none``."""
+    return ";".join("/".join(frame.get(name, "") for name in fields) for frame in frames) or "none"
+
+
+async def _stream_loss_during_case(case: _WriteCase) -> CaseResult:
+    if not case.stream_started():
+        return case.not_observed(REASON_NO_STREAM)
+    market = await case.market()
+    below = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, market.marketable_buy()), (None, below)])
+    gap_marker = case.port.marker()
+    # The existing stream-gap mechanism (stream_gap_during_case): close the private connection
+    # first, so nothing is placed when the port cannot drop it.
+    dropped = await case.port.drop_stream_transport()
+    case.detail("transport_dropped", _flag_text(dropped))
+    if not dropped:
+        return case.not_observed(REASON_NO_STREAM)
+    case.detail(
+        "stream_states_at_entry_send", ",".join(case.port.stream_states_since(gap_marker)) or "none"
+    )
+    placed, status = await case.open_long(market, "slg")
+    entry_id = case.details.get("entry_client_id", "")
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}")
+    if status != ORDER_STATUS_FILLED:
+        if entry_id in case.open_orders:
+            await case.cancel("entry_cancel", entry_id)
+        return case.not_observed(f"the entry did not fill: status {status or 'unreadable'}")
+    case.detail("rest_entry_status_during_gap", status)
+    stop_id = case.client_id("slx")
+    case.detail("client_algo_id", stop_id)
+    stop = await case.conditional(
+        "stop",
+        client_id=stop_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=below,
+        quantity=None,
+        close_position=True,
+    )
+    case.detail("stop_accepted", _flag_text(stop.ok))
+    rest_stop = "not placed"
+    if stop.ok:
+        rest_stop = await case.algo_status("rest_stop_query", stop_id) or "unreadable"
+        case.detail("rest_stop_status_during_gap", rest_stop)
+    case.detail(
+        "stream_states_when_stop_answered",
+        ",".join(case.port.stream_states_since(gap_marker)) or "none",
+    )
+
+    async def recovered() -> bool:
+        return StreamState.LIVE.value in case.port.stream_states_since(gap_marker)
+
+    back = await wait_up_to(case.rig, recovered, case.case_timeout_seconds)
+    states = case.port.stream_states_since(gap_marker)
+    case.detail("stream_states_after_drop", ",".join(states) or "none")
+    case.detail("stream_recovered_live", _flag_text(back))
+    after = case.port.frames_since(gap_marker)
+    case.detail("frames_before_drop_count", str(len(case.frames()) - len(after)))
+    entry_frames = _order_frames(after, entry_id)
+    stop_frames = _algo_frames(after, stop_id)
+    entry_text = _frame_texts(entry_frames, "order_status", "execution_type")
+    stop_text = _frame_texts(stop_frames, "algo_status")
+    case.detail("frames_after_drop_entry", entry_text)
+    case.detail("frames_after_drop_stop", stop_text)
+    case.detail(
+        "entry_fill_frame_delivered",
+        _flag_text(any(f.get("order_status") == ORDER_STATUS_FILLED for f in entry_frames)),
+    )
+    case.detail("stop_frame_delivered", _flag_text(bool(stop_frames)))
+    case.detail("comparison_entry", f"rest={status}; stream_after_drop={entry_text}")
+    case.detail("comparison_stop", f"rest={rest_stop}; stream_after_drop={stop_text}")
+    if stop.ok:
+        await case.cancel_algo("stop_cancel", stop_id)
+    await case.observe_state("end")
+    if not back:
+        return case.not_observed(REASON_STREAM_NOT_RECOVERED)
+    return case.observed()
+
+
+async def case_exchange_info_read_for_close(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A10, Q3): the live exchangeInfo filters and the read time; no order."""
+    return await run_write_case(
+        context,
+        _exchange_info_read_for_close,
+        case_id="exchange_info_read_for_close",
+        reduce_only=False,
+    )
+
+
+async def case_gtd_min_lifetime_boundary(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A1): GTD entries at server time + 599 s and + 601 s."""
+    return await run_write_case(
+        context,
+        _gtd_min_lifetime_boundary,
+        case_id="gtd_min_lifetime_boundary",
+        reduce_only=True,
+    )
+
+
+async def case_partial_fill_attempt(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P3, A5): one best-effort limit order priced to cross; may stay NOT_OBSERVED."""
+    return await run_write_case(
+        context, _partial_fill_attempt, case_id="partial_fill_attempt", reduce_only=True
+    )
+
+
+async def case_entry_cancel_fill_race(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P7): place at the touch and cancel at once, `race_repeats` times."""
+    return await run_write_case(
+        context, _entry_cancel_fill_race, case_id="entry_cancel_fill_race", reduce_only=True
+    )
+
+
+async def case_stream_loss_during_case(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P5): one entry and stop cycle across a dropped user-data stream."""
+    return await run_write_case(
+        context, _stream_loss_during_case, case_id="stream_loss_during_case", reduce_only=True
+    )
+
+
 async def case_account_read_only_capture(context: CaseContext) -> CaseResult:
     """Owner opt-in (O-05, G2-042, Phase 21 SC1, Phase 22): the six read-only account answers."""
     return await run_write_case(
@@ -3597,6 +4113,11 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "commission_vs_realized_pnl": case_commission_vs_realized_pnl,
     "triggered_close_position_bracket": case_triggered_close_position_bracket,
     "tp1_quantity_from_fill": case_tp1_quantity_from_fill,
+    "exchange_info_read_for_close": case_exchange_info_read_for_close,
+    "gtd_min_lifetime_boundary": case_gtd_min_lifetime_boundary,
+    "partial_fill_attempt": case_partial_fill_attempt,
+    "entry_cancel_fill_race": case_entry_cancel_fill_race,
+    "stream_loss_during_case": case_stream_loss_during_case,
     "gtd_entry_expiry_status": case_gtd_entry_expiry_status,
 }
 
@@ -3781,11 +4302,11 @@ class _ProbeRun:
         """Write each REST answer of a capture case as a scrubbed fixture (executed runs only).
 
         One file per observation, `<case_id>-rest-<NNN>-<operation>.json`, beside the raw frame
-        fixtures; the names go to `recorder.fixtures` (so `provenance.md` lists them). Other
-        cases and dry runs write nothing.
+        fixtures; the names go to `recorder.fixtures` (so `provenance.md` lists them). Only the
+        cases of `FIXTURE_CASES` (the sj0 ten and the sj1 five) write them; dry runs write none.
         """
         directory = self.config.fixtures_dir
-        if case_id not in CAPTURE_CASES or self.dry_run or directory is None:
+        if case_id not in FIXTURE_CASES or self.dry_run or directory is None:
             return []
         names: list[str] = []
         for index, observation in enumerate(result.observations, start=1):
@@ -4410,6 +4931,16 @@ class GuardedProbePort:
     async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
         self._enter("live_mark_price")
         result: ProbeObservation = await self._adapter.live_mark_price(symbol=symbol)
+        return result
+
+    async def server_time(self) -> ProbeObservation:
+        self._enter("server_time")
+        result: ProbeObservation = await self._adapter.server_time()
+        return result
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation:
+        self._enter("order_book")
+        result: ProbeObservation = await self._adapter.order_book(symbol=symbol)
         return result
 
     async def position_mode(self) -> ProbeObservation:

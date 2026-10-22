@@ -270,6 +270,7 @@ def test_the_smoke_kind_loads_every_value_with_decimal_strings(tmp_path: Path) -
         near_trigger_fraction=None,
         gtd_lifetime_seconds=None,
         gtd_expiry_wait_seconds=None,
+        race_repeats=None,
     )
     assert limits.enabled_optional_cases == ()
 
@@ -442,8 +443,19 @@ def _with_new_keys(*pairs: tuple[str, str]) -> str:
     return TEST_ONLY_PROBE_LIMITS + "".join(f"{key} = {value}\n" for key, value in pairs)
 
 
-def test_the_evidence_case_keys_are_the_ten_in_script_order() -> None:
-    assert oe.EVIDENCE_CASE_KEYS == NEW_KEYS
+# Quick task 261022-sj1: five more keys, inserted before gtd_expiry (the only long case).
+SJ1_KEYS = (
+    "exchange_info_read",
+    "gtd_min_lifetime",
+    "partial_fill_attempt",
+    "cancel_fill_race",
+    "stream_loss",
+)
+
+
+def test_the_evidence_case_keys_are_the_ten_and_the_five_in_script_order() -> None:
+    assert oe.EVIDENCE_CASE_KEYS == (*NEW_KEYS[:9], *SJ1_KEYS, NEW_KEYS[9])
+    assert oe.EVIDENCE_CASE_KEYS[-1] == "gtd_expiry"  # the case that waits runs last
     assert "EVIDENCE_CASE_KEYS" in oe.__all__
     assert not set(oe.EVIDENCE_CASE_KEYS) & set(oe.OPTIONAL_CASE_KEYS)
 
@@ -638,3 +650,86 @@ def test_the_module_imports_no_sdk_and_no_adapter() -> None:
             imported.add(node.module)
     assert not any(name.startswith(("binance", "src.adapters", "src.paper")) for name in imported)
     assert {name for name in imported if name.startswith("src")} == {"src.ops.redaction"}
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261022-sj1: five more owner opt-in cases and the key race_repeats.
+# --------------------------------------------------------------------------- #
+
+
+def _race_text(repeats: str | None, *, enabled: bool = True) -> str:
+    text = _with_new_keys(("cancel_fill_race", "true" if enabled else "false"))
+    if repeats is not None:
+        text = text.replace(
+            'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\nrace_repeats = {repeats}\n'
+        )
+    return text
+
+
+@pytest.mark.parametrize("key", SJ1_KEYS)
+def test_each_sj1_key_enables_only_its_case(tmp_path: Path, key: str) -> None:
+    text = _race_text("3") if key == "cancel_fill_race" else _with_new_keys((key, "true"))
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert [k for k in limits.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS] == [key]
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "false")), "off.toml"), kind="probe"
+    )
+    assert not [k for k in off.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS]
+    assert off.race_repeats is None
+
+
+def test_race_repeats_comes_with_its_case_and_is_a_small_positive_integer(tmp_path: Path) -> None:
+    limits = oe.load_demo_order_limits(_write(tmp_path, _race_text("3")), kind="probe")
+    assert limits.race_repeats == 3
+    assert isinstance(oe.RACE_REPEATS_MAX, int) and 1 <= oe.RACE_REPEATS_MAX <= 10
+    top = oe.load_demo_order_limits(
+        _write(tmp_path, _race_text(str(oe.RACE_REPEATS_MAX)), "top.toml"), kind="probe"
+    )
+    assert top.race_repeats == oe.RACE_REPEATS_MAX
+
+
+@pytest.mark.parametrize(
+    ("repeats", "enabled", "named"),
+    [
+        (None, True, "order.race_repeats (missing key"),
+        ("0", True, "order.race_repeats (must be a positive integer)"),
+        ("-2", True, "order.race_repeats (must be a positive integer)"),
+        ("true", True, "order.race_repeats (must be a positive integer)"),
+        ('"3"', True, "order.race_repeats (must be a positive integer)"),
+        ("2.5", True, "order.race_repeats (must be a positive integer)"),
+        ("11", True, "order.race_repeats (must be at most"),
+        ("1000000", True, "order.race_repeats (must be at most"),
+        ("3", False, "order.race_repeats (only allowed when"),
+    ],
+)
+def test_race_repeats_is_refused_unless_valid_and_only_with_its_case(
+    tmp_path: Path, repeats: str | None, enabled: bool, named: str
+) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _race_text(repeats, enabled=enabled)), kind="probe"
+        )
+    assert named in str(info.value)
+
+
+def test_the_race_repeats_refusal_never_carries_the_value(tmp_path: Path) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, _race_text("987654")), kind="probe")
+    assert "987654" not in str(info.value)
+
+
+def test_the_smoke_kind_refuses_race_repeats_and_the_sj1_case_keys(tmp_path: Path) -> None:
+    lines = [("order", "race_repeats = 3\n")] + [
+        ("optional_cases", f"{key} = true\n") for key in SJ1_KEYS
+    ]
+    for section, line in lines:
+        text = TEST_ONLY_SMOKE_LIMITS.replace(f"[{section}]\n", f"[{section}]\n{line}", 1)
+        if section == "optional_cases":
+            text += f"\n[optional_cases]\n{line}"
+        with pytest.raises(oe.DemoOrderLimitsRefused):
+            oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+
+
+def test_the_phase18_file_has_no_race_repeats() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.race_repeats is None

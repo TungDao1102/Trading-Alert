@@ -275,6 +275,48 @@ def fake_symbol_filters(symbol: str) -> ProbeObservation:
 # FAKE flat summaries of the capture reads (quick task 261021-sj0): the shape of
 # `_flat_summary`, never Binance data.
 FAKE_EXCHANGE_TIME = "2026-10-16T06:00:00+00:00"
+# Quick task 261022-sj1: the FAKE exchange clock (epoch milliseconds) and the FAKE book around
+# the FAKE mark price (best bid 0.10 below, best ask 0.10 above, 5 units a level).
+FAKE_SERVER_TIME_MS = int(datetime(2026, 10, 16, 6, 0, 0, tzinfo=UTC).timestamp()) * 1000
+FAKE_BOOK_LEVEL_QUANTITY = "5"
+
+
+def fake_server_time(server_time_ms: int = FAKE_SERVER_TIME_MS) -> ProbeObservation:
+    moment = datetime.fromtimestamp(server_time_ms // 1000, tz=UTC) + timedelta(
+        milliseconds=server_time_ms % 1000
+    )
+    return ok_observation(
+        "server_time",
+        {"server_time_ms": str(server_time_ms), "server_time_utc": moment.isoformat()},
+    )
+
+
+def fake_order_book(
+    symbol: str, bids: list[tuple[Decimal, Decimal]], asks: list[tuple[Decimal, Decimal]]
+) -> ProbeObservation:
+    """A flat order-book summary in the shape of `BinanceProbeAdapter.order_book`."""
+    summary = {
+        "symbol": symbol,
+        "last_update_id": "1",
+        "bid_count": str(len(bids)),
+        "ask_count": str(len(asks)),
+    }
+    for side, levels in (("bid", bids), ("ask", asks)):
+        for index, (price, quantity) in enumerate(levels):
+            summary[f"{side}_{index}_price"] = format(price, "f")
+            summary[f"{side}_{index}_quantity"] = format(quantity, "f")
+    return ok_observation("order_book", summary)
+
+
+def default_fake_book(
+    mark: Decimal,
+) -> tuple[list[tuple[Decimal, Decimal]], list[tuple[Decimal, Decimal]]]:
+    """Two levels each side, best bid 0.10 below and best ask 0.10 above `mark`."""
+    quantity = Decimal(FAKE_BOOK_LEVEL_QUANTITY)
+    step = Decimal("0.10")
+    bids = [(mark - step, quantity), (mark - 2 * step, quantity)]
+    asks = [(mark + step, quantity), (mark + 2 * step, quantity)]
+    return bids, asks
 
 
 def fake_account_information() -> ProbeObservation:
@@ -332,6 +374,7 @@ TEST_ONLY_CLEANUP_TIMEOUT_SECONDS = 60
 TEST_ONLY_NEAR_TRIGGER_FRACTION = "0.999"
 TEST_ONLY_GTD_LIFETIME_SECONDS = 660
 TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS = 720
+TEST_ONLY_RACE_REPEATS = 3
 
 _TEST_ONLY_PROBE_LIMITS = """
 [order]
@@ -370,6 +413,8 @@ def write_probe_limits(
     if "triggered_bracket" in optional or "tp1_from_fill" in optional:
         extra_order += f'near_trigger_fraction = "{TEST_ONLY_NEAR_TRIGGER_FRACTION}"\n'
     extra_waits = ""
+    if "cancel_fill_race" in optional:
+        extra_order += f"race_repeats = {TEST_ONLY_RACE_REPEATS}\n"
     if "gtd_expiry" in optional:
         extra_order += f"gtd_lifetime_seconds = {TEST_ONLY_GTD_LIFETIME_SECONDS}\n"
         extra_waits = f"gtd_expiry_wait_seconds = {TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS}\n"
@@ -476,6 +521,11 @@ class FakeProbePort:
         self._next_algo_id = 1_000_000_000
         self.income_rows: list[dict[str, str]] = []
         self.good_till_dates: dict[str, int] = {}
+        # Quick task 261022-sj1: the FAKE exchange clock and the FAKE order book.
+        self.executed_qty: dict[str, Decimal] = {}
+        self.orig_qty: dict[str, Decimal] = {}
+        self.server_time_ms = FAKE_SERVER_TIME_MS
+        self.book_bids, self.book_asks = default_fake_book(self.mark)
 
     # ----- scenario helpers (plan 18-23) -------------------------------------- #
 
@@ -613,9 +663,11 @@ class FakeProbePort:
             if status is None and client_order_id in self.open_order_ids:
                 status = "NEW"
             if status is not None:
-                return ok_observation(
-                    "query_order", {"client_order_id": client_order_id, "status": status}
-                )
+                summary = {"client_order_id": client_order_id, "status": status}
+                if client_order_id in self.executed_qty:
+                    summary["orig_qty"] = format(self.orig_qty[client_order_id], "f")
+                    summary["executed_qty"] = format(self.executed_qty[client_order_id], "f")
+                return ok_observation("query_order", summary)
             return error_observation("query_order", code=-2013, category="ORDER_ABSENT")
 
         return self._answer(
@@ -688,19 +740,30 @@ class FakeProbePort:
                 return self.duplicate_order_answer
             marketable = kwargs.get("side") == "BUY" and Decimal(kwargs["price"]) >= self.mark
             status = "NEW"
+            executed = Decimal(0)
             if marketable and self.fill_marketable:
                 side = self._position_side(kwargs)
                 if self.partial_fill_quantity is not None:
                     status = "PARTIALLY_FILLED"
+                    executed = self.partial_fill_quantity
                     self._add_position(side, self.partial_fill_quantity)
                 else:
                     status = "FILLED"
+                    executed = Decimal(kwargs["quantity"])
                     self._add_position(side, Decimal(kwargs["quantity"]))
             if status != "FILLED":
                 self.open_order_ids.append(client_id)
             self.order_status[client_id] = status
+            self.executed_qty[client_id] = executed
+            self.orig_qty[client_id] = Decimal(kwargs["quantity"])
             return ok_observation(
-                "new_limit_order", {"client_order_id": client_id, "status": status}
+                "new_limit_order",
+                {
+                    "client_order_id": client_id,
+                    "status": status,
+                    "orig_qty": format(Decimal(kwargs["quantity"]), "f"),
+                    "executed_qty": format(executed, "f"),
+                },
             )
 
         return self._answer("new_limit_order", kwargs, default)
@@ -996,6 +1059,16 @@ class FakeProbePort:
 
         return self._answer("live_mark_price", {"symbol": symbol}, default)
 
+    async def server_time(self) -> ProbeObservation:
+        return self._answer("server_time", {}, lambda: fake_server_time(self.server_time_ms))
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation:
+        return self._answer(
+            "order_book",
+            {"symbol": symbol},
+            lambda: fake_order_book(symbol, self.book_bids, self.book_asks),
+        )
+
     # ----- the stream accessors ---------------------------------------------- #
 
     def marker(self) -> int:
@@ -1234,6 +1307,15 @@ class RecordingProbePort:
             },
         )
 
+    async def server_time(self) -> ProbeObservation:
+        self.reads.append("server_time")
+        return fake_server_time()
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation:
+        self.reads.append("order_book")
+        bids, asks = default_fake_book(Decimal(FAKE_MARK_PRICE))
+        return fake_order_book(symbol, bids, asks)
+
     def marker(self) -> int:
         return 0
 
@@ -1256,6 +1338,7 @@ __all__ = [
     "FAKE_EXCHANGE_TIME",
     "FAKE_LABEL",
     "FAKE_MARK_PRICE",
+    "FAKE_SERVER_TIME_MS",
     "FAKE_SYMBOL_FILTERS",
     "MUTATING_OPERATIONS",
     "TEST_ONLY_CLOCK_START",
@@ -1269,9 +1352,12 @@ __all__ = [
     "TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS",
     "TEST_ONLY_GTD_LIFETIME_SECONDS",
     "TEST_ONLY_NEAR_TRIGGER_FRACTION",
+    "TEST_ONLY_RACE_REPEATS",
     "VirtualClock",
     "error_observation",
     "fake_mark_price",
+    "fake_order_book",
+    "fake_server_time",
     "fake_symbol_filters",
     "make_gate",
     "make_public",
