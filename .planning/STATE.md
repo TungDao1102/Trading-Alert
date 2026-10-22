@@ -5,16 +5,16 @@ current_phase: 20
 current_phase_name: Reconcile + SAFE_MODE Hardening + Alerts
 current_plan: 7
 status: executing
-stopped_at: Completed 20-06-PLAN.md (wave 1 done; wave 2 next)
-last_updated: "2026-10-21T08:32:21.521Z"
+stopped_at: Phase 21 context gathered
+last_updated: "2026-10-22T14:55:18.357Z"
 last_activity: 2026-10-21
 last_activity_desc: Phase 20 execution started
-state_head: 92882a2f5c53e80f9d1026a2b729c36bf3278970
+state_head: 2578b602121810d6b8286c406421bbfeecbc4bfb
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 278
-  completed_plans: 251
+  completed_plans: 275
 milestone_name: milestone
 ---
 
@@ -656,6 +656,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-21T08:32:20.243Z
-Stopped at: Completed 20-02-PLAN.md
-Resume file: None
+Last session: 2026-10-22T14:55:14.636Z
+Stopped at: Phase 21 context gathered
+Resume file: .planning/phases/21-account-equity-daily-loss/21-CONTEXT.md
