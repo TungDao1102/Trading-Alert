@@ -696,13 +696,31 @@ ROADMAP = ROOT / ".planning" / "ROADMAP.md"
 # commit of the Q5 change, before the hand-off notes touched the ROADMAP). The Phase 20
 # criteria left this pin on 2026-10-22: the owner accepted new wording of criterion 2 (O-A,
 # plan 20-26) and `test_phase20_criteria_match_the_owner_accepted_wording` pins it instead.
+# The two D079 notes below are the only allowed change since fffdb6e (quick task 261022-t2l,
+# owner instruction 2026-10-22).
 ROADMAP_CRITERIA_BASELINE = "fffdb6e"
+D079_CRITERIA_NOTES: dict[int, str] = {
+    1: (
+        " (D079, 2026-10-22: execution model (a) is the only V1 model: the protective stop is"
+        " STOP_MARKET `closePosition=true`, placed after the first fill with positive quantity,"
+        " confirmed by REST query.)"
+    ),
+    3: (
+        " (D079, 2026-10-22: a stop not confirmed before `max_unprotected_ms`, or an entry not"
+        " terminal before `entry_terminal_timeout`, leads to CLOSE_REQUIRED and an automatic"
+        " reduce-only MARKET close; both deadlines are `NOT_CONFIGURED`.)"
+    ),
+}
 PROPOSED_WORDING = (
     ROOT / ".planning" / "phases" / "20-reconcile-safe-mode-hardening" / "20-PROPOSED-WORDING.md"
 )
 
 # Owner decisions that are still OPEN (the row's status cell says so).
-OPEN_OWNER_ITEMS: tuple[str, ...] = ("O-01", "O-02", "O-03", "O-04", "O-05", "Q3", "Q4")
+OPEN_OWNER_ITEMS: tuple[str, ...] = ("O-02", "O-03", "O-04", "O-05")
+# Items decided on 2026-10-22 (quick task 261022-t2l, owner instruction 'lam 1 va 2 truoc di'):
+# the row says DECIDED and names the DECISIONS id. Q3 and Q5 keep an OPEN part (the
+# maximum-age number; the closing rule), so their rows also say OPEN.
+DECIDED_OWNER_ITEMS: dict[str, str] = {"O-01": "D079", "Q3": "D081", "Q4": "D081", "Q5": "D080"}
 # Phase 18 review items skipped as owner decisions (19-NOTES.md, last section).
 SKIPPED_REVIEW_ITEMS: tuple[str, ...] = ("src/WR-08", "src/WR-01", "src/WR-10", "src/CR-02")
 ASSUMPTIONS: tuple[str, ...] = tuple(f"A{number}" for number in range(1, 11))
@@ -735,11 +753,14 @@ def test_owner_gaps_names_every_open_item_assumption_and_skipped_review_item() -
     for item in OPEN_OWNER_ITEMS:
         assert item in rows, f"{item} has no row in 19-OWNER-GAPS.md"
         assert "OPEN" in rows[item], f"{item} is not marked OPEN"
-    # Q5 is decided in behavior by the owner; its DECISIONS row is still a draft and the
-    # closing rule for an UNKNOWN entry is still open. The register must say all three.
-    assert "Q5" in rows
-    for word in ("DECIDED", "DRAFT", "OPEN"):
-        assert word in rows["Q5"], f"the Q5 row does not say {word}"
+    for item, decision_id in DECIDED_OWNER_ITEMS.items():
+        assert item in rows, f"{item} has no row in 19-OWNER-GAPS.md"
+        assert "DECIDED" in rows[item], f"{item} is not marked DECIDED"
+        assert decision_id in rows[item], f"{item} does not name {decision_id}"
+    # Q5 is decided in behavior by the owner and recorded as D080; the closing rule for an
+    # UNKNOWN entry is still open, and so is the maximum-age number of Q3.
+    for item in ("Q3", "Q5"):
+        assert "OPEN" in rows[item], f"the {item} row does not say OPEN"
     for assumption in ASSUMPTIONS:
         assert assumption in rows, f"{assumption} has no row"
     for item in SKIPPED_REVIEW_ITEMS:
@@ -811,12 +832,18 @@ def test_roadmap_success_criteria_of_phases_19_and_20_are_unchanged() -> None:
         capture_output=True,
         check=True,
     )
-    before = shown.stdout.decode("utf-8")
-    now = ROADMAP.read_text(encoding="utf-8")
-    for phase in (19,):
-        assert _success_criteria(now, phase) == _success_criteria(before, phase), (
-            f"Phase {phase} success criteria changed since {ROADMAP_CRITERIA_BASELINE}"
-        )
+    before = shown.stdout.decode("utf-8").replace("\r\n", "\n")
+    now = ROADMAP.read_text(encoding="utf-8").replace("\r\n", "\n")
+    expected_lines = []
+    for line in _success_criteria(before, 19).split("\n"):
+        for number, note in D079_CRITERIA_NOTES.items():
+            if line.startswith(f"{number}. "):
+                line += note
+        expected_lines.append(line)
+    assert _success_criteria(now, 19) == "\n".join(expected_lines), (
+        f"Phase 19 success criteria changed since {ROADMAP_CRITERIA_BASELINE} "
+        "beyond the two D079 notes"
+    )
 
 
 @pytest.mark.skipif(
