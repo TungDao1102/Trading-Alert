@@ -577,6 +577,10 @@ class FakeProbePort:
         if raw is not None:
             self.raw_log.append((self._sequence.next(), raw))
 
+    def emit_raw(self, payload: object) -> None:
+        """A raw user-data payload without a typed record (quick task 261021-sj0)."""
+        self.raw_log.append((self._sequence.next(), payload))
+
     def emit_state(self, state: str) -> None:
         self.state_log.append((self._sequence.next(), state))
 

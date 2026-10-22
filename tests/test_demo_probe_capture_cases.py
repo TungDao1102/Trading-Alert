@@ -11,9 +11,11 @@ cap 150, far_price_fraction 0.80 (a far BUY rests at 48000.00, a far up-trigger 
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
 from scripts import demo_probe as dp
 
 from tests.probe_fakes import (
@@ -359,3 +361,822 @@ def test_the_pure_helpers_read_ids_and_fields() -> None:
 
 def test_the_only_new_mutating_operation_is_the_gtd_limit() -> None:
     assert "new_gtd_limit_order" in dp.MUTATING_OPERATIONS
+
+
+# =========================================================================== #
+# Task 2: the seven order-sending capture cases.
+# =========================================================================== #
+
+CLOSE_POSITION = "close_position_stop_with_position"
+WOULD_TRIGGER = "stop_would_trigger_after_fill"
+SAME_ID = "stop_query_absent_then_same_id"
+MANUAL_CLOSE = "manual_close_with_open_legs"
+COMMISSION = "commission_vs_realized_pnl"
+BRACKET = "triggered_close_position_bracket"
+TP1 = "tp1_quantity_from_fill"
+ORDER_CASES = (
+    CLOSE_POSITION,
+    WOULD_TRIGGER,
+    SAME_ID,
+    MANUAL_CLOSE,
+    COMMISSION,
+    BRACKET,
+    TP1,
+)
+FAR_BELOW = Decimal("48000.00")
+FAR_ABOVE = Decimal("72000.00")
+MARKETABLE = Decimal("61500.00")
+APPROVED = Decimal("0.002")
+ORDER_SENDS = ("new_limit_order", "new_market_order", "new_conditional_order")
+
+
+def conditional_calls(port: FakeProbePort, tag: str) -> list[dict[str, Any]]:
+    """The new_conditional_order requests whose client algo id carries the case tag."""
+    return [c for c in sent(port, "new_conditional_order") if f"-{tag}-" in c["client_algo_id"]]
+
+
+def algo_id_with(port: FakeProbePort, tag: str) -> str:
+    (client_id,) = {c["client_algo_id"] for c in conditional_calls(port, tag)}
+    return str(client_id)
+
+
+def algo_raw(
+    caid: str,
+    status: str,
+    *,
+    ia: bool = False,
+    ai: str = "",
+    aq: str = "0",
+    rm: str | None = None,
+    event_time: int = 1,
+) -> dict[str, Any]:
+    o: dict[str, Any] = {"caid": caid, "X": status, "ia": ia, "ai": ai, "aq": aq}
+    if rm is not None:
+        o["rm"] = rm
+    return {"e": "ALGO_UPDATE", "E": event_time, "T": event_time, "o": o}
+
+
+def child_raw(order_id: int) -> dict[str, Any]:
+    return {
+        "e": "ORDER_TRADE_UPDATE",
+        "E": 9,
+        "T": 9,
+        "o": {
+            "c": "autoclid",
+            "i": order_id,
+            "X": "FILLED",
+            "x": "TRADE",
+            "ot": "MARKET",
+            "z": "0.002",
+            "ap": "60000.1",
+            "n": "0.024",
+            "N": "USDT",
+            "rp": "0.5",
+            "T": 2,
+        },
+    }
+
+
+def fill_rows(*rows: dict[str, str]) -> Any:
+    summary = {"count": str(len(rows))}
+    for index, row in enumerate(rows):
+        for key, value in row.items():
+            summary[f"row_{index}_{key}"] = value
+    return ok_observation("user_trades", summary)
+
+
+# ----- _near_triggers (pure) ------------------------------------------------------- #
+
+
+def test_near_triggers_sit_on_the_tick_grid_and_never_on_the_wrong_side() -> None:
+    below, above = dp._near_triggers(Decimal("60000.0"), Decimal("0.1"), Decimal("0.999"))
+    assert (below, above) == (Decimal("59940.0"), Decimal("60060.0"))
+    # a fraction so close to 1 that the product lands on or beyond the mark: the tick rule wins
+    below, above = dp._near_triggers(Decimal("60000.0"), Decimal("0.1"), Decimal("0.9999999"))
+    assert below == Decimal("59999.9") and above == Decimal("60000.1")
+    below, above = dp._near_triggers(Decimal("60000.05"), Decimal("0.1"), Decimal("0.99999999"))
+    assert below < Decimal("60000.05") < above
+    assert below % Decimal("0.1") == 0 and above % Decimal("0.1") == 0
+
+
+@pytest.mark.parametrize("mark", ["83748.12", "0.5", "60000", "1234.5678"])
+@pytest.mark.parametrize("fraction", ["0.9", "0.999", "0.999999", "0.99999999999"])
+def test_near_triggers_hold_for_many_marks_and_fractions(mark: str, fraction: str) -> None:
+    tick = Decimal("0.01")
+    below, above = dp._near_triggers(Decimal(mark), tick, Decimal(fraction))
+    assert below < Decimal(mark) < above
+    assert below % tick == 0 and above % tick == 0
+
+
+# ----- the common rules, parametrized over the seven cases -------------------------- #
+
+
+@pytest.mark.parametrize("case_id", ORDER_CASES)
+async def test_an_approved_quantity_above_the_notional_cap_sends_nothing(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, case_id, cap="1")
+    record = case(document, case_id)
+    assert record["status"] == dp.ERROR and record["reason"].startswith("order bound")
+    for operation in ORDER_SENDS:
+        assert sent(port, operation) == [], operation
+
+
+@pytest.mark.parametrize("case_id", ORDER_CASES)
+async def test_hedge_mode_is_not_observed_and_sends_nothing(tmp_path: Path, case_id: str) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _ = await run_cases(tmp_path, port, case_id)
+    record = case(document, case_id)
+    assert record["status"] == dp.NOT_OBSERVED and record["reason"] == dp.REASON_HEDGE_MODE
+    for operation in ORDER_SENDS:
+        assert sent(port, operation) == [], operation
+
+
+@pytest.mark.parametrize("case_id", ORDER_CASES)
+async def test_an_entry_that_does_not_fill_is_not_observed_with_the_entry_reason(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort()
+    port.fill_marketable = False
+    document, _ = await run_cases(tmp_path, port, case_id)
+    record = case(document, case_id)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == "the entry did not fill: status NEW"
+    assert sent(port, "new_conditional_order") == []
+
+
+@pytest.mark.parametrize("case_id", ORDER_CASES)
+async def test_a_rejected_entry_is_not_observed_with_the_entry_reason(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_limit_order",
+        error_observation("new_limit_order", code=-4016, category="REJECTED_DEFINITIVE"),
+    )
+    document, _ = await run_cases(tmp_path, port, case_id)
+    record = case(document, case_id)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"].startswith("entry rejected: ")
+    assert sent(port, "new_conditional_order") == []
+
+
+@pytest.mark.parametrize("case_id", ORDER_CASES)
+async def test_every_order_case_ends_flat_through_the_runner_cleanup(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort()
+    document, code = await run_cases(tmp_path, port, case_id)
+    assert document["cleanup"]["final"]["status"] == dp.CLEANUP_FLAT
+    assert case(document, case_id)["cleanup"]["status"] == dp.CLEANUP_FLAT
+    assert port.positions_rows == [] and port.open_algo_ids == [] and port.open_order_ids == []
+    assert case(document, case_id)["status"] != dp.ERROR
+    assert code == dp.EXIT_OK
+
+
+# ----- P1 / A6: closePosition legs with an open position ----------------------------- #
+
+
+async def test_close_position_legs_with_a_position(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, CLOSE_POSITION)
+    record = case(document, CLOSE_POSITION)
+    details = record["details"]
+    assert record["status"] == dp.OBSERVED
+    stop, take_profit = (
+        conditional_calls(port, "cps")[0],
+        conditional_calls(port, "cpt")[0],
+    )
+    assert (stop["order_type"], stop["side"], stop["trigger_price"]) == (
+        "STOP_MARKET",
+        "SELL",
+        FAR_BELOW,
+    )
+    assert (take_profit["order_type"], take_profit["trigger_price"]) == (
+        "TAKE_PROFIT_MARKET",
+        FAR_ABOVE,
+    )
+    for call in (stop, take_profit):
+        assert call["close_position"] is True and call["quantity"] is None
+        assert call["reduce_only"] is None
+    assert details["close_position_stop_accepted"] == "true"
+    assert details["close_position_tp_accepted"] == "true"
+    assert details["with_legs_open_algo_orders"] == "2"
+    assert details["with_legs_position"] == "0.002"
+    assert "stop_listed_algo_status" in details and "tp_listed_algo_status" in details
+    assert len(sent(port, "cancel_algo_order")) == 2
+
+
+async def test_a_scripted_minus_4509_is_recorded_verbatim_and_only_accepted_legs_are_cancelled(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation(
+            "new_conditional_order",
+            code=-4509,
+            category="REJECTED_DEFINITIVE",
+            message="FAKE position is required",
+        ),
+    )
+    document, _ = await run_cases(tmp_path, port, CLOSE_POSITION)
+    details = case(document, CLOSE_POSITION)["details"]
+    assert details["close_position_stop_accepted"] == "false"
+    assert details["close_position_tp_accepted"] == "true"
+    assert "-4509" in details["close_position_stop"]
+    assert len(sent(port, "cancel_algo_order")) == 1
+
+
+# ----- P8 / B5: a stop on the wrong side after the fill -------------------------------- #
+
+
+async def test_a_would_trigger_stop_is_sent_on_the_wrong_side_and_recorded(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "new_conditional_order",
+        error_observation("new_conditional_order", code=-2021, category="REJECTED_DEFINITIVE"),
+    )
+    document, _ = await run_cases(tmp_path, port, WOULD_TRIGGER)
+    record = case(document, WOULD_TRIGGER)
+    (call,) = conditional_calls(port, "wts")
+    assert call["order_type"] == "STOP_MARKET" and call["side"] == "SELL"
+    assert call["trigger_price"] == FAR_ABOVE and call["close_position"] is True
+    assert record["details"]["would_trigger_accepted"] == "false"
+    assert "-2021" in record["details"]["would_trigger_stop"]
+    assert record["status"] == dp.OBSERVED
+    assert "after_position" not in record["details"]
+
+
+async def test_an_accepted_would_trigger_stop_adds_a_note_and_the_state(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, WOULD_TRIGGER)
+    record = case(document, WOULD_TRIGGER)
+    assert record["details"]["would_trigger_accepted"] == "true"
+    assert any("may trigger at once" in note for note in record["notes"])
+    assert "would_trigger_status" in record["details"]
+    assert record["details"]["after_position"] == "0.002"
+
+
+# ----- B2 / B3 / Q5: the deliberate same-id re-placement -------------------------------- #
+
+
+async def test_the_same_id_probe_sends_the_documented_sequence(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, SAME_ID)
+    record = case(document, SAME_ID)
+    details = record["details"]
+    assert record["status"] == dp.OBSERVED
+    first, again_close, again_reduce = conditional_calls(port, "sas")
+    ids = {first["client_algo_id"], again_close["client_algo_id"], again_reduce["client_algo_id"]}
+    assert len(ids) == 1  # one id, three placements: a deliberate probe, not a retry
+    assert (first["close_position"], first["quantity"]) == (True, None)
+    assert (again_close["close_position"], again_close["quantity"]) == (True, None)
+    assert (again_reduce["reduce_only"], again_reduce["quantity"]) == (True, APPROVED)
+    assert again_reduce["close_position"] is None
+    for call in (first, again_close, again_reduce):
+        assert call["trigger_price"] == FAR_BELOW and call["order_type"] == "STOP_MARKET"
+    assert "-2013" in details["query_before_place"]
+    assert details["query_right_after_place"].startswith("accepted")
+    assert details["query_right_after_place_elapsed_ms"] == "0"
+    assert "-4116" in details["same_id_replace_close_position"]
+    assert "-4116" in details["same_id_replace_reduce_only"]
+    assert details["legs_listed_with_id"] == "1" and details["legs_listed_total"] == "1"
+    assert len(sent(port, "cancel_algo_order")) == 1
+    assert "CANCELED" in details["query_after_cancel"]
+    assert port.names().count("query_algo_order") == 3  # before, right after, after the cancel
+
+
+class _TwoListedLegs(FakeProbePort):
+    """A fake whose list shows the same client algo id twice once three placements were sent."""
+
+    served = False
+
+    async def open_algo_orders(self, *, symbol: str) -> Any:
+        if self.served or self.count("new_conditional_order") < 3:
+            return await super().open_algo_orders(symbol=symbol)
+        self.served = True
+        client_id = self.open_algo_ids[0]
+        self.calls.append(("open_algo_orders", {"symbol": symbol}))
+        return ok_observation(
+            "open_algo_orders",
+            {
+                "count": "2",
+                "row_0_client_algo_id": client_id,
+                "row_1_client_algo_id": client_id,
+            },
+        )
+
+
+async def test_the_same_id_probe_counts_the_legs_listed_with_the_id(tmp_path: Path) -> None:
+    port = _TwoListedLegs()
+    port.duplicate_algo_answer = ok_observation(
+        "new_conditional_order", {"client_algo_id": "dup", "algo_status": "NEW"}
+    )
+    document, _ = await run_cases(tmp_path, port, SAME_ID)
+    details = case(document, SAME_ID)["details"]
+    assert details["same_id_replace_close_position"].startswith("accepted")
+    assert details["legs_listed_with_id"] == "2" and details["legs_listed_total"] == "2"
+
+
+# ----- P6 / A3 / G4-035 / P9: a manual close with two closePosition legs open ------------ #
+
+
+def cancel_all_legs(port: FakeProbePort) -> Any:
+    def hook() -> None:
+        for client_id in list(port.open_algo_ids):
+            port.system_cancel_algo(client_id)
+
+    return hook
+
+
+async def test_a_manual_close_sends_exactly_the_held_quantity_and_sees_the_system_cancels(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.on_wait.append(cancel_all_legs(port))
+    vt = VirtualTime()
+    document, _ = await run_cases(tmp_path, port, MANUAL_CLOSE, vt=vt)
+    record = case(document, MANUAL_CLOSE)
+    details = record["details"]
+    assert record["status"] == dp.OBSERVED
+    closes = sent(port, "new_market_order")
+    assert closes[0]["quantity"] == APPROVED and closes[0]["side"] == "SELL"
+    assert closes[0]["reduce_only"] is True and closes[0]["position_side"] == "BOTH"
+    assert "-mcx-" in closes[0]["client_order_id"]
+    assert details["manual_close_status"] == "FILLED"
+    assert details["stop_auto_cancelled"] == "true" and details["tp_auto_cancelled"] == "true"
+    assert sent(port, "cancel_algo_order") == []  # nothing left to cancel by hand
+    assert vt.sleeps == [30]
+    assert details["after_close_open_algo_orders"] == "0"
+    assert details["stop_algo_update_sequence"].startswith("NOT_OBSERVED: no raw ALGO_UPDATE")
+    assert "CANCELED" in details["stop_statuses_rest"]
+
+
+async def test_a_manual_close_without_a_system_cancel_cancels_each_leg_by_hand(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, MANUAL_CLOSE)
+    details = case(document, MANUAL_CLOSE)["details"]
+    assert details["stop_auto_cancelled"] == "false" and details["tp_auto_cancelled"] == "false"
+    assert len(sent(port, "cancel_algo_order")) == 2
+    assert details["stop_cancel"].startswith("accepted")
+
+
+async def test_a_manual_close_with_both_legs_rejected_names_the_codes(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    for _ in range(2):
+        port.script(
+            "new_conditional_order",
+            error_observation("new_conditional_order", code=-4509, category="REJECTED_DEFINITIVE"),
+        )
+    document, _ = await run_cases(tmp_path, port, MANUAL_CLOSE)
+    record = case(document, MANUAL_CLOSE)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"].startswith(dp.REASON_CLOSE_LEGS_REJECTED)
+    assert record["reason"].count("-4509") == 2
+    assert "manual_close" not in record["details"]
+
+
+async def test_a_manual_close_without_a_position_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    # positions call 0 is the run account read; call 1 is the case read before the close
+    port.script_call("positions", 1, ok_observation("positions", {"count": "0"}))
+    document, _ = await run_cases(tmp_path, port, MANUAL_CLOSE)
+    record = case(document, MANUAL_CLOSE)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == dp.REASON_NO_POSITION_HELD
+    assert "manual_close" not in record["details"]
+
+
+# ----- G2-042 / A9: commission versus realized PnL --------------------------------------- #
+
+ENTRY_TRADE = {
+    "trade_id": "11",
+    "side": "BUY",
+    "price": "61500.0",
+    "qty": "0.002",
+    "quote_qty": "123.00000",
+    "commission": "0.0246",
+    "commission_asset": "USDT",
+    "realized_pnl": "0",
+    "maker": "false",
+    "time_ms": "1000",
+}
+CLOSE_TRADE = {
+    "trade_id": "12",
+    "side": "SELL",
+    "price": "61550.0",
+    "qty": "0.002",
+    "quote_qty": "123.10000",
+    "commission": "0.0246",
+    "commission_asset": "USDT",
+    "realized_pnl": "0.05000000",
+    "maker": "false",
+    "time_ms": "2000",
+}
+
+
+class _WithOrderIds(FakeProbePort):
+    """A fake whose entry and close answers carry an order id (the default ones do not)."""
+
+    async def new_limit_order(self, **kwargs: Any) -> Any:
+        answer = await super().new_limit_order(**kwargs)
+        if not answer.ok:
+            return answer
+        return ok_observation(answer.operation, {**answer.summary, "order_id": "111"})
+
+    async def new_market_order(self, **kwargs: Any) -> Any:
+        answer = await super().new_market_order(**kwargs)
+        if not answer.ok:
+            return answer
+        return ok_observation(answer.operation, {**answer.summary, "order_id": "222"})
+
+
+def commission_port(*, close_trade: dict[str, str] | None = None) -> FakeProbePort:
+    port = _WithOrderIds()
+    port.script_call("user_trades", 0, fill_rows(close_trade or CLOSE_TRADE))
+    port.script_call("user_trades", 1, fill_rows(ENTRY_TRADE))
+    port.income_rows = [
+        {
+            "income_type": "COMMISSION",
+            "income": "-0.0246",
+            "asset": "USDT",
+            "trade_id": "11",
+            "tran_id": "5",
+            "time_ms": "1001",
+        },
+        {
+            "income_type": "REALIZED_PNL",
+            "income": "0.05000000",
+            "asset": "USDT",
+            "trade_id": "12",
+            "tran_id": "6",
+            "time_ms": "2001",
+        },
+        {
+            "income_type": "COMMISSION",
+            "income": "-0.0246",
+            "asset": "USDT",
+            "trade_id": "12",
+            "tran_id": "7",
+            "time_ms": "2002",
+        },
+        {  # another trade of the day: never matched
+            "income_type": "COMMISSION",
+            "income": "-9",
+            "asset": "USDT",
+            "trade_id": "999",
+            "tran_id": "8",
+            "time_ms": "3000",
+        },
+    ]
+    return port
+
+
+async def test_commission_vs_realized_pnl_records_trades_income_and_derived_sums(
+    tmp_path: Path,
+) -> None:
+    port = commission_port()
+    document, _ = await run_cases(tmp_path, port, COMMISSION)
+    record = case(document, COMMISSION)
+    details = record["details"]
+    assert record["status"] == dp.OBSERVED
+    assert details["entry_order_id"] == "111" and details["close_order_id"] == "222"
+    trade_queries = sent(port, "user_trades")
+    assert [q["order_id"] for q in trade_queries] == [222, 111]
+    assert (
+        details["close_trade_1"]
+        == "12|SELL|61550.0|0.002|123.10000|0.0246|USDT|0.05000000|false|2000"
+    )
+    assert details["entry_trade_1"] == "11|BUY|61500.0|0.002|123.00000|0.0246|USDT|0|false|1000"
+    assert sent(port, "income_history")[0]["start_time_ms"] == 1000  # the smallest trade time
+    assert details["income_1"] == "COMMISSION|-0.0246|USDT|11|5|1001"
+    assert details["income_2"] == "REALIZED_PNL|0.05000000|USDT|12|6|2001"
+    assert details["income_3"] == "COMMISSION|-0.0246|USDT|12|7|2002"
+    assert "income_4" not in details
+    assert Decimal(details["derived_sell_quote_minus_buy_quote"]) == Decimal("0.10000")
+    assert Decimal(details["derived_sum_realized_pnl_trades"]) == Decimal("0.05")
+    assert Decimal(details["derived_sum_commission_trades"]) == Decimal("0.0492")
+    assert Decimal(details["derived_income_realized_pnl_sum"]) == Decimal("0.05")
+    assert Decimal(details["derived_income_commission_sum"]) == Decimal("-0.0492")
+    assert not [name for name in details if "verdict" in name or "includes" in name]
+
+
+async def test_mixed_commission_assets_write_no_commission_sum(tmp_path: Path) -> None:
+    port = commission_port(
+        close_trade={**CLOSE_TRADE, "commission_asset": "BNB", "commission": "0.0001"}
+    )
+    document, _ = await run_cases(tmp_path, port, COMMISSION)
+    details = case(document, COMMISSION)["details"]
+    assert "derived_sum_commission_trades" not in details
+    assert "derived_sum_realized_pnl_trades" in details
+
+
+async def test_a_missing_order_id_queries_the_trades_without_it_and_records_the_fact(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()  # the fake answers carry no order_id
+    port.trades = [dict(CLOSE_TRADE), dict(ENTRY_TRADE)]
+    document, _ = await run_cases(tmp_path, port, COMMISSION)
+    details = case(document, COMMISSION)["details"]
+    assert details["entry_order_id"].startswith("NOT_OBSERVED")
+    assert details["close_order_id"].startswith("NOT_OBSERVED")
+    assert [q["order_id"] for q in sent(port, "user_trades")] == [None, None]
+    assert "without" in details["close_trades_query_note"]
+    assert "without" in details["entry_trades_query_note"]
+    # both queries returned the same two trades: counted once in the derived sums
+    assert Decimal(details["derived_sum_realized_pnl_trades"]) == Decimal("0.05")
+
+
+async def test_the_trade_and_income_waits_are_one_owner_timeout_each(tmp_path: Path) -> None:
+    port = commission_port()
+    port.script_call("user_trades", 0, fill_rows())  # no close trade yet
+    port.script_call("user_trades", 1, fill_rows(CLOSE_TRADE))  # after the wait
+    port.script_call("user_trades", 2, fill_rows(ENTRY_TRADE))
+    rows = list(port.income_rows)
+    port.income_rows = []
+
+    def income_appears() -> None:
+        if port.count("income_history") >= 1:
+            port.income_rows = rows
+        else:
+            port.on_wait.append(income_appears)  # the trade wait: not yet
+
+    port.on_wait.append(income_appears)
+    vt = VirtualTime()
+    document, _ = await run_cases(tmp_path, port, COMMISSION, vt=vt)
+    assert vt.sleeps == [30, 30]
+    assert case(document, COMMISSION)["details"]["income_1"].startswith("COMMISSION")
+
+
+# ----- P2 / P11 / A3: the triggered closePosition bracket -------------------------------- #
+
+
+def trigger_stop(port: FakeProbePort, stop_id: str, tp_id: str) -> Any:
+    """A stop leg that triggers (NEW twice, TRIGGERING, TRIGGERED, FINISHED), the TP cancelled."""
+
+    def hook() -> None:
+        port.emit_raw(algo_raw(stop_id, "NEW", ia=False, event_time=1))
+        port.emit_raw(algo_raw(stop_id, "NEW", ia=False, event_time=2))
+        port.emit_raw(algo_raw(stop_id, "TRIGGERING", ia=True, event_time=3))
+        port.emit_raw(algo_raw(stop_id, "TRIGGERED", ia=True, ai="555", aq="0.002", event_time=4))
+        port.emit_raw(algo_raw(stop_id, "FINISHED", ia=True, ai="555", aq="0.002", event_time=5))
+        port.emit_raw(child_raw(555))
+        port.trigger_algo(stop_id, child_order_id="555")
+        port.system_cancel_algo(tp_id)
+
+    return hook
+
+
+async def run_bracket(
+    tmp_path: Path, port: FakeProbePort, *, trigger: bool, vt: VirtualTime | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if trigger:
+
+        def late_hook() -> None:
+            stop_id = algo_id_with(port, "tbs")
+            tp_id = algo_id_with(port, "tbt")
+            trigger_stop(port, stop_id, tp_id)()
+
+        port.on_wait.append(late_hook)
+    document, _ = await run_cases(tmp_path, port, BRACKET, vt=vt)
+    return document, case(document, BRACKET)
+
+
+async def test_the_bracket_prices_both_legs_near_the_live_mark(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    _, record = await run_bracket(tmp_path, port, trigger=True)
+    stop, take_profit = conditional_calls(port, "tbs")[0], conditional_calls(port, "tbt")[0]
+    assert (stop["order_type"], stop["trigger_price"]) == ("STOP_MARKET", Decimal("59940.00"))
+    assert (take_profit["order_type"], take_profit["trigger_price"]) == (
+        "TAKE_PROFIT_MARKET",
+        Decimal("60060.00"),
+    )
+    for call in (stop, take_profit):
+        assert (
+            call["side"] == "SELL" and call["close_position"] is True and call["quantity"] is None
+        )
+    details = record["details"]
+    assert Decimal(details["live_mark_price"]) == Decimal("60000")
+    assert Decimal(details["stop_trigger_price"]) == Decimal("59940")
+    assert Decimal(details["tp_trigger_price"]) == Decimal("60060")
+    assert len(sent(port, "live_mark_price")) == 1
+
+
+async def test_the_bracket_records_the_full_raw_algo_update_sequence(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    vt = VirtualTime()
+    _, record = await run_bracket(tmp_path, port, trigger=True, vt=vt)
+    details = record["details"]
+    assert record["status"] == dp.OBSERVED
+    assert vt.sleeps == [30]  # one wait; the settle check passed at once
+    assert details["triggered_leg"] == "stop"
+    assert details["tp_auto_cancelled"] == "true"
+    assert details["stop_algo_update_count"] == "5"
+    assert details["stop_algo_update_sequence"] == (
+        "NEW|false||0||1|1;NEW|false||0||2|2;TRIGGERING|true||0||3|3;"
+        "TRIGGERED|true|555|0.002||4|4;FINISHED|true|555|0.002||5|5"
+    )
+    assert details["stop_repeated_statuses"] == "NEW x2"
+    assert details["stop_statuses_beyond_new_canceled"] == "FINISHED,TRIGGERED,TRIGGERING"
+    assert details["stop_ia_values"] == "false,true"
+    assert details["stop_ai_values"] == "(empty),555"
+    assert details["stop_aq_values"] == "0,0.002"
+    assert details["stop_child_1"] == (
+        "autoclid|FILLED|TRADE|MARKET|0.002|60000.1|0.024|USDT|0.5|2"
+    )
+    assert details["stop_ai"] == "555" and details["stop_aq"] == "0.002"
+    assert [q["order_id"] for q in sent(port, "user_trades")] == [555]
+    assert details["after_trigger_position"] == "0"
+    assert details["tp_algo_update_sequence"].startswith("NOT_OBSERVED: no raw ALGO_UPDATE")
+
+
+async def test_a_first_rest_minus_2013_does_not_end_the_bracket_wait(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    for index in range(2):  # both legs answer -2013 on their first query
+        port.script_call("query_algo_order", index, _absent("query_algo_order"))
+    vt = VirtualTime()
+    _, record = await run_bracket(tmp_path, port, trigger=True, vt=vt)
+    assert vt.sleeps == [30]  # the wait went on for one owner case timeout
+    assert record["status"] == dp.OBSERVED
+    assert record["details"]["triggered_leg"] == "stop"
+    assert "ABSENT" in record["details"]["stop_statuses_rest"]
+
+
+async def test_without_a_trigger_the_bracket_is_not_observed_with_every_fact(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    for index in range(2):
+        port.script_call("query_algo_order", index, _absent("query_algo_order"))
+    vt = VirtualTime()
+    _, record = await run_bracket(tmp_path, port, trigger=False, vt=vt)
+    assert record["status"] == dp.NOT_OBSERVED and record["reason"] == dp.REASON_NOT_TRIGGERED
+    assert vt.sleeps == [30]
+    details = record["details"]
+    assert details["stop_statuses_rest"].startswith("ABSENT")
+    assert details["not_triggered_open_algo_orders"] == "2"
+    assert details["stop_algo_update_sequence"].startswith("NOT_OBSERVED")
+    assert "triggered_leg" not in details
+
+
+async def test_the_bracket_with_both_legs_rejected_is_not_observed(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    for _ in range(2):
+        port.script(
+            "new_conditional_order",
+            error_observation("new_conditional_order", code=-4509, category="REJECTED_DEFINITIVE"),
+        )
+    _, record = await run_bracket(tmp_path, port, trigger=False)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"].startswith(dp.REASON_CLOSE_LEGS_REJECTED)
+
+
+async def test_an_unreadable_live_mark_stops_the_bracket_before_any_leg(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "live_mark_price",
+        error_observation("live_mark_price", code=None, category="UNKNOWN_EXCHANGE_ERROR"),
+    )
+    _, record = await run_bracket(tmp_path, port, trigger=False)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"].startswith("the live mark price is unreadable")
+    assert sent(port, "new_conditional_order") == []
+
+
+# ----- P10 / A7 / O-03: TP1 sized from the fill -------------------------------------------- #
+
+
+def fake_lot_filters() -> Any:
+    from src.domain.lot_filters import LotFilters
+
+    from tests.probe_fakes import FAKE_SYMBOL_FILTERS as f
+
+    return LotFilters(
+        symbol="BTCUSDT",
+        price_tick_size=Decimal(f["tick_size"]),
+        lot_min_quantity=Decimal(f["min_quantity"]),
+        lot_max_quantity=Decimal(f["max_quantity"]),
+        lot_step_size=Decimal(f["step_size"]),
+        market_lot_min_quantity=Decimal(f["market_lot_min_quantity"]),
+        market_lot_max_quantity=Decimal(f["market_lot_max_quantity"]),
+        market_lot_step_size=Decimal(f["market_lot_step_size"]),
+        min_notional=Decimal(f["min_notional"]),
+    )
+
+
+def trigger_tp1(port: FakeProbePort) -> Any:
+    def hook() -> None:
+        tp_id = algo_id_with(port, "tp1")
+        port.emit_raw(algo_raw(tp_id, "NEW", event_time=1))
+        port.emit_raw(algo_raw(tp_id, "TRIGGERED", ia=True, ai="777", aq="0.001", event_time=2))
+        port.emit_raw(child_raw(777))
+        port.trigger_algo(tp_id, child_order_id="777")
+        port.positions_rows = [("BOTH", Decimal("0.001"))]  # the remainder stays open
+
+    return hook
+
+
+async def test_tp1_is_the_production_quantization_of_the_held_quantity(tmp_path: Path) -> None:
+    from src.backtest.semantics import TP1_QUANTITY_FRACTION
+    from src.execution.lot_split import quantize_to_lot
+
+    port = FakeProbePort()
+    port.on_wait.append(trigger_tp1(port))
+    document, _ = await run_cases(tmp_path, port, TP1)
+    record = case(document, TP1)
+    details = record["details"]
+    expected = min(
+        quantize_to_lot(
+            quantity=APPROVED * TP1_QUANTITY_FRACTION, filters=fake_lot_filters(), market_exit=True
+        ),
+        APPROVED,
+    )
+    assert record["status"] == dp.OBSERVED
+    assert Decimal(details["tp1_quantity"]) == expected == Decimal("0.001")
+    assert Decimal(details["tp1_quantity_lot_size_only"]) == Decimal("0.001")
+    assert Decimal(details["held_quantity"]) == APPROVED
+    assert "TP1_QUANTITY_FRACTION" in details["tp1_fraction_source"]
+    (call,) = conditional_calls(port, "tp1")
+    assert call["order_type"] == "TAKE_PROFIT_MARKET" and call["side"] == "SELL"
+    assert call["reduce_only"] is True and call["quantity"] == expected
+    assert call["close_position"] is None and call["trigger_price"] == Decimal("60060.00")
+    assert call["quantity"] <= APPROVED
+    assert Decimal(details["tp1_aq"]) == Decimal("0.001")
+    assert details["after_tp1_position"] == "0.001"
+    assert Decimal(details["tp1_notional_at_trigger"]) == Decimal("0.001") * Decimal("60060.00")
+    assert details["min_notional"] == "100"
+    assert details["tp1_algo_update_sequence"].startswith("NEW|false||0||1|1;TRIGGERED|true|777")
+    assert details["tp1_child_1"].startswith("autoclid|FILLED")
+
+
+async def test_tp1_without_a_trigger_is_not_observed_with_the_facts(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    vt = VirtualTime()
+    document, _ = await run_cases(tmp_path, port, TP1, vt=vt)
+    record = case(document, TP1)
+    assert record["status"] == dp.NOT_OBSERVED and record["reason"] == dp.REASON_NOT_TRIGGERED
+    assert vt.sleeps == [30]
+    assert Decimal(record["details"]["tp1_quantity"]) == Decimal("0.001")
+
+
+async def test_tp1_with_an_unreadable_lot_filter_is_not_observed_and_sends_no_leg(
+    tmp_path: Path,
+) -> None:
+    from tests.probe_fakes import FAKE_SYMBOL_FILTERS
+
+    broken = {k: v for k, v in FAKE_SYMBOL_FILTERS.items() if k != "market_lot_step_size"}
+    port = FakeProbePort()
+    # symbol_filters call 0 is the run market read; call 1 is the case read
+    port.script_call(
+        "symbol_filters",
+        1,
+        ok_observation("symbol_filters", {"symbol": "BTCUSDT", "found": "true", **broken}),
+    )
+    document, _ = await run_cases(tmp_path, port, TP1)
+    record = case(document, TP1)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"] == dp.REASON_LOT_FILTERS_UNREADABLE
+    assert sent(port, "new_conditional_order") == []
+
+
+async def test_tp1_quantity_is_never_above_the_held_quantity() -> None:
+    from src.backtest.semantics import TP1_QUANTITY_FRACTION
+    from src.execution.lot_split import quantize_to_lot
+
+    filters = fake_lot_filters()
+    for held in ("0.001", "0.002", "0.003", "0.0049", "1"):
+        quantity = Decimal(held)
+        tp1 = min(
+            quantize_to_lot(
+                quantity=quantity * TP1_QUANTITY_FRACTION, filters=filters, market_exit=True
+            ),
+            quantity,
+        )
+        assert tp1 <= quantity
+
+
+async def test_the_tp1_case_with_a_held_quantity_that_quantizes_to_zero(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script_call(
+        "positions",
+        1,
+        ok_observation(
+            "positions",
+            {
+                "count": "1",
+                "row_0_symbol": "BTCUSDT",
+                "row_0_position_side": "BOTH",
+                "row_0_position_amt": "0.001",
+            },
+        ),
+    )
+    document, _ = await run_cases(tmp_path, port, TP1)
+    record = case(document, TP1)
+    assert record["status"] == dp.NOT_OBSERVED and record["reason"] == dp.REASON_TP1_ZERO
+    assert sent(port, "new_conditional_order") == []

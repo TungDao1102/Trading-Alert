@@ -68,7 +68,7 @@ EXPECTED_ORDER = (
 )
 READ_ONLY = EXPECTED_ORDER[:4]
 # The ids of quick task 261021-sj0 whose handler has not landed yet (emptied by its last task).
-PENDING_HANDLERS = frozenset(EXPECTED_ORDER[21:])
+PENDING_HANDLERS = frozenset(EXPECTED_ORDER[28:])
 ALL_OPTIONAL = (
     "explicit_time_in_force",
     "stream_gap",
