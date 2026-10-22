@@ -1,0 +1,32 @@
+{
+  "E": 1792670963088,
+  "T": 1792670963078,
+  "e": "ALGO_UPDATE",
+  "o": {
+    "R": true,
+    "S": "SELL",
+    "V": "EXPIRE_MAKER",
+    "X": "TRIGGERED",
+    "act": "MARKET",
+    "ai": "28645789207",
+    "aid": 1000000251917511,
+    "ap": "0",
+    "aq": "0",
+    "at": "CONDITIONAL",
+    "caid": "dprobe-tbs-20261022T120704Z-12",
+    "cp": true,
+    "f": "GTC",
+    "gtd": 0,
+    "ia": false,
+    "o": "STOP_MARKET",
+    "p": "0",
+    "pP": false,
+    "pm": "NONE",
+    "ps": "BOTH",
+    "q": "0.0008",
+    "s": "BTCUSDT",
+    "tp": "81760.1",
+    "tt": 1792670963055,
+    "wt": "MARK_PRICE"
+  }
+}

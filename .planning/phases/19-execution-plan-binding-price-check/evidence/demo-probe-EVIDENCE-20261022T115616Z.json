@@ -1,0 +1,956 @@
+{
+  "acceptance": {
+    "account_read_only_capture": {
+      "proof_class": "REAL_DEMO",
+      "reason": "OBSERVED: 6 exchange answer(s) recorded",
+      "result": "PASS"
+    },
+    "account_state": {
+      "proof_class": "REAL_DEMO",
+      "reason": "account state recorded before and after",
+      "result": "PASS"
+    },
+    "algo_query_timing_after_new": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "below_min_notional_reduce_only_leg": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cancel_algo_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cancel_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cleanup": {
+      "proof_class": "REAL_DEMO",
+      "reason": "zero open orders, zero open algo orders, flat position",
+      "result": "PASS"
+    },
+    "close_position_stop_with_position": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "closeposition_stop_flat": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "commission_vs_realized_pnl": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "duplicate_client_algo_id": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "entry_cancel_fill_race": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "entry_never_fills_protective_orphan": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "evidence": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the evidence passes check_probe_evidence",
+      "result": "PASS"
+    },
+    "exchange_info_read_for_close": {
+      "proof_class": "REAL_DEMO",
+      "reason": "OBSERVED: 1 exchange answer(s) recorded",
+      "result": "PASS"
+    },
+    "full_fill_protective_quantity": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "get_algo_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "get_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "gtd_entry_expiry_status": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "gtd_min_lifetime_boundary": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_algo": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_normal": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_filled": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "label_and_d055": {
+      "proof_class": "REAL_DEMO",
+      "reason": "labelled demo-observed, not mainnet; D055 stays OPEN",
+      "result": "PASS"
+    },
+    "manual_close_with_open_legs": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "overall": {
+      "proof_class": "REAL_DEMO",
+      "reason": "failing: ['algo_query_timing_after_new', 'below_min_notional_reduce_only_leg', 'cancel_algo_order_not_found', 'cancel_order_not_found', 'close_position_stop_with_position', 'closeposition_stop_flat', 'commission_vs_realized_pnl', 'duplicate_client_algo_id', 'entry_cancel_fill_race', 'entry_never_fills_protective_orphan', 'full_fill_protective_quantity', 'get_algo_order_not_found', 'get_order_not_found', 'gtd_entry_expiry_status', 'gtd_min_lifetime_boundary', 'id_reuse_after_canceled_algo', 'id_reuse_after_canceled_normal', 'id_reuse_after_filled', 'manual_close_with_open_legs', 'partial_fill', 'partial_fill_attempt', 'preplaced_stop_reduce_only_flat', 'rejected_protective_variants', 'stop_query_absent_then_same_id', 'stop_would_trigger_after_fill', 'stream_loss_during_case', 'tp1_quantity_from_fill', 'triggered_close_position_bracket', 'triggered_market_exit_lifecycle']",
+      "result": "FAIL"
+    },
+    "partial_fill": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "partial_fill_attempt": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "preplaced_stop_reduce_only_flat": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "proof_class": {
+      "proof_class": "REAL_DEMO",
+      "reason": "executed on Demo",
+      "result": "PASS"
+    },
+    "rejected_protective_variants": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "stop_query_absent_then_same_id": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "stop_would_trigger_after_fill": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "stream_loss_during_case": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "tp1_quantity_from_fill": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "triggered_close_position_bracket": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "triggered_market_exit_lifecycle": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    }
+  },
+  "account_after": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "3",
+        "row_0_asset": "BTC",
+        "row_0_available_balance": "0.01000000",
+        "row_0_balance": "0.01000000",
+        "row_1_asset": "USDT",
+        "row_1_available_balance": "4999.09343961",
+        "row_1_balance": "4999.09343961",
+        "row_2_asset": "USDC",
+        "row_2_available_balance": "5000.00000000",
+        "row_2_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "account_before": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "3",
+        "row_0_asset": "BTC",
+        "row_0_available_balance": "0.01000000",
+        "row_0_balance": "0.01000000",
+        "row_1_asset": "USDT",
+        "row_1_available_balance": "4999.09343961",
+        "row_1_balance": "4999.09343961",
+        "row_2_asset": "USDC",
+        "row_2_available_balance": "5000.00000000",
+        "row_2_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "ban": null,
+  "case_order": [
+    "account_read_only_capture",
+    "exchange_info_read_for_close"
+  ],
+  "cases": [
+    {
+      "case_id": "account_read_only_capture",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "account_balance_all": "accepted",
+        "account_balance_all_field_count": "72",
+        "account_balance_all_fields": "*.accountAlias,*.asset,*.availableBalance,*.balance,*.crossUnPnl,*.crossWalletBalance,*.marginAvailable,*.maxWithdrawAmount,*.updateTime",
+        "account_config": "accepted",
+        "account_config_field_count": "8",
+        "account_config_fields": "canDeposit,canTrade,canWithdraw,dualSidePosition,feeTier,multiAssetsMargin,tradeGroupId,updateTime",
+        "account_information": "accepted",
+        "account_information_field_count": "115",
+        "account_information_fields": "assets.*.asset,assets.*.availableBalance,assets.*.crossUnPnl,assets.*.crossWalletBalance,assets.*.initialMargin,assets.*.maintMargin,assets.*.marginBalance,assets.*.maxWithdrawAmount,assets.*.openOrderInitialMargin,assets.*.positionInitialMargin,assets.*.unrealizedProfit,assets.*.updateTime,assets.*.walletBalance,availableBalance,maxWithdrawAmount,totalCrossUnPnl,totalCrossWalletBalance,totalInitialMargin,totalMaintMargin,totalMarginBalance,totalOpenOrderInitialMargin,totalPositionInitialMargin,totalUnrealizedProfit,totalWalletBalance",
+        "leverage_brackets": "accepted",
+        "leverage_brackets_field_count": "61",
+        "leverage_brackets_fields": "*.brackets.*.bracket,*.brackets.*.cum,*.brackets.*.initialLeverage,*.brackets.*.maintMarginRatio,*.brackets.*.notionalCap,*.brackets.*.notionalFloor,*.symbol",
+        "position_mode": "accepted",
+        "position_mode_field_count": "1",
+        "position_mode_fields": "dual_side_position",
+        "symbol_config": "accepted",
+        "symbol_config_field_count": "5",
+        "symbol_config_fields": "*.isAutoAddMargin,*.leverage,*.marginType,*.maxNotionalValue,*.symbol"
+      },
+      "finished_utc": "2026-10-22T11:56:19.760226+00:00",
+      "frames": {
+        "events": [],
+        "fixtures": [],
+        "status": "OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "account_information",
+          "summary": {
+            "assets.0.asset": "FDUSD",
+            "assets.0.availableBalance": "0.00000000",
+            "assets.0.crossUnPnl": "0.00000000",
+            "assets.0.crossWalletBalance": "0.00000000",
+            "assets.0.initialMargin": "0.00000000",
+            "assets.0.maintMargin": "0.00000000",
+            "assets.0.marginBalance": "0.00000000",
+            "assets.0.maxWithdrawAmount": "0.00000000",
+            "assets.0.openOrderInitialMargin": "0.00000000",
+            "assets.0.positionInitialMargin": "0.00000000",
+            "assets.0.unrealizedProfit": "0.00000000",
+            "assets.0.updateTime": "0",
+            "assets.0.walletBalance": "0.00000000",
+            "assets.1.asset": "U",
+            "assets.1.availableBalance": "0.00000000",
+            "assets.1.crossUnPnl": "0.00000000",
+            "assets.1.crossWalletBalance": "0.00000000",
+            "assets.1.initialMargin": "0.00000000",
+            "assets.1.maintMargin": "0.00000000",
+            "assets.1.marginBalance": "0.00000000",
+            "assets.1.maxWithdrawAmount": "0.00000000",
+            "assets.1.openOrderInitialMargin": "0.00000000",
+            "assets.1.positionInitialMargin": "0.00000000",
+            "assets.1.unrealizedProfit": "0.00000000",
+            "assets.1.updateTime": "0",
+            "assets.1.walletBalance": "0.00000000",
+            "assets.2.asset": "BNB",
+            "assets.2.availableBalance": "0.00000000",
+            "assets.2.crossUnPnl": "0.00000000",
+            "assets.2.crossWalletBalance": "0.00000000",
+            "assets.2.initialMargin": "0.00000000",
+            "assets.2.maintMargin": "0.00000000",
+            "assets.2.marginBalance": "0.00000000",
+            "assets.2.maxWithdrawAmount": "0.00000000",
+            "assets.2.openOrderInitialMargin": "0.00000000",
+            "assets.2.positionInitialMargin": "0.00000000",
+            "assets.2.unrealizedProfit": "0.00000000",
+            "assets.2.updateTime": "0",
+            "assets.2.walletBalance": "0.00000000",
+            "assets.3.asset": "ETH",
+            "assets.3.availableBalance": "0.00000000",
+            "assets.3.crossUnPnl": "0.00000000",
+            "assets.3.crossWalletBalance": "0.00000000",
+            "assets.3.initialMargin": "0.00000000",
+            "assets.3.maintMargin": "0.00000000",
+            "assets.3.marginBalance": "0.00000000",
+            "assets.3.maxWithdrawAmount": "0.00000000",
+            "assets.3.openOrderInitialMargin": "0.00000000",
+            "assets.3.positionInitialMargin": "0.00000000",
+            "assets.3.unrealizedProfit": "0.00000000",
+            "assets.3.updateTime": "0",
+            "assets.3.walletBalance": "0.00000000",
+            "assets.4.asset": "BTC",
+            "assets.4.availableBalance": "0.01000000",
+            "assets.4.crossUnPnl": "0.00000000",
+            "assets.4.crossWalletBalance": "0.01000000",
+            "assets.4.initialMargin": "0.00000000",
+            "assets.4.maintMargin": "0.00000000",
+            "assets.4.marginBalance": "0.01000000",
+            "assets.4.maxWithdrawAmount": "0.01000000",
+            "assets.4.openOrderInitialMargin": "0.00000000",
+            "assets.4.positionInitialMargin": "0.00000000",
+            "assets.4.unrealizedProfit": "0.00000000",
+            "assets.4.updateTime": "1791048383827",
+            "assets.4.walletBalance": "0.01000000",
+            "assets.5.asset": "USDT",
+            "assets.5.availableBalance": "4999.09343961",
+            "assets.5.crossUnPnl": "0.00000000",
+            "assets.5.crossWalletBalance": "4999.09343961",
+            "assets.5.initialMargin": "0.00000000",
+            "assets.5.maintMargin": "0.00000000",
+            "assets.5.marginBalance": "4999.09343961",
+            "assets.5.maxWithdrawAmount": "4999.09343961",
+            "assets.5.openOrderInitialMargin": "0.00000000",
+            "assets.5.positionInitialMargin": "0.00000000",
+            "assets.5.unrealizedProfit": "0.00000000",
+            "assets.5.updateTime": "1792589257306",
+            "assets.5.walletBalance": "4999.09343961",
+            "assets.6.asset": "USD1",
+            "assets.6.availableBalance": "0.00000000",
+            "assets.6.crossUnPnl": "0.00000000",
+            "assets.6.crossWalletBalance": "0.00000000",
+            "assets.6.initialMargin": "0.00000000",
+            "assets.6.maintMargin": "0.00000000",
+            "assets.6.marginBalance": "0.00000000",
+            "assets.6.maxWithdrawAmount": "0.00000000",
+            "assets.6.openOrderInitialMargin": "0.00000000",
+            "assets.6.positionInitialMargin": "0.00000000",
+            "assets.6.unrealizedProfit": "0.00000000",
+            "assets.6.updateTime": "0",
+            "assets.6.walletBalance": "0.00000000",
+            "assets.7.asset": "USDC",
+            "assets.7.availableBalance": "5000.00000000",
+            "assets.7.crossUnPnl": "0.00000000",
+            "assets.7.crossWalletBalance": "5000.00000000",
+            "assets.7.initialMargin": "0.00000000",
+            "assets.7.maintMargin": "0.00000000",
+            "assets.7.marginBalance": "5000.00000000",
+            "assets.7.maxWithdrawAmount": "5000.00000000",
+            "assets.7.openOrderInitialMargin": "0.00000000",
+            "assets.7.positionInitialMargin": "0.00000000",
+            "assets.7.unrealizedProfit": "0.00000000",
+            "assets.7.updateTime": "1791048383797",
+            "assets.7.walletBalance": "5000.00000000",
+            "availableBalance": "4999.09343961",
+            "maxWithdrawAmount": "4999.09343961",
+            "totalCrossUnPnl": "0.00000000",
+            "totalCrossWalletBalance": "4999.09343961",
+            "totalInitialMargin": "0.00000000",
+            "totalMaintMargin": "0.00000000",
+            "totalMarginBalance": "4999.09343961",
+            "totalOpenOrderInitialMargin": "0.00000000",
+            "totalPositionInitialMargin": "0.00000000",
+            "totalUnrealizedProfit": "0.00000000",
+            "totalWalletBalance": "4999.09343961"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "account_balance_all",
+          "summary": {
+            "0.accountAlias": "uX",
+            "0.asset": "FDUSD",
+            "0.availableBalance": "0.00000000",
+            "0.balance": "0.00000000",
+            "0.crossUnPnl": "0.00000000",
+            "0.crossWalletBalance": "0.00000000",
+            "0.marginAvailable": "true",
+            "0.maxWithdrawAmount": "0.00000000",
+            "0.updateTime": "0",
+            "1.accountAlias": "uX",
+            "1.asset": "U",
+            "1.availableBalance": "0.00000000",
+            "1.balance": "0.00000000",
+            "1.crossUnPnl": "0.00000000",
+            "1.crossWalletBalance": "0.00000000",
+            "1.marginAvailable": "true",
+            "1.maxWithdrawAmount": "0.00000000",
+            "1.updateTime": "0",
+            "2.accountAlias": "uX",
+            "2.asset": "BNB",
+            "2.availableBalance": "0.00000000",
+            "2.balance": "0.00000000",
+            "2.crossUnPnl": "0.00000000",
+            "2.crossWalletBalance": "0.00000000",
+            "2.marginAvailable": "true",
+            "2.maxWithdrawAmount": "0.00000000",
+            "2.updateTime": "0",
+            "3.accountAlias": "uX",
+            "3.asset": "ETH",
+            "3.availableBalance": "0.00000000",
+            "3.balance": "0.00000000",
+            "3.crossUnPnl": "0.00000000",
+            "3.crossWalletBalance": "0.00000000",
+            "3.marginAvailable": "true",
+            "3.maxWithdrawAmount": "0.00000000",
+            "3.updateTime": "0",
+            "4.accountAlias": "uX",
+            "4.asset": "BTC",
+            "4.availableBalance": "0.01000000",
+            "4.balance": "0.01000000",
+            "4.crossUnPnl": "0.00000000",
+            "4.crossWalletBalance": "0.01000000",
+            "4.marginAvailable": "true",
+            "4.maxWithdrawAmount": "0.01000000",
+            "4.updateTime": "1791048383827",
+            "5.accountAlias": "uX",
+            "5.asset": "USDT",
+            "5.availableBalance": "4999.09343961",
+            "5.balance": "4999.09343961",
+            "5.crossUnPnl": "0.00000000",
+            "5.crossWalletBalance": "4999.09343961",
+            "5.marginAvailable": "true",
+            "5.maxWithdrawAmount": "4999.09343961",
+            "5.updateTime": "1792589257306",
+            "6.accountAlias": "uX",
+            "6.asset": "USD1",
+            "6.availableBalance": "0.00000000",
+            "6.balance": "0.00000000",
+            "6.crossUnPnl": "0.00000000",
+            "6.crossWalletBalance": "0.00000000",
+            "6.marginAvailable": "true",
+            "6.maxWithdrawAmount": "0.00000000",
+            "6.updateTime": "0",
+            "7.accountAlias": "uX",
+            "7.asset": "USDC",
+            "7.availableBalance": "5000.00000000",
+            "7.balance": "5000.00000000",
+            "7.crossUnPnl": "0.00000000",
+            "7.crossWalletBalance": "5000.00000000",
+            "7.marginAvailable": "true",
+            "7.maxWithdrawAmount": "5000.00000000",
+            "7.updateTime": "1791048383797"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "account_config",
+          "summary": {
+            "canDeposit": "true",
+            "canTrade": "true",
+            "canWithdraw": "true",
+            "dualSidePosition": "false",
+            "feeTier": "0",
+            "multiAssetsMargin": "false",
+            "tradeGroupId": "-1",
+            "updateTime": "1791260302519"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "symbol_config",
+          "summary": {
+            "0.isAutoAddMargin": "false",
+            "0.leverage": "20",
+            "0.marginType": "CROSSED",
+            "0.maxNotionalValue": "20000000",
+            "0.symbol": "BTCUSDT"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "leverage_brackets",
+          "summary": {
+            "0.brackets.0.bracket": "1",
+            "0.brackets.0.cum": "0.0",
+            "0.brackets.0.initialLeverage": "125",
+            "0.brackets.0.maintMarginRatio": "0.004",
+            "0.brackets.0.notionalCap": "50000",
+            "0.brackets.0.notionalFloor": "0",
+            "0.brackets.1.bracket": "2",
+            "0.brackets.1.cum": "50.0",
+            "0.brackets.1.initialLeverage": "100",
+            "0.brackets.1.maintMarginRatio": "0.005",
+            "0.brackets.1.notionalCap": "250000",
+            "0.brackets.1.notionalFloor": "50000",
+            "0.brackets.2.bracket": "3",
+            "0.brackets.2.cum": "1300.0",
+            "0.brackets.2.initialLeverage": "50",
+            "0.brackets.2.maintMarginRatio": "0.01",
+            "0.brackets.2.notionalCap": "3000000",
+            "0.brackets.2.notionalFloor": "250000",
+            "0.brackets.3.bracket": "4",
+            "0.brackets.3.cum": "46300.0",
+            "0.brackets.3.initialLeverage": "20",
+            "0.brackets.3.maintMarginRatio": "0.025",
+            "0.brackets.3.notionalCap": "20000000",
+            "0.brackets.3.notionalFloor": "3000000",
+            "0.brackets.4.bracket": "5",
+            "0.brackets.4.cum": "546300.0",
+            "0.brackets.4.initialLeverage": "10",
+            "0.brackets.4.maintMarginRatio": "0.05",
+            "0.brackets.4.notionalCap": "40000000",
+            "0.brackets.4.notionalFloor": "20000000",
+            "0.brackets.5.bracket": "6",
+            "0.brackets.5.cum": "2546300.0",
+            "0.brackets.5.initialLeverage": "5",
+            "0.brackets.5.maintMarginRatio": "0.1",
+            "0.brackets.5.notionalCap": "100000000",
+            "0.brackets.5.notionalFloor": "40000000",
+            "0.brackets.6.bracket": "7",
+            "0.brackets.6.cum": "5046300.0",
+            "0.brackets.6.initialLeverage": "4",
+            "0.brackets.6.maintMarginRatio": "0.125",
+            "0.brackets.6.notionalCap": "120000000",
+            "0.brackets.6.notionalFloor": "100000000",
+            "0.brackets.7.bracket": "8",
+            "0.brackets.7.cum": "8046300.0",
+            "0.brackets.7.initialLeverage": "3",
+            "0.brackets.7.maintMarginRatio": "0.15",
+            "0.brackets.7.notionalCap": "200000000",
+            "0.brackets.7.notionalFloor": "120000000",
+            "0.brackets.8.bracket": "9",
+            "0.brackets.8.cum": "28046300.0",
+            "0.brackets.8.initialLeverage": "2",
+            "0.brackets.8.maintMarginRatio": "0.25",
+            "0.brackets.8.notionalCap": "300000000",
+            "0.brackets.8.notionalFloor": "200000000",
+            "0.brackets.9.bracket": "10",
+            "0.brackets.9.cum": "103046300.0",
+            "0.brackets.9.initialLeverage": "1",
+            "0.brackets.9.maintMarginRatio": "0.5",
+            "0.brackets.9.notionalCap": "500000000",
+            "0.brackets.9.notionalFloor": "300000000",
+            "0.symbol": "BTCUSDT"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "position_mode",
+          "summary": {
+            "dual_side_position": "false"
+          }
+        }
+      ],
+      "planned_requests": [],
+      "reason": null,
+      "rest_fixtures": [
+        "account_read_only_capture-rest-001-account_information.json",
+        "account_read_only_capture-rest-002-account_balance_all.json",
+        "account_read_only_capture-rest-003-account_config.json",
+        "account_read_only_capture-rest-004-symbol_config.json",
+        "account_read_only_capture-rest-005-leverage_brackets.json",
+        "account_read_only_capture-rest-006-position_mode.json"
+      ],
+      "started_utc": "2026-10-22T11:56:19.301841+00:00",
+      "status": "OBSERVED"
+    },
+    {
+      "case_id": "exchange_info_read_for_close",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "filter_LOT_SIZE_max_qty": "1000",
+        "filter_LOT_SIZE_min_qty": "0.0001",
+        "filter_LOT_SIZE_step_size": "0.0001",
+        "filter_MARKET_LOT_SIZE_max_qty": "120",
+        "filter_MARKET_LOT_SIZE_min_qty": "0.0001",
+        "filter_MARKET_LOT_SIZE_step_size": "0.0001",
+        "filter_MIN_NOTIONAL_notional": "50",
+        "filter_PRICE_FILTER_tick_size": "0.10",
+        "matches_run_start_snapshot": "true",
+        "price_filter_min_price_max_price": "NOT_OBSERVED: the project port reads the tick size of PRICE_FILTER only",
+        "read_elapsed_ms": "283",
+        "read_endpoint": "GET /fapi/v1/exchangeInfo through BinancePublicMarketData.exchange_info",
+        "snapshot_differences": "none",
+        "symbol_filters_read": "accepted status=TRADING",
+        "symbol_status": "TRADING"
+      },
+      "finished_utc": "2026-10-22T11:56:20.520062+00:00",
+      "frames": {
+        "events": [],
+        "fixtures": [],
+        "status": "OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "symbol_filters",
+          "summary": {
+            "found": "true",
+            "market_lot_max_quantity": "120",
+            "market_lot_min_quantity": "0.0001",
+            "market_lot_step_size": "0.0001",
+            "max_quantity": "1000",
+            "min_notional": "50",
+            "min_quantity": "0.0001",
+            "percent_price_multiplier_decimals": "4",
+            "percent_price_multiplier_down": "0.9500",
+            "percent_price_multiplier_up": "1.0500",
+            "status": "TRADING",
+            "step_size": "0.0001",
+            "symbol": "BTCUSDT",
+            "tick_size": "0.10"
+          }
+        }
+      ],
+      "planned_requests": [],
+      "reason": null,
+      "rest_fixtures": [
+        "exchange_info_read_for_close-rest-001-symbol_filters.json"
+      ],
+      "started_utc": "2026-10-22T11:56:20.236352+00:00",
+      "status": "OBSERVED"
+    }
+  ],
+  "cleanup": {
+    "final": {
+      "actions": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_open_orders",
+          "summary": {
+            "code": "200",
+            "msg": "The operation of cancel all open order is done."
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_algo_open_orders",
+          "summary": {
+            "code": "200",
+            "msg": "The operation of cancel all open order is done."
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "positions",
+          "summary": {
+            "count": "0"
+          }
+        }
+      ],
+      "notes": [],
+      "remaining": {
+        "open_algo_orders": 0,
+        "open_orders": 0,
+        "positions": [],
+        "readable": true
+      },
+      "status": "FLAT",
+      "waited_seconds": 0
+    }
+  },
+  "d055": {
+    "parameters": "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "statement": "D055 stays OPEN: this tool records facts and stops",
+    "status": "OPEN: the probe records facts and stops; D055 is decided by the user, never by this tool"
+  },
+  "environment": "DEMO",
+  "failures": [],
+  "finished_utc": "2026-10-22T11:56:21.974758+00:00",
+  "fixtures": [
+    "account_read_only_capture-rest-001-account_information.json",
+    "account_read_only_capture-rest-002-account_balance_all.json",
+    "account_read_only_capture-rest-003-account_config.json",
+    "account_read_only_capture-rest-004-symbol_config.json",
+    "account_read_only_capture-rest-005-leverage_brackets.json",
+    "account_read_only_capture-rest-006-position_mode.json",
+    "exchange_info_read_for_close-rest-001-symbol_filters.json"
+  ],
+  "label": "demo-observed, not mainnet",
+  "live_port_calls": 37,
+  "market": {
+    "mark_price": {
+      "error": null,
+      "ok": true,
+      "operation": "mark_price",
+      "summary": {
+        "close": "81806.12702899",
+        "close_time_utc": "2026-10-22T11:55:59.999000+00:00",
+        "count": "1",
+        "interval": "1m",
+        "open_time_utc": "2026-10-22T11:55:00+00:00",
+        "symbol": "BTCUSDT"
+      }
+    },
+    "status": "READ",
+    "symbol_filters": {
+      "error": null,
+      "ok": true,
+      "operation": "symbol_filters",
+      "summary": {
+        "found": "true",
+        "market_lot_max_quantity": "120",
+        "market_lot_min_quantity": "0.0001",
+        "market_lot_step_size": "0.0001",
+        "max_quantity": "1000",
+        "min_notional": "50",
+        "min_quantity": "0.0001",
+        "percent_price_multiplier_decimals": "4",
+        "percent_price_multiplier_down": "0.9500",
+        "percent_price_multiplier_up": "1.0500",
+        "status": "TRADING",
+        "step_size": "0.0001",
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10"
+      }
+    }
+  },
+  "mode": "execute",
+  "notes": [
+    "D055 stays OPEN: this tool records facts and stops",
+    "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "The account's listenKey is a singleton: no other process may run on the same account during the probe (research P7)."
+  ],
+  "outcome": "COMPLETE",
+  "proof_class": "REAL_DEMO",
+  "schema": "demo-probe-evidence/schema-1",
+  "sdk_version": "17.4.0",
+  "settings": {
+    "case_timeout_seconds": 90,
+    "cleanup_timeout_seconds": 60,
+    "far_price_fraction": "0.96",
+    "gtd_expiry_wait_seconds": 780,
+    "gtd_lifetime_seconds": 660,
+    "limits_file": "binance-limits-v1.toml",
+    "limits_file_sha256": "9f522adcd35d56fa5dddbf79b42ab1f8c1d3f770bda7527caaf2cb28f8c43383",
+    "market_lot_probe_quantity": null,
+    "max_notional_quote": "100",
+    "near_trigger_fraction": "0.9999",
+    "only": [
+      "account_read_only_capture",
+      "exchange_info_read_for_close"
+    ],
+    "optional_cases": {
+      "account_capture": true,
+      "algo_query_timing": true,
+      "cancel_fill_race": true,
+      "close_position_with_position": true,
+      "commission_realized_pnl": true,
+      "exchange_info_read": true,
+      "explicit_time_in_force": false,
+      "gtd_expiry": true,
+      "gtd_min_lifetime": true,
+      "manual_close_open_legs": true,
+      "market_lot_size_out_of_range": false,
+      "partial_fill_attempt": true,
+      "stop_absent_same_id": true,
+      "stop_trigger_after_fill": true,
+      "stream_gap": false,
+      "stream_loss": true,
+      "tp1_from_fill": true,
+      "triggered_bracket": true
+    },
+    "probe_limits_file": "19-probe-limits.toml",
+    "probe_limits_file_sha256": "0b0b63c4d09d4d2faef67f8b74537934dd3540e913709db1645d1c34b23bebc8",
+    "quantity": "0.0008",
+    "race_repeats": 2
+  },
+  "started_utc": "2026-10-22T11:56:16.665060+00:00",
+  "stream": {
+    "status": "STARTED",
+    "stop": "stopped"
+  },
+  "symbol": "BTCUSDT"
+}

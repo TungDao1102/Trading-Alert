@@ -1,0 +1,17 @@
+{
+  "case_id": "stop_query_absent_then_same_id",
+  "index": 7,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "DUPLICATE_CLIENT_ID",
+      "code": -4116,
+      "http_class": "BAD_REQUEST",
+      "message": "ClientOrderId is duplicated.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "new_conditional_order",
+    "summary": {}
+  }
+}

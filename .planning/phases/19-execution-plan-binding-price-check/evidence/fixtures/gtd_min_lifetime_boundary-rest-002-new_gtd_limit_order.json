@@ -1,0 +1,17 @@
+{
+  "case_id": "gtd_min_lifetime_boundary",
+  "index": 2,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "UNKNOWN_EXCHANGE_ERROR",
+      "code": -5040,
+      "http_class": "BAD_REQUEST",
+      "message": "The goodTillDate timestamp must be greater than the current time plus 600 seconds and smaller than 253402300799000 (UTC 9999-12-31 23:59:59)",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "new_gtd_limit_order",
+    "summary": {}
+  }
+}

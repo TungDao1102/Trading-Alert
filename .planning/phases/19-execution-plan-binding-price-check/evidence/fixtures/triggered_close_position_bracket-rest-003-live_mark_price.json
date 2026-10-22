@@ -1,0 +1,15 @@
+{
+  "case_id": "triggered_close_position_bracket",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "live_mark_price",
+    "summary": {
+      "exchange_time_utc": "2026-10-22T12:08:43+00:00",
+      "mark_price": "81768.31286232",
+      "symbol": "BTCUSDT"
+    }
+  }
+}

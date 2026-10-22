@@ -1,0 +1,23 @@
+{
+  "case_id": "entry_cancel_fill_race",
+  "index": 5,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "1",
+      "row_0_break_even_price": "81793.10415999999",
+      "row_0_entry_price": "81760.4",
+      "row_0_liquidation_price": "0",
+      "row_0_margin_asset": "USDT",
+      "row_0_mark_price": "81760.40000000",
+      "row_0_notional": "65.40832000",
+      "row_0_position_amt": "0.0008",
+      "row_0_position_side": "BOTH",
+      "row_0_symbol": "BTCUSDT",
+      "row_0_unrealized_profit": "0.00000000"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "case_id": "algo_query_timing_after_new",
+  "index": 16,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "cancel_algo_order",
+    "summary": {
+      "algo_id": "1000000251910024",
+      "client_algo_id": "dprobe-aqc-20261022T120055Z-2",
+      "code": "200",
+      "msg": "success"
+    }
+  }
+}

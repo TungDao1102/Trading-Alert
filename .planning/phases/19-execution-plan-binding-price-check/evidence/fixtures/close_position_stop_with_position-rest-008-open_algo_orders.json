@@ -1,0 +1,43 @@
+{
+  "case_id": "close_position_stop_with_position",
+  "index": 8,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_algo_orders",
+    "summary": {
+      "count": "2",
+      "row_0_algo_id": "1000000251915713",
+      "row_0_algo_status": "NEW",
+      "row_0_algo_type": "CONDITIONAL",
+      "row_0_client_algo_id": "dprobe-cpt-20261022T120704Z-3",
+      "row_0_close_position": "true",
+      "row_0_order_type": "TAKE_PROFIT_MARKET",
+      "row_0_position_side": "BOTH",
+      "row_0_price": "0.0",
+      "row_0_quantity": "0.0",
+      "row_0_reduce_only": "true",
+      "row_0_side": "SELL",
+      "row_0_symbol": "BTCUSDT",
+      "row_0_time_in_force": "GTE_GTC",
+      "row_0_trigger_price": "85069.0",
+      "row_0_working_type": "MARK_PRICE",
+      "row_1_algo_id": "1000000251915712",
+      "row_1_algo_status": "NEW",
+      "row_1_algo_type": "CONDITIONAL",
+      "row_1_client_algo_id": "dprobe-cps-20261022T120704Z-2",
+      "row_1_close_position": "true",
+      "row_1_order_type": "STOP_MARKET",
+      "row_1_position_side": "BOTH",
+      "row_1_price": "0.0",
+      "row_1_quantity": "0.0",
+      "row_1_reduce_only": "true",
+      "row_1_side": "SELL",
+      "row_1_symbol": "BTCUSDT",
+      "row_1_time_in_force": "GTE_GTC",
+      "row_1_trigger_price": "78525.2",
+      "row_1_working_type": "MARK_PRICE"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "case_id": "manual_close_with_open_legs",
+  "index": 9,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

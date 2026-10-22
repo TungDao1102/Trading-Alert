@@ -1,0 +1,15 @@
+{
+  "case_id": "tp1_quantity_from_fill",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "live_mark_price",
+    "summary": {
+      "exchange_time_utc": "2026-10-22T12:10:15+00:00",
+      "mark_price": "81761.97434783",
+      "symbol": "BTCUSDT"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "manual_close_with_open_legs",
+  "index": 7,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "ORDER_ABSENT",
+      "code": -2013,
+      "http_class": "BAD_REQUEST",
+      "message": "Order does not exist.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "query_algo_order",
+    "summary": {}
+  }
+}

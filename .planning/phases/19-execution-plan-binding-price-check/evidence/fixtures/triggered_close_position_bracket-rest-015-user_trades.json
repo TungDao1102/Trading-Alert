@@ -1,0 +1,27 @@
+{
+  "case_id": "triggered_close_position_bracket",
+  "index": 15,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "user_trades",
+    "summary": {
+      "count": "1",
+      "row_0_buyer": "false",
+      "row_0_commission": "0.02616201",
+      "row_0_commission_asset": "USDT",
+      "row_0_maker": "false",
+      "row_0_margin_asset": "USDT",
+      "row_0_order_id": "28645789207",
+      "row_0_position_side": "BOTH",
+      "row_0_price": "81756.30",
+      "row_0_qty": "0.0008",
+      "row_0_quote_qty": "65.405040",
+      "row_0_realized_pnl": "-0.00327999",
+      "row_0_side": "SELL",
+      "row_0_time_ms": "1792670963058",
+      "row_0_trade_id": "549733079"
+    }
+  }
+}

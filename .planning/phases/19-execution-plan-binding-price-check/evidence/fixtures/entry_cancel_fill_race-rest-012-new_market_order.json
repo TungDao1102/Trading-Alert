@@ -1,0 +1,29 @@
+{
+  "case_id": "entry_cancel_fill_race",
+  "index": 12,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "new_market_order",
+    "summary": {
+      "client_order_id": "dprobe-rf2-20261022T120704Z-22",
+      "close_position": "false",
+      "executed_qty": "0.0000",
+      "good_till_date": "0",
+      "order_id": "28645791851",
+      "orig_qty": "0.0008",
+      "orig_type": "MARKET",
+      "position_side": "BOTH",
+      "price": "0.00",
+      "reduce_only": "true",
+      "side": "SELL",
+      "status": "NEW",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "MARKET",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

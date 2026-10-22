@@ -1,0 +1,41 @@
+{
+  "case_id": "commission_vs_realized_pnl",
+  "index": 5,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "user_trades",
+    "summary": {
+      "count": "2",
+      "row_0_buyer": "false",
+      "row_0_commission": "0.01634974",
+      "row_0_commission_asset": "USDT",
+      "row_0_maker": "false",
+      "row_0_margin_asset": "USDT",
+      "row_0_order_id": "28645786992",
+      "row_0_position_side": "BOTH",
+      "row_0_price": "81748.70",
+      "row_0_qty": "0.0005",
+      "row_0_quote_qty": "40.874350",
+      "row_0_realized_pnl": "-0.00584999",
+      "row_0_side": "SELL",
+      "row_0_time_ms": "1792670831577",
+      "row_0_trade_id": "549732633",
+      "row_1_buyer": "false",
+      "row_1_commission": "0.00980984",
+      "row_1_commission_asset": "USDT",
+      "row_1_maker": "false",
+      "row_1_margin_asset": "USDT",
+      "row_1_order_id": "28645786992",
+      "row_1_position_side": "BOTH",
+      "row_1_price": "81748.70",
+      "row_1_qty": "0.0003",
+      "row_1_quote_qty": "24.524610",
+      "row_1_realized_pnl": "-0.00350999",
+      "row_1_side": "SELL",
+      "row_1_time_ms": "1792670831577",
+      "row_1_trade_id": "549732634"
+    }
+  }
+}

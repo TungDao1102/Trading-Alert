@@ -1,0 +1,16 @@
+{
+  "case_id": "close_position_stop_with_position",
+  "index": 11,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "cancel_algo_order",
+    "summary": {
+      "algo_id": "1000000251915713",
+      "client_algo_id": "dprobe-cpt-20261022T120704Z-3",
+      "code": "200",
+      "msg": "success"
+    }
+  }
+}

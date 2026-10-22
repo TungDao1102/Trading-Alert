@@ -1,0 +1,27 @@
+{
+  "case_id": "commission_vs_realized_pnl",
+  "index": 6,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "user_trades",
+    "summary": {
+      "count": "1",
+      "row_0_buyer": "true",
+      "row_0_commission": "0.02616332",
+      "row_0_commission_asset": "USDT",
+      "row_0_maker": "false",
+      "row_0_margin_asset": "USDT",
+      "row_0_order_id": "28645786987",
+      "row_0_position_side": "BOTH",
+      "row_0_price": "81760.40",
+      "row_0_qty": "0.0008",
+      "row_0_quote_qty": "65.408320",
+      "row_0_realized_pnl": "0",
+      "row_0_side": "BUY",
+      "row_0_time_ms": "1792670831360",
+      "row_0_trade_id": "549732632"
+    }
+  }
+}

@@ -1,0 +1,58 @@
+# Owner probe limits for the Phase 19 Demo RETEST of two cases (follows 19-probe-limits.toml).
+#
+# STATUS: PROPOSED BY THE ASSISTANT, NOT APPROVED. The owner reads every value, changes what they
+# want and records the approval in a decision note of their own. Nothing here is a trading
+# parameter: every number only bounds how much the Demo probe may send or how long it waits (D-17).
+#
+# A separate file on purpose: 19-probe-limits.toml is referenced by hash in the evidence files
+# already written, so it is not edited.
+#
+# Why a retest (evidence of 2026-10-22):
+#   * gtd_entry_expiry_status: the GTD entry was still NEW 120 s after goodTillDate (the exchange's
+#     own order history shows status CANCELED at +120 s, the cancel of the probe cleanup). A much
+#     longer wait tells apart "expiry is late" from "expiry does not happen on Demo".
+#   * commission_vs_realized_pnl: GET /fapi/v1/income returned zero rows twice within 90 s. A longer
+#     wait tells apart "income lags" from "income is not produced on Demo".
+#
+# Run (owner only), the two cases one after the other, never together:
+#   --only commission_vs_realized_pnl      (about 2 to 7 minutes)
+#   --only gtd_entry_expiry_status         (about 26 minutes)
+
+[order]
+# From Phase 18 / 19-probe-limits.toml (owner-approved values).
+symbol = "BTCUSDT"
+quantity = "0.0008"
+max_notional_quote = "100"
+far_price_fraction = "0.96"
+# Needed because gtd_expiry is on. Binance requires goodTillDate > now + 600 s. (same as before)
+gtd_lifetime_seconds = 660
+
+[waits]
+# The longest one case waits for an event. Raised from 90 so the income read can be tried much
+# later: the probe sleeps this long once if the income rows are not there yet. (proposed)
+case_timeout_seconds = 300
+cleanup_timeout_seconds = 60
+# How long the GTD case waits. goodTillDate is 660 s after placement, so 1500 s is about 14 minutes
+# after the expiry. Must be greater than gtd_lifetime_seconds. The probe sleeps the whole time even
+# if the order ends earlier. Kept under the 1800 s keepalive interval of the stream. (proposed)
+gtd_expiry_wait_seconds = 1500
+
+[optional_cases]
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
+account_capture = false
+algo_query_timing = false
+close_position_with_position = false
+stop_trigger_after_fill = false
+stop_absent_same_id = false
+manual_close_open_legs = false
+commission_realized_pnl = true
+triggered_bracket = false
+tp1_from_fill = false
+exchange_info_read = false
+gtd_min_lifetime = false
+partial_fill_attempt = false
+cancel_fill_race = false
+stream_loss = false
+gtd_expiry = true

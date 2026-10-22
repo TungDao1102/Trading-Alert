@@ -1,0 +1,17 @@
+{
+  "case_id": "algo_query_timing_after_new",
+  "index": 12,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "ORDER_ABSENT",
+      "code": -2013,
+      "http_class": "BAD_REQUEST",
+      "message": "Order does not exist.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "query_algo_order_by_algo_id",
+    "summary": {}
+  }
+}
