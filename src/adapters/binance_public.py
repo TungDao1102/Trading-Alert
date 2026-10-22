@@ -149,6 +149,21 @@ class MarkPriceReading:
 
 
 @dataclass(frozen=True)
+class OrderBookReading:
+    """The top of one symbol's order book (`GET /fapi/v1/depth`, quick task 261022-sj1).
+
+    `bids` and `asks` are (price, quantity) pairs as the exchange lists them (best first),
+    every value a positive finite `Decimal`. Used only by the Demo probe to read how much
+    quantity the book holds; no decision path reads it.
+    """
+
+    symbol: str
+    last_update_id: int
+    bids: tuple[tuple[Decimal, Decimal], ...]
+    asks: tuple[tuple[Decimal, Decimal], ...]
+
+
+@dataclass(frozen=True)
 class LastPriceReading:
     """The latest traded price of one symbol (`GET /fapi/v1/ticker/price`, quick task 261020-l4p).
 
@@ -303,6 +318,24 @@ def _record_rate_limit(
     category = classify(facts, call_kind)
     if category in _RATE_LIMIT_CATEGORIES:
         gate.record(category, facts.retry_after_seconds)
+
+
+def _book_levels(raw: object, side: str, symbol: str) -> tuple[tuple[Decimal, Decimal], ...]:
+    """The (price, quantity) levels of one depth side; any malformed level raises ValueError."""
+    if not isinstance(raw, list):
+        raise ValueError(f"depth {side} missing for {symbol}")
+    levels: list[tuple[Decimal, Decimal]] = []
+    for level in raw:
+        if not isinstance(level, list) or len(level) < 2:
+            raise ValueError(f"depth {side} level malformed for {symbol}")
+        try:
+            price, quantity = Decimal(level[0]), Decimal(level[1])
+        except (InvalidOperation, TypeError):
+            raise ValueError(f"depth {side} level is not a decimal pair for {symbol}") from None
+        if not (price.is_finite() and quantity.is_finite()) or price <= 0 or quantity <= 0:
+            raise ValueError(f"depth {side} level is not positive and finite for {symbol}")
+        levels.append((price, quantity))
+    return tuple(levels)
 
 
 async def _gated_rest_call[**P, R](
@@ -478,6 +511,34 @@ class BinancePublicMarketData:
         return [_row_to_mark_kline(symbol, interval, row) for row in raw]
 
     # ----- live mark price ------------------------------------------------- #
+
+    async def order_book(self, symbol: str, limit: int) -> OrderBookReading:
+        """The top `limit` levels of one symbol's book (`GET /fapi/v1/depth`, unsigned).
+
+        Flag-never-fabricate (D-06): an empty answer, a missing side or update id, or a level
+        that is not a (positive finite price, positive finite quantity) pair raises
+        `ValueError`. No retry; an SDK exception propagates unchanged. Messages name the field
+        and the symbol only (never the payload).
+        """
+        response = await _gated_rest_call(
+            self._rest_gate,
+            CallKind.QUERY,
+            self._sdk.rest_api.order_book,
+            symbol=symbol,
+            limit=limit,
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError(f"depth response empty for {symbol}: refusing to fabricate")
+        update_id = raw.last_update_id
+        if isinstance(update_id, bool) or not isinstance(update_id, int):
+            raise ValueError(f"depth lastUpdateId missing for {symbol}")
+        return OrderBookReading(
+            symbol=symbol,
+            last_update_id=update_id,
+            bids=_book_levels(raw.bids, "bids", symbol),
+            asks=_book_levels(raw.asks, "asks", symbol),
+        )
 
     async def mark_price(self, symbol: str) -> MarkPriceReading:
         """The live mark price of one symbol (`GET /fapi/v1/premiumIndex`).

@@ -140,6 +140,14 @@ class FakeProbeRest:
     def exchange_information(self, **kwargs: Any) -> FakeResponse:
         return self._answer("exchange_information", kwargs)
 
+    # Quick task 261022-sj1: the server time and the depth read.
+
+    def check_server_time(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("check_server_time", kwargs)
+
+    def order_book(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("order_book", kwargs)
+
 
 class FakeProbeSdk:
     """The `DerivativesTradingUsdsFutures` surface the adapter reads: `rest_api`."""
