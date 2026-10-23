@@ -31,11 +31,11 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 ## Current Position
 
-Phase: 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTING
-Current Plan: 7 (wave 2: 20-07..20-10)
-Total Plans in Phase: 26
-Status: Ready to execute
-Last activity: 2026-10-21 — Phase 20 execution started
+Phase: 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
+Current Plan: 31 (gap plans 20-27..20-31 merged)
+Total Plans in Phase: 31
+Status: Verified at library level; owner/Demo items open (20-UAT.md partial)
+Last activity: 2026-10-23 — Phase 20 gap closure, UAT and re-verification; Phase 21 planning started
 
 Progress: [██████░░░░] 61%
 
