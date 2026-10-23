@@ -1069,6 +1069,41 @@ class FakeProbePort:
             lambda: fake_order_book(symbol, self.book_bids, self.book_asks),
         )
 
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation:
+        """FAKE: the exchange answers -1021 when the offset exceeds the window (scriptable)."""
+        kwargs = {
+            "symbol": symbol,
+            "recv_window_ms": recv_window_ms,
+            "timestamp_behind_ms": timestamp_behind_ms,
+        }
+
+        def default() -> ProbeObservation:
+            facts = {
+                "recv_window_ms": str(recv_window_ms),
+                "timestamp_behind_ms": str(timestamp_behind_ms),
+                "clock_calls": "1",
+                "real_clock_ms": str(self.server_time_ms),
+                "timestamp_sent_ms": str(self.server_time_ms - timestamp_behind_ms),
+            }
+            if timestamp_behind_ms > recv_window_ms:
+                return ProbeObservation(
+                    operation="stale_timestamp_read",
+                    ok=False,
+                    summary=facts,
+                    error=ErrorObservation(
+                        http_class="BAD_REQUEST",
+                        code=-1021,
+                        retry_after_seconds=None,
+                        category="CLOCK_SKEW",
+                        message="FAKE Timestamp for this request is outside of the recvWindow.",
+                    ),
+                )
+            return ok_observation("stale_timestamp_read", {"count": "0", **facts})
+
+        return self._answer("stale_timestamp_read", kwargs, default)
+
     # ----- the stream accessors ---------------------------------------------- #
 
     def marker(self) -> int:
@@ -1315,6 +1350,20 @@ class RecordingProbePort:
         self.reads.append("order_book")
         bids, asks = default_fake_book(Decimal(FAKE_MARK_PRICE))
         return fake_order_book(symbol, bids, asks)
+
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation:
+        self.reads.append("stale_timestamp_read")
+        return ok_observation(
+            "stale_timestamp_read",
+            {
+                "count": "0",
+                "recv_window_ms": str(recv_window_ms),
+                "timestamp_behind_ms": str(timestamp_behind_ms),
+                "clock_calls": "1",
+            },
+        )
 
     def marker(self) -> int:
         return 0

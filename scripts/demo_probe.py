@@ -681,6 +681,12 @@ class ProbePort(Protocol):
 
     async def order_book(self, *, symbol: str) -> ProbeObservation: ...
 
+    # Quick task 261023-sj2: one read-only signed GET with a deliberately stale timestamp.
+
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation: ...
+
     def marker(self) -> int: ...
 
     def frames_since(self, marker: int) -> list[dict[str, str]]: ...
@@ -4941,6 +4947,15 @@ class GuardedProbePort:
     async def order_book(self, *, symbol: str) -> ProbeObservation:
         self._enter("order_book")
         result: ProbeObservation = await self._adapter.order_book(symbol=symbol)
+        return result
+
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation:
+        self._enter("stale_timestamp_read")
+        result: ProbeObservation = await self._adapter.stale_timestamp_read(
+            symbol=symbol, recv_window_ms=recv_window_ms, timestamp_behind_ms=timestamp_behind_ms
+        )
         return result
 
     async def position_mode(self) -> ProbeObservation:

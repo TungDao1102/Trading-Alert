@@ -650,9 +650,19 @@ async def test_reads_are_guarded_and_delegated() -> None:
     # quick task 261022-sj1: the exchange clock and the depth of the book
     await port.server_time()
     await port.order_book(symbol="BTCUSDT")
-    assert len(inner.calls) == 19
-    assert len(guard_calls) == 19
-    assert port.call_count == 19
+    # quick task 261023-sj2: the read-only signed GET with a stale timestamp (not mutating)
+    observation = await port.stale_timestamp_read(
+        symbol="BTCUSDT", recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    assert observation.error is not None and observation.error.code == -1021
+    assert len(inner.calls) == 20
+    assert len(guard_calls) == 20
+    assert port.call_count == 20
+    assert inner.calls[-1] == (
+        "stale_timestamp_read",
+        {"symbol": "BTCUSDT", "recv_window_ms": 5000, "timestamp_behind_ms": 10_000},
+    )
+    assert "stale_timestamp_read" not in dp.MUTATING_OPERATIONS
 
 
 def test_the_guarded_port_has_no_attribute_passthrough() -> None:
