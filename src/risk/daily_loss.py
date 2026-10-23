@@ -54,8 +54,12 @@ from enum import Enum
 from typing import Any
 
 from src.core._decimal import _add, _sub
-from src.domain.enums import RejectionReason
-from src.risk.portfolio import resolve_absolute_thresholds
+from src.domain.enums import DailyState, RejectionReason
+from src.risk.portfolio import (
+    _extract_thresholds,
+    derive_daily_state,
+    resolve_absolute_thresholds,
+)
 
 _ZERO = Decimal("0")
 _OK = "OK"
@@ -347,3 +351,192 @@ def day_thresholds(*, parameter_set: dict[str, Any], day: DayRiskState) -> dict[
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+class DayOpenAction(Enum):
+    """What the service does about the persisted state of today's UTC day (D-07, D-08)."""
+
+    USE_STORED = "USE_STORED"
+    OPEN_FROM_FRESH_BASE = "OPEN_FROM_FRESH_BASE"
+    BLOCKED_MISSING_STATE = "BLOCKED_MISSING_STATE"
+    BLOCKED_STORE_UNREADABLE = "BLOCKED_STORE_UNREADABLE"
+
+
+_BLOCKED_REASONS = frozenset(
+    {
+        BLOCKED_DAY_STATE_MISSING,
+        BLOCKED_DAY_STATE_UNREADABLE,
+        BLOCKED_DAY_BASE_UNAVAILABLE,
+        BLOCKED_DAILY_LOSS_UNKNOWN,
+        BLOCKED_DAY_THRESHOLDS_INVALID,
+    }
+)
+_ALERTABLE = (DailyState.WARNING, DailyState.DAILY_STOP)
+
+
+@dataclass(frozen=True, kw_only=True)
+class DayStateVerdict:
+    """The day's state for the gates: a DailyState, or why none can be given.
+
+    `state` None means NO_TRADE: `reason_code` is UNCERTAIN_ACCOUNT_STATE and
+    `blocked_reason` names the cause. DAILY_STOP carries DAILY_STOP_BLOCK. `latch_now` asks
+    the service to persist the latch (only with a newly derived DAILY_STOP). `alerts_due`
+    lists the alerts not yet sent; this module sends nothing.
+    """
+
+    utc_day: date
+    state: DailyState | None
+    reason_code: str
+    blocked_reason: str | None
+    loss_quote: Decimal | None
+    latch_now: bool
+    alerts_due: tuple[DailyState, ...]
+
+    def __post_init__(self) -> None:
+        _require_day(self.utc_day, "utc_day")
+        if self.state is None:
+            if self.reason_code != _UNCERTAIN or self.blocked_reason not in _BLOCKED_REASONS:
+                raise ValueError(
+                    "a verdict without a state needs UNCERTAIN_ACCOUNT_STATE and a known "
+                    "blocked_reason"
+                )
+            if self.latch_now or self.alerts_due:
+                raise ValueError("a verdict without a state asks for no latch and no alert")
+        else:
+            if not isinstance(self.state, DailyState):
+                raise TypeError(f"state must be DailyState, got {type(self.state).__name__}")
+            if self.blocked_reason is not None:
+                raise ValueError("a verdict with a state has no blocked_reason")
+            expected = (
+                RejectionReason.DAILY_STOP_BLOCK.value
+                if self.state is DailyState.DAILY_STOP
+                else _OK
+            )
+            if self.reason_code != expected:
+                raise ValueError(
+                    f"state {self.state.value} requires reason_code {expected}, "
+                    f"got {self.reason_code!r}"
+                )
+            if self.latch_now and self.state is not DailyState.DAILY_STOP:
+                raise ValueError("latch_now is only valid with DAILY_STOP")
+        if self.loss_quote is not None:
+            _require_decimal(self.loss_quote, "loss_quote")
+        if not isinstance(self.latch_now, bool):
+            raise TypeError("latch_now must be bool")
+        for alert in self.alerts_due:
+            if alert not in _ALERTABLE:
+                raise ValueError(f"alerts_due may hold WARNING or DAILY_STOP only, got {alert!r}")
+
+
+def blocked_verdict(*, utc_day: date, blocked_reason: str) -> DayStateVerdict:
+    """NO_TRADE verdict (UNCERTAIN_ACCOUNT_STATE) for one of the BLOCKED_* causes."""
+    if blocked_reason not in _BLOCKED_REASONS:
+        raise ValueError(f"unknown blocked_reason {blocked_reason!r}")
+    return DayStateVerdict(
+        utc_day=utc_day,
+        state=None,
+        reason_code=_UNCERTAIN,
+        blocked_reason=blocked_reason,
+        loss_quote=None,
+        latch_now=False,
+        alerts_due=(),
+    )
+
+
+def _thresholds_usable(thresholds: dict[str, Any] | None) -> bool:
+    """True when the resolved set can derive a state and warning <= stop.
+
+    `derive_daily_state` answers NORMAL for a malformed set, so a malformed set must be
+    stopped here. Inverted warning/stop thresholds are not rejected by the shared rule
+    (ROADMAP 999.3, Phase 05 IN-03, trigger: Phase 21 daily-loss work); the live path
+    rejects them here and leaves `src/risk/portfolio.py` unchanged.
+    """
+    if thresholds is None:
+        return False
+    extracted = _extract_thresholds(thresholds)
+    if extracted is None:
+        return False
+    warning, stop = extracted[3], extracted[4]
+    if not (warning.is_finite() and stop.is_finite()):
+        return False
+    return warning <= stop
+
+
+def evaluate_day_state(
+    *, day: DayRiskState, loss: DailyLossResult, parameter_set: dict[str, Any]
+) -> DayStateVerdict:
+    """The day's verdict: sticky latch first, then thresholds, then the loss (D-06, D-14).
+
+    A held latch is DAILY_STOP for the rest of the UTC day whatever the loss does. A newly
+    derived DAILY_STOP asks for the latch (`latch_now`). A jump straight to DAILY_STOP alerts
+    DAILY_STOP only. A WARNING alerts once (`warning_alerted_at_utc` is None).
+    """
+    if day.stop_latched_at_utc is not None:
+        return DayStateVerdict(
+            utc_day=day.utc_day,
+            state=DailyState.DAILY_STOP,
+            reason_code=RejectionReason.DAILY_STOP_BLOCK.value,
+            blocked_reason=None,
+            loss_quote=loss.loss_quote,
+            latch_now=False,
+            alerts_due=(),
+        )
+    thresholds = day_thresholds(parameter_set=parameter_set, day=day)
+    if not _thresholds_usable(thresholds):
+        return blocked_verdict(utc_day=day.utc_day, blocked_reason=BLOCKED_DAY_THRESHOLDS_INVALID)
+    if loss.loss_quote is None:
+        return blocked_verdict(utc_day=day.utc_day, blocked_reason=BLOCKED_DAILY_LOSS_UNKNOWN)
+    assert thresholds is not None  # narrowed by _thresholds_usable
+    state = derive_daily_state(daily_loss_quote=loss.loss_quote, parameter_set=thresholds)
+    if state is DailyState.DAILY_STOP:
+        return DayStateVerdict(
+            utc_day=day.utc_day,
+            state=state,
+            reason_code=RejectionReason.DAILY_STOP_BLOCK.value,
+            blocked_reason=None,
+            loss_quote=loss.loss_quote,
+            latch_now=True,
+            alerts_due=(DailyState.DAILY_STOP,),
+        )
+    alerts: tuple[DailyState, ...] = ()
+    if state is DailyState.WARNING and day.warning_alerted_at_utc is None:
+        alerts = (DailyState.WARNING,)
+    return DayStateVerdict(
+        utc_day=day.utc_day,
+        state=state,
+        reason_code=_OK,
+        blocked_reason=None,
+        loss_quote=loss.loss_quote,
+        latch_now=False,
+        alerts_due=alerts,
+    )
+
+
+def day_open_action(
+    *,
+    today: DayRiskState | None,
+    previous_day_present: bool,
+    exposure: bool | None,
+    store_readable: bool,
+) -> DayOpenAction:
+    """What to do about today's persisted day state (D-07, D-08).
+
+    D-07: a missing day state is never a fresh day while exposure exists or is unknown
+    (`exposure` None means unknown). D-08: the rollover from a persisted previous day opens
+    the new day from a fresh REST base. The operator acknowledgement path for a missing
+    state with exposure is not built; it is an owner item (research Open Question 5).
+    """
+    if not store_readable:
+        return DayOpenAction.BLOCKED_STORE_UNREADABLE
+    if today is not None:
+        return DayOpenAction.USE_STORED
+    if previous_day_present:
+        return DayOpenAction.OPEN_FROM_FRESH_BASE
+    if exposure is False:
+        return DayOpenAction.OPEN_FROM_FRESH_BASE
+    return DayOpenAction.BLOCKED_MISSING_STATE
+
+
+def base_is_inside_day(*, utc_day: date, observed_at_utc: datetime) -> bool:
+    """True when the base was observed inside the half-open UTC day window."""
+    return _inside_day(utc_day, _require_utc_aware(observed_at_utc, "observed_at_utc"))

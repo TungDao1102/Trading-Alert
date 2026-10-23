@@ -17,15 +17,25 @@ from src.domain.enums import DailyState, RejectionReason
 from src.risk import daily_loss as dl
 from src.risk.daily_loss import (
     BLOCKED_DAILY_LOSS_UNKNOWN,
+    BLOCKED_DAY_BASE_UNAVAILABLE,
+    BLOCKED_DAY_STATE_MISSING,
+    BLOCKED_DAY_STATE_UNREADABLE,
+    BLOCKED_DAY_THRESHOLDS_INVALID,
     FUNDING_LABEL_UNVERIFIED,
     FUNDING_LABEL_VERIFIED,
     ComponentKind,
     ComponentSource,
     DailyLossResult,
+    DayOpenAction,
     DayRiskState,
+    DayStateVerdict,
     FundingPolicy,
     LossComponent,
+    base_is_inside_day,
+    blocked_verdict,
+    day_open_action,
     day_thresholds,
+    evaluate_day_state,
     utc_day_of,
     utc_day_start,
 )
@@ -530,3 +540,276 @@ def test_fold_has_no_default_for_the_funding_policy() -> None:
 
 def test_rejection_reason_vocabulary_is_unchanged_at_21() -> None:
     assert len(list(RejectionReason)) == 21
+
+
+# ------------------------------------------- Task 2: latch, alerts, day-open rule
+
+LATCH_AT = datetime(2026, 10, 23, 9, 30, tzinfo=UTC)
+WARNED_AT = datetime(2026, 10, 23, 8, 0, tzinfo=UTC)
+
+
+def evaluate(day: DayRiskState, loss: DailyLossResult) -> DayStateVerdict:
+    return evaluate_day_state(day=day, loss=loss, parameter_set=PARAMS)
+
+
+@pytest.mark.parametrize(
+    "loss",
+    [known("0"), known("3"), known("5"), unknown()],
+    ids=["zero", "three", "warning-level", "unknown"],
+)
+def test_a_held_latch_wins_over_any_loss(loss: DailyLossResult) -> None:
+    verdict = evaluate(day_state(stop_latched_at_utc=LATCH_AT), loss)
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.reason_code == "DAILY_STOP_BLOCK"
+    assert verdict.blocked_reason is None
+    assert verdict.latch_now is False
+    assert verdict.alerts_due == ()
+    assert verdict.utc_day == DAY
+
+
+def test_a_later_gain_cannot_lift_a_latched_stop() -> None:
+    verdict = evaluate(day_state(stop_latched_at_utc=LATCH_AT), fold([pnl("50")]))
+    assert verdict.state is DailyState.DAILY_STOP
+
+
+def test_a_newly_derived_daily_stop_asks_for_the_latch_and_alerts_once() -> None:
+    verdict = evaluate(day_state(), known("10"))
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.reason_code == "DAILY_STOP_BLOCK"
+    assert verdict.latch_now is True
+    assert verdict.alerts_due == (DailyState.DAILY_STOP,)
+    assert verdict.loss_quote == Decimal("10")
+
+
+def test_a_jump_straight_to_daily_stop_alerts_daily_stop_only() -> None:
+    verdict = evaluate(day_state(), known("50"))
+    assert verdict.alerts_due == (DailyState.DAILY_STOP,)
+
+
+def test_warning_alerts_once() -> None:
+    first = evaluate(day_state(), known("5"))
+    assert first.state is DailyState.WARNING
+    assert first.reason_code == "OK"
+    assert first.latch_now is False
+    assert first.alerts_due == (DailyState.WARNING,)
+    again = evaluate(day_state(warning_alerted_at_utc=WARNED_AT), known("5"))
+    assert again.state is DailyState.WARNING
+    assert again.alerts_due == ()
+
+
+def test_a_warning_already_alerted_still_asks_for_the_latch_at_the_stop() -> None:
+    verdict = evaluate(day_state(warning_alerted_at_utc=WARNED_AT), known("10"))
+    assert verdict.latch_now is True
+    assert verdict.alerts_due == (DailyState.DAILY_STOP,)
+
+
+def test_below_the_warning_threshold_is_normal_with_no_alert() -> None:
+    verdict = evaluate(day_state(), known("2"))
+    assert verdict.state is DailyState.NORMAL
+    assert verdict.reason_code == "OK"
+    assert verdict.alerts_due == ()
+    assert verdict.latch_now is False
+
+
+def test_just_below_each_boundary() -> None:
+    assert evaluate(day_state(), known("4.999999")).state is DailyState.NORMAL
+    assert evaluate(day_state(), known("9.999999")).state is DailyState.WARNING
+
+
+def test_unknown_loss_on_an_unlatched_day_is_uncertain_account_state() -> None:
+    verdict = evaluate(day_state(), unknown())
+    assert verdict.state is None
+    assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert verdict.blocked_reason == BLOCKED_DAILY_LOSS_UNKNOWN
+    assert verdict.alerts_due == ()
+    assert verdict.latch_now is False
+
+
+def test_thresholds_do_not_move_with_intraday_equity() -> None:
+    # The verdict is a function of the persisted base and the loss only: with base 1000
+    # a loss of 10 is the stop whatever the account equity became during the day.
+    assert evaluate(day_state("1000"), known("10")).state is DailyState.DAILY_STOP
+    assert evaluate(day_state("1000"), known("9")).state is DailyState.WARNING
+    assert evaluate(day_state("2000"), known("10")).state is DailyState.WARNING
+
+
+def test_inverted_thresholds_are_rejected_on_the_live_path() -> None:
+    inverted = dict(
+        PARAMS,
+        daily_loss_warning_threshold=Decimal("0.02"),
+        daily_loss_stop_threshold=Decimal("0.01"),
+    )
+    verdict = evaluate_day_state(day=day_state(), loss=known("0"), parameter_set=inverted)
+    assert verdict.state is None
+    assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert verdict.blocked_reason == BLOCKED_DAY_THRESHOLDS_INVALID
+
+
+def test_equal_warning_and_stop_thresholds_are_not_inverted() -> None:
+    equal = dict(
+        PARAMS,
+        daily_loss_warning_threshold=Decimal("0.01"),
+        daily_loss_stop_threshold=Decimal("0.01"),
+    )
+    verdict = evaluate_day_state(day=day_state(), loss=known("0"), parameter_set=equal)
+    assert verdict.state is DailyState.NORMAL
+
+
+@pytest.mark.parametrize(
+    "drop",
+    [
+        "daily_loss_warning_threshold",
+        "daily_loss_stop_threshold",
+        "cluster_cap",
+        "max_aggregate_open_risk",
+        "max_open_positions",
+    ],
+)
+def test_a_parameter_set_missing_a_key_is_blocked_not_normal(drop: str) -> None:
+    broken = {k: v for k, v in PARAMS.items() if k != drop}
+    verdict = evaluate_day_state(day=day_state(), loss=known("100"), parameter_set=broken)
+    assert verdict.state is None
+    assert verdict.blocked_reason == BLOCKED_DAY_THRESHOLDS_INVALID
+
+
+def test_a_latch_still_wins_over_invalid_thresholds() -> None:
+    broken = {k: v for k, v in PARAMS.items() if k != "cluster_cap"}
+    verdict = evaluate_day_state(
+        day=day_state(stop_latched_at_utc=LATCH_AT), loss=known("0"), parameter_set=broken
+    )
+    assert verdict.state is DailyState.DAILY_STOP
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        BLOCKED_DAY_STATE_MISSING,
+        BLOCKED_DAY_STATE_UNREADABLE,
+        BLOCKED_DAY_BASE_UNAVAILABLE,
+        BLOCKED_DAILY_LOSS_UNKNOWN,
+        BLOCKED_DAY_THRESHOLDS_INVALID,
+    ],
+)
+def test_blocked_verdict_is_uncertain_account_state(reason: str) -> None:
+    verdict = blocked_verdict(utc_day=DAY, blocked_reason=reason)
+    assert verdict.state is None
+    assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert verdict.blocked_reason == reason
+    assert verdict.alerts_due == ()
+    assert verdict.latch_now is False
+    assert verdict.loss_quote is None
+
+
+def test_blocked_verdict_rejects_an_unknown_reason() -> None:
+    with pytest.raises(ValueError):
+        blocked_verdict(utc_day=DAY, blocked_reason="SOMETHING_ELSE")
+
+
+def test_verdict_coupling_rules() -> None:
+    with pytest.raises(ValueError):  # state None without a blocked reason
+        DayStateVerdict(
+            utc_day=DAY,
+            state=None,
+            reason_code="UNCERTAIN_ACCOUNT_STATE",
+            blocked_reason=None,
+            loss_quote=None,
+            latch_now=False,
+            alerts_due=(),
+        )
+    with pytest.raises(ValueError):  # a state with an UNCERTAIN reason
+        DayStateVerdict(
+            utc_day=DAY,
+            state=DailyState.NORMAL,
+            reason_code="UNCERTAIN_ACCOUNT_STATE",
+            blocked_reason=None,
+            loss_quote=Decimal("0"),
+            latch_now=False,
+            alerts_due=(),
+        )
+    with pytest.raises(ValueError):  # latch_now only with DAILY_STOP
+        DayStateVerdict(
+            utc_day=DAY,
+            state=DailyState.WARNING,
+            reason_code="OK",
+            blocked_reason=None,
+            loss_quote=Decimal("5"),
+            latch_now=True,
+            alerts_due=(),
+        )
+    with pytest.raises(ValueError):  # DAILY_STOP carries DAILY_STOP_BLOCK
+        DayStateVerdict(
+            utc_day=DAY,
+            state=DailyState.DAILY_STOP,
+            reason_code="OK",
+            blocked_reason=None,
+            loss_quote=Decimal("10"),
+            latch_now=False,
+            alerts_due=(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("today", "previous", "exposure", "readable", "expected"),
+    [
+        (False, True, False, False, DayOpenAction.BLOCKED_STORE_UNREADABLE),
+        (True, True, True, False, DayOpenAction.BLOCKED_STORE_UNREADABLE),
+        (True, False, True, True, DayOpenAction.USE_STORED),
+        (True, False, None, True, DayOpenAction.USE_STORED),
+        (False, True, False, True, DayOpenAction.OPEN_FROM_FRESH_BASE),
+        (False, True, True, True, DayOpenAction.OPEN_FROM_FRESH_BASE),
+        (False, True, None, True, DayOpenAction.OPEN_FROM_FRESH_BASE),
+        (False, False, False, True, DayOpenAction.OPEN_FROM_FRESH_BASE),
+        (False, False, True, True, DayOpenAction.BLOCKED_MISSING_STATE),
+        (False, False, None, True, DayOpenAction.BLOCKED_MISSING_STATE),
+    ],
+)
+def test_day_open_action_table(
+    today: bool,
+    previous: bool,
+    exposure: bool | None,
+    readable: bool,
+    expected: DayOpenAction,
+) -> None:
+    action = day_open_action(
+        today=day_state() if today else None,
+        previous_day_present=previous,
+        exposure=exposure,
+        store_readable=readable,
+    )
+    assert action is expected
+
+
+def test_base_is_inside_day_is_a_half_open_window() -> None:
+    start = datetime(2026, 10, 23, 0, 0, 0, tzinfo=UTC)
+    assert base_is_inside_day(utc_day=DAY, observed_at_utc=start) is True
+    last = datetime(2026, 10, 23, 23, 59, 59, 999999, tzinfo=UTC)
+    assert base_is_inside_day(utc_day=DAY, observed_at_utc=last) is True
+    before = start - timedelta(microseconds=1)
+    assert base_is_inside_day(utc_day=DAY, observed_at_utc=before) is False
+    assert base_is_inside_day(utc_day=DAY, observed_at_utc=start + timedelta(days=1)) is False
+    with pytest.raises(ValueError, match="UTC"):
+        base_is_inside_day(utc_day=DAY, observed_at_utc=datetime(2026, 10, 23, 1, 0))
+
+
+def test_a_latch_never_crosses_the_day_boundary() -> None:
+    with pytest.raises(ValueError, match="outside"):
+        day_state(utc_day=NEXT_DAY, stop_latched_at_utc=LATCH_AT)
+    with pytest.raises(ValueError, match="outside"):
+        day_state(utc_day=NEXT_DAY, warning_alerted_at_utc=WARNED_AT)
+    fresh = day_state(
+        utc_day=NEXT_DAY, base_observed_at_utc=datetime(2026, 10, 24, 0, 1, tzinfo=UTC)
+    )
+    verdict = evaluate(fresh, known("0"))
+    assert verdict.state is DailyState.NORMAL
+    assert verdict.utc_day == NEXT_DAY
+
+
+def test_rollover_resets_the_state_machine_for_the_new_day() -> None:
+    latched_day = evaluate(day_state(stop_latched_at_utc=LATCH_AT), known("0"))
+    assert latched_day.state is DailyState.DAILY_STOP
+    new_day = day_state(
+        "985",
+        utc_day=NEXT_DAY,
+        base_observed_at_utc=datetime(2026, 10, 24, 0, 0, 3, tzinfo=UTC),
+    )
+    assert evaluate(new_day, known("0")).state is DailyState.NORMAL
