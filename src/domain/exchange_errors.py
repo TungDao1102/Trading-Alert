@@ -91,6 +91,9 @@ DEMO_PROBE_DATE = "2026-10-16"
 # The Demo user-data smoke run (20261016T140446Z) that answered -1125 on a keepalive after a
 # delete (evidence/18-smoke-check.txt item f). Demo evidence, not mainnet.
 DEMO_SMOKE_DATE = "2026-10-16"
+# The Phase 19 Demo probe run 20261022T120055Z (case gtd_min_lifetime_boundary) that answered
+# -5040 on a GTD entry (plan 20-27). Demo evidence, not mainnet.
+DEMO_GTD_PROBE_DATE = "2026-10-22"
 
 
 def _is_strict_int(value: object) -> bool:
@@ -380,6 +383,26 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "The Demo probe of 2026-10-16 observed the same answer for the close-position "
                 "variant while flat.",
                 DEMO_PROBE_DATE,
+            ),
+            # GTD lifetime floor (Demo-observed only, plan 20-27, owner approval 2026-10-23).
+            _entry(
+                -5040,
+                "GTD_TIME_TOO_SOON (project label; no page name)",
+                _REJECT_ON_PLACEMENT,
+                "demo-observed",
+                "Absent from the error-code page in the 2026-10-16 read. Observed on the Binance "
+                "Demo host on 2026-10-22 by the Phase 19 Demo probe run 20261022T120055Z, case "
+                "gtd_min_lifetime_boundary "
+                "(.planning/phases/19-execution-plan-binding-price-check/evidence/"
+                "demo-probe-EVIDENCE-20261022T120055Z.json): a GTD LIMIT entry whose goodTillDate "
+                "was 599 s ahead of the server time was rejected with BAD_REQUEST -5040 'The "
+                "goodTillDate timestamp must be greater than the current time plus 600 seconds "
+                "and smaller than 253402300799000 (UTC 9999-12-31 23:59:59)'; the same entry with "
+                "601 s was accepted (NEW) and cancelled. A definitive rejection of a placement: "
+                "nothing was placed. No retry; the consumer must not resend the entry with a "
+                "different goodTillDate (a placement is never re-sent, D080). Demo only, not "
+                "mainnet.",
+                DEMO_GTD_PROBE_DATE,
             ),
             # Definitive rejections of a placement: margin, balance, notional,
             # filters, would-trigger, reduce-only and conditional-order rules.

@@ -734,3 +734,109 @@ async def test_f5_a_found_stop_loss_is_acked_whatever_the_entry_status() -> None
 
     leg = _row(store, approval_id, OrderRole.STOP_LOSS.value)
     assert leg.intent_status == ExecutionIntentStatus.ACKED
+
+
+# --------------------------------------------------------------------------- #
+# 20-REVIEW WR-A1 (plan 20-27): a retry after a failed finalize write must not collide with the
+# evidence row of the first attempt. `RecordingJournal` applies the real replay rule (the same
+# journal id with a different identity field is a JournalConflict), as PgJournalStore does.
+# --------------------------------------------------------------------------- #
+
+
+class _FailsOnce(InMemoryExecutionIntentStore):
+    """The named store method raises `StoreUnavailable` on its first call, then works."""
+
+    def __init__(self, method_name: str) -> None:
+        super().__init__()
+        self._method_name = method_name
+        self.failed = 0
+
+    def _maybe_fail(self, name: str) -> None:
+        if name == self._method_name and self.failed == 0:
+            self.failed += 1
+            raise StoreUnavailable("store blip")
+
+    def finalize_reconciled_resolution(self, **kwargs: Any) -> None:
+        self._maybe_fail("finalize_reconciled_resolution")
+        super().finalize_reconciled_resolution(**kwargs)
+
+    def record_result(self, **kwargs: Any) -> Any:
+        if kwargs.get("status") == ExecutionIntentStatus.ACKED:
+            self._maybe_fail("record_result")
+        return super().record_result(**kwargs)
+
+
+async def test_a_retry_after_a_failed_finalize_write_closes_without_a_journal_conflict() -> None:
+    store = _FailsOnce("finalize_reconciled_resolution")
+    resolver, _store, _adapter, journal, _safe_mode = _make(store=store)
+    approval_id = _seed_entry(store, status=UNKNOWN)
+    await _prime(resolver, PROBE_COUNT - 1)
+
+    first = await resolver.step(now_utc=AFTER_GRACE)  # evidence row written, finalize fails
+    assert first.kept == ((approval_id, "STORE_FAILED"),)
+    assert [e.event_type for e in journal.events].count(UNKNOWN_EXIT_EVIDENCE) == 1
+    assert _status(store, approval_id) == UNKNOWN
+
+    # The count restarts after a failure: PROBE_COUNT clean probes, then the closing step, each
+    # at its own (later) clock value. The evidence row of the closing step carries a new
+    # observation time; its journal identity must not collide with the first attempt's row.
+    later = AFTER_GRACE + INTERVAL
+    report = None
+    for step_no in range(PROBE_COUNT):
+        report = await resolver.step(now_utc=later + step_no * INTERVAL)
+
+    assert report is not None
+    assert report.kept == ()
+    assert report.closed == (approval_id,)
+    row = _row(store, approval_id, ENTRY)
+    assert row.intent_status == REJECTED
+    assert row.resolution_reason_code == RESOLUTION_RECONCILED_ABSENT
+    evidence = [e for e in journal.events if e.event_type == UNKNOWN_EXIT_EVIDENCE]
+    assert len(evidence) == 2  # one row per observation; append-only, nothing is overwritten
+    assert len({e.journal_event_id for e in evidence}) == 2
+    for row_event in evidence:
+        payload = json.loads(row_event.payload_json)
+        assert payload["evidence_source"] == "REST_RECONCILE"
+        assert payload["from_status"] == "UNKNOWN"
+        assert payload["to_status"] == "REJECTED"
+        assert payload["reference"] == _entry_id(1)
+        assert "observed_at_utc" in payload
+        assert row_event.entity_id == approval_id
+        assert row_event.correlation_id == f"unknown-entry:{approval_id}"
+
+
+async def test_a_retry_after_a_failed_ack_write_acks_without_a_journal_conflict() -> None:
+    adapter = BinanceSemanticsFakeAdapter(now_utc=NOW)
+    exchange_order_id = _exchange_holds_entry(adapter)
+    store = _FailsOnce("record_result")
+    resolver, _store, _adapter, journal, _safe_mode = _make(store=store, adapter=adapter)
+    approval_id = _seed_entry(store, status=UNKNOWN)
+
+    first = await resolver.step(now_utc=NOW)  # evidence row written, the ACKED write fails
+    assert first.kept == ((approval_id, "STORE_FAILED"),)
+    assert _status(store, approval_id) == UNKNOWN
+
+    second = await resolver.step(now_utc=NOW + INTERVAL)
+
+    assert second.acked == (approval_id,)
+    assert second.kept == ()
+    row = _row(store, approval_id, ENTRY)
+    assert row.intent_status == ExecutionIntentStatus.ACKED
+    assert row.exchange_order_id == exchange_order_id
+    assert [e.event_type for e in journal.events].count(UNKNOWN_EXIT_EVIDENCE) == 2
+
+
+async def test_the_same_observation_replayed_is_one_evidence_row() -> None:
+    """A byte-identical evidence event (same observation time) is the same journal id: a replay."""
+    resolver, store, _adapter, journal, _safe_mode = _make()
+    approval_id = _seed_entry(store, status=UNKNOWN)
+    record = store.get_entry(approval_id=approval_id)
+    assert record is not None
+
+    first = resolver._exit_event(record, "REJECTED", AFTER_GRACE)  # noqa: SLF001
+    second = resolver._exit_event(record, "REJECTED", AFTER_GRACE)  # noqa: SLF001
+    journal.record(first)
+    journal.record(second)
+
+    assert first.journal_event_id == second.journal_event_id
+    assert len(journal.events) == 1

@@ -32,7 +32,32 @@ deadline means escalate):
 * B2 ``B2_STOP_UNCONFIRMED`` / B3 ``B3_BOTH_AMBIGUOUS``: stop still unconfirmed
   ``max_unprotected_ms`` after the first fill (entry terminal: B2, entry still open: B3). Before
   the deadline the stop and the entry are queried by id every step, the entry cancel is re-issued
-  every step, and a stop REST proved absent is re-placed under the same id (never blindly).
+  every step, and a stop REST proved absent is re-placed under the same id (never blindly), at
+  most once per step, at the plan price. "REST proved absent" (plan 20-27, Binance Demo
+  2026-10-22) is two reads of the same step: the by-id query answers found=False AND the
+  open-algo-orders listing of the symbol was read and does not contain the id. The B2/B3 table:
+
+  ===================  ===================  ================================  =================
+  by-id query          listing of the       stop reading                      same-id re-place
+                       symbol
+  ===================  ===================  ================================  =================
+  found=True ACTIVE    not read             ACTIVE (REST-confirmed)           no
+  found=True other     not read             NOT_ACTIVE                        no
+  found=False          lists the id, NEW    ACTIVE (REST-confirmed)           no
+  found=False          lists the id, other  NOT_ACTIVE                        no
+  found=False          read, id not listed  ABSENT                            once per step
+  found=False          unreadable           UNREADABLE (journaled)            no
+  unreadable           not read             UNREADABLE (journaled)            no
+  ===================  ===================  ================================  =================
+
+  Demo showed the by-id query answering -2013 right after a placement while the stop was NEW, the
+  same-id re-place answering -4116 (DUPLICATE_CLIENT_ID) and the listing showing the stop. A
+  -4116 is "exists, awaiting REST confirmation" (``EVENT_STOP_EXISTS_AWAITING_REST``): never the
+  definitive rejection of B5, never protection, and the id is not sent again until both reads of
+  a later step have denied it. The user-data stream is not a confirmation source (D079). A stop
+  confirmed only by the listing keeps being checked against the listing while its by-id query
+  still answers found=False, so a lagging index is never read as a lost stop; once a by-id query
+  has shown the stop, D077 below applies without any listing read.
 * B4 ``B4_FILL_AFTER_STOP``: a once-confirmed stop that is no longer ACTIVE while a position
   exists (decided by the position, never by the algo status class, research P6) is never
   re-placed; the rest is cancelled and the new exposure is closed by MARKET.
@@ -235,6 +260,9 @@ EVENT_STOP_PLACEMENT_FAILED = "PROTECTION_STOP_PLACEMENT_FAILED"
 EVENT_ENTRY_CANCEL_FAILED = "PROTECTION_ENTRY_CANCEL_FAILED"
 EVENT_STEP_ERROR = "PROTECTION_STEP_ERROR"
 EVENT_STOP_NOT_SENT = "STOP_NOT_SENT"
+# Plan 20-27: a placement answered DUPLICATE_CLIENT_ID (-4116): the id exists, REST has not yet
+# confirmed or denied it.
+EVENT_STOP_EXISTS_AWAITING_REST = "PROTECTION_STOP_EXISTS_AWAITING_REST"
 EVENT_ENTRY_CANCEL_NOT_SENT = "PROTECTION_ENTRY_CANCEL_NOT_SENT"
 EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
@@ -588,6 +616,8 @@ class ProtectionAdapter(Protocol):
 
     async def snapshot_positions(self, *, symbol: str | None = None) -> Any: ...
 
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> Any: ...
+
     async def symbol_lot_filters(self, *, symbol: str) -> Any: ...
 
     def error_facts(self, exc: BaseException) -> Any: ...
@@ -633,6 +663,8 @@ class _PlaceOutcome(Enum):
     NO_POSITION = "NO_POSITION"
     NOT_SENT = "NOT_SENT"
     AMBIGUOUS = "AMBIGUOUS"
+    # Plan 20-27: -4116 (DUPLICATE_CLIENT_ID): the id exists; REST has not confirmed it yet.
+    DUPLICATE = "DUPLICATE"
     # Plan 20-14: the plan no longer wants a stop (policy requires a close, or it is flat).
     SKIPPED = "SKIPPED"
 
@@ -644,6 +676,22 @@ class _StopReading(Enum):
     ABSENT = "ABSENT"
     NOT_ACTIVE = "NOT_ACTIVE"
     UNREADABLE = "UNREADABLE"
+
+
+@dataclass(frozen=True)
+class _ListedStop:
+    """The stop as the open-algo-orders listing shows it (read like a by-id answer)."""
+
+    found: bool
+    algo_status: str | None
+
+
+class _ListingFailure(Exception):  # noqa: N818 - carries the type name of a failed listing read
+    """The listing could not be read (or is not a list): the stop reading is UNREADABLE."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
 
 
 class _Tracked:
@@ -677,6 +725,13 @@ class _Tracked:
         # (confirmed? lost?) is known. Plan 20-19 sets it False for a restored plan whose
         # history the journal cannot establish; ``operator_protect`` then places nothing.
         self.stop_history_known = True
+        # Plan 20-27 (Demo 2026-10-22): whether a by-client-id query has ever answered found=True
+        # for the stop. A stop confirmed only by the open-algo-orders listing is still checked
+        # against the listing when the by-id query keeps answering found=False (its index lags).
+        self.stop_by_id_seen = False
+        # Plan 20-27: a placement answered -4116, so the id exists; set until REST confirms the
+        # stop or both reads deny it.
+        self.stop_exists_unconfirmed = False
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -929,6 +984,8 @@ class ProtectionCoordinator:
         tracked = _Tracked(plan.entry, restored_state=None if journal_lacks_plan else plan.state)
         tracked.first_fill_at = plan.first_fill_at
         tracked.stop_confirmed_at = plan.stop_confirmed_at
+        # A restored confirmation came from an earlier process: treat it as by-id confirmed.
+        tracked.stop_by_id_seen = plan.stop_confirmed_at is not None
         tracked.stop_lost_at = plan.stop_lost_at
         tracked.entry_terminal_at = plan.entry_terminal_at
         tracked.close_branch = plan.close_branch
@@ -1155,6 +1212,7 @@ class ProtectionCoordinator:
         answer = await self._guarded(
             self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
         )
+        answer = await self._cross_check_stop(tracked, answer)
         reading = self._apply_stop_answer(tracked, answer)
         if reading is _StopReading.ACTIVE:
             return None
@@ -1371,6 +1429,18 @@ class ProtectionCoordinator:
             await self._enter_close_required(tracked, BRANCH_B5_STOP_REJECTED)
         elif outcome is _PlaceOutcome.NO_POSITION:
             await self._on_no_position_on_stop(tracked)
+        elif outcome is _PlaceOutcome.DUPLICATE:
+            # Plan 20-27: "exists, awaiting REST confirmation". Never B5 (the exchange did not
+            # reject the stop, it already holds the id), never protection (only REST ACTIVE is).
+            # The next step's by-id query and listing confirm or deny it; nothing is resent
+            # until they have been read.
+            tracked.stop_exists_unconfirmed = True
+            self._journal_note(
+                tracked,
+                EVENT_STOP_EXISTS_AWAITING_REST,
+                {"category": ExchangeErrorCategory.DUPLICATE_CLIENT_ID.value},
+                self._now(),
+            )
 
     async def _on_no_position_on_stop(self, tracked: _Tracked) -> None:
         """-4509 on the stop: the exchange says there is no position; the position is read.
@@ -1646,6 +1716,9 @@ class ProtectionCoordinator:
                 return _PlaceOutcome.REJECTED
             if category is ExchangeErrorCategory.PRECONDITION_NO_POSITION:
                 return _PlaceOutcome.NO_POSITION
+            if category is ExchangeErrorCategory.DUPLICATE_CLIENT_ID:
+                # -4116 (Demo 2026-10-22): the id exists. Not a rejection, not protection.
+                return _PlaceOutcome.DUPLICATE
             return _PlaceOutcome.AMBIGUOUS
         return _PlaceOutcome.PLACED
 
@@ -1772,7 +1845,9 @@ class ProtectionCoordinator:
         that stopped being ACTIVE is seen: B4) and the entry (until terminal) by deterministic id,
         re-issues the entry cancel while the entry is not terminal, re-places a stop that REST
         proved absent before it was ever confirmed, and then applies the two separate deadlines
-        of D-13.
+        of D-13. A by-id answer of found=False for a stop REST never showed by id is checked
+        against the symbol's open-algo-orders listing in the same step (``_cross_check_stop``,
+        plan 20-27): listed means the stop's own status decides, unreadable means no re-place.
 
         19-REVIEW WR-04 (owner, D077): a stop that was confirmed and then lost (``stop_lost_at``)
         is never read, re-placed or trusted again. Every step decides by the position
@@ -1814,7 +1889,10 @@ class ProtectionCoordinator:
                 )
             )
         was_confirmed = tracked.stop_confirmed_at is not None
-        reading = self._apply_stop_answer(tracked, stop_result) if need_stop else None
+        reading: _StopReading | None = None
+        if need_stop:
+            stop_result = await self._cross_check_stop(tracked, stop_result)
+            reading = self._apply_stop_answer(tracked, stop_result)
         if need_entry:
             self._apply_entry_answer(tracked, entry_result)
         if tracked.entry_terminal_at is None:
@@ -1839,8 +1917,11 @@ class ProtectionCoordinator:
                 await self._enter_close_required(tracked, BRANCH_B1_ENTRY_NOT_TERMINAL)
                 return
         elif reading is _StopReading.ABSENT:
-            # A stop never confirmed and absent by id: the same id may be placed again, never
-            # blindly. A lost stop never reaches this branch.
+            # A stop never confirmed and absent by id AND absent from the open-algo-orders
+            # listing (plan 20-27: both were read in this step): the same id may be placed
+            # again, never blindly. Both reads denying the id also ends an earlier "exists,
+            # awaiting REST" (-4116). A lost stop never reaches this branch.
+            tracked.stop_exists_unconfirmed = False
             outcome = await self._place_stop(tracked, probe_first=False)
             await self._on_place_outcome(tracked, outcome)
             if tracked.state is not ProtectionState.UNPROTECTED:
@@ -1955,6 +2036,7 @@ class ProtectionCoordinator:
         answer = await self._guarded(
             self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
         )
+        answer = await self._cross_check_stop(tracked, answer)
         reading = self._apply_stop_answer(tracked, answer)
         if reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE):
             await self._on_stop_lost(tracked)
@@ -1968,16 +2050,64 @@ class ProtectionCoordinator:
         except Exception as exc:  # noqa: BLE001 - returned so the caller journals it
             return exc
 
+    async def _cross_check_stop(self, tracked: _Tracked, answer: Any) -> Any:
+        """Plan 20-27: read the open-algo-orders listing when a by-id query answered found=False.
+
+        Binance Demo (2026-10-22, evidence demo-probe-EVIDENCE-20261022T120055Z.json) answered
+        -2013 to a query of an algo order by client id right after placement although the stop was
+        NEW, and the open-algo-orders listing showed it. So found=False by id is not proof of
+        absence for a stop that REST never showed by id. In the same step the listing of the
+        symbol is read, and the answer is turned into what a by-id answer would have been:
+
+        * the stop's client algo id is listed: found=True with the listed status, so a status of
+          class ACTIVE is a REST confirmation exactly like a found=True ACTIVE answer;
+        * the listing was read and does not contain the id: the by-id answer stands (found=False,
+          ABSENT);
+        * the listing could not be read (a failed call, or an answer that is not a list): a
+          failure, which the stop reading turns into UNREADABLE and never into a re-place.
+
+        Not applied (the answer is returned as it is) to an exception, to an answer that is not
+        found=False, and, so that D077 stays crisp, to a stop that was confirmed and that a by-id
+        query has itself shown at least once. The user-data stream is not read (D079).
+        """
+        if isinstance(answer, BaseException):
+            return answer
+        found = _attr(answer, "found")
+        if found is True:
+            tracked.stop_by_id_seen = True
+            return answer
+        if found is not False:
+            return answer
+        if tracked.stop_confirmed_at is not None and tracked.stop_by_id_seen:
+            return answer
+        try:
+            listing = await self._adapter.snapshot_open_algo_orders(symbol=tracked.entry.symbol)
+        except Exception as exc:  # noqa: BLE001 - an unreadable listing proves nothing
+            return _ListingFailure(type(exc).__name__)
+        if not isinstance(listing, (list, tuple)):
+            return _ListingFailure("InvalidListing")
+        stop_id = self._stop_client_id(tracked)
+        for row in listing:
+            if _attr(row, "client_algo_id") == stop_id:
+                return _ListedStop(
+                    found=True, algo_status=_optional_text(_attr(row, "algo_status"))
+                )
+        return answer
+
     def _apply_stop_answer(self, tracked: _Tracked, answer: Any) -> _StopReading:
         entry = tracked.entry
         role = OrderRole.STOP_LOSS.value
         if isinstance(answer, BaseException):
             if not isinstance(answer, Exception):
                 raise answer
+            if isinstance(answer, _ListingFailure):
+                call, error_type = "snapshot_open_algo_orders", answer.error_type
+            else:
+                call, error_type = "query_algo_order_by_client", type(answer).__name__
             self._journal_note(
                 tracked,
                 EVENT_REST_FAILED,
-                {"call": "query_algo_order_by_client", "error_type": type(answer).__name__},
+                {"call": call, "error_type": error_type},
                 self._now(),
             )
             return _StopReading.UNREADABLE
@@ -1986,6 +2116,8 @@ class ProtectionCoordinator:
             return _StopReading.ABSENT
         if found is not True:
             return _StopReading.UNREADABLE
+        # REST knows the id (by id or in the listing): an earlier "exists, awaiting REST" is over.
+        tracked.stop_exists_unconfirmed = False
         status = _optional_text(_attr(answer, "algo_status"))
         if is_protection_confirmed(status):
             if tracked.stop_confirmed_at is not None:
@@ -2737,6 +2869,7 @@ __all__ = [
     "EVENT_PROTECTION_TRANSITION_REJECTED",
     "EVENT_REST_FAILED",
     "EVENT_STEP_ERROR",
+    "EVENT_STOP_EXISTS_AWAITING_REST",
     "EVENT_STOP_NOT_SENT",
     "EVENT_STOP_PLACEMENT_FAILED",
     "EVENT_SWEEP_FAILED",

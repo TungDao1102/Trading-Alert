@@ -2318,6 +2318,9 @@ KEEP_FIRST_READ_NONZERO = "FIRST_READ_NONZERO"
 KEEP_SECOND_READ_NONZERO = "SECOND_READ_NONZERO"
 KEEP_READ_FAILED = "READ_FAILED"
 KEEP_ENTRY_NOT_TERMINAL = "ENTRY_NOT_TERMINAL"
+# Plan 20-27 (20-REVIEW WR-A3): the entry is PARTIALLY_FILLED and can still fill; a FILLED entry
+# is terminal and no longer keeps the legs.
+KEEP_ENTRY_PARTIALLY_FILLED = "ENTRY_PARTIALLY_FILLED"
 
 
 async def _read_symbol_exposure(adapter: ExecutionAdapter, symbol: str) -> Decimal | None:
@@ -2343,13 +2346,21 @@ async def _read_symbol_exposure(adapter: ExecutionAdapter, symbol: str) -> Decim
 
 
 async def _protectives_keep_reason(
-    adapter: ExecutionAdapter, symbol: str, entry_verdict: CancelVerdict | None
+    adapter: ExecutionAdapter,
+    symbol: str,
+    entry_verdict: CancelVerdict | None,
+    entry_client_order_id: str,
 ) -> str | None:
     """None only when the protective legs may be cancelled; otherwise the reason code (D-09).
 
     Two independent fresh position reads, in sequence, must both be zero, and the entry must be
-    verified terminal (its post-cancel verdict is CANCELED or GONE_NOT_CANCELED). The second read
-    is not made once the first one already refuses.
+    terminal: its post-cancel verdict is CANCELED or GONE_NOT_CANCELED, or it FILLED. The second
+    read is not made once the first one already refuses.
+
+    A FILLED entry is terminal (WR-07 ordering rule; 20-REVIEW WR-A3). Its verdict is
+    FILLED_OR_PARTIAL, which also covers PARTIALLY_FILLED, an entry that can still fill, so the
+    status is read once more after the two flat reads: only an exact FILLED (or an entry that is
+    gone by now) lets the legs go. A failed or unreadable query keeps them (ENTRY_NOT_TERMINAL).
     """
     first = await _read_symbol_exposure(adapter, symbol)
     if first is None:
@@ -2361,9 +2372,20 @@ async def _protectives_keep_reason(
         return KEEP_READ_FAILED
     if second != 0:
         return KEEP_SECOND_READ_NONZERO
-    if entry_verdict not in PROVEN_GONE:
-        return KEEP_ENTRY_NOT_TERMINAL
-    return None
+    if entry_verdict in PROVEN_GONE:
+        return None
+    if entry_verdict is CancelVerdict.FILLED_OR_PARTIAL:
+        detail = CancelDetail()
+        again = await confirm_entry_cancel(
+            adapter, symbol=symbol, client_order_id=entry_client_order_id, detail=detail
+        )
+        if again in PROVEN_GONE or (
+            again is CancelVerdict.FILLED_OR_PARTIAL and detail.observed_status == "FILLED"
+        ):
+            return None
+        if again is CancelVerdict.FILLED_OR_PARTIAL:
+            return KEEP_ENTRY_PARTIALLY_FILLED
+    return KEEP_ENTRY_NOT_TERMINAL
 
 
 def _build_manual_close_event(
@@ -2422,13 +2444,15 @@ async def emergency_manual_close(
       3. `expire_pending_entry` (trigger_reason="operator_close") —
          cancel the pending LIMIT entry, if any, and keep its post-cancel verdict (D-17).
       4. Two independent fresh `snapshot_positions(symbol=...)` reads, in sequence.
-      5. ONLY when both reads succeeded with a zero amount AND the entry verdict is
-         CANCELED or GONE_NOT_CANCELED: `cancel_untriggered_protectives` (each leg verified),
-         then each leg is queried again. A leg that is not CANCELED or GONE_NOT_CANCELED
-         journals `MANUAL_CLOSE_ORPHAN_UNVERIFIED`; SAFE_MODE stays in force.
+      5. ONLY when both reads succeeded with a zero amount AND the entry is terminal (the
+         verdict is CANCELED or GONE_NOT_CANCELED, or the entry FILLED, which a further status
+         read confirms; a PARTIALLY_FILLED entry is not terminal):
+         `cancel_untriggered_protectives` (each leg verified), then each leg is queried again.
+         A leg that is not CANCELED or GONE_NOT_CANCELED journals
+         `MANUAL_CLOSE_ORPHAN_UNVERIFIED`; SAFE_MODE stays in force.
       6. Otherwise no protective leg is cancelled and `PROTECTIVES_KEPT` is journaled with
-         a reason code (FIRST_READ_NONZERO, SECOND_READ_NONZERO, READ_FAILED or
-         ENTRY_NOT_TERMINAL).
+         a reason code (FIRST_READ_NONZERO, SECOND_READ_NONZERO, READ_FAILED,
+         ENTRY_PARTIALLY_FILLED or ENTRY_NOT_TERMINAL).
 
     Every step is isolated: a failure in any step never prevents the
     later steps from running. All failures are raised together as one
@@ -2440,7 +2464,9 @@ async def emergency_manual_close(
     outside this function's adapter surface (`ExecutionAdapter` has no close-position method):
     the operator closes it with `operator_close_position` (plan 20-17) or on the exchange,
     and the legs are removed afterwards by the reconciler's orphan sweeper or by a second call
-    of this control once the position is flat. This control never cancels a protecting stop.
+    of this control once the position is flat (two fresh zero reads and a FILLED or otherwise
+    terminal entry; plan 20-27 made that second call work for a filled plan). This control never
+    cancels a protecting stop.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -2521,7 +2547,12 @@ async def emergency_manual_close(
         errors.append(exc)
 
     # Steps 4-6: the protective legs go only with proof that nothing is left to protect.
-    keep_reason = await _protectives_keep_reason(adapter, symbol, entry_verdict)
+    keep_reason = await _protectives_keep_reason(
+        adapter,
+        symbol,
+        entry_verdict,
+        derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value),
+    )
     if keep_reason is not None:
         record_event(
             "PROTECTIVES_KEPT",
