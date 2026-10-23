@@ -359,8 +359,14 @@ async def test_a_nonzero_first_read_asks_once() -> None:
     assert _methods(fake).count("snapshot_positions") == 1
 
 
-async def test_a_filled_entry_with_a_flat_position_keeps_the_legs() -> None:
-    """The entry verdict is FILLED_OR_PARTIAL: the cancel alone does not prove it terminal."""
+async def test_a_filled_entry_with_two_flat_reads_cancels_the_legs() -> None:
+    """20-REVIEW WR-A3 (plan 20-27): a FILLED entry is terminal.
+
+    The position was closed on the exchange by hand (two fresh zero reads), the entry FILLED, so
+    the stop and the take profits protect nothing and are removed by the second call of this
+    control, as its docstring says. Before plan 20-27 the verdict FILLED_OR_PARTIAL gave
+    ENTRY_NOT_TERMINAL and the legs of an executed plan were never removed.
+    """
     fake = ScriptedFake()
     await _open_position(fake)
     fake.positions[SYMBOL] = Decimal("0")  # closed on the exchange by hand
@@ -368,11 +374,93 @@ async def test_a_filled_entry_with_a_flat_position_keeps_the_legs() -> None:
 
     await _close(fake, journal)
 
+    assert fake.open_algos == {}
+    assert _events(journal, "PROTECTIVES_KEPT") == []
+    assert _events(journal, "MANUAL_CLOSE_ORPHAN_UNVERIFIED") == []
+    assert _methods(fake).count("snapshot_positions") == 2
+    assert _methods(fake).count("cancel_algo_order") == 3
+    for client_algo_id in LEG_IDS:
+        assert _phases(journal, client_algo_id) == ["pre_cancel", "post_cancel"]
+    # The filled entry itself is never "canceled": its first verdict is still journaled as such.
+    assert _phases(journal, ENTRY_ID) == ["pre_cancel", "cancel_unverified"]
+
+
+async def test_a_filled_entry_keeps_the_legs_while_either_read_shows_a_position() -> None:
+    for script, reason in (
+        ([Decimal("0.004")], "FIRST_READ_NONZERO"),
+        ([Decimal("0"), Decimal("0.004")], "SECOND_READ_NONZERO"),
+        ([Decimal("0"), RuntimeError("down")], "READ_FAILED"),
+    ):
+        fake = ScriptedFake()
+        await _open_position(fake)
+        fake.position_script = list(script)
+        journal = RecordingJournal()
+
+        await _close(fake, journal)
+
+        assert set(fake.open_algos) == set(LEG_IDS), reason
+        (kept,) = _events(journal, "PROTECTIVES_KEPT")
+        assert kept["reason_code"] == reason
+        assert kept["entry_verdict"] == "FILLED_OR_PARTIAL"
+
+
+class _StickyPartialEntryFake(ScriptedFake):
+    """The entry is PARTIALLY_FILLED and its cancel answers like -2011 (accepted, no effect)."""
+
+    async def cancel_normal_order(self, **kwargs: Any) -> Any:
+        self._bind_real("cancel_normal_order", kwargs)
+        self._record_call("cancel_normal_order", kwargs)
+        return None
+
+
+async def test_a_partly_filled_entry_that_can_still_fill_keeps_the_legs_with_its_own_reason() -> (
+    None
+):
+    fake = _StickyPartialEntryFake()
+    await fake.place_entry(
+        symbol=SYMBOL,
+        side="BUY",
+        position_side="BOTH",
+        time_in_force="GTC",
+        quantity=QUANTITY,
+        price=PRICE,
+        new_client_order_id=ENTRY_ID,
+    )
+    fake.fill(ENTRY_ID, quantity=Decimal("0.001"))
+    await _place_legs(fake)
+    fake.position_script = [Decimal("0"), Decimal("0")]  # flat on both reads
+    journal = RecordingJournal()
+
+    await _close(fake, journal)
+
     assert set(fake.open_algos) == set(LEG_IDS)
     assert "cancel_algo_order" not in _methods(fake)
     (kept,) = _events(journal, "PROTECTIVES_KEPT")
-    assert kept["reason_code"] == "ENTRY_NOT_TERMINAL"
+    assert kept["reason_code"] == "ENTRY_PARTIALLY_FILLED"
     assert kept["entry_verdict"] == "FILLED_OR_PARTIAL"
+
+
+async def test_a_filled_entry_whose_status_cannot_be_read_again_keeps_the_legs() -> None:
+    fake = ScriptedFake()
+    await _open_position(fake)
+    fake.position_script = [Decimal("0"), Decimal("0")]
+    original = fake.query_order_by_client
+    calls = {"n": 0}
+
+    async def second_query_fails(**kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("down")
+        return await original(**kwargs)
+
+    fake.query_order_by_client = second_query_fails  # type: ignore[method-assign]
+    journal = RecordingJournal()
+
+    await _close(fake, journal)
+
+    assert set(fake.open_algos) == set(LEG_IDS)
+    (kept,) = _events(journal, "PROTECTIVES_KEPT")
+    assert kept["reason_code"] == "ENTRY_NOT_TERMINAL"
 
 
 async def test_a_failing_entry_cancel_keeps_the_legs_and_still_raises_the_group() -> None:

@@ -462,7 +462,7 @@ def _manual_leg_ids() -> dict[str, str]:
 
 
 async def _prepare_manual_exchange(
-    *, position_open: bool, legs_auto_cancelled: bool
+    *, position_open: bool, legs_auto_cancelled: bool, control_read_fails: bool = False
 ) -> BinanceSemanticsFakeAdapter:
     """The Binance-semantics fake holding a filled entry and the three protective legs.
 
@@ -470,6 +470,9 @@ async def _prepare_manual_exchange(
     (outside the system). `legs_auto_cancelled=True` is the first answer to G4-035 (the
     exchange removes the closePosition legs with the position), False the second (they stay).
     Both answers are modelled by the fake only; what Binance does is [NOT_TESTED] (Phase 25).
+    `control_read_fails=True` (plan 20-27) makes the first position read of the control fail, so
+    the control cannot prove the position flat and keeps the legs (a FILLED entry is terminal
+    since plan 20-27 and, with two flat reads, the control removes the legs itself).
     """
     fake = BinanceSemanticsFakeAdapter()
     entry_id = derive_client_order_id(plan_hash=MANUAL_PLAN_HASH, role="ENTRY")
@@ -504,6 +507,8 @@ async def _prepare_manual_exchange(
         for client_algo_id in _manual_leg_ids().values():
             fake.cancel_algo(client_algo_id)
     fake.calls.clear()
+    if control_read_fails:
+        fake.fail_next("snapshot_positions", RuntimeError("scripted read failure"))
     return fake
 
 
@@ -549,7 +554,11 @@ class ManualCloseWiring:
 
 
 def _build_manual_close_wiring(
-    *, now_utc: datetime, position_open: bool = False, legs_auto_cancelled: bool = False
+    *,
+    now_utc: datetime,
+    position_open: bool = False,
+    legs_auto_cancelled: bool = False,
+    control_read_fails: bool = False,
 ) -> ManualCloseWiring:
     """Build the MANUAL_CLOSE drill over the fake exchange (D-27, D-28, G2-016)."""
     import asyncio
@@ -561,7 +570,9 @@ def _build_manual_close_wiring(
 
     exchange = asyncio.run(
         _prepare_manual_exchange(
-            position_open=position_open, legs_auto_cancelled=legs_auto_cancelled
+            position_open=position_open,
+            legs_auto_cancelled=legs_auto_cancelled,
+            control_read_fails=control_read_fails,
         )
     )
     placements = record_placements(exchange)
@@ -977,7 +988,8 @@ def test_eight_drills_rehearse_with_injected_faults() -> None:
         "api_down": OUTCOME_SAFE_MODE_ENTERED,
         "stale_feed": OUTCOME_SAFE_MODE_BLOCKED,
         "db_failure": OUTCOME_SAFE_MODE_ENTERED,
-        "manual_close": OUTCOME_ORPHAN_SWEPTED,
+        # Plan 20-27 (WR-A3): the control removes the legs of a filled, flat plan itself.
+        "manual_close": OUTCOME_SAFE_MODE_ENTERED,
         "restore": OUTCOME_RESTORE_CLEAN_EXIT,
     }
     for outcome in outcomes:
@@ -1340,15 +1352,42 @@ def _phases_of(journal: RecordingJournal, identifier: str) -> list[str]:
     ]
 
 
-def test_manual_close_drill_orphan_variant_sweeps_the_legs_that_stayed() -> None:
+def test_manual_close_drill_removes_the_legs_that_stayed_after_a_filled_entry() -> None:
+    """D-28, G4-035 answer (b) since plan 20-27 (WR-A3): the position was closed outside, the
+    legs stay, the entry FILLED (terminal) and both position reads are zero: the control itself
+    cancels and verifies each leg, so nothing is left for the sweeper."""
+    from src.ops.drills import OUTCOME_SAFE_MODE_ENTERED, DrillLog, run_drill
+
+    wiring = _build_manual_close_wiring(now_utc=DRILL_NOW, position_open=False)
+
+    outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_SAFE_MODE_ENTERED
+    exchange = wiring.exchange
+    assert exchange.open_algos == {}
+    assert len(exchange.calls_to("cancel_algo_order")) == 3  # by the control, none by the sweeper
+    legs = _manual_leg_ids()
+    for client_algo_id in legs.values():
+        assert _phases_of(wiring.journal, client_algo_id) == ["pre_cancel", "post_cancel"]
+    assert [e for e in wiring.journal.events if e.event_type == "PROTECTIVES_KEPT"] == []
+    assert wiring.enablement.disabled is True
+    assert wiring.controller.in_safe_mode is True
+    assert wiring.controller.entered_reason == "MANUAL_CLOSE"
+    assert wiring.placements == []
+
+
+def test_manual_close_drill_orphan_variant_sweeps_the_legs_the_control_kept() -> None:
     """D-28, G4-035 answer (b): the position was closed outside, the legs stay as orphans.
 
-    The control keeps the legs (the entry filled, so it is not terminal), enters SAFE_MODE
-    MANUAL_CLOSE; the sweeper then cancels each leg after two zero reads and verifies it.
+    The control keeps the legs (its first position read fails, so the position is not proven
+    flat), enters SAFE_MODE MANUAL_CLOSE; the sweeper then cancels each leg after two zero reads
+    of its own and verifies it.
     """
     from src.ops.drills import OUTCOME_ORPHAN_SWEPTED, DrillLog, run_drill
 
-    wiring = _build_manual_close_wiring(now_utc=DRILL_NOW, position_open=False)
+    wiring = _build_manual_close_wiring(
+        now_utc=DRILL_NOW, position_open=False, control_read_fails=True
+    )
 
     outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
 
@@ -1364,7 +1403,7 @@ def test_manual_close_drill_orphan_variant_sweeps_the_legs_that_stayed() -> None
         for e in wiring.journal.events
         if e.event_type == "PROTECTIVES_KEPT"
     ]
-    assert [k["reason_code"] for k in kept] == ["ENTRY_NOT_TERMINAL"]
+    assert [k["reason_code"] for k in kept] == ["READ_FAILED"]
     assert wiring.enablement.disabled is True
     assert wiring.controller.in_safe_mode is True
     assert wiring.controller.entered_reason == "MANUAL_CLOSE"
@@ -1382,7 +1421,11 @@ def test_manual_close_drill_auto_cancel_variant_has_nothing_to_sweep() -> None:
     outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
 
     assert outcome.outcome == OUTCOME_SAFE_MODE_ENTERED
-    assert wiring.exchange.calls_to("cancel_algo_order") == []  # nothing left to cancel
+    # Plan 20-27: the control (entry FILLED, two flat reads) asks for each leg to be cancelled; the
+    # exchange has already removed them, so each answers like an absent order and the sweeper
+    # finds nothing left: three cancel calls in all, all of them the control's.
+    assert len(wiring.exchange.calls_to("cancel_algo_order")) == 3
+    assert wiring.exchange.open_algos == {}
     assert wiring.controller.in_safe_mode is True
     assert wiring.controller.entered_reason == "MANUAL_CLOSE"
     assert [

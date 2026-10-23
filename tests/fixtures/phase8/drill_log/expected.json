@@ -17,7 +17,7 @@
     "safe_mode_entered",
     "safe_mode_blocked_entries",
     "safe_mode_entered",
-    "orphan_swept",
+    "safe_mode_entered",
     "restore_clean_exit"
   ],
   "faults": [
