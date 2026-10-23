@@ -46,6 +46,10 @@ SCANNED_FILES = (
     "src/risk/portfolio.py",
     # Phase 14 plan 14-01 — the single R-denominator function (D-20).
     "src/risk/realized_risk.py",
+    # Phase 21 (D-04): pure live account modules.
+    "src/risk/live_equity.py",
+    "src/risk/daily_loss.py",
+    "src/risk/reservations.py",
     # Phase 6 plan 06-03 — pure backtest package (D-05).
     "src/backtest/__init__.py",
     "src/backtest/simulator.py",
