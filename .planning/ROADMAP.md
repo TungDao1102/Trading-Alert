@@ -1114,30 +1114,34 @@ Input: .planning/phases/21-account-equity-daily-loss/21-NOTES.md
 - [G4-039] Phases 21 and 22 replace the UNKNOWN margin type, leverage and equity in the plan constraint snapshot so that it can become COMPLETE (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 - [G2-042] Daily loss (D033) counts commissions, but whether Binance `realizedPnl` excludes commission is unverified: `LIVE_NET_PNL_SEMANTICS_VERIFIED` is False, so live R stays INCOMPLETE; the verification itself is owned by Phase 24 and this phase depends on its outcome (source: src/analytics/live_outcomes.py:77, .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208; decision: none required)
 
-**Plans:** 14 plans
+**Plans:** 16 plans
 
 Plans:
 
 **Wave 1**
-- [ ] 21-01-PLAN.md - Owner decision O-2 (daily-loss counting while income rows are unobserved) and the OWNER-OPEN record (D-09; checkpoint)
 - [ ] 21-02-PLAN.md - Limit key account.max_equity_age_ms, NOT_CONFIGURED and required (D-03, O-1)
 - [ ] 21-03-PLAN.md - Adapter account reads v3/account, v3/balance, accountConfig and the generated Demo fixtures (D-01, D-02, D-21)
 - [ ] 21-04-PLAN.md - Pure live equity resolver (totalMarginBalance, fail closed) and the D-18 snapshot test (F-012, G4-039)
 - [ ] 21-05-PLAN.md - Pure D033 daily-loss fold, day-start thresholds, sticky latch and day-open rule (D-06 to D-11, D-14)
-- [ ] 21-06-PLAN.md - Pure portfolio-cap inputs: reservation verdict and open positions counting resting and approved plans (D-15, D-16)
+- [ ] 21-06-PLAN.md - Pure portfolio-cap inputs: reservation verdict, open positions counting resting and approved plans, release reasons for every terminal plan state (D-15, D-16)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 21-07-PLAN.md - Live equity source: REST truth, stream invalidation, owner age bound (D-01, D-03)
+- [ ] 21-07-PLAN.md - Live equity source: REST truth, stream invalidation, owner age bound, now-after-refresh contract (D-01, D-03)
 - [ ] 21-08-PLAN.md - Adapter userTrades and income reads (paged) and the recorded frames (D-09)
 - [ ] 21-09-PLAN.md - Persisted day state and loss components, migration 0010 (D-07, D-14)
 - [ ] 21-10-PLAN.md - DAILY_STOP cancels resting entries (trigger daily_stop), keeps stops, alert producers (D-12, D-13, F-013, F-963)
-- [ ] 21-11-PLAN.md - Live risk-input builder, release-reason mapping and backtest parity (D-15, D-16)
+- [ ] 21-11-PLAN.md - Live risk-input builder, release-reason mappings (plan status, expiry, final refusal) and backtest parity (D-15, D-16)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 21-12-PLAN.md - Atomic risk reservation at approval, migration 0011 (D-16, D-17, F-407, F-955)
-- [ ] 21-13-PLAN.md - Live daily-loss service: day open and rollover, REST backfill, latch persistence (D-07, D-08, D-09)
+- [ ] 21-12-PLAN.md - Risk reservation store, migration 0011, reserve under the day-row lock, release transition table (D-16, D-17, F-407, F-955)
+- [ ] 21-13-PLAN.md - Live daily-loss service core: day open (judged after the read) and rollover, REST backfill, latch persistence (D-07, D-08, D-09)
 
 **Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 21-01-PLAN.md - Owner decision O-2 (daily-loss counting while income rows are unobserved) and the OWNER-OPEN record of the built defaults (D-09; checkpoint; only 21-14 waits for it)
+- [ ] 21-15-PLAN.md - Atomic reservation in the approval transaction, two-connection race, SKIP/EXPIRE release (D-16, D-17, F-407)
+- [ ] 21-16-PLAN.md - Daily-loss stream path: fills, invalidation on ACCOUNT_UPDATE and gaps, recorded Demo SL-close proof (D-09)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 21-14-PLAN.md - Phase 21 gate, deferred register and canonical docs
 
 ### Phase 22: Leverage, Margin + Liquidation Guard

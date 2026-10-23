@@ -431,17 +431,25 @@ with self._db.transaction() as session:
 | A7 | Module/table/column/limit-key names (`live_equity.py`, `daily_risk_days`, `account.max_equity_age_ms`, ...) | structure | Cosmetic; CONTEXT leaves naming to the planner |
 | A8 | Sign of funding in the fold (`bc`) | Code Examples | Wrong sign hides or inflates funding loss |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+Each question below carries an inline RESOLVED note naming the plan that settles it (plan-phase 2026-10-23, revision pass 1). "Resolved" means a planned home exists; owner items stay owner items and nothing is decided for the owner.
 
 1. **Equity basis vs the backtest (RISK-01 parity) - needs an owner answer.**
    - Known: the backtest `Ledger` is "realized-only (D-18): there is no mark-to-market" (`src/backtest/ledger.py:4-5`), so its sizing equity equals wallet balance. D-02 picks margin balance (wallet + unrealized). With a flat account they are identical (Demo: both `4999.09343961`). With an open position they differ, and thresholds/sizing would then no longer be byte-equivalent across backtest and live.
    - Unclear: whether D-02 intends to accept the difference. Candidates: `totalMarginBalance` (D-02), `totalWalletBalance` (backtest parity), the smaller of the two (most conservative; no number invented).
    - Recommendation: implement D-02 (`totalMarginBalance`) behind ONE named function so the basis is a one-line change, parametrize the unit tests over the basis, and record the choice as a new OWNER-OPEN item (O-5) for the planner to put in the plan's decision log.
+   - RESOLVED: owner item O-5. Plan 21-04 builds the D-02 default behind the single function `equity_basis`; plan 21-11 pins the parity and makes the unrealized-PnL difference visible; plan 21-01 records O-5 as OPEN in `21-OWNER-DECISIONS.md`; plan 21-14 carries it in `21-DEFERRED.md`.
 2. **Where in the Telegram flow the reservation happens, and what the operator sees on refusal.** Recommended: at the PENDING -> APPROVED transition in the same transaction; on a cap failure the approval stays PENDING and the dispatch returns `ok=False` with the cap's reason code (`AGGREGATE_CAP_REJECT`, `CLUSTER_CAP_REJECT`, `MAX_POSITIONS_REJECT`, `DAILY_STOP_BLOCK`). Telegram wording belongs to Phase 23.
+   - RESOLVED: as recommended. Plan 21-12 builds the durable reservation (`reserve_in` under the day-row lock) and plan 21-15 composes it into the PENDING -> APPROVED transaction: a refusal rolls the decision back (approval stays PENDING) and dispatch returns ok=False with the cap reason code through `ReservationRefused(ApprovalRejected)`. Telegram wording stays Phase 23.
 3. **Cross-check tolerance between stream/trade-list loss and the wallet-balance delta.** No tolerance exists and none may be invented. Recommended: use the LARGER of the two losses and emit a WARNING-class journal record on any non-zero difference; make a gating tolerance a NOT_CONFIGURED limit if the owner wants one.
+   - RESOLVED: no tolerance number is invented. Plan 21-05 implements the most-adverse rule in `fold_daily_loss` (the larger loss per key counts, divergent keys are reported); plan 21-16 proves the wallet-delta identity at test level on the recorded Demo sample; plan 21-14 records the runtime gating tolerance as a possible owner NOT_CONFIGURED key in `21-DEFERRED.md`.
 4. **Cluster membership (F-908, F-014).** `CLUSTER_SYMBOLS` is hard-coded and excludes BNB; moving it to the registry changes parameter sets (new set + new `strategy_version`). Not required by the three success criteria; recommend leaving it and recording it as carried (audit refs F-908/F-014 are about counting resting/approved exposure, which D-15 covers).
+   - RESOLVED: membership left unchanged. Plans 21-06 and 21-11 cover the counting part (D-15); plan 21-14 records the membership part (registry move needs a new parameter set, `strategy_version` and DECISIONS row; owner) in the deferred register `21-DEFERRED.md`.
 5. **Day base when no persisted row exists but trades already happened today** (Pitfall 6 iii). Recommended default: UNCERTAIN_ACCOUNT_STATE until REST reconstruction succeeds; ask the owner whether an operator acknowledgement path is wanted (part of O-1 retention).
+   - RESOLVED: the default is built as recommended. Plan 21-05 `day_open_action` returns BLOCKED_MISSING_STATE when no persisted day exists and exposure is present or unknown (NO_TRADE UNCERTAIN_ACCOUNT_STATE, never a fresh day); plan 21-13 applies it and documents that the operator acknowledgement path is not built; plan 21-10 alerts DB_FAILURE with DAY_STATE_MISSING; plan 21-14 records the acknowledgement path as an owner item (Phase 23/24).
 6. **Reservation release job and DAILY_STOP trigger wiring** are Phase 24; Phase 21 delivers the functions and the PG-tested store only.
+   - RESOLVED: Phase 24. Phase 21 delivers the release mappings for every terminal plan state (plan 21-11), the release transition table (plan 21-12), the `daily_stop` trigger and `enforce_daily_state` (plan 21-10); the wiring is registered for Phase 24 in `21-DEFERRED.md` (plan 21-14).
 
 ## Environment Availability
 
