@@ -1962,6 +1962,8 @@ _EXPIRY_TRIGGERS: frozenset[str] = frozenset(
         # Plan 19-15 (D-10, T-19-39): the entry was acknowledged but could not be handed to
         # the protection coordinator — nobody would watch it, so it is canceled fail-closed.
         "protection_handoff_failed",
+        # Phase 21 (D-12, D033): DAILY_STOP cancels resting entries; stops are kept.
+        "daily_stop",
     }
 )
 
@@ -2131,7 +2133,9 @@ async def expire_pending_entry(
 
     Per EXECUTION_SPEC §4: an unfilled entry must be canceled on any of
     five triggers — expiry time, invalidation, superseded plan, mode
-    change, or operator close. Risk-reducing, so it ACTS FIRST (Phase 20
+    change, or operator close; since Phase 21 also `daily_stop` (D033: a latched DAILY_STOP
+    cancels the resting entries and keeps the protective stops). Risk-reducing, so it ACTS
+    FIRST (Phase 20
     plan 20-08, D-16, F-702): the cancel is issued without waiting for the
     journal, then the pre-image and the post-image are recorded (through the
     local `spill` when the journal is down). A failing cancel records a
