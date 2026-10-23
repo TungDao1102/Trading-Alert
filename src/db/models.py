@@ -1114,6 +1114,78 @@ class DailyLossComponentRow(Base):
     )
 
 
+class RiskReservationRow(Base):
+    """The risk reservation of one trade plan, for its whole life (Phase 21 plan 21-12, D-16).
+
+    One row per plan: REQUESTED (issued, not counted), RESERVED (approved, counted), PLACED,
+    OPEN (both counted) and RELEASED (terminal, not counted). The approval transaction locks
+    today's `daily_risk_days` row and flips REQUESTED to RESERVED through the shared cap gate.
+    `realized_risk` is the sized risk after rounding (Pitfall 9). There is no delete path.
+    """
+
+    __tablename__ = "risk_reservations"
+
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    approval_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    realized_risk: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    release_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    requested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reserved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    placed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("trade_plan_id", name="pk_risk_reservations"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_risk_reservations_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["approval_id"],
+            ["approvals.approval_id"],
+            name="fk_risk_reservations_approval_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "status IN ('REQUESTED', 'RESERVED', 'PLACED', 'OPEN', 'RELEASED')",
+            name="ck_risk_reservations_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "position_side IN ('LONG', 'SHORT')", name="ck_risk_reservations_side"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("quantity > 0", name="ck_risk_reservations_quantity_positive").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("realized_risk > 0", name="ck_risk_reservations_risk_positive").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint(
+            "release_reason IS NULL OR release_reason IN ('APPROVAL_EXPIRED', "
+            "'APPROVAL_SKIPPED', 'PLAN_EXPIRED', 'PLAN_INVALIDATED', 'PLAN_SUPERSEDED', "
+            "'PLACEMENT_REFUSED', 'ENTRY_REJECTED', 'ENTRY_ENDED_NO_FILL', 'POSITION_CLOSED')",
+            name="ck_risk_reservations_release_reason",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(status = 'RELEASED') = (release_reason IS NOT NULL AND released_at_utc IS NOT NULL)",
+            name="ck_risk_reservations_released_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "status NOT IN ('RESERVED', 'PLACED', 'OPEN') OR approval_id IS NOT NULL",
+            name="ck_risk_reservations_approval_coherent",
+        ).ddl_if(dialect="postgresql"),
+        Index("ix_risk_reservations_status", "status"),
+    )
+
+
 # ---------- engine factory ---------------------------------------------------
 
 

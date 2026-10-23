@@ -24,6 +24,9 @@ names every module of the package):
                            plan 20-18)
   - `day_risk`            `PgDayRiskStore`: the UTC day's risk state (base, DAILY_STOP latch,
                            warning mark) and its daily-loss components (Phase 21, plan 21-09)
+  - `risk_reservations`   `PgRiskReservationStore`: one durable risk reservation per trade plan
+                           (REQUESTED -> RESERVED -> PLACED -> OPEN -> RELEASED); `reserve_in` runs
+                           the shared cap gate under the day-row lock (Phase 21, plan 21-12)
   - `paper_runtime_state`  `PgRuntimeState`: journal-only paper runtime state (Phase 16)
   - `shadow_stores`        `PgShadowStores`: the SHADOW chain's composed stores (Phase 16)
 

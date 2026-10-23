@@ -20,7 +20,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * Migration 0008 (Phase 20, plan 20-14, D-19, Q4) adds the `pending_protective_actions` table.
   * Migration 0009 (Phase 20, plan 20-18, Q3, D-21) adds the `validated_lot_filters` table.
   * Migration 0010 (Phase 21, plan 21-09, D-07, D-14) adds the `daily_risk_days` and
-    `daily_loss_components` tables; the head test pins 0010.
+    `daily_loss_components` tables.
+  * Migration 0011 (Phase 21, plan 21-12, D-16) adds the `risk_reservations` table; the head test
+    pins 0011.
 """
 
 from __future__ import annotations
@@ -72,6 +74,7 @@ from tests.pg_support import alembic_head_revision, run_alembic
 from tests.support.ast_guards import forbidden_imports
 from tests.support.pg_rows import (
     T0,
+    expect_db_error,
     hexid,
     insert_and_commit,
     make_approval,
@@ -103,6 +106,8 @@ REVISION_0009 = "0009_validated_lot_filters"
 MIGRATION_0009 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0009_validated_lot_filters.py"
 REVISION_0010 = "0010_daily_risk_state"
 MIGRATION_0010 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0010_daily_risk_state.py"
+REVISION_0011 = "0011_risk_reservations"
+MIGRATION_0011 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0011_risk_reservations.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -470,7 +475,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0010
+    assert alembic_head_revision() == REVISION_0011
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -966,13 +971,14 @@ def test_downgrade_0008_drops_only_the_pending_table_and_upgrade_restores_it(
     run_alembic(pg_empty_db, "downgrade", REVISION_0007)
     engine = make_sync_engine(pg_empty_db)
     try:
-        # Downgrading from head to 0007 also passes through 0009 (the filters table) and 0010
-        # (the day-state tables).
+        # Downgrading from head to 0007 also passes through 0009 (the filters table), 0010
+        # (the day-state tables) and 0011 (the reservations table).
         assert _public_tables(engine) == full_schema - {
             "pending_protective_actions",
             "validated_lot_filters",
             "daily_risk_days",
             "daily_loss_components",
+            "risk_reservations",
         }
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
@@ -1026,11 +1032,13 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
     run_alembic(pg_empty_db, "downgrade", REVISION_0008)
     engine = make_sync_engine(pg_empty_db)
     try:
-        # Downgrading from head to 0008 also passes through 0010, which owns the day-state tables.
+        # Downgrading from head to 0008 also passes through 0010 (the day-state tables) and
+        # 0011 (the reservations table).
         assert _public_tables(engine) == full_schema - {
             "validated_lot_filters",
             "daily_risk_days",
             "daily_loss_components",
+            "risk_reservations",
         }
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
@@ -1044,7 +1052,7 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0010
+        assert version == REVISION_0011
     finally:
         engine.dispose()
 
@@ -1095,6 +1103,7 @@ def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_the
         assert _public_tables(engine) == full_schema - {
             "daily_risk_days",
             "daily_loss_components",
+            "risk_reservations",
         }
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
@@ -1108,6 +1117,106 @@ def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_the
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0011
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0011: risk_reservations (Phase 21, plan 21-12, D-16)
+# --------------------------------------------------------------------------------------
+def test_migration_0011_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0011, ("src", "tests")) == []
+
+
+def test_migration_0011_revises_0010() -> None:
+    text_of_migration = MIGRATION_0011.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0010}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0011}"' in text_of_migration
+
+
+def test_downgrade_0011_drops_only_the_reservations_table_and_upgrade_restores_it(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        assert "risk_reservations" in full_schema
+        insert_and_commit(engine, make_signal(1), make_plan(1, 1))
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO risk_reservations (trade_plan_id, plan_hash, symbol, "
+                    "position_side, quantity, realized_risk, status, requested_at_utc, "
+                    "updated_at_utc) VALUES (:plan, :h, 'BTCUSDT', 'LONG', 0.001, 4, "
+                    "'REQUESTED', :t0, :t0)"
+                ),
+                {"plan": hexid(0x1001), "h": "d" * 64, "t0": T0},
+            )
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0010)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema - {"risk_reservations"}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         assert version == REVISION_0010
     finally:
         engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0011
+    finally:
+        engine.dispose()
+
+
+def test_risk_reservations_check_constraints_refuse_bad_rows(engine: Engine) -> None:
+    insert_and_commit(engine, make_signal(1), make_plan(1, 1))
+    base = {
+        "plan": hexid(0x1001),
+        "h": "d" * 64,
+        "side": "LONG",
+        "qty": Decimal("0.001"),
+        "risk": Decimal("4"),
+        "status": "REQUESTED",
+        "reason": None,
+        "released_at": None,
+        "t0": T0,
+    }
+    sql = text(
+        "INSERT INTO risk_reservations (trade_plan_id, plan_hash, symbol, position_side, "
+        "quantity, realized_risk, status, release_reason, released_at_utc, requested_at_utc, "
+        "updated_at_utc) VALUES (:plan, :h, 'BTCUSDT', :side, :qty, :risk, :status, :reason, "
+        ":released_at, :t0, :t0)"
+    )
+    cases = {
+        "ck_risk_reservations_release_reason": {
+            "status": "RELEASED",
+            "reason": "NOT_A_REASON",
+            "released_at": T0,
+        },
+        "ck_risk_reservations_status": {"status": "DONE"},
+        "ck_risk_reservations_side": {"side": "BOTH"},
+        "ck_risk_reservations_quantity_positive": {"qty": Decimal("0")},
+        "ck_risk_reservations_risk_positive": {"risk": Decimal("0")},
+        # a reason and a release time on a row that is not RELEASED (the RELEASED row without a
+        # reason is the last case below)
+        "ck_risk_reservations_released_coherent": {"reason": "PLAN_EXPIRED", "released_at": T0},
+        # a counted status without an approval id
+        "ck_risk_reservations_approval_coherent": {"status": "RESERVED"},
+    }
+    for constraint, override in cases.items():
+        with expect_db_error(_CHECK_VIOLATION) as info, engine.begin() as conn:
+            conn.execute(sql, {**base, **override})
+        assert info.constraint == constraint, (constraint, info.constraint)
+    with expect_db_error(_CHECK_VIOLATION) as info, engine.begin() as conn:
+        conn.execute(sql, {**base, "status": "RELEASED"})
+    assert info.constraint == "ck_risk_reservations_released_coherent"
