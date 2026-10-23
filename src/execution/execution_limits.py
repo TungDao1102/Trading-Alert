@@ -1,11 +1,12 @@
 """The Phase 19 execution limits and their fail-closed loader (plan 19-01; D-07, D-13).
 
-No number lives in this module. The fourteen safety numbers the owner has not chosen yet (seven
-of Phase 19, seven of Phase 20) are optional fields of a frozen dataclass that default to
-nothing: they reach the process only through ``config/execution/execution-limits-v1.toml``,
-where each value is the word ``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While
-any field is ``None`` the live path refuses: ``ExecutionLimits.require_live_ready`` raises
-``ExecutionLimitsNotConfigured`` naming the unset keys. One further key (plan 20-28,
+No number lives in this module. The fifteen required safety numbers the owner has not chosen yet
+(seven of Phase 19, seven of Phase 20, one of Phase 21) are optional fields of a frozen dataclass
+that default to nothing: they reach the process only through
+``config/execution/execution-limits-v1.toml``, where each value is the word ``NOT_CONFIGURED``
+until the owner sets it (OWNER-OPEN O-04). While any field is ``None`` the live path refuses:
+``ExecutionLimits.require_live_ready`` raises ``ExecutionLimitsNotConfigured`` naming the unset
+keys. One further key (plan 20-28,
 ``reconcile.entry_stale_grace_ms``) only switches an alert on: it is an ALERT-ONLY key, loaded and
 validated like the others but left out of ``unset_keys`` and ``require_live_ready``, so while it is
 ``NOT_CONFIGURED`` only that one check is skipped. ``tests/test_no_unratified_defaults.py``
@@ -17,8 +18,8 @@ by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended
 The file format (``config/execution/README.md``):
 
 * exactly the sections ``protection``, ``pre_placement``, ``reconcile``, ``stale_feed``,
-  ``alerts`` and ``provenance`` (plan 20-01 adds ``reconcile``, ``stale_feed`` and ``alerts``;
-  D-25);
+  ``alerts``, ``account`` and ``provenance`` (plan 20-01 adds ``reconcile``, ``stale_feed`` and
+  ``alerts``, D-25; plan 21-02 adds ``account``, D-03);
 * exactly the keys of ``EXECUTION_LIMIT_KEYS``; a missing or unknown key refuses to load;
 * each value is a positive integer (not a boolean, not a float, not zero) or exactly the
   string ``NOT_CONFIGURED`` (read as ``None``);
@@ -63,6 +64,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         ),
         "stale_feed": ("max_mark_price_age_ms", "max_user_data_silence_ms"),
         "alerts": ("dedupe_window_ms",),
+        "account": ("max_equity_age_ms",),
     }
 )
 
@@ -70,7 +72,8 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
 # The seven Phase 19 keys keep the field name equal to the key text (their consumers read
 # ``limits.max_unprotected_ms`` and so on). Every Phase 20 key is ``<section>_<key>``, because
 # ``stale_feed.max_mark_price_age_ms`` shares its key text with
-# ``pre_placement.max_mark_price_age_ms`` (plan 20-01; D-25, T-H).
+# ``pre_placement.max_mark_price_age_ms`` (plan 20-01; D-25, T-H). The Phase 21 key follows the same
+# ``<section>_<key>`` rule (plan 21-02; D-03).
 EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
     {
         "protection.max_unprotected_ms": "max_unprotected_ms",
@@ -88,6 +91,7 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "stale_feed.max_mark_price_age_ms": "stale_feed_max_mark_price_age_ms",
         "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
         "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
+        "account.max_equity_age_ms": "account_max_equity_age_ms",
     }
 )
 
@@ -137,7 +141,7 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The fourteen owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
+    """The sixteen owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
@@ -170,6 +174,13 @@ class ExecutionLimits:
     ``goodTillDate`` of a resting entry the reconcile loop waits before it alerts that Binance did
     not expire it (alert only). It is an ALERT-ONLY key (``ALERT_ONLY_LIMIT_KEYS``): unset, it
     disables that one check and nothing else.
+    ``account_max_equity_age_ms`` (plan 21-02, D-03, F-012; owner number open under O-1): the
+    maximum age, in milliseconds, of the account equity reading used for live sizing, for the
+    daily-loss day-start base and for the approval reservation gate. The age is the injected now
+    minus the injected clock reading taken before the REST request, so it is only over-estimated;
+    an age greater than this value, or negative, is stale (NO_TRADE UNCERTAIN_ACCOUNT_STATE), and
+    an age exactly equal to it passes. It is a REQUIRED key: it is not in ``ALERT_ONLY_LIMIT_KEYS``,
+    so while it is unset the live path refuses.
     """
 
     max_unprotected_ms: int | None
@@ -187,6 +198,7 @@ class ExecutionLimits:
     stale_feed_max_user_data_silence_ms: int | None
     alerts_dedupe_window_ms: int | None
     reconcile_entry_stale_grace_ms: int | None
+    account_max_equity_age_ms: int | None
 
     def _unset(self, *, alert_only: bool) -> tuple[str, ...]:
         return tuple(

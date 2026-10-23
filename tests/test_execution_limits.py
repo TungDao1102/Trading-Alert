@@ -41,6 +41,8 @@ EXPECTED_UNSET = (
     "stale_feed.max_mark_price_age_ms",
     "stale_feed.max_user_data_silence_ms",
     "alerts.dedupe_window_ms",
+    # Phase 21 (plan 21-02; D-03, F-012): the sixteenth key, the first required Phase 21 key.
+    "account.max_equity_age_ms",
 )
 
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
@@ -94,8 +96,8 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
         assert "reconcile.tick_interval_ms" in message
-        # The fourteen dotted names come in file order: protection, pre_placement, reconcile,
-        # stale_feed, alerts.
+        # The fifteen dotted names come in file order: protection, pre_placement, reconcile,
+        # stale_feed, alerts, account.
         assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
             EXPECTED_UNSET
         )
@@ -119,6 +121,7 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.stale_feed_max_mark_price_age_ms == 10
     assert limits.stale_feed_max_user_data_silence_ms == 11
     assert limits.alerts_dedupe_window_ms == 10
+    assert limits.account_max_equity_age_ms == 10
     assert limits.unset_keys() == ()
     assert limits.require_live_ready() is None
 
@@ -371,6 +374,7 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         stale_feed_max_user_data_silence_ms=None,
         alerts_dedupe_window_ms=None,
         reconcile_entry_stale_grace_ms=None,
+        account_max_equity_age_ms=None,
     )
     assert limits.unset_keys() == EXPECTED_UNSET
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
@@ -417,10 +421,10 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_the_not_configured_word() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
-    # Fifteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # Sixteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
     # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys, plan
-    # 20-28 the alert-only reconcile.entry_stale_grace_ms).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
+    # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 32
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -450,7 +454,7 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     for section, count in _PHASE20_SECTIONS.items():
         assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    # The fourteen required keys plus the alert-only key of plan 20-28, in file order.
+    # The fifteen required keys plus the alert-only key of plan 20-28, in file order.
     assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(EXPECTED_UNSET)
     assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
@@ -656,3 +660,99 @@ def test_the_cadence_refusal_carries_neither_value() -> None:
 
 def test_the_cadence_check_is_exported() -> None:
     assert "check_reconcile_cadence" in el.__all__
+
+
+# --------------------------------------------------------------------------- #
+# Plan 21-02 (D-03, F-012, O-1): account.max_equity_age_ms, a REQUIRED key, NOT_CONFIGURED.
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT_KEY = "account.max_equity_age_ms"
+_ACCOUNT_FIELD = "account_max_equity_age_ms"
+
+
+def _account_document(value: Any = 5, label: str = "DECISION") -> dict[str, Any]:
+    """A valid all-set document whose account.max_equity_age_ms comes from a literal."""
+    document = _document()
+    document["account"]["max_equity_age_ms"] = value
+    document["provenance"]["account"]["max_equity_age_ms"] = label
+    return document
+
+
+def test_the_committed_file_leaves_the_account_equity_age_unset_and_required() -> None:
+    limits = el.load_execution_limits(LIMITS_FILE)
+    assert limits.account_max_equity_age_ms is None
+    assert limits.unset_keys()[-1] == _ACCOUNT_KEY
+    assert limits.unset_keys()[:-1] == EXPECTED_UNSET[:-1]
+    assert len(limits.unset_keys()) == 15
+    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
+    assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        limits.require_live_ready()
+    assert info.value.keys[-1] == _ACCOUNT_KEY
+    assert not any(character.isdigit() for character in str(info.value))
+
+
+def test_the_account_section_is_the_last_section_and_has_the_prefixed_field() -> None:
+    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "account"
+    assert el.EXECUTION_LIMIT_KEYS["account"] == ("max_equity_age_ms",)
+    assert el.EXECUTION_LIMIT_FIELDS[_ACCOUNT_KEY] == _ACCOUNT_FIELD
+    assert _ACCOUNT_FIELD in el.ExecutionLimits.__dataclass_fields__
+
+
+def test_a_set_account_equity_age_loads_into_its_prefixed_field() -> None:
+    limits = el.parse_execution_limits(_account_document(5))
+    assert limits.account_max_equity_age_ms == 5
+    assert limits.unset_keys() == ()
+    assert limits.require_live_ready() is None
+
+
+def test_a_document_without_the_account_section_is_refused_by_name() -> None:
+    document = _account_document()
+    del document["account"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert _ACCOUNT_KEY in str(info.value)
+
+
+def test_an_account_section_without_the_key_is_refused_by_name() -> None:
+    document = _account_document()
+    del document["account"]["max_equity_age_ms"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert _ACCOUNT_KEY in str(info.value)
+
+
+def test_an_unknown_key_in_the_account_section_is_refused() -> None:
+    document = _account_document()
+    document["account"]["surprise_ms"] = 5
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert "account.surprise_ms" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "value_text"),
+    [pytest.param(m, v, id=case) for case, m, v in _PHASE20_REFUSALS],
+)
+def test_every_malformed_account_equity_age_entry_is_refused_by_name(
+    mutate: Any, value_text: str
+) -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(mutate(_account_document(), _ACCOUNT_KEY))
+    message = str(info.value)
+    assert _ACCOUNT_KEY in message
+    if value_text:
+        assert value_text not in message
+
+
+def test_the_account_test_only_value_is_set_and_may_be_unset_by_override() -> None:
+    values = tl.TEST_ONLY_EXECUTION_LIMIT_VALUES
+    assert values[_ACCOUNT_KEY] == 9137
+    limits = tl.test_only_execution_limits()
+    assert limits.account_max_equity_age_ms == 9137
+    unset = tl.test_only_execution_limits(account_max_equity_age_ms=None)
+    assert unset.account_max_equity_age_ms is None
+    assert unset.unset_keys() == (_ACCOUNT_KEY,)
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        unset.require_live_ready()
+    assert info.value.keys == (_ACCOUNT_KEY,)

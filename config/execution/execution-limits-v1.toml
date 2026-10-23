@@ -16,6 +16,7 @@
 #   stale_feed.max_mark_price_age_ms           Phase 20, D-25: maximum age of the mark price before the feed counts as stale (not pre_placement.max_mark_price_age_ms)
 #   stale_feed.max_user_data_silence_ms        Phase 20, D-25, D058: maximum silence of the user-data stream (not the paper runtime max_ws_message_silence_seconds)
 #   alerts.dedupe_window_ms                    Phase 20, D-23: window in which a repeated alert is deduplicated
+#   account.max_equity_age_ms                  Phase 21, D-03 (F-012): maximum age of the account equity reading used for live sizing, the daily-loss base and the reservation gate
 # Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
 # (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED, except
 # reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
@@ -49,6 +50,9 @@ max_user_data_silence_ms = "NOT_CONFIGURED"
 [alerts]
 dedupe_window_ms = "NOT_CONFIGURED"
 
+[account]
+max_equity_age_ms = "NOT_CONFIGURED"
+
 [provenance.protection]
 max_unprotected_ms = "NOT_CONFIGURED"
 entry_terminal_timeout_ms = "NOT_CONFIGURED"
@@ -73,3 +77,6 @@ max_user_data_silence_ms = "NOT_CONFIGURED"
 
 [provenance.alerts]
 dedupe_window_ms = "NOT_CONFIGURED"
+
+[provenance.account]
+max_equity_age_ms = "NOT_CONFIGURED"

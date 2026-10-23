@@ -50,6 +50,8 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "alerts.dedupe_window_ms": 6543,
     # Plan 20-28: a FAKE grace past goodTillDate for the stale-entry alert (alert only).
     "reconcile.entry_stale_grace_ms": 4747,
+    # Phase 21 (D-03): a FAKE equity age bound.
+    "account.max_equity_age_ms": 9137,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"

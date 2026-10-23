@@ -86,6 +86,10 @@ One key per line, so the checks of plan 19-01 can parse the list.
 
 - `alerts.dedupe_window_ms` - the window in which a repeated alert for the same event is deduplicated instead of sent again (D-23, used by plan 20-13; milliseconds).
 
+### `[account]` (Phase 21, D-03; F-012)
+
+- `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the fourteen other required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). Owner number open (O-1); no value is chosen and the code carries no default.
+
 ## Phase 20 notes
 
 The fifteenth key, `reconcile.entry_stale_grace_ms`, is alert only: `ExecutionLimits.unset_keys()` and
