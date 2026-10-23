@@ -54,14 +54,19 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
 from src.domain.enums import ExecutionIntentStatus, OrderRole
 from src.domain.journal import JournalEvent, content_hash_event_id
-from src.domain.stream_records import EvidenceSource, ExitEvidence, exit_evidence_event
+from src.domain.stream_records import (
+    EXIT_EVIDENCE_PREFIX,
+    EvidenceSource,
+    ExitEvidence,
+    exit_evidence_event,
+)
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import (
     RESOLUTION_NEVER_SENT,
@@ -718,7 +723,7 @@ class UnknownEntryResolver:
         reference = record.client_order_id
         if reference is None:  # unreachable: a probe needs the id
             raise ValueError("an UNKNOWN entry without a client order id cannot be closed")
-        return exit_evidence_event(
+        event = exit_evidence_event(
             entity_type=_INTENT_ENTITY,
             entity_id=record.approval_id,
             from_status="UNKNOWN",
@@ -730,4 +735,21 @@ class UnknownEntryResolver:
                 correlation_id=self._correlation(record),
             ),
             now_utc=now_utc,
+        )
+        # 20-REVIEW WR-A1: `exit_evidence_event` keys the row on (correlation, type, entity,
+        # transition) only, while the observation time sits in `payload_json`, which the journal
+        # treats as identity. A retry after a failed finalize write (or a crash between the two
+        # writes) therefore rebuilt the same id with a new time and raised JournalConflict on
+        # every later step, so the entry could never leave UNKNOWN. Each observation is its own
+        # append-only row: the id is a content hash over the observation, and the same
+        # observation replayed is still one row.
+        return replace(
+            event,
+            journal_event_id=content_hash_event_id(
+                prefix=EXIT_EVIDENCE_PREFIX,
+                event_type=event.event_type,
+                entity_id=event.entity_id,
+                occurred_at_utc=now_utc,
+                payload_json=event.payload_json,
+            ),
         )
