@@ -519,6 +519,43 @@ updated_at_utc           TIMESTAMPTZ, when the row was written, >= fetched_at_ut
 - Tier 2: when no row exists, the persisted `plan_constraint_snapshots` row of the plan (section 2.15) is used, flagged stale, only when its maximum quantity and all three MARKET_LOT_SIZE values are present. It is never "the last validated filters".
 - The close quantity is floored onto the filters (never rounded up to reach the minimum quantity). A close rejected with a lot-filter code is not resent with the same quantity; the next attempt takes a new attempt number and reads live filters again when it can. Binance accepting a close sized on stale filters is `[NOT_TESTED]` (best effort, Q3).
 
+### 2.19 `daily_risk_days`
+
+The persisted risk state of one UTC day (Phase 21, plan 21-09, D-07, D-14, F-963). A restart inside the UTC day must neither reset the day nor move its day-start equity base, and a DAILY_STOP latch must survive it. `system_state_events` cannot hold this: it accepts only str, bool and None values and a fixed key list, and the base is a Decimal. One row per UTC day.
+
+```text
+utc_day                 PK, DATE (the UTC calendar day)
+equity_at_day_start     NUMERIC(38,18), > 0 (the threshold base for the whole day, written once)
+base_observed_at_utc    TIMESTAMPTZ (when the base was read)
+stop_latched_at_utc     NULL, TIMESTAMPTZ (DAILY_STOP latch, set once, never cleared or moved)
+warning_alerted_at_utc  NULL, TIMESTAMPTZ (WARNING alert mark, set once, never cleared or moved)
+created_at_utc          TIMESTAMPTZ, database clock at the insert (default now())
+```
+
+- Alembic revision `0010_daily_risk_state` (down revision `0009_validated_lot_filters`). Named constraints: `pk_daily_risk_days`, `ck_daily_risk_days_equity_positive`. No foreign keys; no backfill.
+- Writer: `PgDayRiskStore` (`src/persistence/day_risk.py`). `open_day` inserts the day if absent and returns the STORED row, so a second open (another process, a restart, a retry) never moves the base. `latch_stop` and `mark_warning_alerted` update their column only `WHERE ... IS NULL`; there is no update path for the base. Readers: the day-risk service (plan 21-13) and the approval transaction, which locks the row with `PgDayRiskStore.lock_day` (`SELECT ... FOR UPDATE`, plan 21-12).
+- No delete path and no retention rule: retention is owner-open O-1 and no number is invented. An unreachable database raises `StoreUnavailable`; there is no retry loop in the store.
+
+### 2.20 `daily_loss_components`
+
+The signed daily-loss components Binance reported, one row per `(utc_day, kind, source, source_key)` (Phase 21, plan 21-09, D-07). They are the input of the D033 day loss fold (`src/risk/daily_loss.py::fold_daily_loss`). The same fill or funding row seen on the stream and on REST is two rows (two sources); the fold counts it once at the most adverse amount.
+
+```text
+utc_day          PK part, DATE
+kind             PK part, FILL_PNL / FILL_COMMISSION / FUNDING
+source           PK part, USER_DATA_EVENT / REST_USER_TRADES / REST_INCOME
+source_key       PK part, VARCHAR(128), non-empty ("<symbol>:<order id>:<trade id>" for fills, "<symbol>:<tranId>" for funding)
+amount           NUMERIC(38,18), signed, not NaN (the commission component is stored negated)
+asset            VARCHAR(16), non-empty
+event_time_utc   TIMESTAMPTZ, the exchange event time
+recorded_at_utc  TIMESTAMPTZ, database clock at the insert (default now())
+```
+
+- Alembic revision `0010_daily_risk_state`. Named constraints: `pk_daily_loss_components`, `ck_daily_loss_components_kind`, `ck_daily_loss_components_source`, `ck_daily_loss_components_amount_not_nan`, `ck_daily_loss_components_source_key`, `ck_daily_loss_components_asset`; index `ix_daily_loss_components_utc_day`. No foreign keys: a component may be recorded before the day row is opened.
+- Writer: `PgDayRiskStore.add_components` (one transaction per call). A repeated key is a no-op; a stored key with another amount or asset raises `RowConflict` (the message names the key, never the amount) and nothing of that call is stored. Readers: the day-risk service (plan 21-13) through `list_components`.
+- `amount` semantics: on Demo, `realizedPnl` excludes commission, so the commission is its own component; this is demo-observed, not mainnet, and live R stays INCOMPLETE until Phase 24 verifies it. Demo returned no FUNDING income rows (demo-observed, not mainnet), so the funding component has not been seen from the real exchange yet.
+- No delete path and no retention rule: retention is owner-open O-1 and no number is invented.
+
 ## 3. Canonical state machines
 
 Canonical states are defined in `GLOSSARY.md`. The legal transitions between them are `GLOSSARY.md` section 11 (six tables: Signal, TradePlan, Order, Position, Approval, ExecutionIntent) and are implemented once in `src/domain/transitions.py`; the Phase 17 persistence status values (`ExecutionIntentStatus`, approval `consumption_status`, `live_inputs_status`, `SystemStateKey`) are `GLOSSARY.md` section 12. The section 11 tables are an auto-mode default awaiting user confirmation (D051).
