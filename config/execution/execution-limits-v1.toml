@@ -12,11 +12,14 @@
 #   reconcile.entry_unknown_probe_count        Phase 20, D-11: consecutive clean not-found probes of an UNKNOWN entry before it may close
 #   reconcile.entry_unknown_probe_interval_ms  Phase 20, D-11: spacing between those probes
 #   reconcile.lot_filter_refresh_interval_ms   Phase 20, D-21: how often the lot-size filters are refreshed
+#   reconcile.entry_stale_grace_ms             Plan 20-28 (ALERT ONLY): grace past goodTillDate before a resting entry that is still NEW raises the STALE_ENTRY_ORDER alert
 #   stale_feed.max_mark_price_age_ms           Phase 20, D-25: maximum age of the mark price before the feed counts as stale (not pre_placement.max_mark_price_age_ms)
 #   stale_feed.max_user_data_silence_ms        Phase 20, D-25, D058: maximum silence of the user-data stream (not the paper runtime max_ws_message_silence_seconds)
 #   alerts.dedupe_window_ms                    Phase 20, D-23: window in which a repeated alert is deduplicated
 # Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
-# (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED. A set value needs
+# (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED, except
+# reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
+# stale-entry check is skipped (and says so) and nothing else changes. A set value needs
 # a DECISIONS row and the provenance label DECISION. Key meanings and the file format:
 # config/execution/README.md. The ratified config/binance/binance-limits-v1.toml is a
 # separate, sha256-pinned file and is not edited.
@@ -37,6 +40,7 @@ tick_interval_ms = "NOT_CONFIGURED"
 entry_unknown_probe_count = "NOT_CONFIGURED"
 entry_unknown_probe_interval_ms = "NOT_CONFIGURED"
 lot_filter_refresh_interval_ms = "NOT_CONFIGURED"
+entry_stale_grace_ms = "NOT_CONFIGURED"
 
 [stale_feed]
 max_mark_price_age_ms = "NOT_CONFIGURED"
@@ -61,6 +65,7 @@ tick_interval_ms = "NOT_CONFIGURED"
 entry_unknown_probe_count = "NOT_CONFIGURED"
 entry_unknown_probe_interval_ms = "NOT_CONFIGURED"
 lot_filter_refresh_interval_ms = "NOT_CONFIGURED"
+entry_stale_grace_ms = "NOT_CONFIGURED"
 
 [provenance.stale_feed]
 max_mark_price_age_ms = "NOT_CONFIGURED"

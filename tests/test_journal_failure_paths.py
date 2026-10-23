@@ -322,7 +322,7 @@ async def _operator_exit(controller: SafeModeController) -> Any:
     return await controller.exit_safe_mode(
         operator_id="operator-1",
         local_intent_fn=lambda: LocalIntent(orders=(), algos=(), positions=()),
-        readiness=lambda: ExitReadiness(0, 0, 0),
+        readiness=lambda: ExitReadiness(0, 0, 0, True),
         gate_status=lambda: (None, "RESTORED_DURABLE"),
         stream_state=lambda: "LIVE",
         now_utc=NOW_UTC,

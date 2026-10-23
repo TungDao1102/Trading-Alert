@@ -113,6 +113,9 @@ ALERT_EVENTS = MappingProxyType(
         "DAILY_LOSS_WARNING": AlertSeverity.WARNING,
         # Plan 20-22 (D-24): the catch-all for a SAFE_MODE entry with no event of its own.
         "SAFE_MODE_ENTERED": AlertSeverity.HIGH,
+        # Plan 20-28 (owner request 2026-10-23): a resting entry still NEW past goodTillDate plus
+        # the owner grace. Alert only: no SAFE_MODE, no cancel.
+        "STALE_ENTRY_ORDER": AlertSeverity.HIGH,
     }
 )
 
@@ -745,6 +748,7 @@ class Ops05Row:
 _SINK_BEHAVIOR = "dedupe window + bounded message retry; orders never retried"
 _SOURCE_OPS05 = "OPS-05"
 _SOURCE_D24 = "D-24 (entry path)"
+_SOURCE_STALE_ENTRY = "owner request 2026-10-23 (stale entry)"
 _PRODUCER_PHASE21 = "Phase 21"
 
 OPS05_MATRIX: tuple[Ops05Row, ...] = (
@@ -844,6 +848,16 @@ OPS05_MATRIX: tuple[Ops05Row, ...] = (
         "an already consumed approval (stored outcome or lost consume race) alerts through the "
         "optional LivePlacementContext.alert_sink; nothing is re-sent",
         "src/execution/manager.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "STALE_ENTRY_ORDER",
+        _SOURCE_STALE_ENTRY,
+        "reconcile tick alerts a resting entry that is still NEW more than the owner grace "
+        "(reconcile.entry_stale_grace_ms, NOT_CONFIGURED: the check is skipped and says so) past "
+        "its goodTillDate; alert only, nothing is cancelled and SAFE_MODE is not entered",
+        "src/reconcile/loop.py",
         True,
         _SINK_BEHAVIOR,
     ),

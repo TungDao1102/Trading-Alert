@@ -5,7 +5,10 @@ of Phase 19, seven of Phase 20) are optional fields of a frozen dataclass that d
 nothing: they reach the process only through ``config/execution/execution-limits-v1.toml``,
 where each value is the word ``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While
 any field is ``None`` the live path refuses: ``ExecutionLimits.require_live_ready`` raises
-``ExecutionLimitsNotConfigured`` naming the unset keys. ``tests/test_no_unratified_defaults.py``
+``ExecutionLimitsNotConfigured`` naming the unset keys. One further key (plan 20-28,
+``reconcile.entry_stale_grace_ms``) only switches an alert on: it is an ALERT-ONLY key, loaded and
+validated like the others but left out of ``unset_keys`` and ``require_live_ready``, so while it is
+``NOT_CONFIGURED`` only that one check is skipped. ``tests/test_no_unratified_defaults.py``
 scans ``src`` and ``scripts`` so that no numeric default for these names ever appears.
 
 The file is separate from ``config/binance/binance-limits-v1.toml``: that file is sha256-pinned
@@ -56,6 +59,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "entry_unknown_probe_count",
             "entry_unknown_probe_interval_ms",
             "lot_filter_refresh_interval_ms",
+            "entry_stale_grace_ms",
         ),
         "stale_feed": ("max_mark_price_age_ms", "max_user_data_silence_ms"),
         "alerts": ("dedupe_window_ms",),
@@ -80,11 +84,18 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "reconcile.entry_unknown_probe_count": "reconcile_entry_unknown_probe_count",
         "reconcile.entry_unknown_probe_interval_ms": "reconcile_entry_unknown_probe_interval_ms",
         "reconcile.lot_filter_refresh_interval_ms": "reconcile_lot_filter_refresh_interval_ms",
+        "reconcile.entry_stale_grace_ms": "reconcile_entry_stale_grace_ms",
         "stale_feed.max_mark_price_age_ms": "stale_feed_max_mark_price_age_ms",
         "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
         "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
     }
 )
+
+# The keys that only switch an ALERT on (plan 20-28). While one is NOT_CONFIGURED the alert's
+# check is skipped and says so; the key never keeps the live path refused (`unset_keys` and
+# `require_live_ready` leave it out, `unset_alert_only_keys` lists it). It is still loaded,
+# validated and given a provenance label like every other key, and no number is chosen for it.
+ALERT_ONLY_LIMIT_KEYS: frozenset[str] = frozenset({"reconcile.entry_stale_grace_ms"})
 
 PROVENANCE_SECTION = "provenance"
 ALLOWED_SECTIONS: frozenset[str] = frozenset((*EXECUTION_LIMIT_KEYS, PROVENANCE_SECTION))
@@ -155,6 +166,10 @@ class ExecutionLimits:
     runtime key ``max_ws_message_silence_seconds`` and never reuses it.
     ``alerts_dedupe_window_ms`` (D-23, consumer plan 20-13): the window in which a repeated alert
     is deduplicated. The Phase 20 fields are named ``<section>_<key>`` (``EXECUTION_LIMIT_FIELDS``).
+    ``reconcile_entry_stale_grace_ms`` (plan 20-28, owner request 2026-10-23): how long past the
+    ``goodTillDate`` of a resting entry the reconcile loop waits before it alerts that Binance did
+    not expire it (alert only). It is an ALERT-ONLY key (``ALERT_ONLY_LIMIT_KEYS``): unset, it
+    disables that one check and nothing else.
     """
 
     max_unprotected_ms: int | None
@@ -171,15 +186,29 @@ class ExecutionLimits:
     stale_feed_max_mark_price_age_ms: int | None
     stale_feed_max_user_data_silence_ms: int | None
     alerts_dedupe_window_ms: int | None
+    reconcile_entry_stale_grace_ms: int | None
 
-    def unset_keys(self) -> tuple[str, ...]:
-        """The dotted names of the keys still NOT_CONFIGURED, in the fixed file order."""
+    def _unset(self, *, alert_only: bool) -> tuple[str, ...]:
         return tuple(
-            f"{section}.{key}"
+            dotted
             for section, keys in EXECUTION_LIMIT_KEYS.items()
             for key in keys
-            if getattr(self, EXECUTION_LIMIT_FIELDS[f"{section}.{key}"]) is None
+            for dotted in (f"{section}.{key}",)
+            if (dotted in ALERT_ONLY_LIMIT_KEYS) is alert_only
+            and getattr(self, EXECUTION_LIMIT_FIELDS[dotted]) is None
         )
+
+    def unset_keys(self) -> tuple[str, ...]:
+        """The dotted names of the REQUIRED keys still NOT_CONFIGURED, in the fixed file order.
+
+        The alert-only keys (``ALERT_ONLY_LIMIT_KEYS``) are not listed here: they never keep the
+        live path refused. See ``unset_alert_only_keys``.
+        """
+        return self._unset(alert_only=False)
+
+    def unset_alert_only_keys(self) -> tuple[str, ...]:
+        """The dotted names of the alert-only keys still NOT_CONFIGURED, in file order."""
+        return self._unset(alert_only=True)
 
     def require_live_ready(self) -> None:
         """Refuse while any limit is unset.
@@ -339,6 +368,7 @@ def check_reconcile_cadence(limits: ExecutionLimits) -> None:
 
 
 __all__ = [
+    "ALERT_ONLY_LIMIT_KEYS",
     "ALLOWED_PROVENANCE_LABELS",
     "ALLOWED_SECTIONS",
     "EXECUTION_LIMIT_FIELDS",

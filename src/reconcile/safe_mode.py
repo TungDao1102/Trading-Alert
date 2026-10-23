@@ -23,6 +23,7 @@ No Binance SDK, no SQLAlchemy, no Pydantic, no Polars.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,8 @@ from enum import StrEnum
 from typing import Any, Protocol, Self
 
 from src.domain.enums import RejectionReason, SystemMode
+
+from .compare import DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER
 
 #: The `entered_reason` of a controller whose persisted state could not be read or parsed at start
 #: (D-14, research C14): an unreadable store must only ever make the system more restricted.
@@ -128,6 +131,9 @@ class LocalIntentLike(Protocol):
     @property
     def positions(self) -> Sequence[Any]: ...
 
+    @property
+    def active_plans(self) -> Sequence[Any]: ...
+
 
 class ExitRefusal(StrEnum):
     """Why an operator exit was refused (D-15, 20-REVIEW-RESOLUTIONS T-E rows 1-5).
@@ -148,6 +154,10 @@ class ExitRefusal(StrEnum):
     GATE_NOT_OPEN = "GATE_NOT_OPEN"
     GATE_NOT_RESTORED = "GATE_NOT_RESTORED"
     STREAM_NOT_LIVE = "STREAM_NOT_LIVE"
+    # Plan 20-28 (WR-B3, WR-B4): the exit runs the loop's ownership check, and it never ends
+    # SAFE_MODE while the coordinator's restore is not complete.
+    SYMBOL_OWNERSHIP_CONFLICT = "SYMBOL_OWNERSHIP_CONFLICT"
+    RESTORE_NOT_COMPLETE = "RESTORE_NOT_COMPLETE"
 
 
 #: Row 6: the REST gate recovery states that count toward an exit (`GateRecoveryStatus` values).
@@ -170,11 +180,16 @@ class ExitReadiness:
         unknown_intents: unresolved execution intents of any status (INTENDED, SENT, UNKNOWN).
         blocking_plans: plans in UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED.
         open_pending_actions: protective actions still PENDING in the durable queue.
+        restore_complete: True when the protection coordinator's restore after a restart is
+            complete (plan 20-28, WR-B4). False refuses `RESTORE_NOT_COMPLETE`; `None` (could not
+            be read) or anything that is not a bool refuses `READINESS_UNREADABLE`. The field has
+            no default, so no composition can forget it.
     """
 
     unknown_intents: int | None
     blocking_plans: int | None
     open_pending_actions: int | None
+    restore_complete: bool | None
 
 
 @dataclass(frozen=True)
@@ -236,6 +251,11 @@ class SafeModeController:
             self._compare = _compare
         else:
             self._compare = compare_fn
+        # Plan 20-28 (WR-B3): the exit hands the active plans to a compare that takes them (the
+        # default compare does); a test double that predates the keyword is called without it.
+        self._compare_takes_active_plans: bool = _accepts_keyword(
+            self._compare, "local_active_plans"
+        )
         self._in_safe_mode: bool = False
         self._entered_at_utc: datetime | None = None
         self._entered_reason: str | None = None
@@ -250,6 +270,13 @@ class SafeModeController:
         # on the same event loop as the reconcile loop; an entry that lands meanwhile means a
         # divergence was found after the exit's reads began, so the exit is refused.
         self._enter_calls: int = 0
+        # Plan 20-28 (WR-B1): the assertion rounds. Calls that carry one `now_utc` are one round
+        # (the reconcile loop passes one `now_utc` per tick). A reason the previous round asserted
+        # is a standing reason and writes nothing again; see `enter_safe_mode`.
+        self._round_now: datetime | None = None
+        self._round_reasons: set[str] = set()
+        self._prev_round_reasons: frozenset[str] = frozenset()
+        self._round_wrote: bool = False
 
     @classmethod
     def load(
@@ -421,6 +448,16 @@ class SafeModeController:
         different reason updates the reason string and journals a
         new enter event (the previous divergence is still active).
 
+        Standing reasons (plan 20-28, WR-B1): calls that carry the same `now_utc` form one
+        assertion round (the reconcile loop passes one `now_utc` per tick, entering its reasons in
+        ascending urgency). A reason that the previous round asserted again is a standing
+        divergence and writes nothing (no journal row, no saved state version, no `on_enter`
+        call), so two standing reasons no longer flip the stored reason, and with it a new
+        database version, on every tick. A reason that was not in the previous round records as
+        before; once a round has written, its later reasons re-assert, so the LAST reason of the
+        round (the most urgent one) is the persisted reason. A reason that leaves and returns
+        records again. The rounds are forgotten at an operator exit.
+
         With a state store attached the new state is saved after the journal write (D-14). The
         in-memory flag flips first, so a failing journal or store write propagates with the
         controller still in SAFE_MODE (fail closed). The next call, even with the same reason,
@@ -441,9 +478,13 @@ class SafeModeController:
         effective_now = now_utc if now_utc is not None else datetime.now(UTC)
         _require_utc(effective_now)
         self._enter_calls += 1
+        self._roll_round(effective_now)
+        standing = reason in self._prev_round_reasons or reason in self._round_reasons
+        self._round_reasons.add(reason)
         if self._in_safe_mode:
-            # Already in SAFE_MODE — update reason if it changed.
-            if self._entered_reason != reason:
+            # Already in SAFE_MODE — update reason if it changed, unless it is a standing one.
+            if self._entered_reason != reason and (self._round_wrote or not standing):
+                self._round_wrote = True
                 self._entered_reason = reason
                 self._persist_pending = self._state_store is not None
                 try:
@@ -459,6 +500,7 @@ class SafeModeController:
                 self._persist(now_utc=effective_now)
             return
         self._in_safe_mode = True
+        self._round_wrote = True
         self._entered_at_utc = effective_now
         self._entered_reason = reason
         self._persist_pending = self._state_store is not None
@@ -471,6 +513,22 @@ class SafeModeController:
             self._persist(now_utc=effective_now)
         finally:
             self._notify_entered(reason, effective_now)
+
+    def _roll_round(self, now_utc: datetime) -> None:
+        """Start a new assertion round when `now_utc` differs from the current round's."""
+        if self._round_now == now_utc:
+            return
+        self._prev_round_reasons = frozenset(self._round_reasons)
+        self._round_reasons = set()
+        self._round_now = now_utc
+        self._round_wrote = False
+
+    def _forget_rounds(self) -> None:
+        """Drop the assertion rounds (an operator exit ends the episode)."""
+        self._round_now = None
+        self._round_reasons = set()
+        self._prev_round_reasons = frozenset()
+        self._round_wrote = False
 
     def _notify_entered(self, reason: str, now_utc: datetime) -> None:
         """Call the `on_enter` observer; its failure never undoes or masks the entry."""
@@ -533,9 +591,14 @@ class SafeModeController:
           3. Positions, open orders and algo orders were read from Binance during THIS call.
           4. Compare v2 on those fresh reads agrees, and no `enter_safe_mode` call landed while the
              reads were awaited (the reconcile loop shares the event loop; such an entry is a
-             divergence the reads predate, and refuses as `COMPARE_NOT_CLEAN`).
-          5. `readiness()` read every count and all are zero: no unresolved intent, no UNPROTECTED /
-             CLOSE_REQUIRED / CLOSE_FAILED plan, no PENDING protective action.
+             divergence the reads predate, and refuses as `COMPARE_NOT_CLEAN`). The compare gets
+             the same inputs as the loop's, including `local_active_plans` (plan 20-28, WR-B3): a
+             standing symbol-ownership conflict (more than one active plan for one symbol, or
+             exposure whose owner cannot be named) refuses as `SYMBOL_OWNERSHIP_CONFLICT`, and a
+             local intent without `active_plans` is an unreadable source (row 2).
+          5. `readiness()` read every field: all counts are zero (no unresolved intent, no
+             UNPROTECTED / CLOSE_REQUIRED / CLOSE_FAILED plan, no PENDING protective action) and
+             the coordinator's restore is complete (plan 20-28, WR-B4: `RESTORE_NOT_COMPLETE`).
           6. `gate_status()` returned `(restriction, recovery_status)` for the REST gate: the
              restriction is None (else `GATE_NOT_OPEN`) AND the recovery status is one of
              `ACCEPTED_GATE_RECOVERY_STATES` (else `GATE_NOT_RESTORED`; a provider that raises or
@@ -553,8 +616,8 @@ class SafeModeController:
         Args:
             operator_id: Who exits (audit only).
             local_intent_fn: Zero-argument callable returning the local intent
-                (`.orders`, `.algos`, `.positions`) read at exit time.
-            readiness: Zero-argument callable returning the row-5 counts.
+                (`.orders`, `.algos`, `.positions`, `.active_plans`) read at exit time.
+            readiness: Zero-argument callable returning the row-5 counts and the restore flag.
             gate_status: Zero-argument callable returning the REST gate's
                 `(restriction reason or None, recovery status string)`. Required: no default,
                 so no composition can forget it (row 6).
@@ -585,7 +648,9 @@ class SafeModeController:
         enter_calls_before = self._enter_calls
 
         # Row 2: the local intent source, read successfully or the exit is blocked.
-        local = _read_local_intent(local_intent_fn)
+        local = _read_local_intent(
+            local_intent_fn, need_active_plans=self._compare_takes_active_plans
+        )
         if local is None:
             refusals.append(ExitRefusal.LOCAL_SOURCE_UNREADABLE.value)
 
@@ -597,11 +662,14 @@ class SafeModeController:
         # Row 4: compare v2 on those two reads. A SAFE_MODE entry that landed while the reads were
         # awaited (the reconcile loop shares the event loop) is a divergence these reads predate.
         entered_meanwhile = self._enter_calls != enter_calls_before
-        compare_dirty = (
-            local is not None and truth is not None and not self._compare_is_clean(local, truth)
-        )
+        ownership_conflict = False
+        compare_dirty = False
+        if local is not None and truth is not None:
+            ownership_conflict, compare_dirty = self._judge_compare(local, truth)
         if entered_meanwhile or compare_dirty:
             refusals.append(ExitRefusal.COMPARE_NOT_CLEAN.value)
+        if ownership_conflict:
+            refusals.append(ExitRefusal.SYMBOL_OWNERSHIP_CONFLICT.value)
 
         # Row 5: the readiness counts.
         refusals.extend(_readiness_refusals(readiness))
@@ -644,6 +712,7 @@ class SafeModeController:
         self._last_exit_operator_id = operator_id
         self._last_exit_at_utc = now_utc
         self._persist_pending = False
+        self._forget_rounds()
         return ExitDecision(exited=True)
 
     # ----- internal helpers ---------------------------------------------- #
@@ -660,24 +729,38 @@ class SafeModeController:
         except Exception:
             return None
 
-    def _compare_is_clean(
+    def _judge_compare(
         self,
-        local: tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]],
+        local: tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]],
         truth: tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]],
-    ) -> bool:
-        """True only when the compare ran and reported agreement; an error is never clean."""
+    ) -> tuple[bool, bool]:
+        """Run the compare: `(ownership_conflict, other_dirt)`; `(False, False)` is a clean pass.
+
+        Only a compare that ran and reported agreement is clean: an error, a result without
+        `agreement is True` and a divergence of any other kind are `other_dirt`. An
+        AMBIGUOUS_POSITION_OWNER divergence (the loop's SYMBOL_OWNERSHIP_CONFLICT) is reported
+        separately, so the operator sees which condition stands.
+        """
         try:
-            diff = self._compare(
-                local_open_orders=local[0],
-                local_open_algos=local[1],
-                local_open_positions=local[2],
-                truth_normal_orders=truth[0],
-                truth_algo_orders=truth[1],
-                truth_positions=truth[2],
-            )
-            return bool(getattr(diff, "agreement", False) is True)
+            kwargs: dict[str, Any] = {
+                "local_open_orders": local[0],
+                "local_open_algos": local[1],
+                "local_open_positions": local[2],
+                "truth_normal_orders": truth[0],
+                "truth_algo_orders": truth[1],
+                "truth_positions": truth[2],
+            }
+            if self._compare_takes_active_plans:
+                kwargs["local_active_plans"] = local[3]
+            diff = self._compare(**kwargs)
+            if getattr(diff, "agreement", False) is True:
+                return False, False
+            kinds = [getattr(d, "kind", None) for d in getattr(diff, "divergences", ())]
+            ownership = DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER in kinds
+            other = (not kinds) or any(k != DIVERGENCE_KIND_AMBIGUOUS_POSITION_OWNER for k in kinds)
+            return ownership, other
         except Exception:
-            return False
+            return False, True
 
     def _journal_exit_refused(self, *, refusals: Sequence[str], now_utc: datetime) -> None:
         """Journal a refused exit, codes only. Best-effort: the controller stays in SAFE_MODE."""
@@ -754,13 +837,30 @@ def _require_utc(value: datetime) -> None:
         raise ValueError("now_utc must be UTC, not offset-aware")
 
 
+def _accepts_keyword(function: Callable[..., Any], name: str) -> bool:
+    """True when `function` takes the keyword `name` (or any `**kwargs`).
+
+    A callable whose signature cannot be read is assumed to take it: the real compare does, and a
+    wrong guess fails closed (the call raises and the exit is refused as not clean).
+    """
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return True
+    if name in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
 def _read_local_intent(
-    local_intent_fn: Callable[[], LocalIntentLike],
-) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]] | None:
-    """The local intent as three tuples, or None when the source is unreadable (row 2, F-711).
+    local_intent_fn: Callable[[], LocalIntentLike], *, need_active_plans: bool = True
+) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]] | None:
+    """The local intent as four tuples, or None when the source is unreadable (row 2, F-711).
 
     A raising source, a missing result or a missing sequence is never turned into an empty list:
-    an empty sequence counts only when the read itself succeeded.
+    an empty sequence counts only when the read itself succeeded. When the compare takes the
+    active plans (plan 20-28, WR-B3), a source that cannot supply them is unreadable too: a
+    missing ownership input is never read as "no plans".
     """
     try:
         intent = local_intent_fn()
@@ -769,7 +869,13 @@ def _read_local_intent(
         positions = intent.positions
         if orders is None or algos is None or positions is None:
             return None
-        return tuple(orders), tuple(algos), tuple(positions)
+        active: tuple[Any, ...] = ()
+        if need_active_plans:
+            raw_active = intent.active_plans
+            if raw_active is None or isinstance(raw_active, str | bytes):
+                return None
+            active = tuple(raw_active)
+        return tuple(orders), tuple(algos), tuple(positions), active
     except Exception:
         return None
 
@@ -779,6 +885,11 @@ def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_bool(value: object) -> bool:
+    """True only for a real bool (0 and 1 are not a restore flag)."""
+    return isinstance(value, bool)
+
+
 def _readiness_refusals(readiness: Callable[[], ExitReadiness]) -> list[str]:
     """The row-5 refusal codes: an unreadable field refuses, a non-zero count refuses."""
     try:
@@ -786,10 +897,13 @@ def _readiness_refusals(readiness: Callable[[], ExitReadiness]) -> list[str]:
         unknown = counts.unknown_intents
         blocking = counts.blocking_plans
         pending = counts.open_pending_actions
+        restored = counts.restore_complete
     except Exception:
         return [ExitRefusal.READINESS_UNREADABLE.value]
     refusals: list[str] = []
-    if not (_is_count(unknown) and _is_count(blocking) and _is_count(pending)):
+    if not (
+        _is_count(unknown) and _is_count(blocking) and _is_count(pending) and _is_bool(restored)
+    ):
         refusals.append(ExitRefusal.READINESS_UNREADABLE.value)
     if _is_count(unknown) and unknown != 0:
         refusals.append(ExitRefusal.UNKNOWN_INTENT_PRESENT.value)
@@ -797,6 +911,8 @@ def _readiness_refusals(readiness: Callable[[], ExitReadiness]) -> list[str]:
         refusals.append(ExitRefusal.BLOCKING_PROTECTION_STATE.value)
     if _is_count(pending) and pending != 0:
         refusals.append(ExitRefusal.PENDING_ACTION_PRESENT.value)
+    if restored is False:
+        refusals.append(ExitRefusal.RESTORE_NOT_COMPLETE.value)
     return refusals
 
 
@@ -848,24 +964,40 @@ def build_exit_readiness(
     unresolved_intents_fn: Callable[[], Iterable[Any]],
     protections_fn: Callable[[], Iterable[Any]],
     open_pending_fn: Callable[[], Iterable[Any]],
+    restore_complete_fn: Callable[[], bool],
 ) -> ExitReadiness:
-    """Compose the row-5 counts from three plain providers (D-15, T-E).
+    """Compose the row-5 fields from four plain providers (D-15, T-E, plan 20-28).
 
     The composition passes `ExecutionIntentStore.list_unresolved_intents`,
-    `ProtectionCoordinator.protections` and `PendingActionStore.list_open`. A provider that raises,
-    returns None or returns something that is not an iterable makes ITS field None ("could not be
-    read"), which `exit_safe_mode` refuses as `READINESS_UNREADABLE`; it is never read as zero.
+    `ProtectionCoordinator.protections`, `PendingActionStore.list_open` and a callable that reads
+    `ProtectionCoordinator.restore_complete`. A provider that raises, returns None or returns
+    something that is not an iterable makes ITS field None ("could not be read"), which
+    `exit_safe_mode` refuses as `READINESS_UNREADABLE`; it is never read as zero. The same holds
+    for a restore provider that raises or returns anything but a bool. `protections()` has no
+    restore guard of its own, so without this field a half-restored (empty) view reads as "no
+    blocking plans" (WR-B4).
 
     - `unknown_intents`: every unresolved intent counts, whatever its status (INTENDED, SENT or
       UNKNOWN), because any of them may still hold an order or an exposure.
     - `blocking_plans`: plans whose `state` is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED.
     - `open_pending_actions`: every open pending protective action.
+    - `restore_complete`: the coordinator's restore flag; False refuses `RESTORE_NOT_COMPLETE`.
     """
     return ExitReadiness(
         unknown_intents=_count_rows(unresolved_intents_fn, lambda _row: True),
         blocking_plans=_count_rows(protections_fn, _plan_blocks),
         open_pending_actions=_count_rows(open_pending_fn, lambda _row: True),
+        restore_complete=_read_flag(restore_complete_fn),
     )
+
+
+def _read_flag(provider: Callable[[], bool]) -> bool | None:
+    """The provider's bool, or None when it raised or answered anything but a bool."""
+    try:
+        value = provider()
+    except Exception:
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def _plan_blocks(plan: Any) -> bool:

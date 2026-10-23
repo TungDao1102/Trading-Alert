@@ -24,7 +24,7 @@ the execution side imports the enum and compares the names, this module imports 
   UNPROTECTED           PARTIALLY_FILLED       if confirmed*   no             yes
   PROTECTED_ENTRY_OPEN  PARTIALLY_FILLED       if confirmed*   no             yes
   PROTECTED             no                     if confirmed*   no             yes
-  COMPLETE              no                     if confirmed*   TP1, TP2       yes
+  COMPLETE              no                     if confirmed*   TP1**, TP2     yes
   TP_UNAVAILABLE        no                     if confirmed*   no             yes
   CLOSE_REQUIRED        no                     if confirmed*   no             yes
   CLOSE_FAILED          no                     if confirmed*   no             yes
@@ -33,6 +33,12 @@ the execution side imports the enum and compares the names, this module imports 
 
   * `stop_confirmed_at_utc` is set and `stop_lost_at_utc` is not. An entry order is emitted only
     while `entry_terminal_at_utc` is None, in the states that list one.
+  ** The TP1 leg carries the plan's intended quantity as `explained_when_position_below` (plan
+    20-28, WR-B2): a TP1 that triggers and fills leaves the open algo orders (Binance Demo
+    evidence `demo-probe-EVIDENCE-20261022T120704Z.json`, case `tp1_quantity_from_fill`), and the
+    coordinator has no "TP1 filled" state, so compare may read the leg's absence as a fill when the
+    exchange position is strictly below that quantity (and only then). TP2 and the stop never
+    carry it. A plan without a usable `entry_quantity` gets no leniency.
 
 The position intent carries what compare v2 needs (plan 20-04): `plan_hash`, `expected_side`
 (from the plan side LONG or SHORT) and `max_abs_amount` (the plan's entry quantity). A value the
@@ -250,7 +256,12 @@ def derive_local_intent(
             if plan.stop_confirmed_at_utc is not None and plan.stop_lost_at_utc is None:
                 _add_algo(algos, plan, OrderRole.STOP_LOSS.value)
             if rule.take_profits:
-                _add_algo(algos, plan, OrderRole.TAKE_PROFIT_1.value)
+                _add_algo(
+                    algos,
+                    plan,
+                    OrderRole.TAKE_PROFIT_1.value,
+                    explained_when_position_below=_positive_quantity(plan.entry_quantity),
+                )
                 _add_algo(algos, plan, OrderRole.TAKE_PROFIT_2.value)
         if rule.position:
             positions.append(_position_of(plan))
@@ -302,7 +313,13 @@ def derive_local_intent(
     )
 
 
-def _add_algo(algos: dict[str, LocalAlgoIntent], plan: PlanProtectionLike, role: str) -> None:
+def _add_algo(
+    algos: dict[str, LocalAlgoIntent],
+    plan: PlanProtectionLike,
+    role: str,
+    *,
+    explained_when_position_below: Decimal | None = None,
+) -> None:
     algo_id = derive_algo_client_id(plan_hash=plan.plan_hash, role=role)
     algos.setdefault(
         algo_id,
@@ -312,8 +329,16 @@ def _add_algo(algos: dict[str, LocalAlgoIntent], plan: PlanProtectionLike, role:
             order_role=role,
             status=_NEW,
             plan_hash=plan.plan_hash,
+            explained_when_position_below=explained_when_position_below,
         ),
     )
+
+
+def _positive_quantity(value: object) -> Decimal | None:
+    """The value when it is a finite positive Decimal, else None (no leniency)."""
+    if isinstance(value, Decimal) and value.is_finite() and value > 0:
+        return value
+    return None
 
 
 def _position_of(plan: PlanProtectionLike) -> LocalPositionIntent:

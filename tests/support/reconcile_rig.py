@@ -184,6 +184,7 @@ def build_rig(
     alerts: RecordingAlertSink | None = None,
     gate: Any = None,
     protection: FakeProtectionView | None = None,
+    entry_good_till: Any = None,
 ) -> Rig:
     fake = adapter or QueryingAdapter(normal_orders=normal, algo_orders=algo, positions=positions)
     safe_mode = SpyingSafeMode(
@@ -204,6 +205,7 @@ def build_rig(
         limits=limits or make_test_limits(),
         feeds=feed,
         **({"stream": stream} if stream is not None else {}),
+        **({"entry_good_till": entry_good_till} if entry_good_till is not None else {}),
     )
     return Rig(
         loop=loop,
