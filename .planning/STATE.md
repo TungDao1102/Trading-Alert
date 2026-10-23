@@ -659,5 +659,5 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 ## Session Continuity
 
 Last session: 2026-10-22T14:55:14.636Z
-Stopped at: Phase 21 executed and verified (human_needed); next is Phase 22 discuss
-Resume file: .planning/phases/21-account-equity-daily-loss/21-VERIFICATION.md
+Stopped at: Phase 22 context gathered (--auto, owner delegated the choices); next is /gsd-plan-phase 22
+Resume file: .planning/phases/22-leverage-margin-liquidation-guard/22-CONTEXT.md
