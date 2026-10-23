@@ -58,10 +58,12 @@ re-verification policy):
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
   | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
-  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all fourteen SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all sixteen SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
   | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
   | account_information_snapshot | account_information_v3(recv_window) | plan 21-03: GET /fapi/v3/account; every field Optional[str] in the model, parsed strictly to Decimal (a missing or non-finite field raises, never a zero); `totalMarginBalance` is the equity field (D-02), `availableBalance` is not read.  # noqa: E501
   | account_balances_snapshot   | futures_account_balance_v3(recv_window) | plan 21-03: GET /fapi/v3/balance; reads asset, balance, crossUnPnl only; the account alias attribute is never read (D-21).  # noqa: E501
+  | user_trades_in_window       | account_trade_list(symbol, start_time, end_time, from_id, recv_window) | plan 21-08: GET /fapi/v1/userTrades; page 1 sends start_time and end_time, later pages send `from_id` = last trade id + 1 and no time bounds (the endpoint refuses `fromId` with a time bound); trade ids must strictly increase, else ValueError; no `limit` is sent.  # noqa: E501
+  | income_in_window            | get_income_history(income_type, start_time, end_time, page, recv_window) | plan 21-08: GET /fapi/v1/income; pages 1, 2, ... until an empty page; the free-text `info` field is never read; the funding source is unverified on Demo (0 rows in the recorded reads).  # noqa: E501
   | account_config_snapshot     | futures_account_configuration(recv_window) | plan 21-03: GET /fapi/v1/accountConfig; reads multiAssetsMargin and dualSidePosition as strict bools, nothing else (OPS-02 is an owner attestation).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
@@ -79,7 +81,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -90,6 +92,9 @@ from binance_sdk_derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
     RateLimitBanError,
     TooManyRequestsError,
+)
+from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    GetIncomeHistoryIncomeTypeEnum,
 )
 from src.adapters.binance_clock import ClockDriftGuard, DriftBlockReason
 from src.adapters.binance_errors import error_facts_from_exception
@@ -552,6 +557,47 @@ class AccountConfigSnapshot:
 
     multi_assets_margin: bool
     dual_side_position: bool
+
+
+# The exchange window rule for userTrades (SDK 17.4.0 docstring): startTime to endTime may not
+# be longer than seven days.
+_MAX_WINDOW = timedelta(days=7)
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class UserTradeRow:
+    """One fill of `user_trades_in_window` (GET /fapi/v1/userTrades, plan 21-08).
+
+    `realized_pnl` and `commission` are strict Decimals of the exchange text (USDT for the
+    USDT-margined symbols); `trade_id` is the key space of the user-data stream's `t` field.
+    """
+
+    symbol: str
+    order_id: int
+    trade_id: int
+    realized_pnl: Decimal
+    commission: Decimal
+    commission_asset: str
+    margin_asset: str
+    time_utc: datetime
+
+
+@dataclass(frozen=True)
+class IncomeRow:
+    """One row of `income_in_window` (GET /fapi/v1/income, plan 21-08).
+
+    The free-text `info` field of the response has no counterpart here: it is never read.
+    `symbol` is None for an account-level row, `trade_id` None when the exchange sent none.
+    """
+
+    symbol: str | None
+    income_type: str
+    income: Decimal
+    asset: str
+    tran_id: int
+    trade_id: str | None
+    time_utc: datetime
 
 
 # --------------------------------------------------------------------------- #
@@ -1659,6 +1705,110 @@ class BinanceUsdmAdapter:
             dual_side_position=raw.dual_side_position,
         )
 
+    async def user_trades_in_window(
+        self, *, symbol: str, start_utc: datetime, end_utc: datetime
+    ) -> tuple[UserTradeRow, ...]:
+        """Read every fill of `symbol` inside a UTC window (GET /fapi/v1/userTrades, plan 21-08).
+
+        The REST trade list is the arbiter of the realized PnL and commission of a UTC day
+        (D-09): the stream feeds fills of known orders only and drops frames sent during a
+        gap. Through the official SDK `rest_api.account_trade_list` and `_sdk_call` (policy,
+        shared REST gate, never retried; an SDK exception propagates unchanged). Page 1 sends
+        `start_time` and `end_time`; every later page sends `from_id` = last trade id + 1 and
+        no time bound (the endpoint refuses `fromId` with a time bound). The loop ends on an
+        empty page or on a page holding only trades after `end_utc`; rows after `end_utc` are
+        dropped. Trade ids must strictly increase, within a page and across pages, else
+        `ValueError` (the order the exchange pages in is not documented in the SDK; this check
+        fails closed either way and also bounds the loop). No `limit` is sent, no clock is
+        read, nothing about the response is logged. A malformed row, a row of another symbol
+        or a bad window raises `ValueError` naming the field only: the caller then treats the
+        loss as unknown (D-04, D-20).
+        """
+        start_ms, end_ms = _window_ms(start_utc, end_utc)
+        found: list[UserTradeRow] = []
+        last_id: int | None = None
+        while True:
+            if last_id is None:
+                response = await self._sdk_call(
+                    CallKind.QUERY,
+                    self._sdk.rest_api.account_trade_list,
+                    symbol=symbol,
+                    start_time=start_ms,
+                    end_time=end_ms,
+                )
+            else:
+                response = await self._sdk_call(
+                    CallKind.QUERY,
+                    self._sdk.rest_api.account_trade_list,
+                    symbol=symbol,
+                    from_id=last_id + 1,
+                )
+            page = response.data()
+            if not isinstance(page, list):
+                raise ValueError("trade list page is not a list: refusing to fabricate")
+            if not page:
+                break
+            in_window = False
+            for item in page:
+                trade_id = _require_exchange_int(getattr(item, "id", None), "id")
+                if last_id is not None and trade_id <= last_id:
+                    raise ValueError("trade ids must strictly increase: refusing a partial read")
+                last_id = trade_id
+                row, row_ms = _row_to_user_trade(item, symbol, trade_id)
+                if row_ms <= end_ms:
+                    in_window = True
+                    found.append(row)
+            if not in_window:
+                break
+        return tuple(found)
+
+    async def income_in_window(
+        self, *, income_type: str, start_utc: datetime, end_utc: datetime
+    ) -> tuple[IncomeRow, ...]:
+        """Read every income row of one type inside a UTC window (GET /fapi/v1/income).
+
+        Plan 21-08. Through the official SDK `rest_api.get_income_history` and `_sdk_call`
+        (policy, shared REST gate, never retried). `income_type` must be a member of the SDK
+        income enum, else `ValueError` before any call. Pages 1, 2, ... are read until an empty
+        page; `tranId` is unique within one income type, so a repeated one raises (the page
+        parameter is the documented way to page; a server that ignored it could otherwise loop).
+        Funding is read as `income_type="FUNDING_FEE"`; that source is UNVERIFIED on Demo (0 rows
+        in four recorded tries, demo-observed, not mainnet). The free-text `info` field is never
+        read and nothing about the response is logged (D-21 secret-free logging; OPS-02 itself
+        is an owner attestation this method does not claim). Rows are returned ordered by
+        `(time_utc, tran_id)`.
+        """
+        try:
+            income_enum = GetIncomeHistoryIncomeTypeEnum(income_type)
+        except ValueError:
+            raise ValueError("income_type is not a member of the SDK income enum") from None
+        start_ms, end_ms = _window_ms(start_utc, end_utc)
+        found: list[IncomeRow] = []
+        seen: set[int] = set()
+        page_number = 1
+        while True:
+            response = await self._sdk_call(
+                CallKind.QUERY,
+                self._sdk.rest_api.get_income_history,
+                income_type=income_enum,
+                start_time=start_ms,
+                end_time=end_ms,
+                page=page_number,
+            )
+            page = response.data()
+            if not isinstance(page, list):
+                raise ValueError("income page is not a list: refusing to fabricate")
+            if not page:
+                break
+            for item in page:
+                row = _row_to_income(item, income_type)
+                if row.tran_id in seen:
+                    raise ValueError("income tranId repeated across pages: refusing a bad read")
+                seen.add(row.tran_id)
+                found.append(row)
+            page_number += 1
+        return tuple(sorted(found, key=lambda row: (row.time_utc, row.tran_id)))
+
 
 # --------------------------------------------------------------------------- #
 # Internal helpers for reconciler snapshot projection.
@@ -1961,6 +2111,89 @@ def _require_exchange_decimal(value: Any, field_name: str) -> Decimal:
     if not parsed.is_finite():
         raise ValueError(message)
     return parsed
+
+
+def _window_ms(start_utc: datetime, end_utc: datetime) -> tuple[int, int]:
+    """Epoch milliseconds of a UTC window; anything but a valid window raises (plan 21-08).
+
+    Both bounds must be timezone-aware UTC datetimes, `start_utc <= end_utc`, and the span at
+    most seven days (the exchange window rule). Integer arithmetic only.
+    """
+    for bound in (start_utc, end_utc):
+        if (
+            not isinstance(bound, datetime)
+            or bound.tzinfo is None
+            or bound.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("window bounds must be timezone-aware UTC datetimes")
+    if start_utc > end_utc:
+        raise ValueError("window start is after its end")
+    if end_utc - start_utc > _MAX_WINDOW:
+        raise ValueError("window is longer than seven days")
+    one_ms = timedelta(milliseconds=1)
+    return (start_utc - _EPOCH_UTC) // one_ms, (end_utc - _EPOCH_UTC) // one_ms
+
+
+def _require_exchange_int(value: Any, field_name: str) -> int:
+    """A real integer (not a bool) from the exchange; anything else raises, naming the field."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"exchange field {field_name} missing or not an integer")
+    return value
+
+
+def _require_exchange_text(value: Any, field_name: str) -> str:
+    """Non-empty exchange text; anything else raises, naming the field only."""
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"exchange field {field_name} missing or empty")
+    return value
+
+
+def _utc_from_ms(ms: int) -> datetime:
+    """Exact UTC datetime of an epoch millisecond count (no float)."""
+    return _EPOCH_UTC + timedelta(milliseconds=ms)
+
+
+def _row_to_user_trade(item: Any, symbol: str, trade_id: int) -> tuple[UserTradeRow, int]:
+    """Project one `userTrades` row; the second value is its epoch milliseconds (plan 21-08)."""
+    row_symbol = _require_exchange_text(getattr(item, "symbol", None), "symbol")
+    if row_symbol != symbol:
+        raise ValueError("trade row symbol differs from the requested symbol")
+    time_ms = _require_exchange_int(getattr(item, "time", None), "time")
+    row = UserTradeRow(
+        symbol=row_symbol,
+        order_id=_require_exchange_int(getattr(item, "order_id", None), "orderId"),
+        trade_id=trade_id,
+        realized_pnl=_require_exchange_decimal(getattr(item, "realized_pnl", None), "realizedPnl"),
+        commission=_require_exchange_decimal(getattr(item, "commission", None), "commission"),
+        commission_asset=_require_exchange_text(
+            getattr(item, "commission_asset", None), "commissionAsset"
+        ),
+        margin_asset=_require_exchange_text(getattr(item, "margin_asset", None), "marginAsset"),
+        time_utc=_utc_from_ms(time_ms),
+    )
+    return row, time_ms
+
+
+def _row_to_income(item: Any, income_type: str) -> IncomeRow:
+    """Project one income row; `info` is deliberately never touched (plan 21-08, D-21)."""
+    row_type = _require_exchange_text(getattr(item, "income_type", None), "incomeType")
+    if row_type != income_type:
+        raise ValueError("income row incomeType differs from the requested type")
+    raw_symbol = getattr(item, "symbol", None)
+    if raw_symbol is not None and not isinstance(raw_symbol, str):
+        raise ValueError("exchange field symbol is not text")
+    raw_trade_id = getattr(item, "trade_id", None)
+    if raw_trade_id is not None and not isinstance(raw_trade_id, str):
+        raise ValueError("exchange field tradeId is not text")
+    return IncomeRow(
+        symbol=raw_symbol if raw_symbol else None,
+        income_type=row_type,
+        income=_require_exchange_decimal(getattr(item, "income", None), "income"),
+        asset=_require_exchange_text(getattr(item, "asset", None), "asset"),
+        tran_id=_require_exchange_int(getattr(item, "tran_id", None), "tranId"),
+        trade_id=raw_trade_id if raw_trade_id else None,
+        time_utc=_utc_from_ms(_require_exchange_int(getattr(item, "time", None), "time")),
+    )
 
 
 def _row_to_account_asset(item: Any) -> AccountAssetRow:

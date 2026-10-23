@@ -11,6 +11,11 @@ The account alias field of the balance endpoint is dropped from every object: it
 identifier and must never reach a committed fixture (D-21). Its name appears in this file only
 as the constant `ALIAS_FIELD`.
 
+Plan 21-08 adds the REST trade rows (`user_trades_*.json`: the probe's `row_<n>_<field>` text map
+mapped to SDK aliases and JSON types by fixed tables), the empty funding income answer
+(`income_funding_empty.json`) and a byte-for-byte copy of the recorded ORDER_TRADE_UPDATE and
+ACCOUNT_UPDATE stream frames (`frames/`) for the user-data tests.
+
 Demo values: demo-observed, not mainnet. This script imports nothing from `src/` or `tests/`,
 reads only committed files and makes no network call. Running it twice gives byte-identical
 files (sorted keys, 2-space indent, LF line endings, no clock).
@@ -20,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -53,6 +59,63 @@ WIRE_TYPES: dict[str, str] = {
     "multiAssetsMargin": "bool",
 }
 
+# Plan 21-08: the trade rows. The probe wrote `row_<n>_<field>` text for the fields below; the
+# table maps each probe field to its SDK alias (the SDK model `AccountTradeListResponseInner`).
+TRADE_FIELD_MAP: dict[str, str] = {
+    "buyer": "buyer",
+    "commission": "commission",
+    "commission_asset": "commissionAsset",
+    "maker": "maker",
+    "margin_asset": "marginAsset",
+    "order_id": "orderId",
+    "position_side": "positionSide",
+    "price": "price",
+    "qty": "qty",
+    "quote_qty": "quoteQty",
+    "realized_pnl": "realizedPnl",
+    "side": "side",
+    "time_ms": "time",
+    "trade_id": "id",
+}
+TRADE_WIRE_TYPES: dict[str, str] = {
+    "id": "int",
+    "orderId": "int",
+    "time": "int",
+    "buyer": "bool",
+    "maker": "bool",
+}
+# The probe summary carries no symbol. Both recorded cases ran on BTCUSDT (19-OWNER-GAPS.md
+# section 2a): the symbol is a generator reconstruction, not a captured value.
+TRADE_CASE_SYMBOL = "BTCUSDT"
+TRADE_KEY = re.compile(r"row_(\d+)_(.+)")
+
+# output file -> source capture files, in recorded order (a repeated trade id is kept once).
+TRADE_OUTPUTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "user_trades_commission_case.json",
+        (
+            "commission_vs_realized_pnl-rest-005-user_trades.json",
+            "commission_vs_realized_pnl-rest-006-user_trades.json",
+        ),
+    ),
+    (
+        "user_trades_triggered_bracket.json",
+        ("triggered_close_position_bracket-rest-015-user_trades.json",),
+    ),
+)
+
+# The recorded income reads (zero rows each): the generator checks the recorded count is "0".
+INCOME_EMPTY_OUTPUT = "income_funding_empty.json"
+INCOME_EMPTY_SOURCES: tuple[str, ...] = (
+    "commission_vs_realized_pnl-rest-007-income_history.json",
+    "commission_vs_realized_pnl-rest-008-income_history.json",
+)
+
+# Raw stream frames copied byte for byte (already scrubbed by the probe tool, never edited).
+FRAMES_SUBDIR = "frames"
+FRAME_CASES: tuple[str, ...] = ("triggered_close_position_bracket", "commission_vs_realized_pnl")
+FRAME_KINDS: tuple[str, ...] = ("ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE")
+
 # (source capture file, output file) pairs written by `main`.
 OUTPUTS: tuple[tuple[str, str], ...] = (
     (
@@ -70,9 +133,9 @@ OUTPUTS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _convert(field: str, text: Any) -> Any:
+def _convert(field: str, text: Any, types: Mapping[str, str] = WIRE_TYPES) -> Any:
     """Give `field` its JSON wire type; plain text fields pass through unchanged."""
-    kind = WIRE_TYPES.get(field)
+    kind = types.get(field)
     if kind is None:
         return text
     if not isinstance(text, str):
@@ -143,16 +206,99 @@ def _load_summary(path: Path) -> Mapping[str, Any]:
     return summary
 
 
+def trade_rows(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """SDK-shaped trade rows of one flattened `user_trades` summary (plan 21-08).
+
+    The summary holds `count` and `row_<n>_<field>` text. Probe fields are renamed to the SDK
+    aliases by `TRADE_FIELD_MAP`, typed by `TRADE_WIRE_TYPES`, and `symbol` is added from
+    `TRADE_CASE_SYMBOL`. A missing, unknown or extra field, a gap in the row indices or a count
+    that disagrees with the rows raises `ValueError`.
+    """
+    count_text = summary.get("count")
+    if not isinstance(count_text, str) or not count_text.isdigit():
+        raise ValueError("recorded trade summary has no numeric count")
+    rows: dict[int, dict[str, Any]] = {}
+    for key in sorted(summary):
+        if key == "count":
+            continue
+        match = TRADE_KEY.fullmatch(key)
+        if match is None or match.group(2) not in TRADE_FIELD_MAP:
+            raise ValueError("recorded trade summary has an unknown key")
+        alias = TRADE_FIELD_MAP[match.group(2)]
+        rows.setdefault(int(match.group(1)), {})[alias] = _convert(
+            alias, summary[key], TRADE_WIRE_TYPES
+        )
+    if sorted(rows) != list(range(int(count_text))):
+        raise ValueError("recorded trade summary count disagrees with its rows")
+    out: list[dict[str, Any]] = []
+    for index in sorted(rows):
+        row = rows[index]
+        if set(row) != set(TRADE_FIELD_MAP.values()):
+            raise ValueError("recorded trade row is missing a field")
+        row["symbol"] = TRADE_CASE_SYMBOL
+        out.append(row)
+    return out
+
+
+def merged_trade_rows(src: Path, names: Sequence[str]) -> list[dict[str, Any]]:
+    """Rows of several trade captures in recorded order; one row per trade id (a clash raises)."""
+    seen: dict[int, dict[str, Any]] = {}
+    ordered: list[dict[str, Any]] = []
+    for name in names:
+        for row in trade_rows(_load_summary(src / name)):
+            known = seen.get(row["id"])
+            if known is None:
+                seen[row["id"]] = row
+                ordered.append(row)
+            elif known != row:
+                raise ValueError("two recorded trade rows share an id but differ")
+    return ordered
+
+
+def _frame_sources(src: Path) -> list[Path]:
+    """The recorded ORDER_TRADE_UPDATE and ACCOUNT_UPDATE frame files of `FRAME_CASES`."""
+    found: list[Path] = []
+    for case in FRAME_CASES:
+        pattern = re.compile(
+            rf"{re.escape(case)}-\d{{3}}-(?:{'|'.join(FRAME_KINDS)})(?:-\d+)?\.json"
+        )
+        matched = sorted(path for path in src.iterdir() if pattern.fullmatch(path.name))
+        if not matched:
+            raise ValueError(f"no recorded stream frame found for case {case}")
+        found.extend(matched)
+    return found
+
+
+def _write_text(target: Path, text: str) -> None:
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
 def write_all(src: Path, out: Path) -> list[Path]:
-    """Write every fixture of `OUTPUTS` under `<out>/recorded_demo/`; return the paths."""
+    """Write every fixture under `<out>/recorded_demo/`; return the paths written."""
     target_dir = out / RECORDED_SUBDIR
     target_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for source_name, output_name in OUTPUTS:
         value = unflatten_summary(_load_summary(src / source_name))
         target = target_dir / output_name
-        with target.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(render(value))
+        _write_text(target, render(value))
+        written.append(target)
+    for output_name, source_names in TRADE_OUTPUTS:
+        target = target_dir / output_name
+        _write_text(target, render(merged_trade_rows(src, source_names)))
+        written.append(target)
+    for name in INCOME_EMPTY_SOURCES:
+        if _load_summary(src / name).get("count") != "0":
+            raise ValueError(f"capture {name} is not an empty income answer")
+    target = target_dir / INCOME_EMPTY_OUTPUT
+    _write_text(target, render([]))
+    written.append(target)
+    frames_dir = target_dir / FRAMES_SUBDIR
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    for source in _frame_sources(src):
+        target = frames_dir / source.name
+        target.write_bytes(source.read_bytes())
         written.append(target)
     return written
 

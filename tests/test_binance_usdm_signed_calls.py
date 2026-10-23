@@ -187,6 +187,8 @@ def _payloads(kwargs: dict[str, Any]) -> dict[str, Any]:
         "futures_account_configuration": SimpleNamespace(
             multi_assets_margin=False, dual_side_position=False
         ),
+        "account_trade_list": [],
+        "get_income_history": [],
         "kline_candlestick_data": [],
         "mark_price_kline_candlestick_data": [],
         "open_interest": SimpleNamespace(symbol="BTCUSDT", time=UPDATE_MS, open_interest="1"),
@@ -551,7 +553,7 @@ def _protective(a: BinanceUsdmAdapter) -> Any:
     )
 
 
-# The fourteen signed methods and the SDK method each calls (plan 21-03 added the last three).
+# The sixteen signed methods and the SDK method each calls (plan 21-03 added three, 21-08 two).
 SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "snapshot_open_normal_orders": (
         lambda a: a.snapshot_open_normal_orders(symbol="BTCUSDT"),
@@ -593,6 +595,22 @@ SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "account_config_snapshot": (
         lambda a: a.account_config_snapshot(),
         "futures_account_configuration",
+    ),
+    "user_trades_in_window": (
+        lambda a: a.user_trades_in_window(
+            symbol="BTCUSDT",
+            start_utc=datetime(2026, 10, 22, tzinfo=UTC),
+            end_utc=datetime(2026, 10, 22, 12, tzinfo=UTC),
+        ),
+        "account_trade_list",
+    ),
+    "income_in_window": (
+        lambda a: a.income_in_window(
+            income_type="FUNDING_FEE",
+            start_utc=datetime(2026, 10, 22, tzinfo=UTC),
+            end_utc=datetime(2026, 10, 22, 12, tzinfo=UTC),
+        ),
+        "get_income_history",
     ),
 }
 SIGNED_NAMES = sorted(SIGNED)
@@ -639,11 +657,13 @@ SIGNATURE_SNAPSHOTS: dict[str, tuple[tuple[str, str], ...]] = {
     "account_information_snapshot": (("self", _P),),
     "account_balances_snapshot": (("self", _P),),
     "account_config_snapshot": (("self", _P),),
+    "user_trades_in_window": (("self", _P), ("symbol", _K), ("start_utc", _K), ("end_utc", _K)),
+    "income_in_window": (("self", _P), ("income_type", _K), ("start_utc", _K), ("end_utc", _K)),
 }
 
 
-def test_the_signed_set_is_the_fourteen_methods() -> None:
-    assert len(SIGNED) == 14
+def test_the_signed_set_is_the_sixteen_methods() -> None:
+    assert len(SIGNED) == 16
     assert set(SIGNED) == set(SIGNATURE_SNAPSHOTS)
 
 
@@ -756,7 +776,7 @@ def test_signed_methods_never_retry_429_or_418(
     assert restriction is not None
     assert restriction.remaining_seconds == wait, case
     end = restriction.until_utc
-    # Every one of the fourteen methods, placements included, is refused without sending.
+    # Every one of the sixteen methods, placements included, is refused without sending.
     for name in SIGNED_NAMES:
         other, _ = SIGNED[name]
         with pytest.raises(refusal):
