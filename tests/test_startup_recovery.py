@@ -588,6 +588,43 @@ async def test_spill_directory_missing_is_allowed_and_enters_no_safe_mode(tmp_pa
     assert report.safe_mode_reasons == ()
 
 
+async def test_spill_directory_that_cannot_be_listed_is_unreadable_not_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR-C1: a spill that cannot be listed (a pre_send row inside) is unreadable, not empty."""
+    import os
+
+    from src.ops import spill as spill_module
+
+    rig = await make_rig(real_closer=True)
+    await _crashed_closer_run(rig, tmp_path)  # the pre_send row is only in the spill
+    h = harness(rig, tmp_path)
+    assert h.spill is not None and len(h.spill.pending()) == 1
+    real_listdir = os.listdir
+    spill_dir = h.spill.directory
+
+    def _listdir(path: Any = ".") -> list[str]:
+        if Path(path) == spill_dir:
+            raise PermissionError("spill directory cannot be listed")
+        return real_listdir(path)
+
+    monkeypatch.setattr(spill_module.os, "listdir", _listdir)
+
+    report = await h.run()
+
+    assert "RESTORE_INCONSISTENT" in h.safe_mode.entered_reasons
+    assert "DB_FAILURE" not in h.safe_mode.entered_reasons
+    assert STEP_SPILL_READ in report.failed_steps
+    assert STEP_SPILL_READ not in report.steps
+    assert STEP_SPILL_REPLAYED in report.failed_steps
+    assert "replay" not in h.order  # an unreadable spill is not replayed
+    assert h.spill_rows_seen == [None]  # the plans were rebuilt with an unreadable spill
+    assert report.spill_records == 0
+    assert h.safe_mode.exit_calls == 0
+    monkeypatch.undo()
+    assert len(h.spill.pending()) == 1  # the evidence is kept
+
+
 async def test_spill_file_corrupt_enters_restore_inconsistent_keeps_the_file_and_continues(
     tmp_path: Path,
 ) -> None:
