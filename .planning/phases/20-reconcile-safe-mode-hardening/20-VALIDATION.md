@@ -98,7 +98,7 @@ Test file names are working names from the research; the planner may rename them
 |----------|-------------|------------|-------------------|
 | Manual close outside the system: do `closePosition` legs auto-cancel (A1, G4-035) | EXEC-02 | Observed on Demo 2026-10-22 (both legs end `EXPIRED`); the orphan-sweep path was not exercised on Demo | none further unless the owner wants the orphan case |
 | GTD expiry reaches a terminal state (A2) | EXEC-02 | Not confirmed on Demo (entry still `NEW` 840 s after `goodTillDate`); the scheduled cancel is a Phase 24 blocker | owner Demo probe with a longer wait |
-| A4 (reduce-only MARKET cannot flip a position), P5 stop rejection, P3, `rm` of ALGO_UPDATE | EXEC-02, RISK-03 | never probed | owner Demo probe, Phase 25 |
+| A4 (reduce-only MARKET cannot flip a position), P5 stop rejection, P3, `rm` of ALGO_UPDATE | EXEC-02, RISK-03 | Probed 2026-10-23 (19-OWNER-GAPS.md section 2b, demo-observed, not mainnet): A4 rejected -2022, an oversize reduce-only MARKET clipped to the position, a stop accepted and triggered without a later rejection; P3 and `rm` still not observed | owner Demo probe, Phase 25 |
 | The 11 Demo probes and the numeric `NOT_CONFIGURED` limits | all | owner decision plus Demo evidence | `19-OWNER-GAPS.md` section 2 |
 | ROADMAP criterion 2 and REQUIREMENTS RISK-03 wording (O-A) | RISK-03 | owner accepted 2026-10-22 (recorded in the 20-26 SUMMARY) | none |
 

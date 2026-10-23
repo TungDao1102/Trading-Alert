@@ -116,7 +116,7 @@ reason: "Demo showed the entry still NEW 840 s after goodTillDate, and the case 
 expected: Each returns OBSERVED with the exact answers or NOT_OBSERVED with a reason.
 result: blocked
 blocked_by: server
-reason: "Owner runs the probe on a connected machine (.planning/DEMO-EVIDENCE-PLAN.md sections 16 to 23)."
+reason: "Owner ran sections 16 to 23 on 2026-10-23 (19-OWNER-GAPS.md section 2b, demo-observed, not mainnet): A4 (-2022), A8 (clipped to the position), -4164, -2019, -1021, P7 (sample), income (one COMMISSION row) and P5 (accepted, triggered, no rm) are OBSERVED. Still blocked: a partial fill, the ALGO_UPDATE rm text, a FUNDING_FEE row. The assistant is not the acceptance authority; the owner confirms."
 
 ### 18. Owner-set numbers for the NOT_CONFIGURED keys (O-G, O-04, the stale-entry grace)
 expected: The owner sets max_unprotected_ms, the probe counts, the grace and the other keys after Demo evidence; until then the live path refuses.
