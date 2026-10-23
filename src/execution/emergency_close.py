@@ -58,7 +58,11 @@ Decisions and open items:
   in the coordinator and no claim of safety is made. Plan 20-14 (D-19): with a pending-action
   store attached the refusal is also kept as a durable ``CLOSE_NOT_SENT`` row (intent only, no
   side or quantity, spilled first); a later request that passes the gate, or a flat position,
-  resolves it. The next call re-reads the position and sizes the part itself.
+  resolves it. The next call re-reads the position and sizes the part itself. Plan 20-27
+  (20-REVIEW WR-A2): the gate refuses every signed call, so the refusal can arrive at the first
+  position read, the lot-filter read, the attempt discovery or a later position read as well as at
+  the POST; at each of them a ``PreSendRefusal`` (decided by exception TYPE only) takes the same
+  ``NOT_SENT`` path, never ``POSITION_READ_FAILED`` and never SAFE_MODE.
 * Restart (plan 20-19, D-08, WR-03): the pending attempt is rebuilt from the durable
   ``EMERGENCY_CLOSE`` rows. ``pre_send`` is written ahead to the local spill (when one is
   attached) before the journal, so a crash with the journal down still leaves the record.
@@ -516,6 +520,11 @@ class MarketEmergencyCloser(EmergencyCloser):
 
         try:
             position = await self._read_position(symbol)
+        except PreSendRefusal as exc:
+            # Plan 20-27 (20-REVIEW WR-A2): the REST gate refuses EVERY signed call while it is
+            # restricted, so its refusal arrives here first. Nothing was sent: the same
+            # NOT_SENT path as a refusal at the POST (durable CLOSE_NOT_SENT row, alert).
+            return self._not_sent(entry, reason, parts_sent, self._refusal_outcome(exc))
         except Exception as exc:  # noqa: BLE001 - an unreadable position proves nothing
             return self._fail(entry, reason, "POSITION_READ_FAILED", parts_sent, type(exc).__name__)
         if position == _ZERO:
@@ -537,6 +546,8 @@ class MarketEmergencyCloser(EmergencyCloser):
                 chosen = await self._lot_filters.for_emergency_close(
                     symbol, trade_plan_id=entry.trade_plan_id
                 )
+            except PreSendRefusal as exc:
+                return self._not_sent(entry, reason, parts_sent, self._refusal_outcome(exc))
             except LotFiltersUnavailable as exc:
                 return self._fail(
                     entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, exc.error_type
@@ -546,6 +557,8 @@ class MarketEmergencyCloser(EmergencyCloser):
         else:
             try:
                 filters = await self._adapter.symbol_lot_filters(symbol=symbol)
+            except PreSendRefusal as exc:
+                return self._not_sent(entry, reason, parts_sent, self._refusal_outcome(exc))
             except Exception as exc:  # noqa: BLE001 - Q3: no live filters means no valid part
                 return self._fail(
                     entry, reason, "LOT_FILTERS_UNAVAILABLE", parts_sent, type(exc).__name__
@@ -575,6 +588,8 @@ class MarketEmergencyCloser(EmergencyCloser):
             adopted.mark_unknown(CODE_HISTORY_NOT_TERMINAL)
             self._pending[entry.plan_hash] = adopted
             return self._hold(entry, reason, adopted, parts_sent)
+        except PreSendRefusal as exc:
+            return self._not_sent(entry, reason, parts_sent, self._refusal_outcome(exc))
         except Exception as exc:  # noqa: BLE001 - an unknown attempt history stops the close
             return self._fail(
                 entry,
@@ -638,6 +653,8 @@ class MarketEmergencyCloser(EmergencyCloser):
             # The attempt is terminal (or was rejected): only now is the position re-read.
             try:
                 position = await self._read_position(symbol)
+            except PreSendRefusal as exc:
+                return self._not_sent(entry, reason, parts_sent, self._refusal_outcome(exc))
             except Exception as exc:  # noqa: BLE001 - flat is proven by REST or not at all
                 return self._fail(
                     entry, reason, "POSITION_READ_FAILED", parts_sent, type(exc).__name__
@@ -715,12 +732,7 @@ class MarketEmergencyCloser(EmergencyCloser):
             # resend. The coordinator's deadline keeps running (Q4 is owner-open).
             del self._pending[entry.plan_hash]
             journal(PHASE_NOT_SENT, type(exc).__name__)
-            return _Outcome(
-                _Kind.NOT_SENT,
-                error_type=type(exc).__name__,
-                gate_reason=gate_reason_text(getattr(exc, "reason", None) or type(exc).__name__),
-                retry_after_seconds=_whole_seconds(getattr(exc, "retry_after_seconds", None)),
-            )
+            return self._refusal_outcome(exc)
         except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed
             # The request got past the REST gate (whatever the exchange then said).
             self._resolve_close_row(entry, NOTE_CLOSE_SENT_AFTER_GATE)
@@ -879,6 +891,8 @@ class MarketEmergencyCloser(EmergencyCloser):
         """
         try:
             confirmed = await self._read_position(entry.symbol)
+        except PreSendRefusal as exc:
+            return self._not_sent(entry, close_reason, parts_sent, self._refusal_outcome(exc))
         except Exception as exc:  # noqa: BLE001 - an unreadable position proves nothing
             return self._fail(
                 entry, close_reason, "POSITION_READ_FAILED", parts_sent, type(exc).__name__
@@ -941,6 +955,20 @@ class MarketEmergencyCloser(EmergencyCloser):
             pass
         self._last_result = EmergencyCloseResult(status, parts_sent, code)
         return False
+
+    @staticmethod
+    def _refusal_outcome(exc: PreSendRefusal) -> _Outcome:
+        """The NOT_SENT outcome of a pre-send refusal, from the exception TYPE and its two facts.
+
+        Only the class and the ``reason`` / ``retry_after_seconds`` attributes of the refusal are
+        read, never its message text (D-21).
+        """
+        return _Outcome(
+            _Kind.NOT_SENT,
+            error_type=type(exc).__name__,
+            gate_reason=gate_reason_text(getattr(exc, "reason", None) or type(exc).__name__),
+            retry_after_seconds=_whole_seconds(getattr(exc, "retry_after_seconds", None)),
+        )
 
     def _not_sent(
         self, entry: RestingEntry, close_reason: str, parts_sent: int, outcome: _Outcome
