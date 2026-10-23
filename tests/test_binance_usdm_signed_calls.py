@@ -171,6 +171,22 @@ def _payloads(kwargs: dict[str, Any]) -> dict[str, Any]:
         "user_commission_rate": SimpleNamespace(
             symbol="BTCUSDT", maker_commission_rate="0.0002", taker_commission_rate="0.0004"
         ),
+        "account_information_v3": SimpleNamespace(
+            total_margin_balance="1",
+            total_wallet_balance="1",
+            total_unrealized_profit="0",
+            assets=[
+                SimpleNamespace(
+                    asset="USDT", wallet_balance="1", unrealized_profit="0", margin_balance="1"
+                )
+            ],
+        ),
+        "futures_account_balance_v3": [
+            SimpleNamespace(asset="USDT", balance="1", cross_un_pnl="0")
+        ],
+        "futures_account_configuration": SimpleNamespace(
+            multi_assets_margin=False, dual_side_position=False
+        ),
         "kline_candlestick_data": [],
         "mark_price_kline_candlestick_data": [],
         "open_interest": SimpleNamespace(symbol="BTCUSDT", time=UPDATE_MS, open_interest="1"),
@@ -535,7 +551,7 @@ def _protective(a: BinanceUsdmAdapter) -> Any:
     )
 
 
-# The eleven signed methods and the SDK method each calls.
+# The fourteen signed methods and the SDK method each calls (plan 21-03 added the last three).
 SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "snapshot_open_normal_orders": (
         lambda a: a.snapshot_open_normal_orders(symbol="BTCUSDT"),
@@ -566,6 +582,18 @@ SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "place_algo_protective": (_protective, "new_algo_order"),
     "get_position_mode": (lambda a: a.get_position_mode(), "get_current_position_mode"),
     "user_commission_rate": (lambda a: a.user_commission_rate("BTCUSDT"), "user_commission_rate"),
+    "account_information_snapshot": (
+        lambda a: a.account_information_snapshot(),
+        "account_information_v3",
+    ),
+    "account_balances_snapshot": (
+        lambda a: a.account_balances_snapshot(),
+        "futures_account_balance_v3",
+    ),
+    "account_config_snapshot": (
+        lambda a: a.account_config_snapshot(),
+        "futures_account_configuration",
+    ),
 }
 SIGNED_NAMES = sorted(SIGNED)
 
@@ -608,11 +636,14 @@ SIGNATURE_SNAPSHOTS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "get_position_mode": (("self", _P),),
     "user_commission_rate": (("self", _P), ("symbol", _P)),
+    "account_information_snapshot": (("self", _P),),
+    "account_balances_snapshot": (("self", _P),),
+    "account_config_snapshot": (("self", _P),),
 }
 
 
-def test_the_signed_set_is_the_eleven_methods() -> None:
-    assert len(SIGNED) == 11
+def test_the_signed_set_is_the_fourteen_methods() -> None:
+    assert len(SIGNED) == 14
     assert set(SIGNED) == set(SIGNATURE_SNAPSHOTS)
 
 
@@ -725,7 +756,7 @@ def test_signed_methods_never_retry_429_or_418(
     assert restriction is not None
     assert restriction.remaining_seconds == wait, case
     end = restriction.until_utc
-    # Every one of the eleven methods, placements included, is refused without sending.
+    # Every one of the fourteen methods, placements included, is refused without sending.
     for name in SIGNED_NAMES:
         other, _ = SIGNED[name]
         with pytest.raises(refusal):

@@ -59,6 +59,14 @@ OUTPUTS: tuple[tuple[str, str], ...] = (
         "account_read_only_capture-rest-001-account_information.json",
         "account_information_v3.json",
     ),
+    (
+        "account_read_only_capture-rest-002-account_balance_all.json",
+        "account_balance_v3.json",
+    ),
+    (
+        "account_read_only_capture-rest-003-account_config.json",
+        "account_config.json",
+    ),
 )
 
 

@@ -14,6 +14,8 @@ adapter tests build the real SDK models with `from_dict`.
 | File | Source (under `.planning/phases/19-execution-plan-binding-price-check/evidence/fixtures/`) | Endpoint | Label |
 |---|---|---|---|
 | `recorded_demo/account_information_v3.json` | `account_read_only_capture-rest-001-account_information.json` | `GET /fapi/v3/account` | RECORDED_DEMO |
+| `recorded_demo/account_balance_v3.json` | `account_read_only_capture-rest-002-account_balance_all.json` | `GET /fapi/v3/balance` | RECORDED_DEMO |
+| `recorded_demo/account_config.json` | `account_read_only_capture-rest-003-account_config.json` | `GET /fapi/v1/accountConfig` | RECORDED_DEMO |
 
 ## Conversions applied
 

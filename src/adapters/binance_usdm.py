@@ -58,8 +58,11 @@ re-verification policy):
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
   | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
-  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all eleven SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all fourteen SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
   | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
+  | account_information_snapshot | account_information_v3(recv_window) | plan 21-03: GET /fapi/v3/account; every field Optional[str] in the model, parsed strictly to Decimal (a missing or non-finite field raises, never a zero); `totalMarginBalance` is the equity field (D-02), `availableBalance` is not read.  # noqa: E501
+  | account_balances_snapshot   | futures_account_balance_v3(recv_window) | plan 21-03: GET /fapi/v3/balance; reads asset, balance, crossUnPnl only; the account alias attribute is never read (D-21).  # noqa: E501
+  | account_config_snapshot     | futures_account_configuration(recv_window) | plan 21-03: GET /fapi/v1/accountConfig; reads multiAssetsMargin and dualSidePosition as strict bools, nothing else (OPS-02 is an owner attestation).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
 Delta closed during 08-04 was "no public REST method-signature change
@@ -522,6 +525,33 @@ class AccountInformationSnapshot:
     total_wallet_balance: Decimal
     total_unrealized_profit: Decimal
     assets: tuple[AccountAssetRow, ...]
+
+
+@dataclass(frozen=True)
+class AccountBalanceRow:
+    """One row of `account_balances_snapshot` (GET /fapi/v3/balance, plan 21-03, D-02).
+
+    `balance` is the wallet balance of `asset`; `cross_unrealized_pnl` its cross unrealized
+    PnL. Only these three fields are read. The account alias field of the endpoint is
+    deliberately never read, stored or logged (D-21), so this dataclass has no field for it.
+    """
+
+    asset: str
+    balance: Decimal
+    cross_unrealized_pnl: Decimal
+
+
+@dataclass(frozen=True)
+class AccountConfigSnapshot:
+    """Result of `account_config_snapshot` (GET /fapi/v1/accountConfig, plan 21-03).
+
+    Both flags are detected, never assumed: a missing or non-bool value raises. The other
+    fields of the response (canWithdraw, canTrade, feeTier, ...) are not read: the
+    no-withdraw check is an owner attestation (OPS-02, D-21), not an adapter read.
+    """
+
+    multi_assets_margin: bool
+    dual_side_position: bool
 
 
 # --------------------------------------------------------------------------- #
@@ -1574,6 +1604,59 @@ class BinanceUsdmAdapter:
                 raw.total_unrealized_profit, "totalUnrealizedProfit"
             ),
             assets=assets,
+        )
+
+    async def account_balances_snapshot(self) -> tuple[AccountBalanceRow, ...]:
+        """Read the per-asset balances (GET /fapi/v3/balance, USER_DATA, plan 21-03).
+
+        Through the official SDK `rest_api.futures_account_balance_v3(recv_window)` and the
+        one signed helper `_sdk_call` (shared REST gate, never retried). Only `asset`,
+        `balance` and `crossUnPnl` of each row are read; the account alias attribute is
+        never touched (D-21). Strict Decimal parse as `account_information_snapshot` (D-04).
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.futures_account_balance_v3
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError("account balance response empty: refusing to fabricate")
+        rows = raw if isinstance(raw, list) else [raw]
+        out: list[AccountBalanceRow] = []
+        for item in rows:
+            asset = item.asset
+            if not isinstance(asset, str) or asset.strip() == "":
+                raise ValueError("account field asset missing or empty: refusing to fabricate")
+            out.append(
+                AccountBalanceRow(
+                    asset=asset,
+                    balance=_require_exchange_decimal(item.balance, "balance"),
+                    cross_unrealized_pnl=_require_exchange_decimal(item.cross_un_pnl, "crossUnPnl"),
+                )
+            )
+        return tuple(out)
+
+    async def account_config_snapshot(self) -> AccountConfigSnapshot:
+        """Read the account mode flags (GET /fapi/v1/accountConfig, USER_DATA, plan 21-03).
+
+        Through the official SDK `rest_api.futures_account_configuration(recv_window)` and
+        `_sdk_call` (shared REST gate, never retried). `multiAssetsMargin` and
+        `dualSidePosition` must be real bools, like `get_position_mode`: a dropped or
+        renamed field must not read as a default. No other field is read (OPS-02 is an owner
+        attestation, D-21).
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.futures_account_configuration
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError("account config response empty: refusing to fabricate")
+        if not isinstance(raw.multi_assets_margin, bool):
+            raise ValueError("multiAssetsMargin missing or not a bool")
+        if not isinstance(raw.dual_side_position, bool):
+            raise ValueError("dualSidePosition missing or not a bool")
+        return AccountConfigSnapshot(
+            multi_assets_margin=raw.multi_assets_margin,
+            dual_side_position=raw.dual_side_position,
         )
 
 

@@ -19,6 +19,8 @@ import pytest
 from binance_common.errors import BadRequestError
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     AccountInformationV3Response,
+    FuturesAccountBalanceV3Response,
+    FuturesAccountConfigurationResponse,
 )
 from src.adapters.binance_ratelimit_gate import (
     RateLimitBanActive,
@@ -27,6 +29,8 @@ from src.adapters.binance_ratelimit_gate import (
 )
 from src.adapters.binance_usdm import (
     AccountAssetRow,
+    AccountBalanceRow,
+    AccountConfigSnapshot,
     AccountInformationSnapshot,
     BinanceUsdmAdapter,
     SignedCallPolicyMissing,
@@ -240,3 +244,203 @@ async def test_a_successful_account_information_read_logs_no_balance() -> None:
     text = json.dumps(events, default=str)
     for digits in ("4999", "5000.0", "0.01000000"):
         assert digits not in text
+
+
+# --------------------------------------------------------------------------- v3/balance
+
+# The account alias value of the Demo capture: it must never be read, stored or logged (D-21).
+ALIAS_VALUE = "uX"
+
+
+def _balance_payload(fixture: Any = None) -> Any:
+    models = FuturesAccountBalanceV3Response.from_dict(
+        fixture if fixture is not None else _fixture("account_balance_v3.json")
+    )
+    assert models is not None
+    return models
+
+
+async def test_account_balances_snapshot_reads_the_recorded_demo_rows() -> None:
+    adapter, rest, _ = _adapter({"futures_account_balance_v3": _balance_payload()})
+    rows = await adapter.account_balances_snapshot()
+    assert isinstance(rows, tuple)
+    assert all(isinstance(row, AccountBalanceRow) for row in rows)
+    by_asset = {row.asset: row for row in rows}
+    assert by_asset["USDT"] == AccountBalanceRow(
+        asset="USDT",
+        balance=Decimal("4999.09343961"),
+        cross_unrealized_pnl=Decimal("0.00000000"),
+    )
+    assert by_asset["USDC"].balance == Decimal("5000.00000000")
+    assert by_asset["BTC"].balance == Decimal("0.01000000")
+    assert len(rows) == 8
+    assert rest.calls("futures_account_balance_v3") == 1
+    assert rest.kwargs["futures_account_balance_v3"] == [{"recv_window": RECV_WINDOW}]
+
+
+def test_the_balance_row_has_no_field_for_the_account_alias() -> None:
+    assert list(AccountBalanceRow.__dataclass_fields__) == [
+        "asset",
+        "balance",
+        "cross_unrealized_pnl",
+    ]
+
+
+async def test_the_balance_read_never_touches_the_alias_attribute() -> None:
+    class _Row(SimpleNamespace):
+        @property
+        def account_alias(self) -> str:
+            raise AssertionError("the account alias attribute was read")
+
+    row = _Row(asset="USDT", balance="1.5", cross_un_pnl="0")
+    adapter, _, _ = _adapter({"futures_account_balance_v3": [row]})
+    rows = await adapter.account_balances_snapshot()
+    assert rows == (
+        AccountBalanceRow(asset="USDT", balance=Decimal("1.5"), cross_unrealized_pnl=Decimal("0")),
+    )
+
+
+async def test_a_scalar_balance_response_is_handled_like_a_one_row_list() -> None:
+    row = SimpleNamespace(asset="USDT", balance="2", cross_un_pnl="0.5")
+    adapter, _, _ = _adapter({"futures_account_balance_v3": row})
+    rows = await adapter.account_balances_snapshot()
+    assert [r.balance for r in rows] == [Decimal("2")]
+
+
+def _balance_with(field: str, value: Any) -> list[dict[str, Any]]:
+    data: list[dict[str, Any]] = _fixture("account_balance_v3.json")
+    if value is None:
+        del data[5][field]
+    else:
+        data[5][field] = value
+    return data
+
+
+@pytest.mark.parametrize("bad", BAD_TEXT)
+@pytest.mark.parametrize("field", ["balance", "crossUnPnl"])
+async def test_a_bad_balance_amount_raises_naming_the_field_only(field: str, bad: Any) -> None:
+    payload = _balance_payload(_balance_with(field, bad))
+    adapter, _, _ = _adapter({"futures_account_balance_v3": payload})
+    with pytest.raises(ValueError, match=field) as caught:
+        await adapter.account_balances_snapshot()
+    if isinstance(bad, str) and bad:
+        assert bad not in str(caught.value).replace(field, "")
+
+
+@pytest.mark.parametrize("bad", [None, ""])
+async def test_a_missing_or_empty_balance_asset_raises(bad: Any) -> None:
+    payload = _balance_payload(_balance_with("asset", bad))
+    adapter, _, _ = _adapter({"futures_account_balance_v3": payload})
+    with pytest.raises(ValueError, match="asset"):
+        await adapter.account_balances_snapshot()
+
+
+async def test_account_balances_snapshot_gate_policy_and_error_handling() -> None:
+    adapter, rest, gate = _adapter({"futures_account_balance_v3": _balance_payload()})
+    boom = BadRequestError("rejected", -1000)
+    rest.errors["futures_account_balance_v3"] = boom
+    with pytest.raises(BadRequestError) as caught:
+        await adapter.account_balances_snapshot()
+    assert caught.value is boom
+    assert rest.calls("futures_account_balance_v3") == 1  # never retried
+    del rest.errors["futures_account_balance_v3"]
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, None)
+    with pytest.raises(RateLimitPauseActive):
+        await adapter.account_balances_snapshot()
+    assert rest.calls("futures_account_balance_v3") == 1  # refused before the SDK
+    bare, bare_rest, _ = _adapter({"futures_account_balance_v3": _balance_payload()}, policy=False)
+    with pytest.raises(SignedCallPolicyMissing):
+        await bare.account_balances_snapshot()
+    assert bare_rest.calls("futures_account_balance_v3") == 0
+
+
+async def test_a_successful_balance_read_logs_neither_a_balance_nor_the_alias() -> None:
+    data = _fixture("account_balance_v3.json")
+    for row in data:  # the alias is not in the fixture; a live response could still carry one
+        row["accountAlias"] = ALIAS_VALUE
+    adapter, _, _ = _adapter({"futures_account_balance_v3": _balance_payload(data)})
+    with capture_logs() as events:
+        rows = await adapter.account_balances_snapshot()
+    text = json.dumps(events, default=str)
+    for needle in ("4999", "5000.0", "0.01000000", ALIAS_VALUE):
+        assert needle not in text
+    assert ALIAS_VALUE not in repr(rows)
+
+
+# --------------------------------------------------------------------------- accountConfig
+
+
+def _config_payload(fixture: Any = None) -> Any:
+    model = FuturesAccountConfigurationResponse.from_dict(
+        fixture if fixture is not None else _fixture("account_config.json")
+    )
+    assert model is not None
+    return model
+
+
+async def test_account_config_snapshot_reads_the_recorded_demo_flags() -> None:
+    adapter, rest, _ = _adapter({"futures_account_configuration": _config_payload()})
+    snapshot = await adapter.account_config_snapshot()
+    assert snapshot == AccountConfigSnapshot(multi_assets_margin=False, dual_side_position=False)
+    assert rest.calls("futures_account_configuration") == 1
+    assert rest.kwargs["futures_account_configuration"] == [{"recv_window": RECV_WINDOW}]
+
+
+async def test_account_config_snapshot_reports_true_flags_as_true() -> None:
+    data = _fixture("account_config.json")
+    data["multiAssetsMargin"] = True
+    data["dualSidePosition"] = True
+    adapter, _, _ = _adapter({"futures_account_configuration": _config_payload(data)})
+    snapshot = await adapter.account_config_snapshot()
+    assert snapshot == AccountConfigSnapshot(multi_assets_margin=True, dual_side_position=True)
+
+
+@pytest.mark.parametrize("field", ["multiAssetsMargin", "dualSidePosition"])
+async def test_a_missing_config_flag_raises_naming_the_field(field: str) -> None:
+    data = _fixture("account_config.json")
+    del data[field]
+    adapter, _, _ = _adapter({"futures_account_configuration": _config_payload(data)})
+    with pytest.raises(ValueError, match=field):
+        await adapter.account_config_snapshot()
+
+
+@pytest.mark.parametrize("field", ["multiAssetsMargin", "dualSidePosition"])
+@pytest.mark.parametrize("bad", ["false", 0, 1, None])
+async def test_a_non_bool_config_flag_raises_naming_the_field(field: str, bad: Any) -> None:
+    # The SDK model validates strictly, so the non-bool value is injected into a plain fake.
+    attr = "multi_assets_margin" if field == "multiAssetsMargin" else "dual_side_position"
+    row = SimpleNamespace(multi_assets_margin=False, dual_side_position=False)
+    setattr(row, attr, bad)
+    adapter, _, _ = _adapter({"futures_account_configuration": row})
+    with pytest.raises(ValueError, match=field):
+        await adapter.account_config_snapshot()
+
+
+async def test_account_config_snapshot_gate_policy_and_error_handling() -> None:
+    adapter, rest, gate = _adapter({"futures_account_configuration": _config_payload()})
+    boom = BadRequestError("rejected", -1000)
+    rest.errors["futures_account_configuration"] = boom
+    with pytest.raises(BadRequestError) as caught:
+        await adapter.account_config_snapshot()
+    assert caught.value is boom
+    assert rest.calls("futures_account_configuration") == 1  # never retried
+    del rest.errors["futures_account_configuration"]
+    gate.record(ExchangeErrorCategory.IP_BANNED, None)
+    with pytest.raises(RateLimitBanActive):
+        await adapter.account_config_snapshot()
+    assert rest.calls("futures_account_configuration") == 1
+    bare, bare_rest, _ = _adapter(
+        {"futures_account_configuration": _config_payload()}, policy=False
+    )
+    with pytest.raises(SignedCallPolicyMissing):
+        await bare.account_config_snapshot()
+    assert bare_rest.calls("futures_account_configuration") == 0
+
+
+async def test_a_successful_config_read_logs_nothing_about_the_response() -> None:
+    adapter, _, _ = _adapter({"futures_account_configuration": _config_payload()})
+    with capture_logs() as events:
+        await adapter.account_config_snapshot()
+    text = json.dumps(events, default=str)
+    for needle in ("1791260302519", "multiAssetsMargin", "dualSidePosition"):
+        assert needle not in text

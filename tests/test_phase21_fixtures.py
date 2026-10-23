@@ -125,3 +125,48 @@ def test_the_alias_key_is_dropped_by_the_generator() -> None:
         {f"0.{generator.ALIAS_FIELD}": "x", "0.asset": "USDT", "0.balance": "1.0"}
     )
     assert rows == [{"asset": "USDT", "balance": "1.0"}]
+
+
+def test_every_generated_file_is_present_and_equals_a_fresh_run(tmp_path: Path) -> None:
+    generator = _load_generator()
+    assert generator.main(["--out", str(tmp_path)]) == 0
+    fresh = {path.name: _json(path) for path in sorted((tmp_path / "recorded_demo").glob("*.json"))}
+    assert sorted(fresh) == [
+        "account_balance_v3.json",
+        "account_config.json",
+        "account_information_v3.json",
+    ]
+    for name, value in fresh.items():
+        assert _json(RECORDED / name) == value
+    assert sorted(path.name for path in RECORDED.glob("*.json")) == sorted(fresh)
+
+
+def test_no_fixture_carries_the_account_alias_key_at_any_depth() -> None:
+    generator = _load_generator()
+    files = sorted(RECORDED.glob("*.json"))
+    assert len(files) == 3
+    for path in files:
+        assert generator.ALIAS_FIELD not in _walk_keys(_json(path)), path.name
+        assert generator.ALIAS_FIELD not in path.read_text(encoding="utf-8")
+
+
+def test_recorded_demo_balance_rows_and_config_flags_carry_the_capture_values() -> None:
+    rows = {row["asset"]: row for row in _json(RECORDED / "account_balance_v3.json")}
+    assert rows["USDT"]["balance"] == "4999.09343961"
+    assert rows["USDT"]["crossUnPnl"] == "0.00000000"
+    assert rows["USDC"]["balance"] == "5000.00000000"
+    assert rows["BTC"]["balance"] == "0.01000000"
+    assert rows["USDT"]["marginAvailable"] is True
+    config = _json(RECORDED / "account_config.json")
+    assert config["multiAssetsMargin"] is False
+    assert config["dualSidePosition"] is False
+    assert config["feeTier"] == 0
+    assert config["tradeGroupId"] == -1
+
+
+def test_the_readme_lists_every_generated_fixture_with_the_recorded_demo_label() -> None:
+    readme = (FIXTURE_ROOT / "README.md").read_text(encoding="utf-8")
+    for path in sorted(RECORDED.glob("*.json")):
+        assert f"`recorded_demo/{path.name}`" in readme
+    assert readme.count("RECORDED_DEMO") >= 4
+    assert "not mainnet" in readme
