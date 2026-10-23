@@ -236,10 +236,15 @@ class LocalSpill:
         self._path_for(token.journal_event_id).unlink(missing_ok=True)
 
     def scan(self) -> SpillScan:
-        """Parse every spill file; a missing directory is an empty scan (proves nothing)."""
+        """Parse every spill file; a missing directory is an empty scan (proves nothing).
+
+        Only a directory that does not exist is empty. Any other `OSError` from listing it
+        (permission, an I/O fault, a path that is not a directory) propagates: an unreadable
+        spill is not "nothing pending", and startup maps the exception to SAFE_MODE (CR-C1).
+        """
         try:
             names = sorted(os.listdir(self._directory))
-        except OSError:
+        except FileNotFoundError:
             return SpillScan(records=(), corrupt=())
         records: list[SpillRecord] = []
         corrupt: list[tuple[str, str]] = []

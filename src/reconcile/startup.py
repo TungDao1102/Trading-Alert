@@ -319,7 +319,10 @@ async def run_startup_recovery(
 
     # 6. replay the spill into the journal (files that conflict or are corrupt are kept)
     replay_report: Any = None
-    if spill is not None:
+    if spill is not None and not readable:
+        # An unreadable spill cannot be replayed; the files stay where they are (CR-C1).
+        run.fail(STEP_SPILL_REPLAYED, SAFE_MODE_RESTORE_INCONSISTENT)
+    elif spill is not None:
         try:
             replay = spill_replay if spill_replay is not None else _default_replay()
             replay_report = replay(spill, journal)

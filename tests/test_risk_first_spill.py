@@ -663,6 +663,67 @@ def test_a_spill_directory_deleted_before_replay_reports_nothing(tmp_path: Path)
     assert journal.attempts == 0
 
 
+def test_a_missing_spill_directory_is_the_only_empty_scan(tmp_path: Path) -> None:
+    """CR-C1: only a directory that does not exist reads as an empty scan."""
+    import shutil
+
+    from src.ops.spill import LocalSpill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    shutil.rmtree(directory)
+
+    scan = spill.scan()
+
+    assert scan.records == () and scan.corrupt == ()
+
+
+def test_a_spill_path_that_is_not_a_directory_is_not_an_empty_scan(tmp_path: Path) -> None:
+    """CR-C1: a real OSError (not a directory) must not read as 'nothing pending'."""
+    import shutil
+
+    from src.ops.spill import LocalSpill, replay_spill
+
+    directory = tmp_path / "spill"
+    spill = LocalSpill(directory)
+    shutil.rmtree(directory)
+    directory.write_bytes(b"not a directory")
+
+    with pytest.raises(OSError):
+        spill.scan()
+    with pytest.raises(OSError):
+        spill.pending()
+    with pytest.raises(OSError):
+        replay_spill(spill, RecordingJournal())
+
+
+@pytest.mark.parametrize("error", [PermissionError, OSError], ids=["permission", "io"])
+def test_a_directory_that_cannot_be_listed_is_not_an_empty_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[OSError]
+) -> None:
+    """CR-C1: PermissionError and a generic I/O error propagate; the record is kept."""
+    import os
+
+    from src.ops import spill as spill_module
+    from src.ops.spill import LocalSpill
+
+    spill = LocalSpill(tmp_path / "spill")
+    spill.write(_event())
+    real_listdir = os.listdir
+
+    def _listdir(path: Any = ".") -> list[str]:
+        if Path(path) == spill.directory:
+            raise error("spill directory cannot be listed")
+        return real_listdir(path)
+
+    monkeypatch.setattr(spill_module.os, "listdir", _listdir)
+
+    with pytest.raises(error):
+        spill.scan()
+    monkeypatch.undo()
+    assert [r.event.journal_event_id for r in spill.pending()] == ["unit_test_a"]
+
+
 def test_a_write_after_the_directory_vanished_recreates_it(tmp_path: Path) -> None:
     import shutil
 
