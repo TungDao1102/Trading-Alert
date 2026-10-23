@@ -225,7 +225,7 @@ Production code also emits the following plain strings as `reason_code` values o
 | `PLAN_INVALIDATED_BEFORE_PLACEMENT` | `src/execution/pre_placement.py` | The Signal carries an invalidation time or the latest closed strategy bar closed beyond the plan's invalidation level before the entry was placed; deliberately distinct from `RejectionReason.INVALIDATED` (planner geometry, D-08, G4-017) and not an alias of it | proposed canonical, promote in Phase 24 |
 | `INVALIDATION_INPUT_UNAVAILABLE` | `src/execution/pre_placement.py` | The closed-bar close needed for the invalidation check was not provided, or the plan's invalidation rule cannot be read, so the plan is refused (fail closed) | proposed canonical, promote in Phase 24 |
 | `VALIDITY_TOO_SHORT` | `src/execution/pre_placement.py` | The remaining validity, measured to the floored `goodTillDate` second, is below the owner minimum or the exchange GTD floor | proposed canonical, promote in Phase 24 |
-| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the fourteen execution limits (`EXECUTION_LIMIT_KEYS`: the seven Phase 19 keys and the seven Phase 20 keys) in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused | proposed canonical, promote in Phase 24 |
+| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the fifteen required execution limits (`EXECUTION_LIMIT_KEYS` holds sixteen keys: the seven Phase 19 keys, the seven Phase 20 keys, the alert-only key `reconcile.entry_stale_grace_ms`, which never blocks, and the Phase 21 key `account.max_equity_age_ms`) in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused | proposed canonical, promote in Phase 24 |
 | `SYMBOL_HAS_POSITION` | `src/execution/pre_placement.py` | The exchange already reports a position on the plan's symbol | proposed canonical, promote in Phase 24 |
 | `SYMBOL_HAS_OPEN_ORDER` | `src/execution/pre_placement.py` | The exchange already reports an open order on the plan's symbol | proposed canonical, promote in Phase 24 |
 | `UNPROTECTED_POSITION_EXISTS` | `src/execution/pre_placement.py` | An account-wide flag says a position without a confirmed stop exists (a protection state that blocks new entries); checked before the same-symbol rules | proposed canonical, promote in Phase 20 |
@@ -241,6 +241,12 @@ Production code also emits the following plain strings as `reason_code` values o
 | `APPROVED_QUANTITY_NOT_CONFIRMED` | `src/execution/manager.py` | The approval row read inside the consume transaction does not confirm the quantity: its stored `approved_quantity` is NULL, differs from the quantity bound from the caller's approval, or is below the quantity about to be placed (D078 (6)); the transaction rolls back, the approval is not consumed and nothing is sent; the differing and below cases also enter SAFE_MODE `APPROVED_QUANTITY_INCONSISTENT`, a NULL (legacy row) does not | proposed canonical, promote in Phase 24 |
 | `RECONCILED_ABSENT` | `src/execution/intent_recovery.py` (`UnknownEntryResolver`; the constant `RESOLUTION_RECONCILED_ABSENT` lives in `src/execution/intent_store.py`) | Resolution reason of an execution intent, stored in `resolution_reason_code` (Alembic revision 0007): an UNKNOWN ENTRY intent was closed as REJECTED after the D-11 evidence held in one pass (the configured number of clean not-found probes by client order id, `goodTillDate` plus grace passed, a fresh positions read and open-orders read for the symbol showing no position and no open order, all journaled with source `REST_RECONCILE`). It records that the entry is absent on Binance; it is not a Binance rejection and never exits SAFE_MODE | resolution reason, not a rejection reason |
 | `NEVER_SENT` | `src/execution/intent_recovery.py` (`resolve_unresolved_intents`; the constant `RESOLUTION_NEVER_SENT` lives in `src/execution/intent_store.py`) | Resolution reason of an execution intent, stored in `resolution_reason_code`: an INTENDED ENTRY (`mark_sent` never committed, so the send never happened) was probed once by client order id, found absent, and recorded REJECTED (D-11). It is not a Binance rejection | resolution reason, not a rejection reason |
+| `DAY_STATE_MISSING` | `src/risk/daily_loss.py` (`BLOCKED_DAY_STATE_MISSING`, carried as `blocked_reason` of a `DayStateVerdict` whose `reason_code` is `UNCERTAIN_ACCOUNT_STATE`); alerted as `DB_FAILURE` by `src/execution/daily_stop.py` | There is no persisted day state for today and the exposure rule forbids opening one (a missing day with open exposure); no entry is allowed and nothing is cancelled | blocked reason, not a rejection reason |
+| `DAY_STATE_UNREADABLE` | `src/risk/daily_loss.py` (`BLOCKED_DAY_STATE_UNREADABLE`), alerted as `DB_FAILURE` by `src/execution/daily_stop.py` | The persisted day state or its components could not be read; the day is never treated as NORMAL | blocked reason, not a rejection reason |
+| `DAY_BASE_UNAVAILABLE` | `src/risk/daily_loss.py` (`BLOCKED_DAY_BASE_UNAVAILABLE`) | The day-start equity base could not be read fresh enough to open the day | blocked reason, not a rejection reason |
+| `DAILY_LOSS_UNKNOWN` | `src/risk/daily_loss.py` (`BLOCKED_DAILY_LOSS_UNKNOWN`) | A loss source failed, a component is in another asset or conflicts with a stored one, or the funding policy cannot count the day; the loss is unknown, so no entry is allowed (a held latch still answers `DAILY_STOP`) | blocked reason, not a rejection reason |
+| `DAY_THRESHOLDS_INVALID` | `src/risk/daily_loss.py` (`BLOCKED_DAY_THRESHOLDS_INVALID`) | The parameter set lacks a typed daily threshold or its warning is above its stop, so the daily state cannot be derived (a malformed set must not read as NORMAL) | blocked reason, not a rejection reason |
+| `FUNDING_SOURCE_UNVERIFIED` | `src/risk/daily_loss.py` (`FUNDING_LABEL_UNVERIFIED`) | Label on a daily loss counted under `FundingPolicy.TRADES_WITH_UNVERIFIED_FUNDING` (the owner's O-2 answer): zero income rows were counted as zero funding while the FUNDING_FEE source has not been observed | label, not a rejection reason |
 
 ### 9.4 SAFE_MODE entry reasons
 
@@ -518,3 +524,55 @@ The three source tags of a bar (`SourceTag` in `src/paper/vocabulary.py`). A clo
 ### test_only
 
 Marker carried by every record of the pre-soak rehearsal of the SHADOW APPROVE, CONFIRM, journal path. The rehearsal runs before the trial soak in its own window on an explicit test-only path with its own test identifier, does not bypass the paper-start allowlist, and is excluded from every count: signals, trades, parity evidence, G1 to G5 and PAPER-03. The trial soak starts from a clean state afterwards. Authority: D063 item 3 (REV-03).
+
+## 14. Live account state vocabulary (Phase 21)
+
+Words of the live equity, daily loss and reservation code. This section describes the code as built (`src/risk/daily_loss.py`, `src/risk/reservations.py`); it adds no rule and no `RejectionReason` member. Nothing here is started by a running process before Phase 24. Demo facts are demo-observed, not mainnet.
+
+### 14.1 ReservationStatus
+
+A reservation is one row per plan for the plan's life (`risk_reservations`). The caps count RESERVED, PLACED and OPEN.
+
+| Value | Meaning | Counted by the caps |
+|-------|---------|---------------------|
+| `REQUESTED` | The plan asked to reserve its sized risk; not approved yet | no |
+| `RESERVED` | The approval transaction accepted the risk against the caps | yes |
+| `PLACED` | The entry order was sent | yes |
+| `OPEN` | The entry filled and the position is live | yes |
+| `RELEASED` | Terminal; the risk is free again. The first release reason and time are kept | no |
+
+### 14.2 ReleaseReason
+
+The nine reasons, each with the terminal plan state that causes it and the statuses it may release from (`RELEASE_SOURCE_STATUSES`). RELEASED is never a source.
+
+| Value | Terminal plan state | Permitted source statuses |
+|-------|---------------------|---------------------------|
+| `APPROVAL_SKIPPED` | Approval decided SKIPPED (the SKIP and CANCEL actions) | REQUESTED |
+| `APPROVAL_EXPIRED` | Approval decided EXPIRED | REQUESTED |
+| `PLAN_EXPIRED` | Plan EXPIRED, or an APPROVED plan never consumed before its expiry | REQUESTED, RESERVED |
+| `PLAN_INVALIDATED` | Plan INVALIDATED | REQUESTED, RESERVED |
+| `PLAN_SUPERSEDED` | Plan SUPERSEDED | REQUESTED, RESERVED |
+| `PLACEMENT_REFUSED` | A final pre-placement refusal before consumption (`PLAN_STATUS_INVALID`, `PLAN_INVALIDATED_BEFORE_PLACEMENT`, `VALIDITY_TOO_SHORT`) | RESERVED |
+| `ENTRY_REJECTED` | Entry intent REJECTED | RESERVED, PLACED |
+| `ENTRY_ENDED_NO_FILL` | Protection state `ENTRY_ENDED_NO_FILL` (a resting entry ended with no fill) | PLACED |
+| `POSITION_CLOSED` | Protection state `FLAT` | OPEN |
+
+### 14.3 ComponentKind and ComponentSource
+
+A daily loss component is one signed amount of one kind from one source. The same component seen from two sources counts once, at the more adverse amount.
+
+| Value | Meaning |
+|-------|---------|
+| `ComponentKind.FILL_PNL` | Realized PnL of a fill |
+| `ComponentKind.FILL_COMMISSION` | Commission of a fill |
+| `ComponentKind.FUNDING` | A funding payment or receipt; comes from REST income only |
+| `ComponentSource.USER_DATA_EVENT` | The user-data stream event of a fill |
+| `ComponentSource.REST_USER_TRADES` | A row of the REST user trades read |
+| `ComponentSource.REST_INCOME` | A row of the REST income read |
+
+### 14.4 FundingPolicy
+
+| Value | Meaning |
+|-------|---------|
+| `TRADES_WITH_UNVERIFIED_FUNDING` | Owner choice O-2, "option A" (2026-10-23): PnL and commission come from the trade sources, FUNDING_FEE rows are added when the income read returns them, zero rows count as zero funding with the label `FUNDING_SOURCE_UNVERIFIED`, and a failed income read makes the loss unknown. Passed by the Phase 24 composition |
+| `REQUIRE_VERIFIED_FUNDING_SOURCE` | The loss is unknown until `FUNDING_SOURCE_VERIFIED` is True; it stays False until a DECISIONS row changes it |
