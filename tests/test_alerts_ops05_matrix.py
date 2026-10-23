@@ -4,8 +4,9 @@ Evidence label: executed tests with a fake journal and the real `JournalFirstAle
 AST scans of the producer modules. No Telegram call is made and nothing here is `[DEMO]`.
 
 One parametrized case per OPS-05 alert listed in REQUIREMENTS.md plus the D-24 entry-path rows.
-DAILY_STOP and DAILY_LOSS_WARNING have a contract and a test trigger only (the producer is
-Phase 21): a test trigger is not end-to-end coverage, and OPS-05 is NOT complete end-to-end here.
+DAILY_STOP and DAILY_LOSS_WARNING have their producer in `src/execution/daily_stop.py` since
+Phase 21; `emit_daily_state_alert` stays a test trigger, no producer is wired in a running
+process until Phase 24, and OPS-05 is NOT complete end-to-end here.
 """
 
 from __future__ import annotations
@@ -184,12 +185,21 @@ def test_the_entry_path_reasons_reach_the_sink_through_the_observer_in_alerts_py
 
 
 @pytest.mark.parametrize("alert", ["DAILY_STOP", "DAILY_LOSS_WARNING"])
-def test_daily_state_rows_list_only_the_test_trigger_with_phase_21_as_producer(alert: str) -> None:
+def test_daily_state_rows_name_the_phase_21_producer(alert: str) -> None:
     row = _row(alert)
 
-    assert row.producer == "Phase 21"
-    assert row.phase20_delivers.startswith("contract and test trigger only")
-    assert "not end-to-end" in row.phase20_delivers
+    assert row.producer == "src/execution/daily_stop.py"
+    assert row.phase20_delivers.startswith("Phase 21 producer (enforce_daily_state)")
+    assert "not wired in a running process until Phase 24" in row.phase20_delivers
+
+
+def test_the_db_failure_row_keeps_its_producer_and_names_the_day_state_reasons() -> None:
+    row = _row("DB_FAILURE")
+
+    assert row.producer == "src/execution/manager.py"
+    assert "DAY_STATE_MISSING" in row.phase20_delivers
+    assert "DAY_STATE_UNREADABLE" in row.phase20_delivers
+    assert "src/execution/daily_stop.py" in row.phase20_delivers
 
 
 @pytest.mark.parametrize(

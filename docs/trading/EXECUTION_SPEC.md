@@ -60,7 +60,7 @@ An unfilled entry must be canceled when:
 
 1. time expiry is reached;
 2. strategy invalidation occurs;
-3. portfolio/risk state changes and the order is no longer permitted;
+3. portfolio/risk state changes and the order is no longer permitted (DAILY_STOP, D033: trigger `daily_stop`, Phase 21; protective stops are kept);
 4. symbol/market conditions make the plan stale;
 5. user explicitly cancels.
 

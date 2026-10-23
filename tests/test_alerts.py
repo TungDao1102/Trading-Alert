@@ -730,8 +730,9 @@ def test_the_daily_state_trigger_refuses_any_other_state() -> None:
 def test_daily_state_trigger_has_no_production_caller() -> None:
     """`emit_daily_state_alert` is a TEST TRIGGER: no module under src may use it (Phase 21).
 
-    This keeps the OPS-05 matrix of plan 20-22 truthful: DAILY_STOP and the daily-loss WARNING
-    are "contract and test trigger only" until Phase 21 adds a real producer.
+    This keeps the OPS-05 matrix truthful: the Phase 21 producer of DAILY_STOP and the
+    daily-loss WARNING (`src/execution/daily_stop.py`) calls the sink directly, and the
+    trigger stays a test trigger.
     """
     src_root = ALERTS_SOURCE.parents[1]
     offenders: list[str] = []

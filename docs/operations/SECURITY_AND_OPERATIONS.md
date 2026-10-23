@@ -78,13 +78,13 @@ Phase 20 built the alert contract (`ALERT_EVENTS`: a closed set of events with a
 | `STALE_DATA` | OPS-05 | HIGH | `src/reconcile/loop.py` | Reconcile tick alerts a stale mark price, a silent user-data stream or a halted stream |
 | `AUTH_FAILURE` | OPS-05 | HIGH | `src/reconcile/loop.py` | Produced only by the reconcile tick REST reads; the coordinator, the closer and the manager journal the error class and do not alert it |
 | `DUPLICATE_EXECUTION_ATTEMPT` | OPS-05 | HIGH | `src/execution/manager.py` | An already consumed approval (stored outcome or lost consume race) alerts through the optional `LivePlacementContext.alert_sink`; nothing is re-sent |
-| `DAILY_STOP` | OPS-05 | CRITICAL | Phase 21 | Contract and test trigger only (`emit_daily_state_alert`); not end to end. The producer is Phase 21 |
-| `DAILY_LOSS_WARNING` | OPS-05 | WARNING | Phase 21 | Contract and test trigger only; not end to end. The producer is Phase 21 |
+| `DAILY_STOP` | OPS-05 | CRITICAL | `src/execution/daily_stop.py` | Phase 21 producer; cancels resting entries via `expire_pending_entry('daily_stop')` before alerting; not wired until Phase 24 (`emit_daily_state_alert` stays a test trigger) |
+| `DAILY_LOSS_WARNING` | OPS-05 | WARNING | `src/execution/daily_stop.py` | Phase 21 producer; alerts without any exchange call; not wired until Phase 24 |
 | `ENTRY_STATE_UNKNOWN` | D-24 (entry path) | CRITICAL | `src/execution/manager.py` | SAFE_MODE entry of the entry path alerts through the `on_enter` observer |
 | `PROTECTION_HANDOFF_FAILED` | D-24 (entry path) | CRITICAL | `src/execution/manager.py` | SAFE_MODE entry of the entry path alerts through the `on_enter` observer |
-| `DB_FAILURE` | D-24 (entry path) | HIGH | `src/execution/manager.py` | SAFE_MODE entry after a store failure alerts through the `on_enter` observer |
+| `DB_FAILURE` | D-24 (entry path) | HIGH | `src/execution/manager.py` | SAFE_MODE entry after a store failure alerts through the `on_enter` observer; since Phase 21 `src/execution/daily_stop.py` also alerts it with the reasons `DAY_STATE_MISSING` and `DAY_STATE_UNREADABLE` (a missing or unreadable persisted day state; nothing is cancelled) |
 
-OPS-05 is therefore not complete end to end: the `DAILY_STOP` and daily-loss WARNING producers are Phase 21 (D033), and the wiring of every other producer into a running process is Phase 24. Other events of the closed set (`TP_UNAVAILABLE`, `EMERGENCY_CLOSE_FAILED`, `EMERGENCY_CLOSE_NOT_SENT`, `MANUAL_CLOSE_ORPHAN_UNVERIFIED`, `SAFE_MODE_ENTERED`) keep their existing producers. Section 7 is not changed by this note.
+OPS-05 is therefore not complete end to end: the `DAILY_STOP` and daily-loss WARNING producers exist since Phase 21 (D033, `src/execution/daily_stop.py`), and the wiring of every producer into a running process is Phase 24. Other events of the closed set (`TP_UNAVAILABLE`, `EMERGENCY_CLOSE_FAILED`, `EMERGENCY_CLOSE_NOT_SENT`, `MANUAL_CLOSE_ORPHAN_UNVERIFIED`, `SAFE_MODE_ENTERED`) keep their existing producers. Section 7 is not changed by this note.
 
 ## 6. Logging
 

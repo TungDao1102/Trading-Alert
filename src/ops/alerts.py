@@ -17,13 +17,14 @@ with the real infrastructure; plan 20-22 wires the producers and publishes `OPS0
   (redaction is not relied on).
 - On a restart the caller passes the journaled rows to `requeue_undelivered`: every
   `OPERATIONAL_ALERT` without an `ALERT_DELIVERED` row is queued again (at least once).
-- `emit_daily_state_alert` is a TEST TRIGGER for the Phase 21 daily states: no production
-  module calls it until Phase 21 provides a producer.
+- `emit_daily_state_alert` stays a TEST TRIGGER for the daily states: no production module
+  calls it. The Phase 21 producer is `src/execution/daily_stop.py` (`enforce_daily_state`),
+  which calls the sink directly after it cancelled the resting entries (D-13).
 
 `OPS05_MATRIX` states, per OPS-05 alert, the producer and what Phase 20 delivers.
-OPS-05 is NOT complete end-to-end in Phase 20: DAILY_STOP and DAILY_LOSS_WARNING have a contract
-and a test trigger only (the producer is Phase 21), and a test trigger is not end-to-end
-coverage (D-23).
+OPS-05 is NOT complete end-to-end: DAILY_STOP and DAILY_LOSS_WARNING have a producer since
+Phase 21, but no producer is wired in a running process until Phase 24, and a test trigger is
+not end-to-end coverage (D-23).
 
 The module reads no clock: every time comes from the caller.
 """
@@ -731,8 +732,9 @@ class Ops05Row:
 
     `alert` is the event name in `ALERT_EVENTS` (the event contract: name, severity and fixed
     template). `requirement_source` says where the alert is required (`OPS-05` or a Phase 20
-    decision). `producer` is the module that raises it today, or `Phase 21` when none exists
-    yet; `phase20_delivers` is the honest scope. `journal_first` and `dedupe_and_retry` describe
+    decision). `producer` is the module that raises it (a producer exists for every row since
+    Phase 21; none is wired in a running process before Phase 24); `phase20_delivers` is the
+    honest scope. `journal_first` and `dedupe_and_retry` describe
     the shared sink: the alert is journaled before it is queued, a repeat inside the dedupe
     window is suppressed, and only the MESSAGE is retried (an order never is, Q5).
     """
@@ -749,7 +751,12 @@ _SINK_BEHAVIOR = "dedupe window + bounded message retry; orders never retried"
 _SOURCE_OPS05 = "OPS-05"
 _SOURCE_D24 = "D-24 (entry path)"
 _SOURCE_STALE_ENTRY = "owner request 2026-10-23 (stale entry)"
-_PRODUCER_PHASE21 = "Phase 21"
+_PRODUCER_DAILY_STOP = "src/execution/daily_stop.py"
+_DAILY_PRODUCER_TEXT = (
+    "Phase 21 producer (enforce_daily_state): cancels the resting entries through "
+    "expire_pending_entry('daily_stop') before it alerts; not wired in a running process "
+    "until Phase 24"
+)
 
 OPS05_MATRIX: tuple[Ops05Row, ...] = (
     Ops05Row(
@@ -771,7 +778,10 @@ OPS05_MATRIX: tuple[Ops05Row, ...] = (
     Ops05Row(
         "DB_FAILURE",
         _SOURCE_D24,
-        "SAFE_MODE entry after a store failure alerts through the on_enter observer",
+        "SAFE_MODE entry after a store failure alerts through the on_enter observer; since "
+        "Phase 21 src/execution/daily_stop.py also alerts it with the reasons DAY_STATE_MISSING "
+        "and DAY_STATE_UNREADABLE (a missing or unreadable persisted day state, nothing is "
+        "cancelled)",
         "src/execution/manager.py",
         True,
         _SINK_BEHAVIOR,
@@ -864,16 +874,16 @@ OPS05_MATRIX: tuple[Ops05Row, ...] = (
     Ops05Row(
         "DAILY_STOP",
         _SOURCE_OPS05,
-        "contract and test trigger only (emit_daily_state_alert); not end-to-end",
-        _PRODUCER_PHASE21,
+        _DAILY_PRODUCER_TEXT,
+        _PRODUCER_DAILY_STOP,
         True,
         _SINK_BEHAVIOR,
     ),
     Ops05Row(
         "DAILY_LOSS_WARNING",
         _SOURCE_OPS05,
-        "contract and test trigger only (emit_daily_state_alert); not end-to-end",
-        _PRODUCER_PHASE21,
+        _DAILY_PRODUCER_TEXT,
+        _PRODUCER_DAILY_STOP,
         True,
         _SINK_BEHAVIOR,
     ),
@@ -904,13 +914,14 @@ _DAILY_STATE_EVENTS = MappingProxyType(
 def emit_daily_state_alert(
     sink: _AlertEmitter, *, state: DailyState, subject: str, now_utc: datetime
 ) -> None:
-    """TEST TRIGGER for the Phase 21 daily states. It has no production caller.
+    """TEST TRIGGER for the daily states. It has no production caller.
 
     DAILY_STOP emits `DAILY_STOP` (CRITICAL) and WARNING emits `DAILY_LOSS_WARNING` (WARNING).
-    The producers (the daily PnL state machine) belong to Phase 21; until they exist this
-    function is the contract plus a way for a test to push the alert through the sink. A test
-    that calls it is NOT evidence of end-to-end coverage (D-23, OPS-05 scope split), and
-    `tests/test_alerts.py` scans `src` to prove no module other than this one uses it.
+    The production producer is `src/execution/daily_stop.py` (`enforce_daily_state`, Phase 21),
+    which calls the sink directly; this function stays the contract plus a way for a test to
+    push the alert through the sink. A test that calls it is NOT evidence of end-to-end
+    coverage (D-23, OPS-05 scope split), and `tests/test_alerts.py` scans `src` to prove no
+    module other than this one uses it.
 
     Raises:
         ValueError: `state` is not DAILY_STOP or WARNING.
