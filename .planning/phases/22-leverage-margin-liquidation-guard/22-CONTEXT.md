@@ -138,3 +138,29 @@ None — no pending todo matched this phase's scope.
 
 *Phase: 22-Leverage, Margin + Liquidation Guard*
 *Context gathered: 2026-10-23*
+
+## Research amendments (2026-10-23, from 22-RESEARCH.md C1..C10)
+
+The decisions above were chosen by the assistant under `--auto`; the research found facts that override ten of
+their details. Where this section and a D-xx line differ, THIS section wins. Nothing here sets an owner number.
+
+- A1 (D-13): "availableBalance already nets resting orders" is cited from a support article and an assumed
+  mapping, not proven. Hold the basis in one function `free_margin_basis`; count other claims conservatively;
+  the D-18 Demo case settles it. Criteria 2 and 3 are not Demo-proven until it runs.
+- A2 (D-14): the exchange reading cannot be taken inside the synchronous approval transaction. Migration 0012
+  still stores `required_margin` (nullable); the authoritative margin check runs at placement with a fresh async
+  reading, summing the other RESERVED rows.
+- A3 (D-16): do NOT change the `RejectionReason` enum. Emit the existing `INSUFFICIENT_MARGIN`; add the other
+  codes as plain strings in GLOSSARY 9.3 (Phase 19 precedent).
+- A4 (D-10/D-11/D-13): limits keys are positive integers only: express buffer and headroom in basis points
+  (`..._bps`) and ages in milliseconds (`..._ms`); all start `NOT_CONFIGURED`.
+- A5 (D-07): do not call `get_position_mode` per plan (gate 5f already does); take `dualSidePosition` and
+  `multiAssetsMargin` from the single `accountConfig` read.
+- A6 (D-08): no recorded isolated `liquidationPrice` exists; goldens are the official examples and the Demo
+  bracket numbers in RESEARCH 5.1; the maintenance tier is the one containing `Q*LP`, not `Q*EP`.
+- A7 (D-15): order is configuration guard, then liquidation, then margin; call site after gate 5f, before gate 5g.
+- A8 (D-05): fill margin type, leverage and equity by `dataclasses.replace` on the in-memory snapshot carried by
+  `RestingEntry`; the persisted write-once row is not touched.
+- A9 (D-03): `ALERT_EVENTS` is pinned; reuse `DIVERGENCE` with a reason code unless the plan updates every pin.
+- A10 (D-12): plan the post-fill liquidation comparison as its own isolated plan; an exchange `liquidationPrice`
+  of "0" or None is unknown (fail closed). O-4 default unchanged.
