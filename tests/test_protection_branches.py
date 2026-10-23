@@ -9,6 +9,19 @@ Demo-observed only, the -2022 / -2024 answers of a reduce-only close are a TEST 
 no number here is a ratified limit (the deadlines are the TEST_ONLY values of
 tests/support/execution_limits.py).
 
+B2 / B3 table (plan 20-27; Demo shapes of 2026-10-22: tests/test_protection_demo_shapes.py).
+A never-confirmed stop is re-placed under the same id, at most once per step, only when REST proved
+it absent: the by-id query answers found=False AND the open-algo-orders listing was read and does
+not contain the id.
+
+| by-id query | listing       | stop reading          | same-id re-place | covered by            |
+|-------------|---------------|-----------------------|------------------|-----------------------|
+| found=True  | not read      | ACTIVE / NOT_ACTIVE   | no               | b2 tests below        |
+| found=False | lists id, NEW | ACTIVE                | no               | demo_shapes, listed   |
+| found=False | read, no id   | ABSENT                | once per step    | ambiguous_stop_is_... |
+| found=False | unreadable    | UNREADABLE            | no               | demo_shapes, unreadable|
+| any         | -4116 on place| exists, awaiting REST | not resent       | demo_shapes, 4116     |
+
 Open and NOT claimed safe here: Q4 / Phase 18 src/WR-12 (a 418/429 pause refuses the stop, the
 cancel and the close), A3 (whether a closePosition stop is auto-cancelled when the position
 closes), A2 (a GTD expiry reported as EXPIRED and terminal).
@@ -305,13 +318,16 @@ async def test_branch_ambiguous_stop_is_replaced_only_after_a_definitive_absence
     sequence = [
         (c["method"], c["kwargs"].get("client_algo_id"))
         for c in rig.fake.calls
-        if c["method"] in ("place_algo_protective", "query_algo_order_by_client")
+        if c["method"]
+        in ("place_algo_protective", "query_algo_order_by_client", "snapshot_open_algo_orders")
     ]
     stop_id = rig.stop_id
     assert sequence == [
         ("query_algo_order_by_client", stop_id),
         ("place_algo_protective", stop_id),
         ("query_algo_order_by_client", stop_id),
+        # Plan 20-27: the by-id absence is checked against the listing before the re-place.
+        ("snapshot_open_algo_orders", None),
         ("place_algo_protective", stop_id),
         ("query_algo_order_by_client", stop_id),
     ]
