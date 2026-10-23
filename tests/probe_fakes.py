@@ -375,6 +375,9 @@ TEST_ONLY_NEAR_TRIGGER_FRACTION = "0.999"
 TEST_ONLY_GTD_LIFETIME_SECONDS = 660
 TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS = 720
 TEST_ONLY_RACE_REPEATS = 3
+# Quick task 261023-sj2: the TEST_ONLY quantity of `insufficient_margin` (far above the 150 cap
+# at the far price 48000.00: a notional of 240000).
+TEST_ONLY_MARGIN_QUANTITY = "5"
 
 _TEST_ONLY_PROBE_LIMITS = """
 [order]
@@ -410,11 +413,22 @@ def write_probe_limits(
     """
     market_lot = "market_lot_size_out_of_range" in optional
     extra_order = 'market_lot_probe_quantity = "200"\n' if market_lot else ""
-    if "triggered_bracket" in optional or "tp1_from_fill" in optional:
+    if any(
+        key in optional
+        for key in (
+            "triggered_bracket",
+            "tp1_from_fill",
+            "stop_reject_after_accept",
+            "trigger_cancel_race",
+        )
+    ):
         extra_order += f'near_trigger_fraction = "{TEST_ONLY_NEAR_TRIGGER_FRACTION}"\n'
     extra_waits = ""
-    if "cancel_fill_race" in optional:
+    if "cancel_fill_race" in optional or "trigger_cancel_race" in optional:
         extra_order += f"race_repeats = {TEST_ONLY_RACE_REPEATS}\n"
+    if "insufficient_margin" in optional:
+        extra_order += f'insufficient_margin_quantity = "{TEST_ONLY_MARGIN_QUANTITY}"\n'
+
     if "gtd_expiry" in optional:
         extra_order += f"gtd_lifetime_seconds = {TEST_ONLY_GTD_LIFETIME_SECONDS}\n"
         extra_waits = f"gtd_expiry_wait_seconds = {TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS}\n"
@@ -1400,6 +1414,7 @@ __all__ = [
     "TEST_ONLY_CLEANUP_TIMEOUT_SECONDS",
     "TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS",
     "TEST_ONLY_GTD_LIFETIME_SECONDS",
+    "TEST_ONLY_MARGIN_QUANTITY",
     "TEST_ONLY_NEAR_TRIGGER_FRACTION",
     "TEST_ONLY_RACE_REPEATS",
     "VirtualClock",

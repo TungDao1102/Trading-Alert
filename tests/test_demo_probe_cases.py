@@ -70,6 +70,15 @@ EXPECTED_ORDER = (
     "partial_fill_attempt",
     "entry_cancel_fill_race",
     "stream_loss_during_case",
+    # quick task 261023-sj2: eight more owner opt-in cases, before the long GTD case
+    "reduce_only_market_on_flat",
+    "reduce_only_market_larger_than_position",
+    "non_reduce_only_below_min_notional",
+    "insufficient_margin_order",
+    "stop_rejected_after_acceptance",
+    "trigger_cancel_race",
+    "timestamp_outside_recv_window",
+    "income_history_read",
     "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
@@ -91,6 +100,14 @@ ALL_OPTIONAL = (
     "partial_fill_attempt",
     "cancel_fill_race",
     "stream_loss",
+    "reduce_only_flat",
+    "reduce_only_oversize",
+    "min_notional_entry",
+    "insufficient_margin",
+    "stop_reject_after_accept",
+    "trigger_cancel_race",
+    "recv_window_error",
+    "income_history",
     "gtd_expiry",
 )
 
@@ -171,6 +188,7 @@ def test_case_order_is_the_d16_order_of_risk() -> None:
     # the sj0 ten keep their relative order; the sj1 five sit before the last (long) one
     assert dp.CAPTURE_CASES == tuple(c for c in EXPECTED_ORDER[19:] if c in dp.CAPTURE_CASES)
     assert dp.SJ1_CASES == EXPECTED_ORDER[28:33]
+    assert dp.SJ2_CASES == EXPECTED_ORDER[33:41]
     assert EXPECTED_ORDER[-1] == "gtd_entry_expiry_status"
 
 
