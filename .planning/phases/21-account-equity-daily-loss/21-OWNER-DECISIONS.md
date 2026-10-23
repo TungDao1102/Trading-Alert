@@ -22,13 +22,19 @@ Source: `21-CONTEXT.md` D-09; `19-OWNER-GAPS.md` section 2b; plan 21-05 and 21-1
 
 ## O-1 Retention and the equity-age number (D-03, D-07)
 
-Status: OPEN
+Status: ANSWERED by the owner (2026-10-23); NOT YET APPLIED. The number is not in the repository: `account.max_equity_age_ms` stays `NOT_CONFIGURED` until the owner writes the DECISIONS row (draft: `21-DEC-O1-DRAFT.md`) and the config and the gate test change together.
 
-Built default in Phase 21: the limit key `account.max_equity_age_ms` stays `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml` (plan 21-02), so the live path refuses while it is unset. The persisted day-state tables have no delete or purge method (`src/persistence/day_risk.py`, plan 21-09) and no retention rule, so rows are kept until the owner sets a retention. No number is written here.
+Owner answer, verbatim:
 
-Who decides: the owner. The assistant did not decide it.
+> 1 để 15000, 2 giữ toàn bộ
 
-Source: `21-CONTEXT.md` OWNER-OPEN O-1.
+Reading of the answer, as the assistant understands it (the owner's words above are the record): (1) `account.max_equity_age_ms` = 15000 (milliseconds, the unit of the key); (2) no retention rule for the persisted day state (`daily_risk_days`, `daily_loss_components`, `risk_reservations`): every row is kept. Both were the assistant's recommendation of the same day (15000 ms from the Demo timing of the three REST reads, observed at about 1 to 2 seconds in the probe runs; keep all because the rows are small and are the audit trail of each DAILY_STOP and refusal); the owner adopted them.
+
+Built default in Phase 21: the limit key `account.max_equity_age_ms` is `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml` (plan 21-02), so the live path refuses while it is unset. The persisted day-state tables have no delete or purge method (`src/persistence/day_risk.py`, plan 21-09) and no retention rule, which already matches the answer to part 2: nothing to build.
+
+Who decides: the owner (answered above). Writing the number needs a DECISIONS row and the provenance label `DECISION`, which only the owner writes.
+
+Source: `21-CONTEXT.md` D-03, D-07, OWNER-OPEN O-1; `config/execution/execution-limits-v1.toml` header.
 
 ## O-3 Multi-asset margin mode (D-02)
 
@@ -71,3 +77,4 @@ Who decides: the owner. The assistant did not decide it.
 Source: `21-CONTEXT.md` D-14; `src/backtest/ledger.py`.
 
 The assistant recorded these items and decided none of them.
+
