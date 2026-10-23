@@ -110,7 +110,7 @@ Source: `20-REVIEW.md` (34 findings) and the three-part audit of DECISIONS D001 
 | WR-B6 | a feed timestamp in the future counts as fresh (stale-feed guard fails open) | Phase 24 (small; candidate for an early plan) |
 | WR-B7 | lot-filter refresh runs inside the tick lock with no timeout | Phase 24 |
 | IN-B1, IN-B2, IN-B3 | raw vs sanitised symbol; stale docstring and wall-clock fallback; `now_utc` UTC-awareness | Phase 24 review |
-| WR-C2, WR-C3, WR-C9 | gate save never retried; restore adopts any persisted deadline; no directory fsync on the gate file | Phase 24 (WR-C2/C9 only if not done by 20-29) |
+| WR-C3 | restore adopts any persisted deadline, however far in the future (WR-C2 and WR-C9 were fixed by plan 20-29) | Phase 24 |
 | WR-C5 to WR-C8 | tenacity swallows `CancelledError`; failed CRITICAL alert not re-queued; blocking write-ahead and journal-first alert before an emergency close | Phase 24 |
 | WR-C10 | `clear --reason` / `--force` not durably recorded | Phase 23 / 24 (operator surface) |
 | IN-C1 to IN-C5 | redaction regex, queue sharing, spill hygiene, drill assertion, alert timestamps | Phase 24 review |
@@ -142,5 +142,5 @@ Source: `20-REVIEW.md` (34 findings) and the three-part audit of DECISIONS D001 
 |------|--------|
 | TP1 below the minimum notional (D052, `tp_sizing.py`) | Demo accepted a 32.7 USDT TP1 against a 50 minimum (R-P10); Binance documents -4164 as "no smaller than 5.0 (unless you choose reduce only)". The refusal rule is not an exchange rule. Changing it needs a protocol version bump and regenerated research records. Evidence for O-03 (Phase 21 / 22); no Phase 20 change |
 | `-5040` | Added to the taxonomy by plan 20-27 as a definitive placement rejection (Demo, GTD below now + 600 s) |
-| Provenance of O-D, O-E and O-B | Recorded in the SUMMARYs of 20-20, 20-21 and 20-25 as "relayed by the orchestrator". The owner has been asked to confirm they typed them; no answer yet |
+| Provenance of O-D, O-E and O-B | Recorded in the SUMMARYs of 20-20, 20-21 and 20-25 as "relayed by the orchestrator". On 2026-10-23 the owner did not say whether they typed them and instead delegated the recording to the assistant. Recorded as: accepted by the owner through that delegation; the original typed answer was not seen by the assistant, and the SUMMARYs keep their wording |
 | Decision wording proposals | `20-DECISION-AUDIT.md` (proposals only; `docs/DECISIONS.md` is the owner's) |
