@@ -134,7 +134,7 @@ async def test_an_entry_still_new_past_the_grace_raises_one_alert_and_nothing_el
     assert rig.adapter.cancelled_normal == []
     assert rig.adapter.cancelled_algo == []
     assert rig.adapter.forbidden_calls == []
-    assert set(rig.safe_mode.enter_calls) <= {"ENTRY_WITHOUT_PROTECTIVE"}
+    assert rig.safe_mode.enter_calls == []  # a resting unfilled entry is no divergence (20-31)
     row = rows(rig, STALE_ROW)[0]
     assert row["client_order_id"] == ENTRY_ID
     assert row["plan_hash"] == H1

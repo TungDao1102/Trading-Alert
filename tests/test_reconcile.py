@@ -712,7 +712,9 @@ def test_divergence_forces_safe_mode_without_cancel() -> None:
 
 def test_entry_without_protective_divergence_does_not_sweep() -> None:
     """Beh. 4: a local entry with no matching protective yields a
-    non-orphan divergence (entry without protection). The sweeper MUST
+    non-orphan divergence (entry without protection). Since plan 20-31
+    (W1) the entry is a partially filled one: an entry still waiting for
+    its first fill has nothing to protect and is no divergence. The sweeper MUST
     refuse to cancel — only ORPHAN_PROTECTIVE cancellations are
     authorised (Pitfall 1: never auto-place rescue protection).
 
@@ -729,7 +731,7 @@ def test_entry_without_protective_divergence_does_not_sweep() -> None:
                 "client_order_id": "x-11111111111111111111111111111111EN",
                 "symbol": "BTCUSDT",
                 "order_role": "ENTRY",
-                "status": "NEW",
+                "status": "PARTIALLY_FILLED",
             }
         ],
         "open_algos": [],
@@ -746,7 +748,7 @@ def test_entry_without_protective_divergence_does_not_sweep() -> None:
                     "position_side": "LONG",
                     "order_type": "LIMIT",
                     "time_in_force": "GTC",
-                    "status": "NEW",
+                    "status": "PARTIALLY_FILLED",
                     "quantity": "0.010",
                     "price": "50000.00",
                     "stop_price": None,
