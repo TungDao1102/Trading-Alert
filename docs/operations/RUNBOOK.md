@@ -127,7 +127,7 @@ NO NEW ENTRY ORDERS
 → resume only after health check
 ```
 
-The freshness thresholds of the live execution path are not defaults in code: `stale_feed.max_mark_price_age_ms`, `stale_feed.max_user_data_silence_ms` and the reconcile cadence `reconcile.tick_interval_ms` are keys of `config/execution/execution-limits-v1.toml` and are `NOT_CONFIGURED` until the owner sets them after Demo evidence (O-G). While any key is `NOT_CONFIGURED` the live path refuses; do not invent a value. Since Phase 20 the reconcile tick enters SAFE_MODE `STALE_FEED` when the mark price of a tracked symbol or the user-data stream is stale; this is built and tested with fakes and is not wired into a running process until Phase 24.
+The freshness thresholds of the live execution path are not defaults in code: `stale_feed.max_mark_price_age_ms`, `stale_feed.max_user_data_silence_ms` and the reconcile cadence `reconcile.tick_interval_ms` are keys of `config/execution/execution-limits-v1.toml` and are `NOT_CONFIGURED` until the owner sets them after Demo evidence (O-G). While any key is `NOT_CONFIGURED` the live path refuses; do not invent a value. Since Phase 20 the reconcile tick enters SAFE_MODE `STALE_FEED` when the mark price of a tracked symbol or the user-data stream is stale; this is built and tested with fakes and is not wired into a running process until Phase 24. A feed time ahead of the clock by more than the ratified `[drift]` skew of `config/binance/binance-limits-v1.toml` counts as stale, not fresh. A persisted REST gate deadline later than its record time plus the largest policy wait is not trusted: the gate starts as `GATE_STATE_UNKNOWN` and the operator clears it (section 21.3).
 
 ## 8. WebSocket disconnect
 
@@ -923,10 +923,10 @@ SAFE_MODE is never left by a restart, a timer, a recovered feed, a closed intent
 The exit succeeds only when every readiness row holds in one call; every refusal found is returned and journaled as `SAFE_MODE_EXIT_REFUSED` (codes only) and the state does not change:
 
 1. the operator id is a non-blank text;
-2. the local intent source (the durable intents and the replayed protection journal) was read; a source that raises or is incomplete blocks the exit;
+2. the local intent source (the durable intents and the replayed protection journal) was read; a source that raises or is incomplete blocks the exit, and a local intent with no usable list of active plans refuses `LOCAL_SOURCE_UNREADABLE`;
 3. positions, open orders and algo orders were read from Binance during this call (a failed read refuses `BINANCE_READ_FAILED`);
-4. the compare on those fresh reads agrees, and no SAFE_MODE entry landed while the reads were awaited (`COMPARE_NOT_CLEAN`);
-5. all readiness counts are read and zero: no unresolved execution intent, no plan in UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, no PENDING protective action;
+4. the compare on those fresh reads agrees, and no SAFE_MODE entry landed while the reads were awaited (`COMPARE_NOT_CLEAN`); the compare is given the local active plans like the reconcile loop, so a standing symbol-ownership conflict (two active plans on one symbol) refuses `SYMBOL_OWNERSHIP_CONFLICT`;
+5. all readiness counts are read and zero: no unresolved execution intent, no plan in UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, no PENDING protective action, and the coordinator's restore after a restart is complete (`RESTORE_NOT_COMPLETE`; a readiness value that is missing or not a boolean refuses `READINESS_UNREADABLE`);
 6. the REST gate has no restriction (`GATE_NOT_OPEN`) and its recovery status is `RESTORED_DURABLE` (`RESTORED_BARRIER` is accepted too but reserved; option a1 does not produce it) (`GATE_NOT_RESTORED`; the in-memory, not-restored, unknown-state and persistence-failed statuses all refuse);
 7. the user-data stream state is exactly `LIVE` (`STREAM_NOT_LIVE`).
 
