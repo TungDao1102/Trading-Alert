@@ -23,7 +23,10 @@ Divergence kinds (the only kinds the reconciler emits):
   - UNSYNCED_NORMAL: local normal order with no matching exchange
     normal order (the order disappeared or was filled externally).
   - UNSYNCED_ALGO: local algo order with no matching exchange algo
-    order (cancel/disappeared).
+    order (cancel/disappeared). One exception (plan 20-28, WR-B2): the TP1 leg of a COMPLETE plan
+    carries `explained_when_position_below`, and its absence is not a divergence while exactly one
+    exchange position of the plan's side exists and is strictly below that quantity (a TP1 that
+    triggered and filled leaves the open algo orders).
   - UNSYNCED_POSITION: exchange position with no matching local intent
     (suspicious — drives SAFE_MODE but not the sweeper).
 
@@ -142,13 +145,22 @@ class LocalOrderIntent:
 
 @dataclass(frozen=True)
 class LocalAlgoIntent:
-    """Lightweight carrier for one local open-algo-order intent."""
+    """Lightweight carrier for one local open-algo-order intent.
+
+    `explained_when_position_below` (plan 20-28, WR-B2) is set only for the TP1 leg of a plan in
+    state COMPLETE: the intended quantity of the plan. A TP1 that triggers and fills leaves the
+    exchange's open algo orders (Binance Demo: TRIGGERING, TRIGGERED, FINISHED), so its absence is
+    explained when exactly one exchange position of the plan's side exists and its absolute amount
+    is strictly below this bound. None (the default) means the leg's absence is always a
+    divergence.
+    """
 
     client_algo_id: str
     symbol: str
     order_role: str
     status: str
     plan_hash: str | None = None
+    explained_when_position_below: Any = None  # Decimal: the plan's intended quantity
 
 
 @dataclass(frozen=True)
@@ -496,6 +508,9 @@ def compare(
 
         truth_algo = truth_algo_by_client_id.get(client_algo_id)
         if truth_algo is None:
+            if _leg_absence_explained(algo_intent, local_open_positions, truth_positions):
+                # A TP1 that triggered and filled (plan 20-28, WR-B2): not a divergence.
+                continue
             # Local algo with no matching exchange algo (non-orphan).
             divergences.append(
                 Divergence(
@@ -750,6 +765,44 @@ def _is_zero_like(value: Any) -> bool:
         return bool(value == 0)
     except TypeError:
         return False
+
+
+def _leg_absence_explained(
+    algo_intent: Any, local_open_positions: Sequence[Any], truth_positions: Sequence[Any]
+) -> bool:
+    """True when a missing algo leg is explained by a fill that reduced the position (WR-B2).
+
+    Only a leg that carries `explained_when_position_below` (the TP1 of a COMPLETE plan) can be
+    explained, and only by evidence that the position really shrank: exactly one local position
+    intent of the same plan for the symbol, exactly one non-zero exchange position row for the
+    symbol on the plan's side (LONG positive, SHORT negative) and `0 < abs(amount) < bound`. A
+    full or larger position, no position, a second plan, a second row, the wrong side or a bound
+    that is not a positive Decimal all keep the divergence. The stop and TP2 never carry the bound.
+    """
+    bound = _get_field(algo_intent, "explained_when_position_below")
+    if not _is_positive_decimal(bound):
+        return False
+    plan_hash = _get_field(algo_intent, "plan_hash")
+    symbol = _get_field(algo_intent, "symbol")
+    if not isinstance(plan_hash, str) or plan_hash == "" or not isinstance(symbol, str):
+        return False
+    local_rows = [p for p in local_open_positions if _get_field(p, "symbol") == symbol]
+    if len(local_rows) != 1 or _get_field(local_rows[0], "plan_hash") != plan_hash:
+        return False
+    side = _get_field(local_rows[0], "expected_side")
+    exchange_rows = [
+        p
+        for p in truth_positions
+        if _get_field(p, "symbol") == symbol and _get_field(p, "position_amt") != 0
+    ]
+    if len(exchange_rows) != 1:
+        return False
+    amount = _get_field(exchange_rows[0], "position_amt")
+    if not isinstance(amount, Decimal) or not amount.is_finite():
+        return False
+    if (side == "LONG" and amount > 0) or (side == "SHORT" and amount < 0):
+        return bool(abs(amount) < bound)
+    return False
 
 
 def _is_protective_role(order_role: str) -> bool:
