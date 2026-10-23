@@ -573,7 +573,9 @@ async def test_keepalive_429_never_triggers_immediate_rekey_or_snapshot() -> Non
     # The 429 paused every REST call of the process; the supervisor is waiting it out.
     restriction = rig.gate.restriction()
     assert restriction is not None and restriction.reason == RATE_LIMIT_PAUSE_429
-    assert WAIT_429 in rig.vt.sleeps
+    # The wait is slept in slices of at most reconnect_wait_max_seconds (plan 20-30, WR-C3).
+    assert rig.limits.reconnect_wait_max_seconds in rig.vt.sleeps
+    assert WAIT_429 not in rig.vt.sleeps
     assert rig.supervisor.state is S.UNKNOWN
     assert rig.listen_key_posts() == 1
     assert rig.snapshots_provider.calls == 1
@@ -600,7 +602,9 @@ async def test_keepalive_429_with_retry_after_waits_capped_value() -> None:
     )
 
     await rig.vt.advance(KEEPALIVE)
-    assert CAP in rig.vt.sleeps
+    # Capped at the policy cap, then slept in slices of at most reconnect_wait_max_seconds.
+    assert rig.limits.reconnect_wait_max_seconds in rig.vt.sleeps
+    assert CAP not in rig.vt.sleeps
     assert CAP * 3 not in rig.vt.sleeps
 
     await rig.vt.advance(CAP - 1)

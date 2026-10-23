@@ -658,6 +658,9 @@ class UserDataSupervisor:
         own 1 second hint at most `reconnect_max_attempts` times or `reconnect_max_delay_seconds`
         of the injected clock, whichever comes first (the two stops `_bounded_reconnect` uses),
         then the recovery halts with the gate's reason and `on_failure` reports it once (WR-C4).
+        A timed pause is slept in slices of at most `reconnect_wait_max_seconds`, re-checking the
+        gate after each one; the total wait is the pause itself, which the policy bounds and
+        `restore()` refuses to exceed (WR-C3).
         """
         started_at = self._clock()
         unknown_checks = 0
@@ -681,7 +684,9 @@ class UserDataSupervisor:
                     raise _RecoveryHalted(restriction.reason)
             remaining = self._gate.remaining_seconds()
             log.info("userdata.supervisor.rest_paused", remaining_seconds=remaining)
-            await self._sleep(remaining)
+            # One sleep is at most `reconnect_wait_max_seconds` (WR-C3); the gate is asked again
+            # after each slice, so the wait still ends when the gate opens.
+            await self._sleep(min(remaining, self._limits.reconnect_wait_max_seconds))
 
     async def _gated[T](self, call: Callable[[], Awaitable[T]]) -> T:
         """`call` once REST is allowed; a refusal raised by a holder anyway is handled alike."""
