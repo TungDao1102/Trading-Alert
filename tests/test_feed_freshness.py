@@ -117,11 +117,11 @@ def test_the_stale_symbols_are_sorted_and_unique() -> None:
     assert verdict.stale_symbols == ("BTCUSDT", "ETHUSDT")
 
 
-def test_a_mark_time_ahead_of_now_is_clock_skew_and_counts_as_fresh() -> None:
-    # Pre-placement judges a future time against the ratified drift bound; this predicate has no
-    # bound of its own (no default may be invented), and "older than" is what stale means.
+def test_a_mark_time_ahead_of_now_is_stale_unless_a_skew_bound_allows_it() -> None:
+    # Plan 20-30 (WR-B6): ahead of now is unreadable unless within the ratified drift bound given
+    # as `max_clock_skew`; no bound means no allowance. More cases: test_feed_freshness_skew.py.
     ahead = NOW + timedelta(seconds=1)
-    assert assess(reading(btc=ahead, user=ahead)).stale_symbols == ()
+    assert assess(reading(btc=ahead, user=ahead)).stale_symbols == ("BTCUSDT",)
 
 
 def test_user_data_silence_past_the_limit_is_silent() -> None:

@@ -11,9 +11,12 @@ threshold that is `NOT_CONFIGURED` (None) is refused with a ValueError, never de
 thresholds are read from the `stale_feed_*` fields of the execution limits only; the paper
 runtime's `max_ws_message_silence_seconds` belongs to another process and is not used (D-25).
 
-A timestamp ahead of `now_utc` is clock skew between two machines, not staleness: it counts as
-fresh here (staleness means "older than"). The ratified drift bound that judges a future mark
-time lives in the pre-placement check; this module has none of its own and invents none.
+A timestamp ahead of `now_utc` by more than `max_clock_skew` is unreadable, hence stale (plan
+20-30, WR-B6): a source bug (milliseconds read as seconds, a wrong time zone) or a clock that
+jumped must not switch the guard off. The bound is the already ratified drift of
+`config/binance/binance-limits-v1.toml [drift]` (the same margin the pre-placement check tolerates,
+see `clock_skew_from_drift`); this module invents no number. No bound given means no allowance at
+all: any time ahead of `now_utc` is stale (fail closed).
 
 Pure: stdlib and `src.domain` only, no clock read, no float, no I/O. The loop (plan 20-16) turns
 a stale verdict into SAFE_MODE STALE_FEED plus a STALE_DATA alert; a feed that recovers never
@@ -26,6 +29,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
+
+
+class DriftLimitsLike(Protocol):
+    """The two ratified drift limits (`DriftLimits` of `src.adapters.binance_limits`)."""
+
+    @property
+    def ahead_limit_ms(self) -> int: ...
+
+    @property
+    def behind_limit_ms(self) -> int: ...
 
 
 class StaleFeedLimits(Protocol):
@@ -68,6 +81,7 @@ def assess_feeds(
     symbols: Iterable[str],
     now_utc: datetime,
     limits: StaleFeedLimits,
+    max_clock_skew: timedelta | None = None,
 ) -> FeedVerdict:
     """Judge the mark price of each of `symbols` and the user-data feed.
 
@@ -76,19 +90,28 @@ def assess_feeds(
         symbols: the symbols with a tracked plan; only these mark prices are judged.
         now_utc: the injected current time (timezone-aware).
         limits: the execution limits (only the two `stale_feed_*` fields are read).
+        max_clock_skew: how far ahead of `now_utc` a feed time may be and still count as fresh
+            (the ratified drift, see `clock_skew_from_drift`). None means no allowance: any time
+            ahead of `now_utc` is stale.
 
     Raises:
-        ValueError: a datetime is naive, or a threshold is NOT_CONFIGURED.
+        ValueError: a datetime is naive, a threshold is NOT_CONFIGURED, or `max_clock_skew` is
+            neither None nor a non-negative `timedelta`.
     """
     _require_aware(now_utc, "now_utc")
+    skew = _skew(max_clock_skew)
     mark_limit = _limit(limits.stale_feed_max_mark_price_age_ms, "stale_feed.max_mark_price_age_ms")
     silence_limit = _limit(
         limits.stale_feed_max_user_data_silence_ms, "stale_feed.max_user_data_silence_ms"
     )
     stale = sorted(
-        {s for s in symbols if _is_stale(reading.mark_price_at_utc.get(s), now_utc, mark_limit)}
+        {
+            s
+            for s in symbols
+            if _is_stale(reading.mark_price_at_utc.get(s), now_utc, mark_limit, skew)
+        }
     )
-    silent = _is_stale(reading.user_data_last_event_at_utc, now_utc, silence_limit)
+    silent = _is_stale(reading.user_data_last_event_at_utc, now_utc, silence_limit, skew)
     return FeedVerdict(stale_symbols=tuple(stale), user_data_silent=silent)
 
 
@@ -98,11 +121,34 @@ def _limit(value: int | None, key: str) -> timedelta:
     return timedelta(milliseconds=value)
 
 
-def _is_stale(seen_at_utc: datetime | None, now_utc: datetime, limit: timedelta) -> bool:
-    """Missing is stale; otherwise stale means strictly older than `limit`."""
+def _skew(value: timedelta | None) -> timedelta:
+    """None is no allowance (zero); anything but a non-negative timedelta is refused."""
+    if value is None:
+        return timedelta(0)
+    if not isinstance(value, timedelta) or value < timedelta(0):
+        raise ValueError("max_clock_skew must be None or a non-negative timedelta")
+    return value
+
+
+def clock_skew_from_drift(drift: DriftLimitsLike) -> timedelta:
+    """The ratified drift as a feed-time skew bound: the larger of the two drift limits.
+
+    This is the same margin the placement path uses as `gtd_clock_margin` (19-REVIEW-FIX; the demo
+    rehearsal builds it the same way). Nothing is chosen here: both limits are ratified keys of
+    `config/binance/binance-limits-v1.toml [drift]`.
+    """
+    return timedelta(milliseconds=max(drift.ahead_limit_ms, drift.behind_limit_ms))
+
+
+def _is_stale(
+    seen_at_utc: datetime | None, now_utc: datetime, limit: timedelta, skew: timedelta
+) -> bool:
+    """Missing is stale; older than `limit` is stale; ahead of now by more than `skew` is stale."""
     if seen_at_utc is None:
         return True
     _require_aware(seen_at_utc, "feed time")
+    if seen_at_utc - now_utc > skew:
+        return True
     return now_utc - seen_at_utc > limit
 
 
@@ -111,4 +157,11 @@ def _require_aware(value: datetime, name: str) -> None:
         raise ValueError(f"{name} must be a timezone-aware datetime")
 
 
-__all__ = ["FeedReading", "FeedVerdict", "StaleFeedLimits", "assess_feeds"]
+__all__ = [
+    "DriftLimitsLike",
+    "FeedReading",
+    "FeedVerdict",
+    "StaleFeedLimits",
+    "assess_feeds",
+    "clock_skew_from_drift",
+]

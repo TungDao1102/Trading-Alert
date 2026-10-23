@@ -447,9 +447,14 @@ class ReconcileLoop:
             alerts `STALE_ENTRY_ORDER` for an entry order that is still NEW more than
             `reconcile.entry_stale_grace_ms` after its `goodTillDate`. Alert only. None means the
             check does not run (and nothing is journaled about it).
+        feed_clock_skew: optional non-negative `timedelta` (plan 20-30, WR-B6); how far ahead of
+            the tick time a feed time may be and still count as fresh. Phase 24 binds it to the
+            ratified drift (`clock_skew_from_drift(binance_limits.drift)`). None means no
+            allowance: any feed time ahead of the tick time is stale (fail closed).
 
     Raises:
-        ValueError: `safe_mode` is not durable.
+        ValueError: `safe_mode` is not durable, or `feed_clock_skew` is neither None nor a
+            non-negative `timedelta`.
         ExecutionLimitsNotConfigured: any limit is unset (names the keys, never a value).
         ExecutionLimitsInvalid: the tick interval is not below `max_unprotected_ms`.
     """
@@ -473,7 +478,12 @@ class ReconcileLoop:
         pending_actions: OpenPendingSource | None = None,
         risk_reducer: RiskReducer | None = None,
         entry_good_till: EntryGoodTillSource | None = None,
+        feed_clock_skew: timedelta | None = None,
     ) -> None:
+        if feed_clock_skew is not None and (
+            not isinstance(feed_clock_skew, timedelta) or feed_clock_skew < timedelta(0)
+        ):
+            raise ValueError("feed_clock_skew must be None or a non-negative timedelta")
         if not safe_mode.is_durable:
             raise ValueError(
                 "the reconcile loop needs a durable SafeModeController (is_durable is False): "
@@ -494,6 +504,7 @@ class ReconcileLoop:
         self._journal = journal
         self._unknown_entries = unknown_entries
         self._feeds = feeds
+        self._feed_clock_skew = feed_clock_skew
         self._stream = stream
         self._lot_filters = lot_filters
         self._pending_actions = pending_actions
@@ -1105,14 +1116,19 @@ class ReconcileLoop:
 
         Never an exit: a later fresh reading changes nothing in SAFE_MODE (D-15). A source that
         raises, or a reading `assess_feeds` refuses, counts as stale for every tracked symbol and
-        for the user-data feed (fail closed); only the exception class name is journaled.
+        for the user-data feed (fail closed); only the exception class name is journaled. A feed
+        time ahead of `now_utc` by more than `feed_clock_skew` is stale too (WR-B6).
         """
         if self._feeds is None:
             return _NO_PRE
         tracked = self._tracked_symbols()
         try:
             verdict = assess_feeds(
-                self._feeds.read_feed(), symbols=tracked, now_utc=now_utc, limits=self._limits
+                self._feeds.read_feed(),
+                symbols=tracked,
+                now_utc=now_utc,
+                limits=self._limits,
+                max_clock_skew=self._feed_clock_skew,
             )
         except Exception as exc:
             failures.append("feed_read")

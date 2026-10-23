@@ -185,6 +185,7 @@ def build_rig(
     gate: Any = None,
     protection: FakeProtectionView | None = None,
     entry_good_till: Any = None,
+    feed_clock_skew: Any = None,
 ) -> Rig:
     fake = adapter or QueryingAdapter(normal_orders=normal, algo_orders=algo, positions=positions)
     safe_mode = SpyingSafeMode(
@@ -206,6 +207,7 @@ def build_rig(
         feeds=feed,
         **({"stream": stream} if stream is not None else {}),
         **({"entry_good_till": entry_good_till} if entry_good_till is not None else {}),
+        **({"feed_clock_skew": feed_clock_skew} if feed_clock_skew is not None else {}),
     )
     return Rig(
         loop=loop,

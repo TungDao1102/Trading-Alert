@@ -391,6 +391,11 @@ class RestRateLimitGate:
         cleared in process, only by a restart whose `restore()` reads a valid record).
 
         * a valid record is adopted (end times only move later): `RESTORED_DURABLE`;
+        * a record whose `ban_until_utc` or `pause_until_utc` lies beyond `recorded_at_utc` plus
+          the largest wait the policy can produce (the largest of `retry_after_cap_seconds`,
+          `no_retry_after_wait_418_seconds`, `no_retry_after_wait_429_seconds`; zero extra
+          allowance) was not written by this policy (host clock skew, a corrupted year): it is
+          untrusted and treated like the cases below (WR-C3);
         * no record (loss of initialized state: a first install must have run the explicit
           bootstrap), a record that does not parse, or a store that cannot be read: the gate
           is restricted with no known end (`GATE_STATE_UNKNOWN`, status
@@ -412,7 +417,7 @@ class RestRateLimitGate:
                 # A missing record, a corrupt one and an unreadable store are the same verdict:
                 # the persisted state cannot be trusted (D-10: decided by type, never by text).
                 record = None
-            if record is None:
+            if record is None or self._deadline_beyond_policy(record):
                 with self._lock:
                     self._unknown_state = True
                     self._restore_done = True
@@ -436,6 +441,27 @@ class RestRateLimitGate:
             if merged:
                 self._persist()  # a deadline recorded before restore() is saved now
         return self.recovery_status()
+
+    def _deadline_beyond_policy(self, record: GateStateRecord) -> bool:
+        """True when a persisted deadline is later than the policy could ever have produced.
+
+        A deadline is `now + wait` with `wait` at most the largest of the three policy waits, and
+        `recorded_at_utc` is read at save time, not before the deadline was set, so a genuine
+        record never has `deadline > recorded_at_utc + largest wait`. No skew allowance is added:
+        the policy gives none and none is invented (WR-C3).
+        """
+        policy = self._policy
+        latest = record.recorded_at_utc + timedelta(
+            seconds=max(
+                policy.retry_after_cap_seconds,
+                policy.no_retry_after_wait_418_seconds,
+                policy.no_retry_after_wait_429_seconds,
+            )
+        )
+        return any(
+            deadline is not None and deadline > latest
+            for deadline in (record.ban_until_utc, record.pause_until_utc)
+        )
 
     def _alert(self, event: str) -> None:
         """Tell the injected hook; a failing hook never changes the restriction."""
