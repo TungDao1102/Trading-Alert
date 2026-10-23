@@ -1168,10 +1168,37 @@ Input: .planning/phases/22-leverage-margin-liquidation-guard/22-NOTES.md
 - [G3-001] The Change-Position-Mode wording was not fetched in Phase 11 and docs/SOURCES.md still carries it unconfirmed; re-confirm it on the official page before criterion 4 relies on the one-way check (source: .planning/phases/11-decision-alignment/11-05-SUMMARY.md:125-126, docs/SOURCES.md:46; decision: D044)
 - [G4-039] Fill the UNKNOWN margin type and leverage fields of the plan constraint snapshot so it can become COMPLETE (see Phase 21) (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 16 plans (planned 2026-10-23, not executed)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 22 to break down)
+
+**Wave 1**
+- [ ] 22-01-PLAN.md - Recorded-Demo fixtures and the signed symbolConfig and leverageBracket reads (D-01, D-06, D-08, D-11, F-011)
+- [ ] 22-02-PLAN.md - Limit keys margin.liquidation_buffer_bps, margin.max_bracket_age_ms and margin.headroom_bps, NOT_CONFIGURED and required (D-10, D-11, D-13, O-2, O-3)
+- [ ] 22-03-PLAN.md - Error taxonomy for the configuration calls and the SOURCES section that closes G3-001 (D-03, D-07)
+- [ ] 22-04-PLAN.md - Pure available-margin predicate: initial margin, fees, claims, headroom (D-13, F-966)
+- [ ] 22-05-PLAN.md - Owner-run probe infrastructure: configuration operations and the first SJ3 case (D-18)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 22-06-PLAN.md - Mutating adapter calls change_margin_type and change_initial_leverage, signed registry at twenty (D-01, D-03)
+- [ ] 22-07-PLAN.md - Pure liquidation module: exchange brackets, tier rule, strict buffer beyond the stop (D-08, D-09, F-964)
+- [ ] 22-08-PLAN.md - Migration 0012 and the reservation margin claims (D-14, F-966)
+- [ ] 22-09-PLAN.md - The five remaining owner-run SJ3 cases and the evidence-plan sections (D-18)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 22-10-PLAN.md - The account reading carries availableBalance and the position and margin mode (D-07, D-13, F-965, F-020)
+- [ ] 22-11-PLAN.md - Symbol configuration guard: set and verify ISOLATED and the target leverage (D-01 to D-06, F-011, F-964)
+- [ ] 22-12-PLAN.md - Bounded-age leverage bracket cache (D-11)
+- [ ] 22-13-PLAN.md - Post-fill liquidation watch through the existing close path, isolated (D-12, A10)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 22-14-PLAN.md - MarginGuard: mode, configuration, liquidation, margin in one fixed order (D-15, D-16)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 22-15-PLAN.md - Manager gate 5f2 and the COMPLETE in-memory plan constraint snapshot (D-05, G4-039)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 22-16-PLAN.md - Phase 22 gate, owner and deferred registers, canonical docs
 
 ### Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
 
