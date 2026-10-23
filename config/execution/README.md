@@ -1,9 +1,10 @@
 # Execution protection, pre-placement and reconcile limits
 
-This directory holds the fourteen safety limits of the execution path that the owner has not
-chosen yet: the seven of Phase 19 (D-07, D-13, the owner's 19-REVIEW WR-05 and WR-03 decisions
-and the last-price check of quick task 261020-l4p) and the seven of Phase 20 (plan 20-01; D-25,
-D-11, D-21, D-23, T-H). The values file
+This directory holds the sixteen safety limits of the execution path that the owner has not
+chosen yet, fifteen required and one alert-only: the seven of Phase 19 (D-07, D-13, the owner's
+19-REVIEW WR-05 and WR-03 decisions and the last-price check of quick task 261020-l4p), the eight
+of Phase 20 (plan 20-01; D-25, D-11, D-21, D-23, T-H; plan 20-28 added the alert-only
+`reconcile.entry_stale_grace_ms`) and the one of Phase 21 (plan 21-02; D-03). The values file
 `execution-limits-v1.toml` holds only the word `NOT_CONFIGURED` for every key until the owner fills the numbers in, after the Demo probes
 listed in `19-NOTES.md` (OWNER-OPEN O-04 and O-05).
 **This README lists the required keys and what they mean. It carries no value, and the code
@@ -11,7 +12,7 @@ carries no default for any of them.** `tests/test_no_unratified_defaults.py` sca
 `scripts/` so that no key name below is ever given a number in code.
 
 The loader is `load_execution_limits(path)` in `src/execution/execution_limits.py`. It returns
-an `ExecutionLimits` whose fourteen fields are `None` while the file says `NOT_CONFIGURED`.
+an `ExecutionLimits` whose sixteen fields are `None` while the file says `NOT_CONFIGURED`.
 `ExecutionLimits.require_live_ready()` raises `ExecutionLimitsNotConfigured` naming the unset
 keys, so the live path refuses while any key is `NOT_CONFIGURED` (the manager gate and the
 coordinator check that call it are wired by later Phase 19 plans). The loader refuses to load,
@@ -23,20 +24,21 @@ only, never a value or a path.
 ## Separation from the Binance limits file
 
 `config/binance/binance-limits-v1.toml` is ratified and pinned by sha256 in the DECISIONS row
-of Phase 18, and its loader and README tests demand exactly the keys of that file. The fourteen keys
+of Phase 18, and its loader and README tests demand exactly the keys of that file. The sixteen keys
 here therefore live in a separate file with a separate loader; the Binance file and its README
 are not edited.
 
 ## File format
 
 - Exactly the sections `[protection]`, `[pre_placement]`, `[reconcile]`, `[stale_feed]`,
-  `[alerts]` and `[provenance]`.
-- Exactly the fourteen keys below, each written once; nothing else is accepted.
+  `[alerts]`, `[account]` and `[provenance]`.
+- Exactly the sixteen keys below, each written once; nothing else is accepted.
 - Every value is a TOML integer that is not a boolean, strictly positive (a float, a boolean,
   zero or a negative number is refused), or exactly the TOML string `"NOT_CONFIGURED"`, which
   loads as `None` and means "the owner has not chosen yet". No other string is accepted.
 - The `ExecutionLimits` field of a Phase 19 key is the key text (`max_unprotected_ms`); the field
-  of a Phase 20 key is `<section>_<key>` (`reconcile_tick_interval_ms`), because
+  of a Phase 20 or Phase 21 key is `<section>_<key>` (`reconcile_tick_interval_ms`,
+  `account_max_equity_age_ms`), because
   `stale_feed.max_mark_price_age_ms` shares its key text with `pre_placement.max_mark_price_age_ms`.
   `EXECUTION_LIMIT_FIELDS` in the loader is the only place that mapping lives.
 - The key `entry_terminal_timeout_ms` carries the `_ms` suffix for unit clarity; D-13 names the
@@ -75,7 +77,7 @@ One key per line, so the checks of plan 19-01 can parse the list.
 - `reconcile.entry_unknown_probe_count` - how many consecutive clean not-found probes by client order id an `UNKNOWN` entry needs before reconciliation may close it (D-11, used by plan 20-10; a count).
 - `reconcile.entry_unknown_probe_interval_ms` - the spacing between those probes (D-11, used by plan 20-10; milliseconds).
 - `reconcile.lot_filter_refresh_interval_ms` - how often the lot-size filters used for quantization are refreshed from exchange information (D-21, used by plan 20-21; milliseconds).
-- `reconcile.entry_stale_grace_ms` - ALERT ONLY (plan 20-28, owner request 2026-10-23): how long past the `goodTillDate` of a resting entry the reconcile loop waits before it raises the `STALE_ENTRY_ORDER` alert for an entry order that is still `NEW`; Binance Demo did not cancel a GTD order 780 s and 1500 s after `goodTillDate`. It enters no SAFE_MODE, cancels nothing and changes no state. Unlike the fourteen required keys it does not keep the live path refused: while it is `NOT_CONFIGURED` the check is skipped, one journal row `RECONCILE_STALE_ENTRY_CHECK_SKIPPED` says so, and `ExecutionLimits.unset_alert_only_keys()` lists it (milliseconds).
+- `reconcile.entry_stale_grace_ms` - ALERT ONLY (plan 20-28, owner request 2026-10-23): how long past the `goodTillDate` of a resting entry the reconcile loop waits before it raises the `STALE_ENTRY_ORDER` alert for an entry order that is still `NEW`; Binance Demo did not cancel a GTD order 780 s and 1500 s after `goodTillDate`. It enters no SAFE_MODE, cancels nothing and changes no state. Unlike the fifteen required keys it does not keep the live path refused: while it is `NOT_CONFIGURED` the check is skipped, one journal row `RECONCILE_STALE_ENTRY_CHECK_SKIPPED` says so, and `ExecutionLimits.unset_alert_only_keys()` lists it (milliseconds).
 
 ### `[stale_feed]` (Phase 20, D-25, D058)
 
@@ -88,16 +90,17 @@ One key per line, so the checks of plan 19-01 can parse the list.
 
 ### `[account]` (Phase 21, D-03; F-012)
 
-- `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the fourteen other required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). Owner number open (O-1); no value is chosen and the code carries no default.
+- `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the other fourteen required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). Owner number open (O-1); no value is chosen and the code carries no default.
 
 ## Phase 20 notes
 
-The fifteenth key, `reconcile.entry_stale_grace_ms`, is alert only: `ExecutionLimits.unset_keys()` and
+Of the sixteen keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
 `require_live_ready()` leave it out (`ALERT_ONLY_LIMIT_KEYS` in the loader), so the sentence below
-about the live path refusing covers the fourteen required keys.
+about the live path refusing covers the fifteen required keys, `account.max_equity_age_ms`
+(Phase 21, D-03) among them.
 
 `stale_feed.max_user_data_silence_ms` is not the paper runtime's `max_ws_message_silence_seconds`
 (`src/paper/coverage.py`); the two are separate keys in separate files and neither reads the other.
-A value for any of the fourteen keys is the owner's number (OWNER-OPEN O-04, decision O-G): setting
+A value for any of the sixteen keys is the owner's number (OWNER-OPEN O-04, decision O-G): setting
 one needs a DECISIONS row and the provenance label `DECISION`. Until then each stays
 `NOT_CONFIGURED` and the live path refuses, naming the key.

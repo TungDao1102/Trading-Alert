@@ -208,9 +208,13 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # max_last_price_age_ms, the last-price check of quick task 261020-l4p) + the Phase 20 keys of
     # plan 20-01: 6 new key texts (stale_feed.max_mark_price_age_ms repeats a Phase 19 text) and
     # 7 "<section>_<key>" field names = 30 + 7 + 6 + 7 = 50 guarded names, plus the alert-only key
-    # of plan 20-28 (key text `entry_stale_grace_ms` and field `reconcile_entry_stale_grace_ms`).
-    assert len(GUARDED_NAMES) == 52
+    # of plan 20-28 (key text `entry_stale_grace_ms` and field `reconcile_entry_stale_grace_ms`),
+    # plus Phase 21 (plan 21-02): key text `max_equity_age_ms` and field
+    # `account_max_equity_age_ms` (52 -> 54).
+    assert len(GUARDED_NAMES) == 54
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
+    # Plan 21-02 (D-03): the equity-age bound has no numeric default under either spelling.
+    assert {"max_equity_age_ms", "account_max_equity_age_ms"} <= GUARDED_NAMES
     # Plan 20-01: the key texts AND the "<section>_<key>" field names of the Phase 20 keys are
     # guarded, so a numeric default cannot hide behind either spelling.
     assert {
