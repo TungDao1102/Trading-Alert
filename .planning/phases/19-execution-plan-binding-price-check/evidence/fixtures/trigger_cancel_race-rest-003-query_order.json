@@ -1,0 +1,30 @@
+{
+  "case_id": "trigger_cancel_race",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "query_order",
+    "summary": {
+      "avg_price": "81858.900000",
+      "client_order_id": "dprobe-tr1-20261023T140731Z-6",
+      "close_position": "false",
+      "executed_qty": "0.0008",
+      "good_till_date": "0",
+      "order_id": "28647902789",
+      "orig_qty": "0.0008",
+      "orig_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "83896.10",
+      "reduce_only": "false",
+      "side": "BUY",
+      "status": "FILLED",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "LIMIT",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

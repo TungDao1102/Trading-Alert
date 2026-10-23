@@ -1,0 +1,21 @@
+{
+  "case_id": "income_history_read",
+  "index": 2,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "income_history",
+    "summary": {
+      "count": "1",
+      "row_0_asset": "USDT",
+      "row_0_income": "-0.02619484",
+      "row_0_income_type": "COMMISSION",
+      "row_0_info": "550080281",
+      "row_0_symbol": "BTCUSDT",
+      "row_0_time_ms": "1792764460000",
+      "row_0_trade_id": "550080281",
+      "row_0_tran_id": "90031550080281"
+    }
+  }
+}

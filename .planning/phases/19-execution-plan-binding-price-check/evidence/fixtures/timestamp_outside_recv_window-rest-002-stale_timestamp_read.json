@@ -1,0 +1,23 @@
+{
+  "case_id": "timestamp_outside_recv_window",
+  "index": 2,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "CLOCK_SKEW",
+      "code": -1021,
+      "http_class": "BAD_REQUEST",
+      "message": "Timestamp for this request is outside of the recvWindow.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "stale_timestamp_read",
+    "summary": {
+      "clock_calls": "1",
+      "real_clock_ms": "1792764412343",
+      "recv_window_ms": "5000",
+      "timestamp_behind_ms": "9679",
+      "timestamp_sent_ms": "1792764402664"
+    }
+  }
+}

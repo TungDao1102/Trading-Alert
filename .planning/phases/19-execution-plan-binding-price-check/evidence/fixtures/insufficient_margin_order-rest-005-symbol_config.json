@@ -1,0 +1,17 @@
+{
+  "case_id": "insufficient_margin_order",
+  "index": 5,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "symbol_config",
+    "summary": {
+      "0.isAutoAddMargin": "false",
+      "0.leverage": "20",
+      "0.marginType": "CROSSED",
+      "0.maxNotionalValue": "20000000",
+      "0.symbol": "BTCUSDT"
+    }
+  }
+}

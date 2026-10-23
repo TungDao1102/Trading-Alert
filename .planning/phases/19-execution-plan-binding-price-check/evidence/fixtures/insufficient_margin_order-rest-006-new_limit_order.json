@@ -1,0 +1,17 @@
+{
+  "case_id": "insufficient_margin_order",
+  "index": 6,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "REJECTED_DEFINITIVE",
+      "code": -2019,
+      "http_class": "BAD_REQUEST",
+      "message": "Margin is insufficient.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "new_limit_order",
+    "summary": {}
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "non_reduce_only_below_min_notional",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "REJECTED_DEFINITIVE",
+      "code": -4164,
+      "http_class": "BAD_REQUEST",
+      "message": "Order's notional must be no smaller than 50 (unless you choose reduce only).",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "new_limit_order",
+    "summary": {}
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "case_id": "trigger_cancel_race",
+  "index": 12,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "cancel_algo_order",
+    "summary": {
+      "algo_id": "1000000253704664",
+      "client_algo_id": "dprobe-tc2-20261023T140731Z-8",
+      "code": "200",
+      "msg": "success"
+    }
+  }
+}

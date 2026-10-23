@@ -287,3 +287,95 @@
 - `gtd_entry_expiry_status-rest-003-query_order-2.json`: RECORDED_DEMO
 - `gtd_entry_expiry_status-rest-004-cancel_order-2.json`: RECORDED_DEMO
 
+## execute run of 20261023T140649Z (DEMO, scripts/demo_probe.py)
+
+- `timestamp_outside_recv_window-rest-001-server_time.json`: RECORDED_DEMO
+- `timestamp_outside_recv_window-rest-002-stale_timestamp_read.json`: RECORDED_DEMO
+
+## execute run of 20261023T140731Z (DEMO, scripts/demo_probe.py)
+
+- `reduce_only_market_on_flat-rest-001-open_orders.json`: RECORDED_DEMO
+- `reduce_only_market_on_flat-rest-002-open_algo_orders.json`: RECORDED_DEMO
+- `reduce_only_market_on_flat-rest-003-positions.json`: RECORDED_DEMO
+- `reduce_only_market_on_flat-rest-004-new_market_order.json`: RECORDED_DEMO
+- `reduce_only_market_on_flat-rest-005-positions.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-001-new_limit_order.json`: RECORDED_DEMO
+- `non_reduce_only_below_min_notional-rest-001-new_limit_order.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-001-open_orders.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-002-open_algo_orders.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-003-positions.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-004-account_information.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-005-symbol_config.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-006-new_limit_order.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-007-account_information.json`: RECORDED_DEMO
+- `insufficient_margin_order-rest-008-positions.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-001-new_limit_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-001-TRADE_LITE.json`: RECORDED_DEMO
+- `trigger_cancel_race-002-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-003-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-004-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-005-ALGO_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-006-ALGO_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-007-ALGO_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-008-ALGO_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-009-TRADE_LITE.json`: RECORDED_DEMO
+- `trigger_cancel_race-010-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-011-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-012-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-001-positions.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-002-new_limit_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-003-query_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-004-live_mark_price.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-005-new_conditional_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-006-cancel_algo_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-007-query_algo_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-008-positions.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-009-positions.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-010-live_mark_price.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-011-new_conditional_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-012-cancel_algo_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-013-query_algo_order.json`: RECORDED_DEMO
+- `trigger_cancel_race-rest-014-positions.json`: RECORDED_DEMO
+- `income_history_read-rest-001-server_time.json`: RECORDED_DEMO
+- `income_history_read-rest-002-income_history.json`: RECORDED_DEMO
+
+## execute run of 20261023T141029Z (DEMO, scripts/demo_probe.py)
+
+- `reduce_only_market_larger_than_position-001-TRADE_LITE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-002-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-003-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-004-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-005-TRADE_LITE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-006-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-007-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-008-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-001-new_limit_order-2.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-002-query_order.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-003-positions.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-004-new_market_order.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-005-positions.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-006-query_order.json`: RECORDED_DEMO
+- `reduce_only_market_larger_than_position-rest-007-positions.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-001-TRADE_LITE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-002-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-003-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-004-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-005-ALGO_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-006-TRADE_LITE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-007-ALGO_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-008-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-009-ACCOUNT_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-010-ORDER_TRADE_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-011-ALGO_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-012-ALGO_UPDATE.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-001-new_limit_order-2.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-002-query_order.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-003-positions.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-004-live_mark_price.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-005-new_conditional_order.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-006-query_algo_order.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-007-query_algo_order.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-008-open_orders.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-009-open_algo_orders.json`: RECORDED_DEMO
+- `stop_rejected_after_acceptance-rest-010-positions.json`: RECORDED_DEMO
+
