@@ -1032,7 +1032,7 @@ Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
 - [T-06] The reconcile cadence, stale-feed threshold and WS-silence threshold have no values ("configured freshness threshold"); they must be registry parameters with provenance labels (source: docs/operations/RUNBOOK.md:113-115, .planning/audits/2026-09-29-deep-audit/DEEP_AUDIT_REPORT.md:636 (F-026); decision: open user decision, the values)
 - [G3-005] Promote `ENTRY_WITHOUT_PROTECTIVE` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:206, docs/DECISIONS.md D044 item (1); decision: D044)
 
-**Plans:** 30/30 plans executed (26 planned + 4 gap-closure) (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
+**Plans:** 31/31 plans executed (26 planned + 5 gap-closure) (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
 
 Plans:
 **Wave 1**
@@ -1084,6 +1084,7 @@ Plans:
 - [x] 20-28-PLAN.md - Reconcile lane: TP1 fill is not UNSYNCED_ALGO, no SAFE_MODE re-entry rows, exit ownership and restore checks, stale resting-entry alert
 - [x] 20-29-PLAN.md - Ops lane: unreadable spill directory fails closed, gate state file hardening, bounded supervisor wait
 - [x] 20-30-PLAN.md - Future feed time is stale, implausible persisted gate deadline is untrusted
+- [x] 20-31-PLAN.md - Unfilled resting GTD entry is not ENTRY_WITHOUT_PROTECTIVE; deadline-step stop attempt test
 
 ### Phase 21: Account Equity + Daily Loss from Binance
 
@@ -1240,6 +1241,8 @@ Plans:
 Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+
+- [P20-DEFERRED] Phase 24 inherits about 30 items registered only in `.planning/phases/20-reconcile-safe-mode-hardening/20-DEFERRED.md` (composition of ReconcileLoop with `feed_clock_skew`, scheduled cancel of unfilled entries at plan expiry, second-plan-per-symbol refusal, D028 approval chain, W8 alert for long gate skip, -1003 ban-end parsing D083, Telegram commands). Read that file when writing the Phase 24 CONTEXT (source: 20-VERIFICATION.md W3; decision: none required)
 - [D055] The -4509 finding in criterion 5 (protective legs placed after the entry fills) is a recorded observation, not a chosen execution model; criteria 1 and 2 are NOT amended and depend on the D055 outcome (the Phase 18 probe, then a user decision); no LIVE execution until D055 is closed with a verified execution policy (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
 - [D056] DEGRADED health policy: on mainnet a DEGRADED health state cannot enable any order-capable capability and, once enabled, no new entry may be created until health returns to an allowed state; Demo may run DEGRADED only in an explicit Demo or Rehearsal mode that journals the health state and can never switch to LIVE. Today `src/ops/health.py` lets DEGRADED pass and nothing under `src` produces it, so a producer, a state transition and an explicit mode are designed here together with Phase 26 (source: docs/DECISIONS.md D056, src/ops/health.py:37-39; decision: D056)
 - [D058] Live mark-price gate: execution fails closed when the mark-price data needed for risk or protection is missing or stale, and LIVE cannot be enabled in that state; a stale or degraded mark price while LIVE is enabled is an invalid state and LIVE never bypasses it. This phase owns the enablement side; Phase 20 owns stale-feed handling (source: docs/DECISIONS.md D058; decision: D058)
@@ -1399,7 +1402,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
 | 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
-| 20. Reconcile + SAFE_MODE Hardening + Alerts | 30/30 | Executed, human_needed | 2026-10-23 |
+| 20. Reconcile + SAFE_MODE Hardening + Alerts | 31/31 | Executed, human_needed | 2026-10-23 |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |
