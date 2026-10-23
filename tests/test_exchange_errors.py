@@ -203,6 +203,9 @@ _EXPECTED_BY_CODE: dict[int, tuple[ExchangeErrorCategory, tuple[CallKind, ...]]]
     -4400: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4401: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4509: (_C.PRECONDITION_NO_POSITION, _PLACEMENT),
+    # Added on purpose (plan 20-27, owner approval 2026-10-23): Binance Demo rejected a GTD entry
+    # with goodTillDate below now + 600 s (Demo run 20261022T120055Z, gtd_min_lifetime_boundary).
+    -5040: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
 }
 
 
@@ -288,11 +291,15 @@ def test_demo_observed_codes_are_exactly_the_probe_observed_codes_in_the_table()
     assert observed == sorted(
         [code for code, *_ in _PROBE_OBSERVED_IN_TABLE]
         + [code for code, *_ in _SMOKE_OBSERVED_IN_TABLE]
+        + [-5040]
     )
-    assert observed == [-4509, -4116, -4016, -2021, -2013, -2011, -1125, -1106]
+    # -5040 (plan 20-27) is the only code seen on a later Demo run (2026-10-22).
+    assert observed == [-5040, -4509, -4116, -4016, -2021, -2013, -2011, -1125, -1106]
     assert -4024 not in observed
     for code in observed:
-        assert ERROR_CODE_TABLE[code].demo_observed_on == "2026-10-16"
+        assert ERROR_CODE_TABLE[code].demo_observed_on == (
+            "2026-10-22" if code == -5040 else "2026-10-16"
+        )
         # The read date of the documentation is not changed by a Demo observation.
         assert ERROR_CODE_TABLE[code].read_date == _expected_read_date(code)
 
@@ -313,6 +320,28 @@ def test_a_demo_observation_does_not_relabel_a_documented_code() -> None:
     # The duplicate clientAlgoId case was observed as -4116 (DUPLICATE_CLIENT_ID on placement).
     assert "clientAlgoId" in ERROR_CODE_TABLE[-4116].note
     assert "observed" in ERROR_CODE_TABLE[-4116].note
+
+
+def test_5040_is_a_demo_observed_definitive_placement_rejection() -> None:
+    """Plan 20-27: goodTillDate below now + 600 s answered -5040 on Binance Demo (2026-10-22)."""
+    entry = ERROR_CODE_TABLE[-5040]
+    assert entry.evidence == "demo-observed"
+    assert entry.demo_observed_on == "2026-10-22"
+    assert entry.read_date == ERROR_TABLE_READ_DATE  # the page read; the code is not on it
+    assert dict(entry.categories_by_call_kind) == {_K.PLACEMENT: _C.REJECTED_DEFINITIVE}
+    # The evidence file and case are named in the row's note; it is not a page statement.
+    assert "demo-probe-EVIDENCE-20261022T120055Z.json" in entry.note
+    assert "gtd_min_lifetime_boundary" in entry.note
+    assert "600 seconds" in entry.note
+    assert "documented" not in entry.evidence
+    assert "re-read 2026-10-1" not in entry.note
+    for http_class in (HttpClass.BAD_REQUEST, HttpClass.NOT_FOUND):
+        facts = ErrorFacts(http_class, -5040, None)
+        assert classify(facts, _K.PLACEMENT) is _C.REJECTED_DEFINITIVE
+        for kind in (_K.CANCEL, _K.QUERY, _K.LISTEN_KEY, _K.TIME):
+            assert classify(facts, kind) is _C.UNKNOWN_EXCHANGE_ERROR
+    # A placement is never retried, whatever the category.
+    assert retry_eligible(_C.REJECTED_DEFINITIVE, _K.PLACEMENT) is False
 
 
 def test_demo_observed_on_must_be_an_iso_date() -> None:
