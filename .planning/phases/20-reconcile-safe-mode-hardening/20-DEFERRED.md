@@ -107,10 +107,10 @@ Source: `20-REVIEW.md` (34 findings) and the three-part audit of DECISIONS D001 
 | WR-A4 | FLAT sweep omits `spill`, so protective-cancel audit rows are lost when the journal is down | Phase 24 |
 | IN-A1, IN-A2, IN-A4 | shared `_last_result` across concurrent closes; PROTECTION clearing guard lacks two-read FLAT evidence from PROTECTED/COMPLETE/TP_UNAVAILABLE; `recheck` read in `_confirm` has no effect | Phase 24 review |
 | WR-B5 | a raising position verifier aborts the whole sweep | Phase 24 |
-| WR-B6 | a feed timestamp in the future counts as fresh (stale-feed guard fails open) | Phase 24 (small; candidate for an early plan) |
+| WR-B6 | a feed time in the future counted as fresh. CLOSED by plan 20-30: it is stale beyond the ratified `[drift]` skew. Phase 24 must pass `ReconcileLoop(feed_clock_skew=clock_skew_from_drift(binance_limits.drift))` and document which clock stamps the user-data liveness time; RUNBOOK ~line 130 needs one sentence on the skew | Phase 24 (composition) |
 | WR-B7 | lot-filter refresh runs inside the tick lock with no timeout | Phase 24 |
 | IN-B1, IN-B2, IN-B3 | raw vs sanitised symbol; stale docstring and wall-clock fallback; `now_utc` UTC-awareness | Phase 24 review |
-| WR-C3 | restore adopts any persisted deadline, however far in the future (WR-C2 and WR-C9 were fixed by plan 20-29) | Phase 24 |
+| WR-C3 | restore adopted any persisted deadline. CLOSED by plan 20-30: a deadline beyond `recorded_at_utc` plus the largest policy wait is untrusted (`GATE_STATE_UNKNOWN`, operator clears); a single supervisor sleep is sliced by `reconnect_wait_max_seconds`. Still open: no cap on the total wait (needs an owner number); RUNBOOK needs one sentence | Phase 24 |
 | WR-C5 to WR-C8 | tenacity swallows `CancelledError`; failed CRITICAL alert not re-queued; blocking write-ahead and journal-first alert before an emergency close | Phase 24 |
 | WR-C10 | `clear --reason` / `--force` not durably recorded | Phase 23 / 24 (operator surface) |
 | IN-C1 to IN-C5 | redaction regex, queue sharing, spill hygiene, drill assertion, alert timestamps | Phase 24 review |
