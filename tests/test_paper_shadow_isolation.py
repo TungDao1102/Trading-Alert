@@ -641,6 +641,12 @@ def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_a
         "get_mark_price",
         "get_last_price",
         "symbol_lot_filters",
+        # Phase 21: signed read-only account and history GETs (no order surface).
+        "account_information_snapshot",
+        "account_balances_snapshot",
+        "account_config_snapshot",
+        "user_trades_in_window",
+        "income_in_window",
     }
     public_async = {
         name
