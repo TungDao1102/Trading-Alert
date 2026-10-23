@@ -49,8 +49,14 @@ OPS05_REQUIREMENT_EVENTS: dict[str, tuple[str, ...]] = {
     "DAILY_STOP": ("DAILY_STOP",),
 }
 D24_EVENTS = ("ENTRY_STATE_UNKNOWN", "PROTECTION_HANDOFF_FAILED", "DB_FAILURE")
-ALL_ROW_EVENTS = [e for events in OPS05_REQUIREMENT_EVENTS.values() for e in events] + list(
-    D24_EVENTS
+# Plan 20-28 (owner request 2026-10-23): the stale resting entry alert is not an OPS-05 phrase and
+# not a D-24 entry-path reason; it is its own row with its own requirement source.
+STALE_ENTRY_EVENTS = ("STALE_ENTRY_ORDER",)
+STALE_ENTRY_SOURCE = "owner request 2026-10-23 (stale entry)"
+ALL_ROW_EVENTS = (
+    [e for events in OPS05_REQUIREMENT_EVENTS.values() for e in events]
+    + list(D24_EVENTS)
+    + list(STALE_ENTRY_EVENTS)
 )
 
 
@@ -112,7 +118,7 @@ def test_each_row_is_in_the_event_contract_and_states_its_sink_behavior(alert: s
     assert alert in ALERT_EVENTS
     assert row.journal_first is True
     assert row.dedupe_and_retry == SINK_BEHAVIOR
-    assert row.requirement_source in ("OPS-05", "D-24 (entry path)")
+    assert row.requirement_source in ("OPS-05", "D-24 (entry path)", STALE_ENTRY_SOURCE)
     assert row.phase20_delivers.strip() != ""
     assert row.producer.strip() != ""
 
@@ -152,6 +158,16 @@ def test_each_named_producer_module_really_emits_the_event(alert: str) -> None:
     imported = _imported_names(path)
     # Either the module owns the event name or it imports the `ALERT_<EVENT>` constant it sends.
     assert alert in constants or f"ALERT_{alert}" in imported, (alert, row.producer)
+
+
+def test_the_stale_entry_row_is_alert_only_and_produced_by_the_reconcile_loop() -> None:
+    row = _row("STALE_ENTRY_ORDER")
+
+    assert row.requirement_source == STALE_ENTRY_SOURCE
+    assert row.producer == "src/reconcile/loop.py"
+    assert "alert only" in row.phase20_delivers
+    assert "nothing is cancelled" in row.phase20_delivers
+    assert "NOT_CONFIGURED" in row.phase20_delivers
 
 
 def test_the_entry_path_reasons_reach_the_sink_through_the_observer_in_alerts_py() -> None:

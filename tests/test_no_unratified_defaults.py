@@ -207,8 +207,9 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # emergency_close_poll_timeout_ms, the owner's WR-03 key; the seventh,
     # max_last_price_age_ms, the last-price check of quick task 261020-l4p) + the Phase 20 keys of
     # plan 20-01: 6 new key texts (stale_feed.max_mark_price_age_ms repeats a Phase 19 text) and
-    # 7 "<section>_<key>" field names = 30 + 7 + 6 + 7 = 50 guarded names.
-    assert len(GUARDED_NAMES) == 50
+    # 7 "<section>_<key>" field names = 30 + 7 + 6 + 7 = 50 guarded names, plus the alert-only key
+    # of plan 20-28 (key text `entry_stale_grace_ms` and field `reconcile_entry_stale_grace_ms`).
+    assert len(GUARDED_NAMES) == 52
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
     # Plan 20-01: the key texts AND the "<section>_<key>" field names of the Phase 20 keys are
     # guarded, so a numeric default cannot hide behind either spelling.

@@ -75,6 +75,7 @@ One key per line, so the checks of plan 19-01 can parse the list.
 - `reconcile.entry_unknown_probe_count` - how many consecutive clean not-found probes by client order id an `UNKNOWN` entry needs before reconciliation may close it (D-11, used by plan 20-10; a count).
 - `reconcile.entry_unknown_probe_interval_ms` - the spacing between those probes (D-11, used by plan 20-10; milliseconds).
 - `reconcile.lot_filter_refresh_interval_ms` - how often the lot-size filters used for quantization are refreshed from exchange information (D-21, used by plan 20-21; milliseconds).
+- `reconcile.entry_stale_grace_ms` - ALERT ONLY (plan 20-28, owner request 2026-10-23): how long past the `goodTillDate` of a resting entry the reconcile loop waits before it raises the `STALE_ENTRY_ORDER` alert for an entry order that is still `NEW`; Binance Demo did not cancel a GTD order 780 s and 1500 s after `goodTillDate`. It enters no SAFE_MODE, cancels nothing and changes no state. Unlike the fourteen required keys it does not keep the live path refused: while it is `NOT_CONFIGURED` the check is skipped, one journal row `RECONCILE_STALE_ENTRY_CHECK_SKIPPED` says so, and `ExecutionLimits.unset_alert_only_keys()` lists it (milliseconds).
 
 ### `[stale_feed]` (Phase 20, D-25, D058)
 
@@ -86,6 +87,10 @@ One key per line, so the checks of plan 19-01 can parse the list.
 - `alerts.dedupe_window_ms` - the window in which a repeated alert for the same event is deduplicated instead of sent again (D-23, used by plan 20-13; milliseconds).
 
 ## Phase 20 notes
+
+The fifteenth key, `reconcile.entry_stale_grace_ms`, is alert only: `ExecutionLimits.unset_keys()` and
+`require_live_ready()` leave it out (`ALERT_ONLY_LIMIT_KEYS` in the loader), so the sentence below
+about the live path refusing covers the fourteen required keys.
 
 `stale_feed.max_user_data_silence_ms` is not the paper runtime's `max_ws_message_silence_seconds`
 (`src/paper/coverage.py`); the two are separate keys in separate files and neither reads the other.

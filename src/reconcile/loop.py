@@ -37,6 +37,16 @@ process; here it is driven by tests with fakes. One tick:
      tracked symbol when due (`refresh_if_due`). It re-checks the gate first, is skipped while a
      pending risk-reducing row is still open, and a refresh failure never fails the tick.
 
+Stale resting entry (plan 20-28, owner request 2026-10-23; ALERT ONLY): when the caller supplies
+`entry_good_till` (plan hash to `goodTillDate`), step 6 also looks at the exchange entry orders of
+this system. An entry that is still `NEW` more than `reconcile.entry_stale_grace_ms` after its
+`goodTillDate` raises the alert `STALE_ENTRY_ORDER` once while it stands (Binance Demo did not
+cancel a GTD order 780 s and 1500 s after `goodTillDate`, so the GTD is not a proof of expiry). It
+enters no SAFE_MODE, cancels nothing (the loop never cancels a normal order), changes no plan state
+and sends nothing. While the grace key is NOT_CONFIGURED the check is skipped and one journal row
+`RECONCILE_STALE_ENTRY_CHECK_SKIPPED` says so; an entry whose `goodTillDate` is unknown is skipped
+and said so once per order.
+
 Fail closed: a failed truth read, a failed local read or a compare error is never agreement. The
 tick enters SAFE_MODE (API_DEGRADATION for the exchange reads and compare, DB_FAILURE for the
 local source) and compares nothing. An exchange read that fails with AUTH_OR_SIGNATURE (classified
@@ -173,6 +183,20 @@ CATEGORY_UNCLASSIFIED: str = "UNCLASSIFIED"
 
 #: A targeted REST query of an id a stream divergence named (plan 20-16, D-04).
 RECONCILE_STREAM_QUERY: str = "RECONCILE_STREAM_QUERY"
+
+#: Stale resting entry, alert only (plan 20-28). The alert event is in the OPS-05 contract of
+#: `src.ops.alerts.ALERT_EVENTS`; the reason is project-fixed text.
+ALERT_STALE_ENTRY_ORDER: str = "STALE_ENTRY_ORDER"
+ALERT_REASON_ENTRY_NOT_EXPIRED: str = "ENTRY_NOT_EXPIRED_AFTER_GTD"
+#: Journal row of one detected stale entry (ids, symbol, times; no secret).
+RECONCILE_STALE_ENTRY: str = "RECONCILE_STALE_ENTRY"
+#: Journal row that says the stale-entry check did not run (the payload names why).
+RECONCILE_STALE_ENTRY_CHECK_SKIPPED: str = "RECONCILE_STALE_ENTRY_CHECK_SKIPPED"
+STALE_ENTRY_GRACE_KEY: str = "reconcile.entry_stale_grace_ms"
+STALE_ENTRY_SKIP_KEY_NOT_CONFIGURED: str = "KEY_NOT_CONFIGURED"
+STALE_ENTRY_SKIP_GOOD_TILL_UNKNOWN: str = "GOOD_TILL_UNKNOWN"
+_ENTRY_ROLE: str = "ENTRY"
+_ENTRY_STATUS_NEW: str = "NEW"
 
 # The user-data router's `StreamDivergenceKind` values and the supervisor's halt reason, matched by
 # their string values because src.reconcile imports no adapter. A parity test pins every one of
@@ -332,6 +356,11 @@ class OpenPendingSource(Protocol):
 #: The injected risk-reducing work (Phase 24 binds the coordinator and closer steps to it).
 RiskReducer = Callable[[], Awaitable[None]]
 
+#: The `goodTillDate` of a plan's entry, by plan hash (plan 20-28). The loop knows none by itself;
+#: Phase 24 binds it to the intent store and the plan expiry, as it does for `UnknownEntryResolver`.
+#: None, a naive time or an exception means "unknown": the entry is skipped, never alerted.
+EntryGoodTillSource = Callable[[str], datetime | None]
+
 
 class _UnusableRows(Exception):
     """A snapshot answered with something that is not a list of rows."""
@@ -352,7 +381,9 @@ class TickReport:
     pairs of stop-related divergences that reached no coordinator plan (several or no candidate,
     or an untracked plan): they were alerted only. `swept` and `sweep_skipped` echo the sweeper
     outcome. `action_failures` names the steps that failed after a read succeeded;
-    `failed_source` names the read that failed. `order` lists the phases that ran, in execution
+    `failed_source` names the read that failed. `stale_entries` lists the client order ids of
+    resting entries whose stale-entry alert was raised in this tick (plan 20-28, alert only).
+    `order` lists the phases that ran, in execution
     order (plan 20-21; names are the `PHASE_*` constants): a tick stopped by the gate is just
     ("gate",), and a clean tick with a lot-filter refresher ends with "background".
     """
@@ -375,6 +406,7 @@ class TickReport:
     unknown_entries: Any = None
     stale_symbols: tuple[str, ...] = ()
     user_data_silent: bool = False
+    stale_entries: tuple[str, ...] = ()
     order: tuple[str, ...] = ()
 
 
@@ -411,6 +443,10 @@ class ReconcileLoop:
             background phase from running while any row is still open.
         risk_reducer: optional awaitable callable; Phase 24 binds the coordinator and closer steps
             to it. The loop only awaits it; it places and cancels nothing itself.
+        entry_good_till: optional `EntryGoodTillSource` (plan 20-28); when set, a compared tick
+            alerts `STALE_ENTRY_ORDER` for an entry order that is still NEW more than
+            `reconcile.entry_stale_grace_ms` after its `goodTillDate`. Alert only. None means the
+            check does not run (and nothing is journaled about it).
 
     Raises:
         ValueError: `safe_mode` is not durable.
@@ -436,6 +472,7 @@ class ReconcileLoop:
         lot_filters: LotFilterRefresher | None = None,
         pending_actions: OpenPendingSource | None = None,
         risk_reducer: RiskReducer | None = None,
+        entry_good_till: EntryGoodTillSource | None = None,
     ) -> None:
         if not safe_mode.is_durable:
             raise ValueError(
@@ -466,6 +503,12 @@ class ReconcileLoop:
         self._tick_interval_ms = tick_interval_ms
         self._lock = asyncio.Lock()
         self._journal_failures = 0
+        self._entry_good_till = entry_good_till
+        # Stale-entry bookkeeping (plan 20-28): ids alerted while they stand, the one-time "check
+        # skipped, key unset" note, and the ids whose unknown goodTillDate was already said.
+        self._stale_alerted: set[str] = set()
+        self._stale_key_skip_said = False
+        self._stale_unknown_said: set[str] = set()
 
     @property
     def tick_interval_ms(self) -> int:
@@ -572,9 +615,10 @@ class ReconcileLoop:
                 now_utc, "compare", exc, SAFE_MODE_API_DEGRADATION, action_failures
             )
 
-        return await self._act(
+        report = await self._act(
             now_utc, diff, plans, unknown_report, action_failures, gate_status, pre
         )
+        return self._with_stale_entries(report, now_utc, truth["open_normal_orders"], local.orders)
 
     def _gate_recovery_status(self) -> str | None:
         """The gate's restart-recovery verdict (plan 20-07), when the gate exposes one.
@@ -794,6 +838,127 @@ class ReconcileLoop:
             action_failures=tuple(failures),
             unknown_entries=unknown_report,
         )
+
+    def _with_stale_entries(
+        self,
+        report: TickReport,
+        now_utc: datetime,
+        truth_orders: Sequence[Any],
+        local_orders: Sequence[Any],
+    ) -> TickReport:
+        """Fold the stale-entry alerts of this tick into the report (alert only, plan 20-28)."""
+        alerted, sent, failed = self._check_stale_entries(now_utc, truth_orders, local_orders)
+        if not alerted:
+            return report
+        return dataclasses.replace(
+            report,
+            stale_entries=alerted,
+            alerts_sent=report.alerts_sent + sent,
+            alerts_failed=report.alerts_failed + failed,
+        )
+
+    def _check_stale_entries(
+        self, now_utc: datetime, truth_orders: Sequence[Any], local_orders: Sequence[Any]
+    ) -> tuple[tuple[str, ...], int, int]:
+        """Alert an entry order that is still NEW past `goodTillDate` plus the owner grace.
+
+        Returns `(client order ids alerted, alerts sent, alerts failed)`. Read-only by
+        construction: it calls the alert sink and the journal and nothing else. An entry is judged
+        only when a local ENTRY intent owns it (an exchange entry nobody owns is the
+        UNTRACKED_SYSTEM_ORDER divergence of the compare) and only while its status is exactly NEW.
+        An alert that stands is raised once; one that could not be delivered is tried again next
+        tick; an entry that leaves the book (or is no longer stale) is forgotten, so a return is
+        alerted again. Nothing here may raise into the tick.
+        """
+        if self._entry_good_till is None:
+            return (), 0, 0
+        grace_ms = self._limits.reconcile_entry_stale_grace_ms
+        if grace_ms is None:
+            if not self._stale_key_skip_said:
+                self._stale_key_skip_said = True
+                self._journal_row(
+                    RECONCILE_STALE_ENTRY_CHECK_SKIPPED,
+                    {"key": STALE_ENTRY_GRACE_KEY, "reason": STALE_ENTRY_SKIP_KEY_NOT_CONFIGURED},
+                    now_utc,
+                )
+            return (), 0, 0
+        grace = timedelta(milliseconds=grace_ms)
+        entry_plans = {
+            order_id: getattr(order, "plan_hash", None)
+            for order in local_orders
+            if getattr(order, "order_role", None) == _ENTRY_ROLE
+            for order_id in (getattr(order, "client_order_id", None),)
+            if isinstance(order_id, str)
+        }
+        stale_ids: set[str] = set()
+        present_ids: set[str] = set()
+        alerted: list[str] = []
+        sent = 0
+        failed = 0
+        for order in truth_orders:
+            order_id = getattr(order, "client_order_id", None)
+            plan_hash = entry_plans.get(order_id) if isinstance(order_id, str) else None
+            if not isinstance(order_id, str) or not isinstance(plan_hash, str):
+                continue
+            if getattr(order, "status", None) != _ENTRY_STATUS_NEW:
+                continue
+            present_ids.add(order_id)
+            good_till = self._good_till_of(plan_hash)
+            if good_till is None:
+                if order_id not in self._stale_unknown_said:
+                    self._stale_unknown_said.add(order_id)
+                    self._journal_row(
+                        RECONCILE_STALE_ENTRY_CHECK_SKIPPED,
+                        {"client_order_id": order_id, "reason": STALE_ENTRY_SKIP_GOOD_TILL_UNKNOWN},
+                        now_utc,
+                    )
+                continue
+            if now_utc <= good_till + grace:
+                continue
+            stale_ids.add(order_id)
+            if order_id in self._stale_alerted:
+                continue
+            symbol = getattr(order, "symbol", None)
+            symbol_text = symbol if isinstance(symbol, str) and symbol != "" else _UNKNOWN_REASON
+            self._journal_row(
+                RECONCILE_STALE_ENTRY,
+                {
+                    "client_order_id": order_id,
+                    "symbol": symbol_text,
+                    "plan_hash": plan_hash,
+                    "good_till_utc": good_till.isoformat(),
+                    "grace_ms": grace_ms,
+                },
+                now_utc,
+            )
+            alerted.append(order_id)
+            if self._alert(
+                event=ALERT_STALE_ENTRY_ORDER,
+                subject=symbol_text,
+                reason=ALERT_REASON_ENTRY_NOT_EXPIRED,
+                symbol=symbol_text,
+                plan_hash=plan_hash,
+                now_utc=now_utc,
+            ):
+                self._stale_alerted.add(order_id)
+                sent += 1
+            else:
+                failed += 1
+        self._stale_alerted.intersection_update(stale_ids)
+        self._stale_unknown_said.intersection_update(present_ids)
+        return tuple(alerted), sent, failed
+
+    def _good_till_of(self, plan_hash: str) -> datetime | None:
+        """The plan's `goodTillDate`, or None when the source raised or answered no UTC time."""
+        if self._entry_good_till is None:
+            return None
+        try:
+            value = self._entry_good_till(plan_hash)
+        except Exception:
+            return None
+        if isinstance(value, datetime) and value.utcoffset() == timedelta(0):
+            return value
+        return None
 
     async def _risk_reducing_first(self, now_utc: datetime, failures: list[str]) -> None:
         """Hand open pending risk-reducing work to the injected `risk_reducer` first (D-20, Q4).
@@ -1405,7 +1570,9 @@ def _owner_of(divergence: Divergence, plans: Sequence[Any]) -> str | None:
 
 
 __all__ = [
+    "ALERT_REASON_ENTRY_NOT_EXPIRED",
     "ALERT_SINK_FAILED",
+    "ALERT_STALE_ENTRY_ORDER",
     "BACKGROUND_SKIP_GATE_RESTRICTED",
     "BACKGROUND_SKIP_OPEN_PENDING",
     "BACKGROUND_SKIP_PENDING_UNREADABLE",
@@ -1431,6 +1598,8 @@ __all__ = [
     "RECONCILE_TICK",
     "ALERT_SUBJECT_SYSTEM",
     "CATEGORY_UNCLASSIFIED",
+    "RECONCILE_STALE_ENTRY",
+    "RECONCILE_STALE_ENTRY_CHECK_SKIPPED",
     "RECONCILE_STREAM_QUERY",
     "SAFE_MODE_API_DEGRADATION",
     "SAFE_MODE_AUTH_FAILURE",
@@ -1444,6 +1613,7 @@ __all__ = [
     "TICK_SKIPPED_GATE",
     "TICK_SKIPPED_OVERLAP",
     "TICK_SKIPPED_RESTORE_PENDING",
+    "EntryGoodTillSource",
     "FeedSource",
     "GateRestrictionSource",
     "JournalSink",

@@ -48,6 +48,8 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "stale_feed.max_user_data_silence_ms": 5791,
     # D-23: a FAKE alert dedupe window.
     "alerts.dedupe_window_ms": 6543,
+    # Plan 20-28: a FAKE grace past goodTillDate for the stale-entry alert (alert only).
+    "reconcile.entry_stale_grace_ms": 4747,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"

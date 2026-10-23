@@ -54,6 +54,7 @@ PHASE20_FIELDS = {
     "stale_feed.max_mark_price_age_ms": "stale_feed_max_mark_price_age_ms",
     "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
     "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
+    "reconcile.entry_stale_grace_ms": "reconcile_entry_stale_grace_ms",
 }
 
 
@@ -369,8 +370,10 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         stale_feed_max_mark_price_age_ms=None,
         stale_feed_max_user_data_silence_ms=None,
         alerts_dedupe_window_ms=None,
+        reconcile_entry_stale_grace_ms=None,
     )
     assert limits.unset_keys() == EXPECTED_UNSET
+    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
 
 
 def test_the_writer_can_write_a_bad_label_for_refusal_tests(tmp_path: Path) -> None:
@@ -414,9 +417,10 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_the_not_configured_word() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
-    # Fourteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
-    # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 28
+    # Fifteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys, plan
+    # 20-28 the alert-only reconcile.entry_stale_grace_ms).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -428,7 +432,7 @@ def test_the_test_only_helper_rejects_an_unknown_field() -> None:
 # Plan 20-01 (D-25, D-11, D-21, D-23, T-H): the seven Phase 20 keys.
 # --------------------------------------------------------------------------- #
 
-_PHASE20_SECTIONS = {"reconcile": 4, "stale_feed": 2, "alerts": 1}
+_PHASE20_SECTIONS = {"reconcile": 5, "stale_feed": 2, "alerts": 1}
 
 
 def _phase20_document() -> dict[str, Any]:
@@ -446,7 +450,12 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     for section, count in _PHASE20_SECTIONS.items():
         assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    assert dotted_keys == list(EXPECTED_UNSET)
+    # The fourteen required keys plus the alert-only key of plan 20-28, in file order.
+    assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(EXPECTED_UNSET)
+    assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
+    assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
+        dotted_keys.index("reconcile.lot_filter_refresh_interval_ms") + 1
+    )
 
 
 def test_the_field_table_names_every_key_once_and_keeps_the_phase_19_field_names() -> None:
