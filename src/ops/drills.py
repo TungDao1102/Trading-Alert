@@ -944,7 +944,7 @@ def make_restore_drill(
         else (lambda: LocalIntent(orders=(), algos=(), positions=()))
     )
     resolved_readiness: Callable[[], Any] = (
-        readiness if readiness is not None else (lambda: ExitReadiness(0, 0, 0))
+        readiness if readiness is not None else (lambda: ExitReadiness(0, 0, 0, True))
     )
     resolved_gate: Callable[[], tuple[str | None, str]] = (
         gate_status if gate_status is not None else (lambda: (None, "RESTORED_DURABLE"))

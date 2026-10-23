@@ -1008,6 +1008,8 @@ class _LocalIntentStub:
         self.orders = orders
         self.algos = algos
         self.positions = positions
+        # Plan 20-28 (WR-B3): the exit also reads the active plans.
+        self.active_plans: list[Any] = []
 
 
 async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
@@ -1030,7 +1032,7 @@ async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
     decision = await controller.exit_safe_mode(
         operator_id="operator-1",
         local_intent_fn=lambda: _LocalIntentStub([], [], []),
-        readiness=lambda: ExitReadiness(0, 0, 0),
+        readiness=lambda: ExitReadiness(0, 0, 0, True),
         gate_status=lambda: (None, "RESTORED_DURABLE"),
         stream_state=lambda: "LIVE",
         now_utc=NOW,
@@ -1055,7 +1057,7 @@ async def test_wr16_divergent_intent_fn_blocks_exit() -> None:
     decision = await controller.exit_safe_mode(
         operator_id="operator-1",
         local_intent_fn=lambda: _LocalIntentStub(divergent, [], []),
-        readiness=lambda: ExitReadiness(0, 0, 0),
+        readiness=lambda: ExitReadiness(0, 0, 0, True),
         gate_status=lambda: (None, "RESTORED_DURABLE"),
         stream_state=lambda: "LIVE",
         now_utc=NOW,

@@ -35,6 +35,7 @@ from typing import Any
 
 import pytest
 from src.adapters.binance_usdm import PositionSnapshot
+from src.reconcile.compare import LocalActivePlan
 from src.reconcile.local_intent import LocalIntent
 from src.reconcile.safe_mode import (
     ExitDecision,
@@ -51,7 +52,9 @@ SAFE_MODE_SOURCE = REPO_ROOT / "src" / "reconcile" / "safe_mode.py"
 
 OPERATOR = "op-1"
 EMPTY_INTENT = LocalIntent(orders=(), algos=(), positions=())
-CLEAN = ExitReadiness(unknown_intents=0, blocking_plans=0, open_pending_actions=0)
+CLEAN = ExitReadiness(
+    unknown_intents=0, blocking_plans=0, open_pending_actions=0, restore_complete=True
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -605,20 +608,20 @@ async def test_row4_a_compare_result_without_agreement_is_never_clean() -> None:
 
 
 def _not_a_count() -> Any:
-    return ExitReadiness(True, 0, 0)  # type: ignore[arg-type]  # a bool is not a count
+    return ExitReadiness(True, 0, 0, True)  # type: ignore[arg-type]  # a bool is not a count
 
 
 ROW5: list[Any] = [
-    pytest.param(ExitReadiness(1, 0, 0), ("UNKNOWN_INTENT_PRESENT",), id="unknown-intent"),
-    pytest.param(ExitReadiness(0, 1, 0), ("BLOCKING_PROTECTION_STATE",), id="blocking-plan"),
-    pytest.param(ExitReadiness(0, 0, 1), ("PENDING_ACTION_PRESENT",), id="pending-action"),
-    pytest.param(ExitReadiness(None, 0, 0), ("READINESS_UNREADABLE",), id="intents-unread"),
-    pytest.param(ExitReadiness(0, None, 0), ("READINESS_UNREADABLE",), id="plans-unread"),
-    pytest.param(ExitReadiness(0, 0, None), ("READINESS_UNREADABLE",), id="pending-unread"),
-    pytest.param(ExitReadiness(-1, 0, 0), ("READINESS_UNREADABLE",), id="negative-count"),
+    pytest.param(ExitReadiness(1, 0, 0, True), ("UNKNOWN_INTENT_PRESENT",), id="unknown-intent"),
+    pytest.param(ExitReadiness(0, 1, 0, True), ("BLOCKING_PROTECTION_STATE",), id="blocking-plan"),
+    pytest.param(ExitReadiness(0, 0, 1, True), ("PENDING_ACTION_PRESENT",), id="pending-action"),
+    pytest.param(ExitReadiness(None, 0, 0, True), ("READINESS_UNREADABLE",), id="intents-unread"),
+    pytest.param(ExitReadiness(0, None, 0, True), ("READINESS_UNREADABLE",), id="plans-unread"),
+    pytest.param(ExitReadiness(0, 0, None, True), ("READINESS_UNREADABLE",), id="pending-unread"),
+    pytest.param(ExitReadiness(-1, 0, 0, True), ("READINESS_UNREADABLE",), id="negative-count"),
     pytest.param(_not_a_count(), ("READINESS_UNREADABLE",), id="bool-is-not-a-count"),
     pytest.param(
-        ExitReadiness(None, 2, 3),
+        ExitReadiness(None, 2, 3, True),
         ("READINESS_UNREADABLE", "BLOCKING_PROTECTION_STATE", "PENDING_ACTION_PRESENT"),
         id="partly-unread-and-blocking",
     ),
@@ -657,7 +660,7 @@ async def test_row5_a_readiness_without_the_fields_refuses() -> None:
 async def test_every_refusal_found_in_one_pass_is_reported_and_journaled_once() -> None:
     rig = _rig(adapter=FakeAdapter(positions=[_position()]))
 
-    decision = await _exit(rig, operator_id="", readiness=lambda: ExitReadiness(1, 1, 1))
+    decision = await _exit(rig, operator_id="", readiness=lambda: ExitReadiness(1, 1, 1, True))
 
     assert decision.refusals == (
         "OPERATOR_ID_MISSING",
@@ -884,16 +887,20 @@ def _readiness_of(
     intents: Any = lambda: [],  # noqa: B006 - lambdas are fresh per call
     plans: Any = lambda: [],
     pending: Any = lambda: [],
+    restored: Any = lambda: True,
 ) -> ExitReadiness:
     return build_exit_readiness(
-        unresolved_intents_fn=intents, protections_fn=plans, open_pending_fn=pending
+        unresolved_intents_fn=intents,
+        protections_fn=plans,
+        open_pending_fn=pending,
+        restore_complete_fn=restored,
     )
 
 
 def test_a_clean_composition_reads_all_zero() -> None:
     plans = [_Plan(_State.PROTECTED), _Plan("FLAT"), _Plan(_State.AWAITING_FILL)]
 
-    assert _readiness_of(plans=lambda: plans) == ExitReadiness(0, 0, 0)
+    assert _readiness_of(plans=lambda: plans) == ExitReadiness(0, 0, 0, True)
 
 
 @pytest.mark.parametrize("status", ["INTENDED", "SENT", "UNKNOWN"])
@@ -935,7 +942,9 @@ def test_each_provider_is_independent() -> None:
         pending=lambda: [object(), object(), object()],
     )
 
-    assert result == ExitReadiness(unknown_intents=1, blocking_plans=2, open_pending_actions=3)
+    assert result == ExitReadiness(
+        unknown_intents=1, blocking_plans=2, open_pending_actions=3, restore_complete=True
+    )
 
 
 @pytest.mark.parametrize("field", ["intents", "plans", "pending"])
@@ -1417,3 +1426,202 @@ async def test_the_real_gate_restriction_is_none_exactly_when_check_would_not_re
     for gate, refuses in ((unrestored, True), (restored, False), (paused, True), (banned, True)):
         assert check_refuses(gate) is refuses
         assert (gate.restriction() is not None) is refuses
+
+
+# --------------------------------------------------------------------------- #
+# Plan 20-28 (WR-B3, WR-B4): ownership at exit and the coordinator restore.
+# --------------------------------------------------------------------------- #
+
+HASH_A = "a" * 64
+HASH_B = "b" * 64
+
+
+def _two_plans_one_symbol() -> LocalIntent:
+    """Two active plans for BTCUSDT and no position: the loop reports SYMBOL_OWNERSHIP_CONFLICT."""
+    return LocalIntent(
+        orders=(),
+        algos=(),
+        positions=(),
+        active_plans=(
+            LocalActivePlan(plan_hash=HASH_A, symbol="BTCUSDT"),
+            LocalActivePlan(plan_hash=HASH_B, symbol="BTCUSDT"),
+        ),
+    )
+
+
+async def test_wr_b3_a_standing_ownership_conflict_refuses_the_exit() -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, local_intent_fn=_two_plans_one_symbol)
+
+    assert decision == ExitDecision(exited=False, refusals=("SYMBOL_OWNERSHIP_CONFLICT",))
+    _assert_still_in_safe_mode(rig)
+    refused = rig.journal.of("SAFE_MODE_EXIT_REFUSED")
+    assert json.loads(refused[0].payload_json)["refusals"] == ["SYMBOL_OWNERSHIP_CONFLICT"]
+
+
+async def test_wr_b3_one_plan_per_symbol_exits() -> None:
+    rig = _rig()
+    one_plan = LocalIntent(
+        orders=(),
+        algos=(),
+        positions=(),
+        active_plans=(
+            LocalActivePlan(plan_hash=HASH_A, symbol="BTCUSDT"),
+            LocalActivePlan(plan_hash=HASH_B, symbol="ETHUSDT"),
+        ),
+    )
+
+    decision = await _exit(rig, local_intent_fn=lambda: one_plan)
+
+    assert decision.exited is True
+
+
+async def test_wr_b3_the_exit_passes_the_active_plans_to_the_compare() -> None:
+    seen: dict[str, Any] = {}
+
+    def compare_fn(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return SimpleNamespace(agreement=True, divergences=())
+
+    controller = SafeModeController(
+        adapter=FakeAdapter(), journal=FakeJournal(), compare_fn=compare_fn, state_store=FakeStore()
+    )
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+    local = _two_plans_one_symbol()
+
+    decision = await controller.exit_safe_mode(
+        operator_id=OPERATOR,
+        local_intent_fn=lambda: local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
+    )
+
+    assert decision.exited is True
+    assert seen["local_active_plans"] == local.active_plans
+
+
+async def test_wr_b3_a_local_intent_without_active_plans_is_an_unreadable_source() -> None:
+    """The default compare takes `local_active_plans`: a source that cannot supply it blocks."""
+    rig = _rig()
+    legacy = SimpleNamespace(orders=(), algos=(), positions=())
+
+    decision = await _exit(rig, local_intent_fn=lambda: legacy)  # type: ignore[arg-type,return-value]
+
+    assert decision == ExitDecision(exited=False, refusals=("LOCAL_SOURCE_UNREADABLE",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_wr_b3_active_plans_that_are_not_a_sequence_are_unreadable() -> None:
+    rig = _rig()
+    broken = SimpleNamespace(orders=(), algos=(), positions=(), active_plans=None)
+
+    decision = await _exit(rig, local_intent_fn=lambda: broken)  # type: ignore[arg-type,return-value]
+
+    assert decision.refusals == ("LOCAL_SOURCE_UNREADABLE",)
+
+
+async def test_wr_b3_a_compare_without_the_keyword_is_not_given_it() -> None:
+    """A test double that predates `local_active_plans` still works (the default compare has it)."""
+    seen: dict[str, Any] = {}
+
+    def old_compare(
+        *,
+        local_open_orders: Any,
+        local_open_algos: Any,
+        local_open_positions: Any,
+        truth_normal_orders: Any,
+        truth_algo_orders: Any,
+        truth_positions: Any,
+    ) -> Any:
+        seen["called"] = True
+        return SimpleNamespace(agreement=True)
+
+    controller = SafeModeController(
+        adapter=FakeAdapter(), journal=FakeJournal(), compare_fn=old_compare
+    )
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    decision = await controller.exit_safe_mode(
+        operator_id=OPERATOR,
+        local_intent_fn=_local,
+        readiness=_readiness,
+        gate_status=_gate_healthy,
+        stream_state=_stream_live,
+        now_utc=T1,
+    )
+
+    assert decision.exited is True and seen == {"called": True}
+
+
+async def test_wr_b3_a_conflict_with_other_dirt_reports_both_codes() -> None:
+    rig = _rig(adapter=FakeAdapter(positions=[_position()]))
+
+    decision = await _exit(rig, local_intent_fn=_two_plans_one_symbol)
+
+    assert "SYMBOL_OWNERSHIP_CONFLICT" in decision.refusals
+    assert decision.exited is False
+
+
+async def test_wr_b4_a_restore_that_is_not_complete_refuses() -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, readiness=lambda: ExitReadiness(0, 0, 0, False))
+
+    assert decision == ExitDecision(exited=False, refusals=("RESTORE_NOT_COMPLETE",))
+    _assert_still_in_safe_mode(rig)
+
+
+@pytest.mark.parametrize("value", [None, 1, 0, "True", object()])
+async def test_wr_b4_an_unreadable_restore_flag_refuses_as_readiness_unreadable(
+    value: Any,
+) -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, readiness=lambda: ExitReadiness(0, 0, 0, value))
+
+    assert decision == ExitDecision(exited=False, refusals=("READINESS_UNREADABLE",))
+
+
+async def test_wr_b4_restore_refusal_is_reported_with_the_other_readiness_codes() -> None:
+    rig = _rig()
+
+    decision = await _exit(rig, readiness=lambda: ExitReadiness(1, 0, 0, False))
+
+    assert decision.refusals == ("UNKNOWN_INTENT_PRESENT", "RESTORE_NOT_COMPLETE")
+
+
+def test_wr_b4_exit_readiness_has_no_default_for_the_restore_flag() -> None:
+    with pytest.raises(TypeError):
+        ExitReadiness(0, 0, 0)  # type: ignore[call-arg]
+
+
+def test_wr_b4_build_exit_readiness_reads_the_restore_flag() -> None:
+    assert _readiness_of(restored=lambda: True).restore_complete is True
+    assert _readiness_of(restored=lambda: False).restore_complete is False
+
+
+@pytest.mark.parametrize("failure", ["raises", "none", "not-a-bool"])
+def test_wr_b4_a_restore_provider_that_cannot_read_gives_none(failure: str) -> None:
+    def bad() -> Any:
+        if failure == "raises":
+            raise RuntimeError("coordinator gone")
+        return None if failure == "none" else 1
+
+    result = _readiness_of(restored=bad)
+
+    assert result.restore_complete is None
+    assert (result.unknown_intents, result.blocking_plans, result.open_pending_actions) == (0, 0, 0)
+
+
+async def test_wr_b4_a_half_restored_coordinator_keeps_the_exit_refused_end_to_end() -> None:
+    """The review scenario: restore raised, the tracked set is empty, nothing else is dirty."""
+    rig = _rig()
+
+    refused = await _exit(rig, readiness=lambda: _readiness_of(restored=lambda: False))
+    assert refused.refusals == ("RESTORE_NOT_COMPLETE",)
+
+    allowed = await _exit(rig, readiness=lambda: _readiness_of(restored=lambda: True))
+    assert allowed.exited is True
