@@ -15,15 +15,30 @@ TEST_ONLY helpers; nothing here is a project value and no figure is a mainnet fi
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
+from src.execution.account_equity import LiveEquitySource
+from src.execution.day_risk_service import LiveDayRiskService
 from src.persistence.errors import RowConflict
 from src.risk.daily_loss import (
     DayRiskState,
+    FundingPolicy,
     LossComponent,
     base_is_inside_day,
 )
+
+from tests.support.account_fakes import (
+    BALANCES,
+    CONFIG,
+    INFORMATION,
+    ScriptedAccountReader,
+    demo_account_snapshots,
+)
+from tests.support.execution_limits import test_only_execution_limits
+from tests.support.virtual_time import VirtualTime
 
 _ComponentKey = tuple[date, str, str, str]
 
@@ -175,4 +190,62 @@ class ScriptedDayRiskReader:
         return self.income
 
 
-__all__ = ["InMemoryDayRiskStore", "ScriptedDayRiskReader"]
+TEST_ONLY_PARAMETER_SET: dict[str, Any] = {
+    "daily_loss_warning_threshold": Decimal("0.005"),
+    "daily_loss_stop_threshold": Decimal("0.01"),
+    "cluster_cap": Decimal("0.006"),
+    "max_aggregate_open_risk": Decimal("0.01"),
+    "max_open_positions": 2,
+}
+
+
+@dataclass
+class DayRiskRig:
+    """A service over the fakes and the recorded-Demo account snapshots (plan 21-16 tests)."""
+
+    service: LiveDayRiskService
+    store: InMemoryDayRiskStore
+    reader: ScriptedDayRiskReader
+    clock: VirtualTime
+
+
+async def build_day_risk_rig(
+    *,
+    start: datetime,
+    reader: ScriptedDayRiskReader | None = None,
+    store: InMemoryDayRiskStore | None = None,
+    policy: FundingPolicy = FundingPolicy.TRADES_WITH_UNVERIFIED_FUNDING,
+) -> DayRiskRig:
+    """One service on a virtual clock at ``start``; the day base is the recorded Demo equity."""
+    clock = VirtualTime(start)
+    information, balances, config = await demo_account_snapshots()
+    account = ScriptedAccountReader(
+        {CONFIG: [config], INFORMATION: [information], BALANCES: [balances]},
+        virtual_time=clock,
+        advance_seconds_per_call=0,
+    )
+    source = LiveEquitySource(
+        adapter=account, clock=clock, limits=test_only_execution_limits(), quote_asset="USDT"
+    )
+    day_store = store if store is not None else InMemoryDayRiskStore()
+    day_reader = reader if reader is not None else ScriptedDayRiskReader()
+    service = LiveDayRiskService(
+        reader=day_reader,
+        store=day_store,
+        equity=source,
+        clock=clock,
+        symbols={"BTCUSDT"},
+        quote_asset="USDT",
+        funding_policy=policy,
+        parameter_set=TEST_ONLY_PARAMETER_SET,
+    )
+    return DayRiskRig(service, day_store, day_reader, clock)
+
+
+__all__ = [
+    "TEST_ONLY_PARAMETER_SET",
+    "DayRiskRig",
+    "InMemoryDayRiskStore",
+    "ScriptedDayRiskReader",
+    "build_day_risk_rig",
+]

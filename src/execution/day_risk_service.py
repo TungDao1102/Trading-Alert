@@ -56,6 +56,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Protocol
 
 from src.domain.enums import DailyState
@@ -80,6 +81,10 @@ from src.risk.daily_loss import (
 )
 
 FUNDING_INCOME_TYPE = "FUNDING_FEE"
+# Why the stream path makes the loss unknown until the next backfill (plan 21-16): any
+# ACCOUNT_UPDATE (FUNDING_FEE included) and every stream gap. Frames sent during a gap are not
+# replayed (demo-observed, not mainnet), so a loss computed across a gap is never trusted.
+INVALIDATION_REASONS = frozenset({"ACCOUNT_UPDATE", "STREAM_GAP"})
 _OK = "OK"
 
 
@@ -147,6 +152,42 @@ def components_from_user_trade(row: Any) -> tuple[LossComponent, LossComponent]:
     return pnl, commission
 
 
+def components_from_fill(fill: Any, *, quote_asset: str) -> tuple[LossComponent, ...] | None:
+    """The two signed components of one stream ``FillEvent``, or None when it is unusable.
+
+    Realized PnL is a quote-asset amount only for a symbol quoted in ``quote_asset`` (USD-M
+    single-asset mode, enforced by the equity resolver); any other symbol carries the symbol as
+    the asset, so the asset check of ``fold_daily_loss`` makes the loss unknown. Commission is
+    MINUS the commission in ``commission_asset``. The key matches the REST row of the same trade
+    (``symbol:orderId:tradeId``). None when commission, its asset or realized PnL is missing.
+    """
+    if fill.commission is None or fill.commission_asset is None or fill.realized_pnl is None:
+        return None
+    key = f"{fill.symbol}:{fill.order_id}:{fill.exchange_trade_id}"
+    event_time = fill.fill_time_utc
+    day = utc_day_of(event_time)
+    pnl_asset = quote_asset if fill.symbol.endswith(quote_asset) else fill.symbol
+    pnl = LossComponent(
+        kind=ComponentKind.FILL_PNL,
+        source=ComponentSource.USER_DATA_EVENT,
+        source_key=key,
+        amount=fill.realized_pnl,
+        asset=pnl_asset,
+        event_time_utc=event_time,
+        utc_day=day,
+    )
+    commission = LossComponent(
+        kind=ComponentKind.FILL_COMMISSION,
+        source=ComponentSource.USER_DATA_EVENT,
+        source_key=key,
+        amount=-fill.commission,
+        asset=fill.commission_asset,
+        event_time_utc=event_time,
+        utc_day=day,
+    )
+    return pnl, commission
+
+
 def components_from_income(row: Any) -> LossComponent:
     """The FUNDING component of one ``IncomeRow``; any other income type is a ``ValueError``."""
     if row.income_type != FUNDING_INCOME_TYPE:
@@ -202,6 +243,8 @@ class LiveDayRiskService:
         self._trades_complete_for: tuple[date, int] | None = None
         self._funding_read_ok_for: tuple[date, int] | None = None
         self._last_error_type: str | None = None
+        # Days opened by ``evaluate``; ``current_daily_loss_quote`` answers only for these.
+        self._evaluated_days: set[date] = set()
 
     @property
     def last_error_type(self) -> str | None:
@@ -242,6 +285,68 @@ class LiveDayRiskService:
         if generation == self._backfill_generation:
             self._trades_complete_for = (day, generation)
             self._funding_read_ok_for = (day, generation)
+
+    # ------------------------------------------------------------------ the stream path
+
+    def invalidate(self, *, reason: str) -> None:
+        """Make the day loss unknown until a backfill completes AFTER this call (D-01, D-09).
+
+        Called for any ACCOUNT_UPDATE (FUNDING_FEE included) and every stream gap (Phase 24 wires
+        both). Bumping the generation also defeats a backfill already in flight: it started under
+        the older generation, so it does not mark the loss known. The equity source is untouched.
+        """
+        if reason not in INVALIDATION_REASONS:
+            raise ValueError(
+                f"reason must be one of {sorted(INVALIDATION_REASONS)}, got {reason!r}"
+            )
+        self._mark_loss_incomplete()
+
+    def ingest_fill(self, fill: Any) -> None:
+        """Add one stream fill to the day loss between backfills; never raises (D-09, D-11).
+
+        An unusable fill (no commission, commission asset or realized PnL) or a fill the store
+        cannot write makes the loss unknown until the next backfill. Only the exception type name
+        is kept. For the same trade key the most adverse of stream and REST counts once (fold).
+        """
+        try:
+            components = components_from_fill(fill, quote_asset=self._quote_asset)
+            if components is None:
+                self._mark_loss_incomplete()
+                return
+            self._store.add_components(components)
+        except Exception as exc:  # noqa: BLE001 - the stream router must never see a raise
+            self._last_error_type = type(exc).__name__
+            self._mark_loss_incomplete()
+
+    def current_daily_loss_quote(self, utc_day: date) -> Decimal | None:
+        """The known loss of ``utc_day`` now, or None (fail closed, D-11).
+
+        Known only for a day ``evaluate`` has opened, while a backfill of the CURRENT generation
+        completed for it (no invalidation, unusable fill or failed write since). The loss is
+        folded from the stored components on each call, so a stream fill added after the last
+        evaluate counts. This is the callable plan 21-15's ``make_reserving_save_atomic`` takes
+        as ``daily_loss_quote``.
+        """
+        if utc_day not in self._evaluated_days or not self._backfill_is_current(utc_day):
+            return None
+        try:
+            loss = fold_daily_loss(
+                components=tuple(self._store.list_components(utc_day)),
+                utc_day=utc_day,
+                quote_asset=self._quote_asset,
+                trades_complete=True,
+                funding_read_ok=True,
+                funding_policy=self._funding_policy,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unreadable or conflicting loss is unknown
+            self._last_error_type = type(exc).__name__
+            return None
+        return loss.loss_quote
+
+    def _mark_loss_incomplete(self) -> None:
+        self._backfill_generation += 1
+        self._trades_complete_for = None
+        self._funding_read_ok_for = None
 
     # ------------------------------------------------------------------ the day
 
@@ -316,6 +421,7 @@ class LiveDayRiskService:
         if isinstance(opened, DayStateVerdict):
             return opened
         day = opened.utc_day
+        self._evaluated_days.add(day)
         try:
             stored_components = tuple(self._store.list_components(day))
         except Exception as exc:  # noqa: BLE001 - unreadable components are an unknown loss
@@ -365,10 +471,12 @@ class LiveDayRiskService:
 
 __all__ = [
     "FUNDING_INCOME_TYPE",
+    "INVALIDATION_REASONS",
     "DayRiskReadPort",
     "DayRiskStorePort",
     "EquityCheckPort",
     "LiveDayRiskService",
+    "components_from_fill",
     "components_from_income",
     "components_from_user_trade",
 ]
