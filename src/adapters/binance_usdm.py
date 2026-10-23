@@ -489,6 +489,41 @@ class CommissionRates:
     taker_rate: Decimal
 
 
+@dataclass(frozen=True)
+class AccountAssetRow:
+    """One row of the `assets` list of `account_information_v3` (plan 21-03).
+
+    All three amounts are Decimal, parsed from the exchange text. The USDT row is the
+    cross-check of the account equity: `margin_balance` equals the account-level
+    `total_margin_balance` in single-asset mode (demo-observed, not mainnet). Other
+    assets (USDC, BTC on the Demo account) are kept as their own rows; the account totals
+    exclude them.
+    """
+
+    asset: str
+    wallet_balance: Decimal
+    unrealized_profit: Decimal
+    margin_balance: Decimal
+
+
+@dataclass(frozen=True)
+class AccountInformationSnapshot:
+    """Result of `account_information_snapshot` (GET /fapi/v3/account, plan 21-03, D-02).
+
+    The equity field is `total_margin_balance` ("USDT only in single-asset mode" in the SDK
+    17.4.0 model; on Demo equal to `total_wallet_balance + total_unrealized_profit` and to
+    the USDT row's `margin_balance`, all 4999.09343961, demo-observed, not mainnet). The
+    choice and the identity checks belong to the pure resolver of plan 21-04; this value
+    only carries the parsed numbers. `availableBalance` is deliberately NOT read: it is
+    Phase 22's margin check, not an equity. `assets` keeps the response order.
+    """
+
+    total_margin_balance: Decimal
+    total_wallet_balance: Decimal
+    total_unrealized_profit: Decimal
+    assets: tuple[AccountAssetRow, ...]
+
+
 # --------------------------------------------------------------------------- #
 # Helper conversions.
 # --------------------------------------------------------------------------- #
@@ -1510,6 +1545,37 @@ class BinanceUsdmAdapter:
         taker = _require_commission_rate(raw.taker_commission_rate, "takerCommissionRate", symbol)
         return CommissionRates(symbol=symbol, maker_rate=maker, taker_rate=taker)
 
+    async def account_information_snapshot(self) -> AccountInformationSnapshot:
+        """Read the account equity figures (GET /fapi/v3/account, USER_DATA, plan 21-03).
+
+        Through the official SDK `rest_api.account_information_v3(recv_window)` and the one
+        signed helper `_sdk_call` (policy, shared REST gate, never retried; an SDK exception
+        propagates unchanged). Every amount is parsed as a Decimal from the exchange text;
+        a missing, empty, non-decimal or non-finite field raises `ValueError` naming the
+        field only, never a zero (D-04). The adapter takes no clock (the caller stamps the
+        reading time before the call) and logs nothing about the response.
+        """
+        response = await self._sdk_call(CallKind.QUERY, self._sdk.rest_api.account_information_v3)
+        raw = response.data()
+        if raw is None:
+            raise ValueError("account information response empty: refusing to fabricate")
+        raw_assets = raw.assets
+        if raw_assets is None:
+            raise ValueError("account field assets missing: refusing to fabricate")
+        assets = tuple(_row_to_account_asset(item) for item in raw_assets)
+        return AccountInformationSnapshot(
+            total_margin_balance=_require_exchange_decimal(
+                raw.total_margin_balance, "totalMarginBalance"
+            ),
+            total_wallet_balance=_require_exchange_decimal(
+                raw.total_wallet_balance, "totalWalletBalance"
+            ),
+            total_unrealized_profit=_require_exchange_decimal(
+                raw.total_unrealized_profit, "totalUnrealizedProfit"
+            ),
+            assets=assets,
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Internal helpers for reconciler snapshot projection.
@@ -1793,6 +1859,38 @@ def _require_commission_rate(value: Any, field_name: str, symbol: str) -> Decima
             "likely a unit error"
         )
     return rate
+
+
+def _require_exchange_decimal(value: Any, field_name: str) -> Decimal:
+    """Parse one exchange amount strictly: a finite Decimal from non-empty text (plan 21-03).
+
+    A missing (None), empty, non-text, non-decimal or non-finite value raises `ValueError`
+    naming the field only; the offending text is never put in the message. No float is built
+    and a failure is never turned into a zero (D-04).
+    """
+    message = f"account field {field_name} missing or not a finite decimal: refusing to fabricate"
+    if not isinstance(value, str) or value.strip() != value or value == "" or "_" in value:
+        raise ValueError(message)
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise ValueError(message) from None
+    if not parsed.is_finite():
+        raise ValueError(message)
+    return parsed
+
+
+def _row_to_account_asset(item: Any) -> AccountAssetRow:
+    """Project one `assets` row of `account_information_v3` into the frozen dataclass."""
+    asset = item.asset
+    if not isinstance(asset, str) or asset.strip() == "":
+        raise ValueError("account field asset missing or empty: refusing to fabricate")
+    return AccountAssetRow(
+        asset=asset,
+        wallet_balance=_require_exchange_decimal(item.wallet_balance, "walletBalance"),
+        unrealized_profit=_require_exchange_decimal(item.unrealized_profit, "unrealizedProfit"),
+        margin_balance=_require_exchange_decimal(item.margin_balance, "marginBalance"),
+    )
 
 
 def _require_update_time_utc(value: Any) -> datetime:
