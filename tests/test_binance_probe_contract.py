@@ -270,6 +270,10 @@ _OPERATIONS: dict[str, _Op] = {
     # quick task 261022-sj1: the server time and the depth read
     "server_time": lambda a: a.server_time(),
     "order_book": lambda a: a.order_book(symbol="BTCUSDT"),
+    # quick task 261023-sj2: the stale-timestamp read (a signed GET with the policy window)
+    "stale_timestamp_read": lambda a: a.stale_timestamp_read(
+        symbol="BTCUSDT", recv_window_ms=TEST_ONLY_RECV_WINDOW_MS, timestamp_behind_ms=10_000
+    ),
 }
 
 
@@ -433,3 +437,89 @@ async def test_the_mark_price_interval_is_the_only_plain_text_exception() -> Non
         _check_argument_types(name, {**kwargs, "interval": 1})
     with pytest.raises(TypeError):
         _bind(name, {**kwargs, "intervall": kwargs["interval"]})
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261023-sj2: the stale clock is honoured by the REAL installed SDK.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeHttpResponse:
+    status_code = 200
+    text = "[]"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+
+    def json(self) -> list[Any]:
+        return []
+
+
+class _FakeSession:
+    """Records the query string of every request; never opens a connection."""
+
+    def __init__(self) -> None:
+        self.params: list[str] = []
+
+    def request(self, **kwargs: Any) -> _FakeHttpResponse:
+        self.params.append(kwargs["params"])
+        return _FakeHttpResponse()
+
+    def mount(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _real_sdk_rest_with_fake_session() -> tuple[Any, _FakeSession]:
+    from binance_common.configuration import ConfigurationRestAPI
+
+    config = ConfigurationRestAPI(
+        api_key="TESTONLYkey", api_secret="s" * 32, base_path="https://sdk-contract.invalid"
+    )
+    rest = SdkRestApi(config)
+    session = _FakeSession()
+    for name in vars(rest):
+        holder = getattr(rest, name)
+        if hasattr(holder, "_session"):
+            holder._session = session
+    return rest, session
+
+
+async def test_the_installed_sdk_signs_the_stale_timestamp_the_adapter_asks_for() -> None:
+    import re
+
+    import binance_common.utils as sdk_utils
+
+    original = sdk_utils.get_timestamp
+    rest, session = _real_sdk_rest_with_fake_session()
+    gate = make_gate()
+    adapter = BinanceProbeAdapter(
+        FakeProbeSdk(rest),  # type: ignore[arg-type]
+        policy=test_only_signed_call_policy(),
+        rest_gate=gate,
+        public=make_public(FakeProbeRest(), gate),
+    )
+    before = original()
+    observation = await adapter.stale_timestamp_read(
+        symbol="BTCUSDT", recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    after = original()
+    assert observation.ok is True
+    (query,) = session.params
+    match = re.search(r"timestamp=(\d+)", query)
+    assert match is not None
+    sent = int(match.group(1))
+    assert before - 10_000 <= sent <= after - 10_000
+    assert "recvWindow=5000" in query and "symbol=BTCUSDT" in query
+    assert observation.summary["clock_calls"] == "1"
+    assert observation.summary["timestamp_sent_ms"] == str(sent)
+    assert sdk_utils.get_timestamp is original
+    # an ordinary signed read afterwards carries the real clock again
+    other = await adapter.open_orders(symbol="BTCUSDT")
+    assert other.ok is True
+    later = int(re.search(r"timestamp=(\d+)", session.params[-1]).group(1))  # type: ignore[union-attr]
+    assert later >= before
+
+
+def test_the_sdk_send_request_reads_the_clock_by_the_name_the_adapter_replaces() -> None:
+    import binance_common.utils as sdk_utils
+
+    source = inspect.getsource(sdk_utils.send_request)
+    assert 'cleaned_payload["timestamp"] = get_timestamp()' in source

@@ -905,6 +905,9 @@ _READ_AND_MUTATING_CALLS = [
     lambda a: a.cancel_all_open_orders(symbol=TEST_ONLY_SYMBOL),
     lambda a: a.cancel_all_algo_open_orders(symbol=TEST_ONLY_SYMBOL),
     lambda a: _gtd(a),  # quick task 261021-sj0
+    lambda a: a.stale_timestamp_read(  # quick task 261023-sj2
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    ),
 ]
 
 
@@ -1040,7 +1043,8 @@ def test_module_has_no_retry_construct() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in {"to_thread", "sleep"}
     ]
-    assert attributes == ["to_thread"]
+    # `_call` (every ordinary request) and the one stale-clock call of quick task 261023-sj2.
+    assert attributes == ["to_thread", "to_thread"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1477,6 +1481,10 @@ _READ_CALLS = [
     # quick task 261022-sj1
     lambda a: a.server_time(),
     lambda a: a.order_book(symbol=TEST_ONLY_SYMBOL),
+    # quick task 261023-sj2
+    lambda a: a.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    ),
 ]
 
 
@@ -2053,6 +2061,8 @@ def test_every_public_coroutine_returns_observations_only() -> None:
         # quick task 261022-sj1
         "server_time",
         "order_book",
+        # quick task 261023-sj2
+        "stale_timestamp_read",
     }
     assert {name: text for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {}
 
@@ -2148,3 +2158,138 @@ async def test_order_book_records_a_malformed_answer_as_data() -> None:
     observation = await adapter.order_book(symbol=TEST_ONLY_SYMBOL)
     assert observation.ok is False
     assert observation.error is not None and observation.error.message == "ValueError"
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261023-sj2: the stale-timestamp read (the -1021 answer).
+# --------------------------------------------------------------------------- #
+
+
+class _ClockAskingRest(FakeProbeRest):
+    """A fake whose `current_all_open_orders` asks the SDK clock like `send_request` does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock_values: list[int] = []
+
+    def current_all_open_orders(self, **kwargs: Any) -> Any:
+        import binance_common.utils as sdk_utils
+
+        self.clock_values.append(sdk_utils.get_timestamp())
+        return super().current_all_open_orders(**kwargs)
+
+
+async def test_the_stale_read_sends_the_clock_minus_the_given_milliseconds() -> None:
+    import binance_common.utils as sdk_utils
+
+    original = sdk_utils.get_timestamp
+    rest = _ClockAskingRest()
+    adapter, _, _ = _adapter(rest)
+    rest.script("current_all_open_orders", [])
+    before = original()
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    after = original()
+    assert observation.ok is True and observation.operation == "stale_timestamp_read"
+    (sent,) = rest.clock_values
+    assert before - 10_000 <= sent <= after - 10_000
+    assert observation.summary["timestamp_sent_ms"] == str(sent)
+    assert observation.summary["timestamp_behind_ms"] == "10000"
+    assert observation.summary["recv_window_ms"] == "5000"
+    assert observation.summary["clock_calls"] == "1"
+    assert observation.summary["count"] == "0"
+    assert rest.calls == [
+        ("current_all_open_orders", {"symbol": TEST_ONLY_SYMBOL, "recv_window": 5000})
+    ]
+    assert sdk_utils.get_timestamp is original  # the SDK clock is back
+
+
+async def test_the_stale_read_records_the_exchange_error_with_the_clock_facts() -> None:
+    rest = _ClockAskingRest()
+    adapter, _, _ = _adapter(rest)
+    rest.script(
+        "current_all_open_orders",
+        BadRequestError(
+            status_code=-1021,
+            error_message="Timestamp for this request is outside of the recvWindow.",
+        ),
+    )
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    assert observation.ok is False
+    assert observation.error is not None
+    assert observation.error.code == -1021
+    assert observation.error.http_class == "BAD_REQUEST"
+    assert "recvWindow" in observation.error.message
+    assert observation.summary["clock_calls"] == "1"
+    assert observation.summary["timestamp_behind_ms"] == "10000"
+
+
+async def test_a_read_that_never_asks_the_sdk_clock_says_so() -> None:
+    adapter, rest, _ = _adapter()  # the plain fake never asks the clock
+    rest.script("current_all_open_orders", [])
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    assert observation.summary["clock_calls"] == "0"
+    assert "timestamp_sent_ms" not in observation.summary
+
+
+async def test_the_sdk_clock_is_restored_after_an_exception_and_other_threads_see_real_time() -> (
+    None
+):
+    import binance_common.utils as sdk_utils
+
+    original = sdk_utils.get_timestamp
+    seen_in_other_thread: list[int] = []
+
+    class _Rest(_ClockAskingRest):
+        def current_all_open_orders(self, **kwargs: Any) -> Any:
+            worker = threading.Thread(
+                target=lambda: seen_in_other_thread.append(sdk_utils.get_timestamp())
+            )
+            worker.start()
+            worker.join()
+            raise NetworkError(error_message="boom")
+
+    rest = _Rest()
+    adapter, _, _ = _adapter(rest)
+    start = original()
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=60_000
+    )
+    assert observation.ok is False
+    assert sdk_utils.get_timestamp is original
+    (other,) = seen_in_other_thread
+    assert other >= start  # another thread is never made stale
+
+
+@pytest.mark.parametrize(
+    ("window", "behind"),
+    [(0, 10), (-1, 10), (5000, 0), (5000, -3), (True, 10), (5000, True), (5000.0, 10), (5000, 1.5)],
+)
+async def test_the_stale_read_refuses_a_window_or_offset_that_is_not_a_positive_int(
+    window: Any, behind: Any
+) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.stale_timestamp_read(
+            symbol=TEST_ONLY_SYMBOL, recv_window_ms=window, timestamp_behind_ms=behind
+        )
+    assert rest.calls == []
+
+
+async def test_the_stale_read_is_refused_after_a_ban_without_an_sdk_call() -> None:
+    adapter, rest, gate = _adapter()
+    rest.script(
+        "current_all_open_orders", TooManyRequestsError(error_message="slow", retry_after=3)
+    )
+    await adapter.open_orders(symbol=TEST_ONLY_SYMBOL)
+    assert gate.restriction() is not None
+    with pytest.raises(ProbeBanned):
+        await adapter.stale_timestamp_read(
+            symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+        )
+    assert len(rest.calls) == 1

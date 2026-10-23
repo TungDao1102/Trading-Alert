@@ -47,14 +47,22 @@ def make_config(
     execute: bool = True,
     fixtures: bool = False,
     cap: str | None = None,
+    replace: tuple[tuple[str, str], ...] = (),
 ) -> dp.ProbeConfig:
-    """A config enabling the keys of `case_ids`, running only them; `cap` lowers the notional."""
+    """A config enabling the keys of `case_ids`, running only them; `cap` lowers the notional.
+
+    `replace` rewrites text of the limits file, (old, new) pairs (quick task 261023-sj2).
+    """
     optional = tuple(CASE_KEYS[case_id] for case_id in case_ids)
     limits = write_probe_limits(tmp_path, optional=optional)
     if cap is not None:
         text = limits.read_text(encoding="utf-8")
         assert 'max_notional_quote = "150"' in text
         limits.write_text(text.replace('"150"', f'"{cap}"'), encoding="utf-8")
+    for old, new in replace:
+        text = limits.read_text(encoding="utf-8")
+        assert old in text, old
+        limits.write_text(text.replace(old, new), encoding="utf-8")
     argv = [
         "--environment",
         "DEMO",
@@ -104,8 +112,9 @@ async def run_cases(
     fixtures: bool = False,
     stream: bool = False,
     cap: str | None = None,
+    replace: tuple[tuple[str, str], ...] = (),
 ) -> tuple[dict[str, Any], int]:
-    config = make_config(tmp_path, case_ids=case_ids, fixtures=fixtures, cap=cap)
+    config = make_config(tmp_path, case_ids=case_ids, fixtures=fixtures, cap=cap, replace=replace)
     recorder = dp.ProbeRecorder()
     rig = scenario_rig(port, vt, stream=stream)
     code = await dp.run_probe(config, rig, recorder)

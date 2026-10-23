@@ -271,6 +271,7 @@ def test_the_smoke_kind_loads_every_value_with_decimal_strings(tmp_path: Path) -
         gtd_lifetime_seconds=None,
         gtd_expiry_wait_seconds=None,
         race_repeats=None,
+        insufficient_margin_quantity=None,
     )
     assert limits.enabled_optional_cases == ()
 
@@ -453,8 +454,21 @@ SJ1_KEYS = (
 )
 
 
-def test_the_evidence_case_keys_are_the_ten_and_the_five_in_script_order() -> None:
-    assert oe.EVIDENCE_CASE_KEYS == (*NEW_KEYS[:9], *SJ1_KEYS, NEW_KEYS[9])
+# Quick task 261023-sj2: eight more keys, inserted before gtd_expiry (the only long case).
+SJ2_KEYS = (
+    "reduce_only_flat",
+    "reduce_only_oversize",
+    "min_notional_entry",
+    "insufficient_margin",
+    "stop_reject_after_accept",
+    "trigger_cancel_race",
+    "recv_window_error",
+    "income_history",
+)
+
+
+def test_the_evidence_case_keys_are_the_ten_the_five_and_the_eight_in_script_order() -> None:
+    assert oe.EVIDENCE_CASE_KEYS == (*NEW_KEYS[:9], *SJ1_KEYS, *SJ2_KEYS, NEW_KEYS[9])
     assert oe.EVIDENCE_CASE_KEYS[-1] == "gtd_expiry"  # the case that waits runs last
     assert "EVIDENCE_CASE_KEYS" in oe.__all__
     assert not set(oe.EVIDENCE_CASE_KEYS) & set(oe.OPTIONAL_CASE_KEYS)
@@ -733,3 +747,144 @@ def test_the_smoke_kind_refuses_race_repeats_and_the_sj1_case_keys(tmp_path: Pat
 def test_the_phase18_file_has_no_race_repeats() -> None:
     limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
     assert limits.race_repeats is None
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261023-sj2: eight more owner opt-in cases and their keys.
+# --------------------------------------------------------------------------- #
+
+MARGIN_QUANTITY_LINE = 'insufficient_margin_quantity = "5"\n'
+NEAR_LINE = 'near_trigger_fraction = "0.999"\n'
+RACE_LINE = "race_repeats = 3\n"
+
+
+def _sj2_text(*keys: str, extra_order: str = "") -> str:
+    text = _with_new_keys(*((key, "true") for key in keys))
+    if extra_order:
+        text = text.replace('symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{extra_order}', 1)
+    return text
+
+
+_SJ2_NEEDS: dict[str, str] = {
+    "stop_reject_after_accept": NEAR_LINE,
+    "trigger_cancel_race": NEAR_LINE + RACE_LINE,
+    "insufficient_margin": MARGIN_QUANTITY_LINE,
+}
+
+
+@pytest.mark.parametrize("key", SJ2_KEYS)
+def test_each_sj2_key_enables_only_its_case(tmp_path: Path, key: str) -> None:
+    text = _sj2_text(key, extra_order=_SJ2_NEEDS.get(key, ""))
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert [k for k in limits.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS] == [key]
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "false")), "off.toml"), kind="probe"
+    )
+    assert not [k for k in off.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS]
+    assert off.near_trigger_fraction is None
+    assert off.race_repeats is None
+    assert off.insufficient_margin_quantity is None
+
+
+def test_the_near_trigger_fraction_serves_the_two_new_stop_cases(tmp_path: Path) -> None:
+    for key in ("stop_reject_after_accept", "trigger_cancel_race"):
+        extra = _SJ2_NEEDS[key]
+        limits = oe.load_demo_order_limits(
+            _write(tmp_path, _sj2_text(key, extra_order=extra), f"{key}.toml"), kind="probe"
+        )
+        assert limits.near_trigger_fraction == Decimal("0.999")
+        with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+            oe.load_demo_order_limits(
+                _write(
+                    tmp_path,
+                    _sj2_text(key, extra_order=extra.replace(NEAR_LINE, "")),
+                    f"{key}-no.toml",
+                ),
+                kind="probe",
+            )
+        assert "order.near_trigger_fraction (missing key" in str(info.value)
+
+
+def test_race_repeats_serves_either_race_case_and_is_refused_otherwise(tmp_path: Path) -> None:
+    both = _sj2_text("cancel_fill_race", "trigger_cancel_race", extra_order=NEAR_LINE + RACE_LINE)
+    limits = oe.load_demo_order_limits(_write(tmp_path, both), kind="probe")
+    assert limits.race_repeats == 3
+    missing = _sj2_text("trigger_cancel_race", extra_order=NEAR_LINE)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, missing, "n.toml"), kind="probe")
+    assert "order.race_repeats (missing key" in str(info.value)
+    assert "optional_cases.trigger_cancel_race" in str(info.value)
+    toolong = _sj2_text("trigger_cancel_race", extra_order=NEAR_LINE + "race_repeats = 11\n")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info2:
+        oe.load_demo_order_limits(_write(tmp_path, toolong, "t.toml"), kind="probe")
+    assert "order.race_repeats (must be at most" in str(info2.value)
+
+
+def test_the_margin_quantity_is_the_owners_own_key_and_the_cap_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    text = _sj2_text("insufficient_margin", extra_order=MARGIN_QUANTITY_LINE)
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert limits.insufficient_margin_quantity == Decimal("5")
+    assert limits.max_notional_quote == Decimal("150")
+    assert limits.quantity == Decimal("0.002")
+
+
+@pytest.mark.parametrize(
+    ("line", "enabled", "named"),
+    [
+        ("", True, "order.insufficient_margin_quantity (missing key"),
+        (
+            'insufficient_margin_quantity = "<OWNER: whole quantity>"\n',
+            True,
+            "order.insufficient_margin_quantity (must be a plain decimal string)",
+        ),
+        (
+            'insufficient_margin_quantity = "0"\n',
+            True,
+            "order.insufficient_margin_quantity (must be positive)",
+        ),
+        (
+            'insufficient_margin_quantity = "-3"\n',
+            True,
+            "order.insufficient_margin_quantity (must be positive)",
+        ),
+        (
+            "insufficient_margin_quantity = 5\n",
+            True,
+            "order.insufficient_margin_quantity (must be a plain decimal string)",
+        ),
+        (
+            'insufficient_margin_quantity = "5"\n',
+            False,
+            "order.insufficient_margin_quantity (only allowed when",
+        ),
+    ],
+)
+def test_the_margin_quantity_is_refused_unless_a_positive_decimal_and_only_with_its_case(
+    tmp_path: Path, line: str, enabled: bool, named: str
+) -> None:
+    text = _with_new_keys(("insufficient_margin", "true" if enabled else "false")).replace(
+        'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{line}', 1
+    )
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert named in str(info.value)
+    assert "OWNER" not in str(info.value)  # a refusal names keys, never a value
+
+
+def test_the_smoke_kind_refuses_the_sj2_case_keys_and_the_margin_quantity(tmp_path: Path) -> None:
+    for key in SJ2_KEYS:
+        text = TEST_ONLY_SMOKE_LIMITS + f"\n[optional_cases]\n{key} = true\n"
+        with pytest.raises(oe.DemoOrderLimitsRefused):
+            oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+    text = TEST_ONLY_SMOKE_LIMITS.replace(
+        "[order]\n", '[order]\ninsufficient_margin_quantity = "5"\n', 1
+    )
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, text, "m.toml"), kind="smoke")
+
+
+def test_the_phase18_file_has_no_margin_quantity() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.insufficient_margin_quantity is None

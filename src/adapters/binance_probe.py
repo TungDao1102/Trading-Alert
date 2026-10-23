@@ -40,12 +40,23 @@ credential field, and every value still goes through the shared redactor and the
 Quick task 261022-sj1 adds two unsigned public reads through the gated reader: `server_time`
 (the exchange clock, for the goodTillDate boundary case) and `order_book` (the top
 `ORDER_BOOK_LIMIT` levels, for the partial-fill and cancel-race cases).
+
+Quick task 261023-sj2 adds `stale_timestamp_read`: ONE signed read-only GET whose timestamp is
+deliberately behind the clock, to record the exchange's `-1021` answer. The installed SDK builds
+the timestamp itself (`binance_common.utils.get_timestamp`, read by name inside `send_request`),
+so the adapter replaces that function for the duration of the one call with a wrapper that
+subtracts a thread-local offset: only the worker thread of this call is ever made stale, every
+other thread keeps the real clock, and the original function is restored when the call ends. The
+answer carries how often the SDK asked the clock (`clock_calls`): 0 means the stale clock was not
+honoured and the case must not draw a conclusion.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import threading
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -53,6 +64,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+import binance_common.utils as sdk_utils
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
     NewAlgoOrderAlgoTypeEnum,
     NewAlgoOrderClosePositionEnum,
@@ -280,6 +292,41 @@ _FLAT_MAX_DEPTH: int = 8
 
 def _is_strict_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+# --------------------------------------------------------------------------- #
+# The stale clock of `stale_timestamp_read` (quick task 261023-sj2).
+# --------------------------------------------------------------------------- #
+
+# Per-thread state of the one stale call: `behind_ms` (None outside a stale call) and the list
+# of (real clock, timestamp sent) pairs the SDK asked for.
+_STALE_STATE = threading.local()
+
+
+def _stale_clock(real: Callable[[], int]) -> Callable[[], int]:
+    """A drop-in for `binance_common.utils.get_timestamp`, stale only in a marked thread."""
+
+    def stale_get_timestamp() -> int:
+        now: int = real()
+        behind: int | None = getattr(_STALE_STATE, "behind_ms", None)
+        if behind is None:
+            return now
+        sent = now - behind
+        _STALE_STATE.asked.append((now, sent))
+        return sent
+
+    return stale_get_timestamp
+
+
+@contextmanager
+def _stale_clock_installed() -> Iterator[None]:
+    """Replace the SDK clock for the duration of the block and always restore it."""
+    original = sdk_utils.get_timestamp
+    sdk_utils.get_timestamp = _stale_clock(original)
+    try:
+        yield
+    finally:
+        sdk_utils.get_timestamp = original
 
 
 # --------------------------------------------------------------------------- #
@@ -1178,6 +1225,63 @@ class BinanceProbeAdapter:
             call_kind=CallKind.PLACEMENT,
             kwargs=kwargs,
             summarize=_order_summary,
+        )
+
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation:
+        """ONE signed GET /fapi/v1/openOrders whose timestamp is `timestamp_behind_ms` stale.
+
+        Read-only: it lists open orders. The request carries `recv_window_ms` as its
+        recvWindow and a timestamp that is the real clock minus `timestamp_behind_ms`, so with
+        an offset larger than the window the exchange answers `-1021`. The answer is data like
+        every other: an error becomes an `ErrorObservation`; both the accepted and the error
+        observation carry the clock facts in `summary` (`recv_window_ms`,
+        `timestamp_behind_ms`, `clock_calls`, and `timestamp_sent_ms` / `real_clock_ms` when
+        the SDK asked the clock). Never retried.
+        """
+        if not _is_strict_int(recv_window_ms) or recv_window_ms <= 0:
+            raise ValueError("recv_window_ms must be a positive int (not a bool)")
+        if not _is_strict_int(timestamp_behind_ms) or timestamp_behind_ms <= 0:
+            raise ValueError("timestamp_behind_ms must be a positive int (not a bool)")
+        sdk_method_name = "current_all_open_orders"
+        if sdk_method_name not in SDK_REST_METHODS:
+            raise ValueError(f"undeclared SDK method: {sdk_method_name}")
+        self._refuse_if_banned()
+        method = getattr(self._sdk.rest_api, sdk_method_name)
+        request = {"symbol": symbol, "recv_window": recv_window_ms}
+
+        def run() -> tuple[Any, Exception | None, list[tuple[int, int]]]:
+            _STALE_STATE.behind_ms = timestamp_behind_ms
+            _STALE_STATE.asked = []
+            try:
+                try:
+                    return method(**request), None, list(_STALE_STATE.asked)
+                except Exception as exc:  # noqa: BLE001 - recorded as data below
+                    return None, exc, list(_STALE_STATE.asked)
+            finally:
+                _STALE_STATE.behind_ms = None
+
+        with _stale_clock_installed():
+            response, failure, asked = await asyncio.to_thread(run)
+        facts = {
+            "recv_window_ms": str(recv_window_ms),
+            "timestamp_behind_ms": str(timestamp_behind_ms),
+            "clock_calls": str(len(asked)),
+        }
+        if asked:
+            facts["real_clock_ms"] = str(asked[-1][0])
+            facts["timestamp_sent_ms"] = str(asked[-1][1])
+        if failure is not None:
+            error = self._failure(
+                "stale_timestamp_read", failure, CallKind.QUERY, record_in_gate=True
+            )
+            return ProbeObservation(
+                operation="stale_timestamp_read", ok=False, summary=facts, error=error.error
+            )
+        summary = {**_open_orders_summary(response.data()), **facts}
+        return ProbeObservation(
+            operation="stale_timestamp_read", ok=True, summary=summary, error=None
         )
 
     async def server_time(self) -> ProbeObservation:

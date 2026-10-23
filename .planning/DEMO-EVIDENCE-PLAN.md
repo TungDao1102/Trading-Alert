@@ -1,8 +1,8 @@
 # Demo evidence plan: the owner runs the capture cases
 
-Written for the owner by quick task 261021-sj0 and extended by quick task 261022-sj1 (five more cases and the section "One session: all cases"). It tells you which commands to run on Binance Demo, which files each run leaves behind and which later phase or open item reads them. It decides nothing. Every result is labelled "demo-observed, not mainnet" (D-17); no result may choose a trading parameter, a model or a limit number; D055 stays OPEN (the closure is yours, see `19-DEC-D055-DRAFT.md`).
+Written for the owner by quick task 261021-sj0 and extended by quick task 261022-sj1 (five more cases and the section "One session: all cases") and by quick task 261023-sj2 (eight more cases, sections 16 to 23). It tells you which commands to run on Binance Demo, which files each run leaves behind and which later phase or open item reads them. It decides nothing. Every result is labelled "demo-observed, not mainnet" (D-17); no result may choose a trading parameter, a model or a limit number; D055 stays OPEN (the closure is yours, see `19-DEC-D055-DRAFT.md`).
 
-The tool is `scripts/demo_probe.py` (ten opt-in cases of 261021-sj0, `CAPTURE_CASES`, and five more of 261022-sj1, `SJ1_CASES`) plus the existing `scripts/user_data_smoke.py` (one re-run, Step 2). The code and its offline tests were written without any network call: no agent ran `--execute` of anything.
+The tool is `scripts/demo_probe.py` (ten opt-in cases of 261021-sj0, `CAPTURE_CASES`, five more of 261022-sj1, `SJ1_CASES`, and eight more of 261023-sj2, `SJ2_CASES`) plus the existing `scripts/user_data_smoke.py` (one re-run, Step 2). The code and its offline tests were written without any network call: no agent ran `--execute` of anything.
 
 ## Safety
 
@@ -10,7 +10,7 @@ The tool is `scripts/demo_probe.py` (ten opt-in cases of 261021-sj0, `CAPTURE_CA
 - Demo only: there is no host, URL, key or LIVE option in either tool, and a LIVE credential variable in the environment refuses the run. Credentials come only from the Demo variables your environment already uses; never paste them into a file or into chat.
 - One process per Demo account: the listenKey is a singleton. Stop every other process on the Demo account (the paper runtime, the rehearsal) before a run.
 - The tool never retries. On a flaky network re-run one case at most once and then stop. Never provoke a 418 or 429 on purpose; if one happens the run stops by itself (`ABORTED_BAN`), and you wait out the `retry_after_seconds` the evidence records.
-- Each order case opens at most the approved quantity (an order above your approved quantity or above your notional cap is refused before it is sent). After every case the cleanup cancels all orders and all algo orders and closes any residual position with one reduce-only MARKET order, then checks the symbol is flat. If the run ends `CLEANUP_FAILED` or `ABORTED_BAN`, open the Demo account and clean it by hand (open orders, open algo orders, position).
+- Each order case opens at most the approved quantity (an order above your approved quantity or above your notional cap is refused before it is sent). The single exception is `insufficient_margin_order` (section 19): it sends your own `insufficient_margin_quantity`, which is deliberately larger than the margin allows, so the `max_notional_quote` check and the approved-quantity check are NOT applied to that one order (it keeps the symbol, the flat precheck, the far-price band, the step grid and the cleanup). No other case may send more than the approved quantity or notional, and the tests pin that. After every case the cleanup cancels all orders and all algo orders and closes any residual position with one reduce-only MARKET order, then checks the symbol is flat. If the run ends `CLEANUP_FAILED` or `ABORTED_BAN`, open the Demo account and clean it by hand (open orders, open algo orders, position).
 - One-way mode only. In hedge mode every order case ends NOT_OBSERVED (`hedge mode: reduceOnly cannot be sent`) and sends nothing.
 - Results are facts: a case ends OBSERVED (with the exchange answers) or NOT_OBSERVED (with the reason). Nothing here says a behaviour is good or safe.
 
@@ -18,7 +18,7 @@ The tool is `scripts/demo_probe.py` (ten opt-in cases of 261021-sj0, `CAPTURE_CA
 
 You create and approve `.planning/phases/19-execution-plan-binding-price-check/decisions/19-probe-limits.toml` and record the approval in a decision note of your own. The agent did not create or approve it, and the Phase 18 files (`18-probe-limits.toml`, `18-smoke-limits.toml`) are unchanged.
 
-Layout: the Phase 18 keys, the fifteen new `[optional_cases]` keys (ten of 261021-sj0 and five of 261022-sj1), and four new keys that are required exactly when their case is on. Every number is yours: nothing is proposed here, and every placeholder below is written `<OWNER: ...>`, so the loader refuses the file until you replace each one.
+Layout: the Phase 18 keys, the twenty-three new `[optional_cases]` keys (ten of 261021-sj0, five of 261022-sj1 and eight of 261023-sj2), and five new keys that are required exactly when their case is on. Every number is yours: nothing is proposed here, and every placeholder below is written `<OWNER: ...>`, so the loader refuses the file until you replace each one.
 
 ```toml
 [order]
@@ -26,12 +26,14 @@ symbol = "<OWNER: the Demo symbol>"
 quantity = "<OWNER: approved quantity>"
 max_notional_quote = "<OWNER: notional cap in quote currency>"
 far_price_fraction = "<OWNER: strictly between 0 and 1>"
-# only with triggered_bracket or tp1_from_fill:
+# only with triggered_bracket, tp1_from_fill, stop_reject_after_accept or trigger_cancel_race:
 near_trigger_fraction = "<OWNER: strictly between 0 and 1>"
 # only with gtd_expiry:
 gtd_lifetime_seconds = <OWNER: whole seconds>
-# only with cancel_fill_race:
+# only with cancel_fill_race or trigger_cancel_race:
 race_repeats = <OWNER: a whole number, at most 5>
+# only with insufficient_margin (its own quantity; the notional cap does not apply to it):
+insufficient_margin_quantity = "<OWNER: whole quantity on the step grid, large enough to exceed available margin at the account's leverage>"
 
 [waits]
 case_timeout_seconds = <OWNER: whole seconds>
@@ -57,15 +59,24 @@ gtd_min_lifetime = <OWNER: true or false>
 partial_fill_attempt = <OWNER: true or false>
 cancel_fill_race = <OWNER: true or false>
 stream_loss = <OWNER: true or false>
+reduce_only_flat = <OWNER: true or false>
+reduce_only_oversize = <OWNER: true or false>
+min_notional_entry = <OWNER: true or false>
+insufficient_margin = <OWNER: true or false>
+stop_reject_after_accept = <OWNER: true or false>
+trigger_cancel_race = <OWNER: true or false>
+recv_window_error = <OWNER: true or false>
+income_history = <OWNER: true or false>
 gtd_expiry = <OWNER: true or false>
 ```
 
 What the loader enforces (it names keys, never values, when it refuses):
 
-- `near_trigger_fraction` is a plain decimal strictly between 0 and 1, required exactly when `triggered_bracket` or `tp1_from_fill` is true and refused otherwise. The closer to 1, the closer the trigger sits to the live mark price; a trigger case ends NOT_OBSERVED when the price does not reach it within `case_timeout_seconds`.
+- `near_trigger_fraction` is a plain decimal strictly between 0 and 1, required exactly when `triggered_bracket`, `tp1_from_fill`, `stop_reject_after_accept` or `trigger_cancel_race` is true and refused otherwise. The closer to 1, the closer the trigger sits to the live mark price; a trigger case ends NOT_OBSERVED when the price does not reach it within `case_timeout_seconds`.
 - `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds` are positive integers, required exactly when `gtd_expiry` is true and refused otherwise; the wait must be greater than the lifetime. Binance requires `goodTillDate` greater than now plus 600 seconds; the loader does not check that floor, so a lifetime below it is allowed and the exchange answer to it is evidence (A1).
-- `race_repeats` is a positive integer of at most 5 (`RACE_REPEATS_MAX`, a cap on the number of probe orders, not a trading number), required exactly when `cancel_fill_race` is true and refused otherwise.
-- A larger `case_timeout_seconds` (your choice) gives the trigger cases and the stream-loss case more time. A key that is absent means the case is off, and a file with none of the fifteen keys behaves exactly like the Phase 18 file.
+- `race_repeats` is a positive integer of at most 5 (`RACE_REPEATS_MAX`, a cap on the number of probe orders, not a trading number), required exactly when `cancel_fill_race` or `trigger_cancel_race` is true and refused otherwise.
+- `insufficient_margin_quantity` is a positive plain decimal (a string like the other quantities), required exactly when `insufficient_margin` is true and refused otherwise. There is no default and no proposed number: the text `<OWNER: ...>` is not a decimal, so the loader refuses the file until you replace it. Choose a whole quantity on the step grid that is large enough to exceed the available margin at your account's leverage; the case records the available balance, the leverage and the implied margin it read just before, so you can see whether it was large enough. It must also be inside the LOT_SIZE range (a quantity above the exchange maximum would answer a lot-size error, not -2019, so the case does not send it).
+- A larger `case_timeout_seconds` (your choice) gives the trigger cases and the stream-loss case more time. A key that is absent means the case is off, and a file with none of the twenty-three keys behaves exactly like the Phase 18 file.
 
 ## Step 1: dry run first (offline)
 
@@ -101,7 +112,7 @@ Typed phrase: `DEMO PROBE BTCUSDT` (the symbol of your file). Running all enable
 Files every run leaves (in the evidence directory unless noted):
 
 - `demo-probe-EVIDENCE-<stamp>.json`: the evidence document, schema `demo-probe-evidence/schema-1`. Each case has `details` (the facts named below), `observations` (every exchange answer: HTTP class, code, category, message), `frames` and `cleanup`.
-- In the `--fixtures-dir`: the raw user-data payloads `<case_id>-<NNN>-<event>.json` (scrubbed), and for the fifteen opt-in cases (the ten of 261021-sj0 and the five of 261022-sj1) the REST answers `<case_id>-rest-<NNN>-<operation>.json` (scrubbed), and `provenance.md` listing every file of the run with its label. A dry run writes none of these.
+- In the `--fixtures-dir`: the raw user-data payloads `<case_id>-<NNN>-<event>.json` (scrubbed), and for the twenty-three opt-in cases (the ten of 261021-sj0, the five of 261022-sj1 and the eight of 261023-sj2) the REST answers `<case_id>-rest-<NNN>-<operation>.json` (scrubbed), and `provenance.md` listing every file of the run with its label. A dry run writes none of these.
 
 ### 1. account_read_only_capture (key `account_capture`)
 
@@ -201,6 +212,66 @@ Files every run leaves (in the evidence directory unless noted):
 - Read: `transport_dropped`, `stream_states_at_entry_send`, `stream_states_when_stop_answered`, `stream_states_after_drop`, `stream_recovered_live`, `rest_entry_status_during_gap`, `rest_stop_status_during_gap`, `frames_before_drop_count`, `frames_after_drop_entry`, `frames_after_drop_stop`, `entry_fill_frame_delivered`, `stop_frame_delivered`, `comparison_entry`, `comparison_stop`, and `end_open_orders`, `end_open_algo_orders`, `end_position`.
 - Consumers: P5 (the branch timing of B2 and B3, reconciliation when the stream is lost or late).
 
+Sections 16 to 23 were added by quick task 261023-sj2. Each ends with a line "If it stops" that says what a NOT_OBSERVED or ERROR means and what, if anything, to do. Every case below records the exact answer of every exchange call (HTTP class, code, category, message) in `observations` and in the `*_error_*` details, and never retries.
+
+### 16. reduce_only_market_on_flat (key `reduce_only_flat`; added by 261023-sj2)
+
+- Reads open orders, open algo orders and the position first and stops (NOT_OBSERVED) unless the symbol is flat. Then sends ONE reduce-only MARKET SELL of the approved quantity with no position, and reads the position again. If the exchange accepted it and any position appeared (a flip) the tool flattens it at once with one reduce-only MARKET order and records `flipped` = true.
+- Read: `precheck_state`, `client_order_id`, `order_accepted`; on a rejection `order_error_code` (the exact code), `order_error_class`, `order_error_category`, `order_error_message`; on an acceptance `order_status`, `order_executed_qty`; `position_after`, `flipped`. A rejection code is the answer (OBSERVED).
+- Consumers: 19-OWNER-GAPS A4 (reduce-only with no position: rejected, or accepted).
+- If it stops: "not flat" means the symbol had an open order, algo order or position when the case began; clean the Demo account and run the case alone with `--only reduce_only_market_on_flat`. An "order bound" ERROR means the approved quantity at the marketable price is above your notional cap; nothing was sent.
+
+### 17. reduce_only_market_larger_than_position (key `reduce_only_oversize`; added by 261023-sj2)
+
+- Opens a position of about half the approved quantity (floored to the step; it must be at least the exchange minimum quantity, else NOT_OBSERVED with the reason), then sends ONE reduce-only MARKET SELL of the full approved quantity, which is larger than the position. After an acceptance it waits once (`case_timeout_seconds`) for the position to change, reads the order and the position again, and flattens any remainder (a flip is closed with the opposite reduce-only order).
+- Read: `half_quantity`, `held_before`, `oversize_quantity`, `order_accepted`, and the exact error fields on a rejection, `order_status` and `order_executed_qty`, `final_status`, `final_executed_qty`, `position_after`, and `outcome` (`rejected`, `clipped_to_position`, `partly_reduced`, `unchanged` or `flipped`).
+- Consumers: 19-OWNER-GAPS A8 (is a larger reduce-only MARKET clipped, rejected or flipped), A4.
+- If it stops: "half of the approved quantity ... below the exchange minimum quantity" means your approved quantity is too small to open half of it; raise the approved quantity in your file (your number), or leave the case off. "entry rejected" (for example -4164) means the half entry is below the minimum notional at the marketable price; the entry code is recorded.
+
+### 18. non_reduce_only_below_min_notional (key `min_notional_entry`; added by 261023-sj2)
+
+- Reads the filters, takes the exchange MIN_NOTIONAL, and computes the largest quantity on the step grid whose notional at the far price is strictly below it (never above the approved quantity). Sends ONE far BUY LIMIT (not reduce-only) of that quantity, records the answer, and cancels it at once if it was accepted.
+- Read: `min_notional_used`, `far_price`, `sent_quantity`, `computed_notional`, `client_order_id`, `order_accepted`, the exact error fields (the expected answer is -4164), `cancel_accepted`.
+- Consumers: -4164 for the O-03 TP1 minimum-notional evidence (what the exchange says for a non-reduce-only order below the minimum notional; reduce-only is exempt by the exchange text).
+- If it stops: NOT_OBSERVED with "MIN_NOTIONAL filter is not listed" means the exchange did not list it for the symbol. "below the exchange minimum quantity" means no quantity below the minimum notional is also a valid order; nothing can be sent. A reason naming the cap means the computed order is above your notional cap; nothing was sent (the tool never exceeds your cap).
+
+### 19. insufficient_margin_order (key `insufficient_margin`; needs `insufficient_margin_quantity`; added by 261023-sj2)
+
+- This is the one case that does NOT use `max_notional_quote` or the approved quantity. It sends exactly your own `insufficient_margin_quantity` as ONE far BUY LIMIT (not reduce-only) at the far price inside your `far_price_fraction` band (always below the mark, so it can only rest, never fill). It keeps the symbol, the flat precheck (stops NOT_OBSERVED unless the symbol is flat), the price band, the step grid, the LOT_SIZE range, and the cleanup. Just before the order it reads the account (availableBalance and the margin totals), the symbol configuration (the leverage) and computes the implied notional and margin.
+- If the order is rejected, the code is the answer (OBSERVED; the expected answer is -2019). If it is accepted (it rests), it is cancelled at once, the margin figures before and after are recorded, `order_accepted` = true, and the case ends NOT_OBSERVED (the quantity did not exceed your available margin). If anything filled (it should not), the runner cleanup flattens it, because no cap applies to this quantity.
+- Read: `far_price`, `insufficient_margin_quantity`, `available_balance_before`, `total_wallet_balance_before`, `total_initial_margin_before`, `total_open_order_initial_margin_before`, `leverage`, `implied_notional`, `implied_initial_margin`, `implied_margin_exceeds_available`, `order_accepted`, the exact error fields, `cancel_accepted`, `final_status`, the same four figures with `_after`, `position_after`.
+- Consumers: 19 error-taxonomy coverage for -2019 (`src/domain/exchange_errors.py` lists it as documented; this is the Demo answer).
+- If it stops: "not flat" - clean the account. A reason about the exchange minimum or maximum quantity or the step grid means your `insufficient_margin_quantity` would draw a lot-size error instead of -2019, so nothing was sent; change your number. Accepted and NOT_OBSERVED means the quantity was not large enough to exceed the margin; raise it (your number) and run the case alone.
+
+### 20. stop_rejected_after_acceptance (key `stop_reject_after_accept`; needs `near_trigger_fraction`; added by 261023-sj2; best effort)
+
+- Opens a position of about half the approved quantity, reads the live mark price, then places a reduce-only STOP_MARKET SELL (not closePosition) for the full approved quantity, which is larger than the position, with its trigger just below the mark (your fraction). If the placement is rejected the code is the answer (OBSERVED). If it is accepted, the tool watches the REST status and the ALGO_UPDATE frames for one `case_timeout_seconds` until the leg ends, records every status and the raw `rm` text, and cancels the leg if it is still open. The runner cleanup flattens the position.
+- Read: `half_quantity`, `held_before`, `stop_trigger_price`, `stop_quantity`, `placement_accepted`, on a rejection `stop_leg_error_code`, `stop_leg_error_class`, `stop_leg_error_category`, `stop_leg_error_message`; if accepted `stop_statuses_rest`, `stop_statuses_frames`, `stop_ai`, `stop_aq`, `stop_rm` (the raw reject text), `stop_algo_update_sequence` (`X|ia|ai|aq|rm|E|T` per delivery), `after_*`.
+- Honest limit: if the mark does not move to the trigger the leg stays NEW and nothing informative happens: NOT_OBSERVED (the acceptance and the NEW status are still recorded). It needs the user-data stream for the frames; without a stream only the REST statuses are seen.
+- Consumers: P5 remainder (a stop accepted and then rejected) and the `ALGO_UPDATE.o.rm` text.
+- If it stops: NOT_OBSERVED "accepted but no ALGO_UPDATE status beyond NEW" - run again with a `near_trigger_fraction` closer to 1 or when the price is moving, or accept that Demo did not show it.
+
+### 21. trigger_cancel_race (key `trigger_cancel_race`; needs `near_trigger_fraction` and `race_repeats`; added by 261023-sj2; best effort)
+
+- Plainly: this is not a deterministic race. Per repeat, with a position open (the tool opens one marketable entry of the approved quantity when none is open): reads the live mark, places a closePosition STOP_MARKET SELL just below it, cancels it at once, then queries the algo order and the position. Whether the exchange triggers the stop before the cancel lands depends on timing and the price; a repeat may show nothing happening at all.
+- Read: `note`, `race_repeats`, `repeats_completed`, `stopped`; per repeat `r<n>_stop_trigger_price`, `r<n>_placement_accepted` (and `r<n>_placement_error_code` and the other error fields), `r<n>_cancel_code` (`accepted` or the exact code, for example -2011), `r<n>_final_algo_status` (`CANCELED`, `FINISHED`, `ABSENT`, ...), `r<n>_triggered`, `r<n>_position_closed`, `r<n>_outcome`; the tallies `outcome_triggered`, `outcome_not_triggered`, `outcome_cancel_rejected`, `outcome_placement_rejected`.
+- Consumers: P7 trigger part (a stop triggering while its cancel is in flight), P3/P5 timing.
+- If it stops: NOT_OBSERVED "no stop was placed and cancelled" means every placement was rejected or the entry did not fill; the first rejection code is in `r1_placement_error_code`. A run where nothing triggered is still OBSERVED: it says the cancel won in every sample.
+
+### 22. timestamp_outside_recv_window (key `recv_window_error`; added by 261023-sj2)
+
+- Sends no order and runs in hedge mode too. Reads the public server time, then sends ONE read-only signed GET (open orders) whose timestamp is 2 x the recvWindow behind the exchange time. The recvWindow used is your ratified `signed_calls.recv_window_ms` (the project does not document a smaller allowed minimum, so none is invented). The SDK stamps the real clock itself, so the tool replaces that one clock read for the duration of this one call (thread-local, restored afterwards) and adds the clock offset between the tool and the exchange to what it takes away.
+- Read: `recv_window_ms`, `server_time_ms`, `local_clock_before_utc`, `local_clock_after_utc`, `local_minus_server_ms`, `timestamp_behind_server_ms_target`, `timestamp_behind_local_ms`, `clock_calls`, `real_clock_ms`, `timestamp_sent_ms`, `timestamp_sent_minus_server_read_ms`, `accepted`, `error_code` (the expected answer is -1021), `error_class`, `error_category`, `error_message`.
+- Consumers: -1021 for the GTD clock margin (`pre_placement.py`) and the drift guard.
+- If it stops: NOT_OBSERVED "did not ask the stale clock" means the SDK did not use the replaced clock (an SDK change): no conclusion may be drawn, report it. "offset swallows" means the tool and the exchange clocks differ by more than twice the window; fix the machine clock first.
+
+### 23. income_history_read (key `income_history`; added by 261023-sj2)
+
+- Sends no order and runs in hedge mode too. After the other cases it reads the income history from the run start (converted to the exchange clock with one server-time read; the local start is used and the `window_note` says so when the server time cannot be read), without a type filter and with the exchange default limit.
+- Read: `window_start_ms`, `window_note`, `local_minus_server_ms`, `row_count`, `row_fields` (the field names seen), `row_types` (for example COMMISSION, REALIZED_PNL, FUNDING_FEE), `row_count_<TYPE>`, `derived_sum_<TYPE>_<ASSET>` (exact sums, arithmetic only), `first_row_time_ms`, `last_row_time_ms`. The rows themselves are in `observations` and in the fixture file (values are account values; the free-text `info` goes through the redactor and a 200 character cap; read the fixture before it enters git).
+- Consumers: Phase 21 (daily loss and the income types), G2-042/A9 (commission and realized PnL).
+- If it stops: NOT_OBSERVED "no income row in the run window" means nothing was charged or paid in the window (for example when the other cases were off); run it after the order cases in the same session. A read failure shows the exact code.
+
 ## One session: all cases
 
 The order of the case ids in one run without `--only` is the `CASE_ORDER` of the tool. The sixteen required Phase 18 cases run first; the cases below run only when their key is true in your file; the one case that waits more than ten minutes is last.
@@ -219,7 +290,15 @@ The order of the case ids in one run without `--only` is the `CASE_ORDER` of the
 12. `partial_fill_attempt` (key `partial_fill_attempt`)
 13. `entry_cancel_fill_race` (key `cancel_fill_race`)
 14. `stream_loss_during_case` (key `stream_loss`)
-15. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
+15. `reduce_only_market_on_flat` (key `reduce_only_flat`)
+16. `reduce_only_market_larger_than_position` (key `reduce_only_oversize`)
+17. `non_reduce_only_below_min_notional` (key `min_notional_entry`)
+18. `insufficient_margin_order` (key `insufficient_margin`): the one case with its own quantity key, not held to the notional cap
+19. `stop_rejected_after_acceptance` (key `stop_reject_after_accept`)
+20. `trigger_cancel_race` (key `trigger_cancel_race`)
+21. `timestamp_outside_recv_window` (key `recv_window_error`)
+22. `income_history_read` (key `income_history`): reads the income of the whole run window, so it runs after the order cases
+23. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
 
 A complete probe-limits file with every one of these keys on. Every number is yours: nothing is proposed, every placeholder is written `<OWNER: ...>`, and the loader refuses the file until you replace each one. The three Phase 18 optional cases stay off here (they are your earlier decisions; enabling `market_lot_size_out_of_range` also needs `market_lot_probe_quantity`).
 
@@ -232,6 +311,7 @@ far_price_fraction = "<OWNER: strictly between 0 and 1>"
 near_trigger_fraction = "<OWNER: strictly between 0 and 1>"
 gtd_lifetime_seconds = <OWNER: whole seconds>
 race_repeats = <OWNER: a whole number, at most 5>
+insufficient_margin_quantity = "<OWNER: whole quantity on the step grid, large enough to exceed available margin at the account's leverage>"
 
 [waits]
 case_timeout_seconds = <OWNER: whole seconds>
@@ -256,6 +336,14 @@ gtd_min_lifetime = true
 partial_fill_attempt = true
 cancel_fill_race = true
 stream_loss = true
+reduce_only_flat = true
+reduce_only_oversize = true
+min_notional_entry = true
+insufficient_margin = true
+stop_reject_after_accept = true
+trigger_cancel_race = true
+recv_window_error = true
+income_history = true
 gtd_expiry = true
 ```
 
@@ -286,17 +374,25 @@ Before it: the dry run of Step 1 and the smoke re-run of Step 2. The session tak
 | partial_fill_attempt | P3, A5: can Demo produce a partial fill (best effort; NOT_OBSERVED is a valid answer) | 19 P3, A5, A2 |
 | entry_cancel_fill_race | P7: the cancel answer, the final status and the fill of orders placed at the touch (not a deterministic race) | 19 P7, B4 order, A5 |
 | stream_loss_during_case | P5: REST during a user-data gap against what the stream delivers after it | 19 P5, B2 and B3 timing |
+| reduce_only_market_on_flat | A4: a reduce-only MARKET order with no position is rejected (the exact code) or accepted (and whether a position appeared) | 19-OWNER-GAPS A4 |
+| reduce_only_market_larger_than_position | A8: a reduce-only MARKET larger than the position is clipped, rejected or flipped | 19-OWNER-GAPS A8 (and A4) |
+| non_reduce_only_below_min_notional | The -4164 answer of a non-reduce-only order below the minimum notional, with the minimum used | 19 O-03 TP1 minimum-notional evidence; the exchange error table (-4164) |
+| insufficient_margin_order | The -2019 answer of a resting order larger than the margin allows, with the available balance, leverage and implied margin | 19 error-taxonomy coverage for -2019 (`exchange_errors.py`) |
+| stop_rejected_after_acceptance | P5 remainder: a stop accepted and then rejected, and the raw `ALGO_UPDATE.o.rm` text (best effort) | 19 P5; the algo-status classes (`algo_status.py`) |
+| trigger_cancel_race | P7 trigger part: place and cancel a near stop; the cancel answer, the final algo status, whether it triggered (not a deterministic race) | 19 P7 (trigger part), P3/P5 timing |
+| timestamp_outside_recv_window | The -1021 answer with both clocks, for a timestamp 2 x the recvWindow behind | the GTD clock margin in `pre_placement.py`; the drift guard |
+| income_history_read | The income row types and fields seen in the run window (commission, realized PnL, funding) | Phase 21 (daily loss, income types); G2-042/A9 |
 
 ## Not covered here
 
 Listed so nobody assumes otherwise:
 
 - P3 partial fill: best effort only. The existing derived `partial_fill` case reads the entries of the run; `partial_fill_attempt` (261022-sj1) sends one crossing limit order at the approved quantity. Demo may never produce a partial fill, so P3 can stay NOT_OBSERVED for ever (the tool never raises the quantity to force one).
-- P5 stream loss: `stream_loss_during_case` (261022-sj1) runs one entry and stop cycle across a dropped user-data stream, next to the existing optional `stream_gap_during_case`. It ends NOT_OBSERVED when the stream does not return; a stream lost for longer than one `case_timeout_seconds`, and "stop rejected or timed out" under a lost stream, are not covered.
-- P7 fill, cancel and trigger race: best effort only. `entry_cancel_fill_race` (261022-sj1) captures the -2011, FILLED and CANCELED answers of cancels sent right after placements at the touch price; it does not reproduce a deterministic race, and P7 can stay NOT_OBSERVED on Demo. The trigger part of the race (a stop triggering while a cancel is in flight) has no case.
-- The real 418 duration and the 429 queue order of plan 20-21: never provoked, by your instruction and your decision not to provoke a ban; there is no case for either.
+- P5 stream loss: `stream_loss_during_case` (261022-sj1) runs one entry and stop cycle across a dropped user-data stream, next to the existing optional `stream_gap_during_case`. It ends NOT_OBSERVED when the stream does not return; a stream lost for longer than one `case_timeout_seconds` is not covered. "Stop rejected after acceptance" is best effort in `stop_rejected_after_acceptance` (261023-sj2) and may stay NOT_OBSERVED when the price does not reach the trigger; "stop timed out" under a lost stream has no case.
+- P7 fill, cancel and trigger race: best effort only. `entry_cancel_fill_race` (261022-sj1) captures the -2011, FILLED and CANCELED answers of cancels sent right after placements at the touch price, and `trigger_cancel_race` (261023-sj2) samples the cancel of a near stop; neither reproduces a deterministic race, and P7 can stay NOT_OBSERVED on Demo.
+- The real 418 duration and the 429 queue order of plan 20-21: never provoked, by your instruction and your decision not to provoke a ban (a case would have to cause the ban or the queue on purpose, and the tool never does); there is no case for either.
 - The stream states of SAFE_MODE exit row 7: the smoke and stream evidence only.
-- Hedge Mode.
+- Hedge Mode: every order case refuses hedge mode and sends nothing (the reduce-only parameter cannot be sent there); the project runs one-way mode only, so there is no case for it.
 
 ## After a run
 
