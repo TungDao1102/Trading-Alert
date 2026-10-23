@@ -18,8 +18,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * Migration 0007 (Phase 20, plan 20-03, T-B) adds the nullable `resolution_reason_code`
     column and its named CHECK to `execution_intents`.
   * Migration 0008 (Phase 20, plan 20-14, D-19, Q4) adds the `pending_protective_actions` table.
-  * Migration 0009 (Phase 20, plan 20-18, Q3, D-21) adds the `validated_lot_filters` table; the
-    head test pins 0009.
+  * Migration 0009 (Phase 20, plan 20-18, Q3, D-21) adds the `validated_lot_filters` table.
+  * Migration 0010 (Phase 21, plan 21-09, D-07, D-14) adds the `daily_risk_days` and
+    `daily_loss_components` tables; the head test pins 0010.
 """
 
 from __future__ import annotations
@@ -100,6 +101,8 @@ MIGRATION_0008 = (
 )
 REVISION_0009 = "0009_validated_lot_filters"
 MIGRATION_0009 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0009_validated_lot_filters.py"
+REVISION_0010 = "0010_daily_risk_state"
+MIGRATION_0010 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0010_daily_risk_state.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -467,7 +470,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0009
+    assert alembic_head_revision() == REVISION_0010
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -963,10 +966,13 @@ def test_downgrade_0008_drops_only_the_pending_table_and_upgrade_restores_it(
     run_alembic(pg_empty_db, "downgrade", REVISION_0007)
     engine = make_sync_engine(pg_empty_db)
     try:
-        # Downgrading from head to 0007 also passes through 0009, which owns the filters table.
+        # Downgrading from head to 0007 also passes through 0009 (the filters table) and 0010
+        # (the day-state tables).
         assert _public_tables(engine) == full_schema - {
             "pending_protective_actions",
             "validated_lot_filters",
+            "daily_risk_days",
+            "daily_loss_components",
         }
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
@@ -1020,7 +1026,12 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
     run_alembic(pg_empty_db, "downgrade", REVISION_0008)
     engine = make_sync_engine(pg_empty_db)
     try:
-        assert _public_tables(engine) == full_schema - {"validated_lot_filters"}
+        # Downgrading from head to 0008 also passes through 0010, which owns the day-state tables.
+        assert _public_tables(engine) == full_schema - {
+            "validated_lot_filters",
+            "daily_risk_days",
+            "daily_loss_components",
+        }
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         assert version == REVISION_0008
@@ -1033,6 +1044,70 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0010
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0010: daily_risk_days and daily_loss_components (Phase 21, plan 21-09, D-07, D-14)
+# --------------------------------------------------------------------------------------
+def test_migration_0010_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0010, ("src", "tests")) == []
+
+
+def test_migration_0010_revises_0009() -> None:
+    text_of_migration = MIGRATION_0010.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0009}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0010}"' in text_of_migration
+
+
+def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_them(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        assert {"daily_risk_days", "daily_loss_components"} <= full_schema
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO daily_risk_days (utc_day, equity_at_day_start, "
+                    "base_observed_at_utc) VALUES ('2026-10-23', 1000, :t0)"
+                ),
+                {"t0": T0},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO daily_loss_components (utc_day, kind, source, source_key, "
+                    "amount, asset, event_time_utc) VALUES "
+                    "('2026-09-19', 'FILL_PNL', 'USER_DATA_EVENT', 'BTCUSDT:1:1', -1, 'USDT', :t0)"
+                ),
+                {"t0": T0},
+            )
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0009)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema - {
+            "daily_risk_days",
+            "daily_loss_components",
+        }
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         assert version == REVISION_0009
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0010
     finally:
         engine.dispose()

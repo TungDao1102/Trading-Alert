@@ -38,13 +38,14 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKeyConstraint,
     Index,
@@ -1032,6 +1033,84 @@ class ValidatedLotFiltersRow(Base):
         CheckConstraint(
             "updated_at_utc >= fetched_at_utc", name="ck_validated_lot_filters_time_order"
         ).ddl_if(dialect="postgresql"),
+    )
+
+
+class DailyRiskDayRow(Base):
+    """The persisted risk state of one UTC day (Phase 21 plan 21-09, D-07, D-14, migration 0010).
+
+    One row per UTC day: the day-start equity base (written once, never moved), when the base
+    was read, and the one-time DAILY_STOP latch and WARNING alert marks. The approval
+    transaction locks this row (`SELECT ... FOR UPDATE`). There is no delete path (owner-open
+    O-1).
+    """
+
+    __tablename__ = "daily_risk_days"
+
+    utc_day: Mapped[date] = mapped_column(Date, nullable=False)
+    equity_at_day_start: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    base_observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stop_latched_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    warning_alerted_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("utc_day", name="pk_daily_risk_days"),
+        CheckConstraint(
+            "equity_at_day_start > 0", name="ck_daily_risk_days_equity_positive"
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
+class DailyLossComponentRow(Base):
+    """One signed daily-loss component as Binance reported it (Phase 21 plan 21-09, migration 0010).
+
+    Keyed by (utc_day, kind, source, source_key): the same fill or funding row from the stream
+    and from REST are two rows, folded once at the most adverse amount by
+    `src.risk.daily_loss.fold_daily_loss`. A stored key is never replaced with another amount.
+    """
+
+    __tablename__ = "daily_loss_components"
+
+    utc_day: Mapped[date] = mapped_column(Date, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    asset: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_time_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "utc_day", "kind", "source", "source_key", name="pk_daily_loss_components"
+        ),
+        CheckConstraint(
+            "kind IN ('FILL_PNL', 'FILL_COMMISSION', 'FUNDING')",
+            name="ck_daily_loss_components_kind",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "source IN ('USER_DATA_EVENT', 'REST_USER_TRADES', 'REST_INCOME')",
+            name="ck_daily_loss_components_source",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("amount <> 'NaN'", name="ck_daily_loss_components_amount_not_nan").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("source_key <> ''", name="ck_daily_loss_components_source_key").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("asset <> ''", name="ck_daily_loss_components_asset").ddl_if(
+            dialect="postgresql"
+        ),
+        Index("ix_daily_loss_components_utc_day", "utc_day"),
     )
 
 

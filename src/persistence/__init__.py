@@ -22,6 +22,8 @@ names every module of the package):
   - `lot_filters`         `PgLotFilterStore`: the last validated lot filters of each symbol, used
                            only by the emergency close when exchangeInfo is unreadable (Phase 20,
                            plan 20-18)
+  - `day_risk`            `PgDayRiskStore`: the UTC day's risk state (base, DAILY_STOP latch,
+                           warning mark) and its daily-loss components (Phase 21, plan 21-09)
   - `paper_runtime_state`  `PgRuntimeState`: journal-only paper runtime state (Phase 16)
   - `shadow_stores`        `PgShadowStores`: the SHADOW chain's composed stores (Phase 16)
 
