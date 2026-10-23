@@ -95,3 +95,50 @@ The owner ran the new probe cases on Binance Demo (demo-observed, not mainnet, n
 | Manual close (G4-035) | Observed: no orphan; the legs end `EXPIRED`. |
 | Stream states for SAFE_MODE exit row 7 | Partly: after a forced drop the supervisor reports `UNKNOWN`, `SYNCING`, `LIVE`. Frames sent during the gap were not delivered after the reconnect; REST showed the state. |
 | The 11 Demo probes (O-05) and the D055 closure draft (O-01) | O-05: partly observed, see `19-OWNER-GAPS.md` section 2a (not observed: P3, a GTD expiry, `rm`). O-01: unchanged, the owner has not recorded an acceptance. Update 2026-10-22: accepted as DECISIONS D079. |
+
+## Review and decision-audit follow-ups (2026-10-23)
+
+Source: `20-REVIEW.md` (34 findings) and the three-part audit of DECISIONS D001 to D083 (owner request 2026-10-23). Gap-closure plans 20-27 (execution), 20-28 (reconcile) and 20-29 (ops) close CR-C1, WR-A1 to WR-A3, WR-B1 to WR-B4, WR-C1, WR-C4 and the stop-confirmation, `-4116` and `-5040` items; their SUMMARYs are authoritative for what was done. Rows 43 (`scan()` OSError), 46 (`exit_safe_mode` ownership and restore checks) and 49 (`-1013`, now `-5040` only) above are updated by those plans. Labels as above; nothing here is `[DEMO]` except where stated.
+
+### Review findings not fixed in Phase 20
+
+| Finding | Item | Receiving phase |
+|---------|------|-----------------|
+| WR-A4 | FLAT sweep omits `spill`, so protective-cancel audit rows are lost when the journal is down | Phase 24 |
+| IN-A1, IN-A2, IN-A4 | shared `_last_result` across concurrent closes; PROTECTION clearing guard lacks two-read FLAT evidence from PROTECTED/COMPLETE/TP_UNAVAILABLE; `recheck` read in `_confirm` has no effect | Phase 24 review |
+| WR-B5 | a raising position verifier aborts the whole sweep | Phase 24 |
+| WR-B6 | a feed timestamp in the future counts as fresh (stale-feed guard fails open) | Phase 24 (small; candidate for an early plan) |
+| WR-B7 | lot-filter refresh runs inside the tick lock with no timeout | Phase 24 |
+| IN-B1, IN-B2, IN-B3 | raw vs sanitised symbol; stale docstring and wall-clock fallback; `now_utc` UTC-awareness | Phase 24 review |
+| WR-C2, WR-C3, WR-C9 | gate save never retried; restore adopts any persisted deadline; no directory fsync on the gate file | Phase 24 (WR-C2/C9 only if not done by 20-29) |
+| WR-C5 to WR-C8 | tenacity swallows `CancelledError`; failed CRITICAL alert not re-queued; blocking write-ahead and journal-first alert before an emergency close | Phase 24 |
+| WR-C10 | `clear --reason` / `--force` not durably recorded | Phase 23 / 24 (operator surface) |
+| IN-C1 to IN-C5 | redaction regex, queue sharing, spill hygiene, drill assertion, alert timestamps | Phase 24 review |
+
+### Owner-configuration constraints (still `NOT_CONFIGURED`)
+
+| Key | Constraint recorded |
+|-----|---------------------|
+| `max_unprotected_ms` (O-04) | Must exceed several coordinator step cadences (Phase 24) and the 120 s HTTP 429 pause, or a correctly protected position is market-closed (`CLOSE_FAILED`). Demo showed a by-id stop query answering -2013 right after placement although the stop was `NEW`; the confirmation therefore also reads the open-algo-orders list (plan 20-27). The lag was not measured. |
+| stale-entry alert grace (new key from plan 20-28) | Time after `goodTillDate` before the ALERT-only warning for an entry still `NEW`. Owner value open. |
+
+### Blockers carried to Phase 24 (decision audit)
+
+| Item | Why | Evidence |
+|------|-----|----------|
+| Scheduled cancel of an unfilled entry at plan expiry | `expire_pending_entry` has no scheduled caller (only hand-off failure and operator close, verified in `src/execution/manager.py`); `entry_terminal_timeout_ms` starts at the first fill; GTD did not expire on Demo (840 s). An entry can fill hours after its plan expired. The alert-only warning of plan 20-28 is a stopgap | `[DEMO]` GTD result; `[DESIGN]` for the missing caller |
+| Refuse a second plan on a symbol with an active plan or position | Backtest and paper refuse (`CONFLICT_WITH_OPEN_POSITION`); `src/execution` and `src/risk` have no equivalent (verified); D082 detects it at reconcile time only. In One-way mode the second entry merges and plan 1's `closePosition` stop closes both | `[DESIGN]` |
+| VPS or process down while an entry rests | After D079 no stop exists until a fill is seen. `POST /fapi/v1/countdownCancelAll` is in the official docs; whether it leaves algo orders alone is unverified | `[DOC]`, `[NOT_TESTED]` |
+| D028 approval chain | `transition_signal` and `transition_trade_plan` are defined in `src/persistence/entities.py` and never called (verified); signals stay DETECTED, plans READY. Safety holds through the Approval row | owner decision needed |
+| Stop-out looks like a lost stop (D077) | Any status other than ACTIVE reads as NOT_ACTIVE (`protection.py`); a stop that is mid-trigger can lead to CLOSE_REQUIRED and a second reduce-only close. Its safety rests on A4 (reduce-only cannot flip a position), never probed | `[NOT_TESTED]` |
+| A4 and the P5 stop rejection | Both can be run on Demo and were not | `[NOT_TESTED]` |
+| Phase 24 operator surface | Telegram operator commands (`[P20-OPS-REMOTE]`), `ENTRY_WITHOUT_PROTECTIVE` for resting entries, `-1013` (Phase 25) | unassigned until the owner confirms |
+
+### Owner evidence and provenance items
+
+| Item | Status |
+|------|--------|
+| TP1 below the minimum notional (D052, `tp_sizing.py`) | Demo accepted a 32.7 USDT TP1 against a 50 minimum (R-P10); Binance documents -4164 as "no smaller than 5.0 (unless you choose reduce only)". The refusal rule is not an exchange rule. Changing it needs a protocol version bump and regenerated research records. Evidence for O-03 (Phase 21 / 22); no Phase 20 change |
+| `-5040` | Added to the taxonomy by plan 20-27 as a definitive placement rejection (Demo, GTD below now + 600 s) |
+| Provenance of O-D, O-E and O-B | Recorded in the SUMMARYs of 20-20, 20-21 and 20-25 as "relayed by the orchestrator". The owner has been asked to confirm they typed them; no answer yet |
+| Decision wording proposals | `20-DECISION-AUDIT.md` (proposals only; `docs/DECISIONS.md` is the owner's) |
