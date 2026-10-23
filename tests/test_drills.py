@@ -1376,7 +1376,9 @@ def test_manual_close_drill_removes_the_legs_that_stayed_after_a_filled_entry() 
     assert wiring.placements == []
 
 
-def test_manual_close_drill_orphan_variant_sweeps_the_legs_the_control_kept() -> None:
+def test_manual_close_drill_orphan_variant_sweeps_the_legs_that_stayed_after_a_failed_read() -> (
+    None
+):
     """D-28, G4-035 answer (b): the position was closed outside, the legs stay as orphans.
 
     The control keeps the legs (its first position read fails, so the position is not proven
