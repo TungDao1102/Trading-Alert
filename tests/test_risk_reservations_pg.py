@@ -454,6 +454,7 @@ def test_the_store_has_no_delete_path() -> None:
         "mark_placed",
         "mark_open",
         "release",
+        "release_requested_in",
     }
 
 
