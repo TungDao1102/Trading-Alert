@@ -64,7 +64,7 @@ Nothing is marked complete; no requirement status changed, and `requirements.mar
 - OPS-01: the reconcile loop, the SAFE_MODE exit conditions (seven rows), the durable SAFE_MODE state, the REST gate restart recovery and the eight drills are built and tested with fakes `[DESIGN]`. Stays Pending: nothing is wired in a running process (Phase 24) and the real-host rehearsal is Phases 25 / 26 `[NOT_TESTED]`.
 - RISK-03: the D077 rules and the D-09 / D-11 rules are built and tested with fakes `[DESIGN]`. Stays Pending: ROADMAP criterion 2 wording awaits the owner's O-A acceptance, and the D077 P6 behavior was never observed on Demo `[NOT_TESTED]`.
 - EXEC-06: the five manual controls exist and are named in `EXEC06_CONTROLS` `[DESIGN]`. Stays Pending: no command surface or authentication (Phase 23 / 24) and no Demo evidence of manual-close behavior (G4-035, A1 / A3) `[NOT_TESTED]`.
-- OPS-05: the alert contract, the journal-first sink and the Telegram sender with a bounded message retry exist, and `OPS05_MATRIX` has fourteen rows `[DESIGN]`. Stays Pending: the `DAILY_STOP` and daily-loss `WARNING` producers are Phase 21 (contract and test trigger only), and no producer is wired in a running process until Phase 24.
+- OPS-05: the alert contract, the journal-first sink and the Telegram sender with a bounded message retry exist, and `OPS05_MATRIX` has fifteen rows (fourteen at plan 20-22, one added by plan 20-28) `[DESIGN]`. Stays Pending: the `DAILY_STOP` and daily-loss `WARNING` producers are Phase 21 (contract and test trigger only), and no producer is wired in a running process until Phase 24.
 
 ## Needs a connected machine (Demo)
 

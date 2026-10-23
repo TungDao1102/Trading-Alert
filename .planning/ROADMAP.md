@@ -1032,7 +1032,7 @@ Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
 - [T-06] The reconcile cadence, stale-feed threshold and WS-silence threshold have no values ("configured freshness threshold"); they must be registry parameters with provenance labels (source: docs/operations/RUNBOOK.md:113-115, .planning/audits/2026-09-29-deep-audit/DEEP_AUDIT_REPORT.md:636 (F-026); decision: open user decision, the values)
 - [G3-005] Promote `ENTRY_WITHOUT_PROTECTIVE` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:206, docs/DECISIONS.md D044 item (1); decision: D044)
 
-**Plans:** 6/26 plans executed (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
+**Plans:** 30/30 plans executed (26 planned + 4 gap-closure) (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
 
 Plans:
 **Wave 1**
@@ -1044,40 +1044,46 @@ Plans:
 - [x] 20-06-PLAN.md - Durable SAFE_MODE: persisted on enter, fail-closed load (D-14)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 20-07-PLAN.md - REST gate restart recovery, owner decision O-C (T-D, D-18)
-- [ ] 20-08-PLAN.md - Local spill and act-first risk-reducing controls (D-16, F-702)
-- [ ] 20-09-PLAN.md - Stop supervision after PROTECTED and reconcile hooks (D-07, D-06, D077)
-- [ ] 20-10-PLAN.md - UNKNOWN-entry evidence protocol, owner decision O-F (T-C, D-11, D-12)
+- [x] 20-07-PLAN.md - REST gate restart recovery, owner decision O-C (T-D, D-18)
+- [x] 20-08-PLAN.md - Local spill and act-first risk-reducing controls (D-16, F-702)
+- [x] 20-09-PLAN.md - Stop supervision after PROTECTED and reconcile hooks (D-07, D-06, D077)
+- [x] 20-10-PLAN.md - UNKNOWN-entry evidence protocol, owner decision O-F (T-C, D-11, D-12)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 20-11-PLAN.md - Cancel verification and the emergency_manual_close fix (D-17, D-09, D-03)
-- [ ] 20-12-PLAN.md - Reconcile loop tick library (EXEC-02, D-01, D-02, D-07)
-- [ ] 20-13-PLAN.md - Operational alert sender, journal first, dedupe, bounded message retry (D-22, D-23)
-- [ ] 20-14-PLAN.md - Durable pending protective actions, migration 0008 (D-19, Q4)
+- [x] 20-11-PLAN.md - Cancel verification and the emergency_manual_close fix (D-17, D-09, D-03)
+- [x] 20-12-PLAN.md - Reconcile loop tick library (EXEC-02, D-01, D-02, D-07)
+- [x] 20-13-PLAN.md - Operational alert sender, journal first, dedupe, bounded message retry (D-22, D-23)
+- [x] 20-14-PLAN.md - Durable pending protective actions, migration 0008 (D-19, Q4)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 20-15-PLAN.md - SAFE_MODE operator exit, readiness rows 1-5 (D-15, F-711)
-- [ ] 20-16-PLAN.md - Stale feed, stream divergences and auth failures in the tick (D-04, D-25, D058)
-- [ ] 20-17-PLAN.md - EXEC-06 operator close and re-protect controls (D-26)
-- [ ] 20-18-PLAN.md - Emergency close with stored validated lot filters, migration 0009 (D-21, Q3)
+- [x] 20-15-PLAN.md - SAFE_MODE operator exit, readiness rows 1-5 (D-15, F-711)
+- [x] 20-16-PLAN.md - Stale feed, stream divergences and auth failures in the tick (D-04, D-25, D058)
+- [x] 20-17-PLAN.md - EXEC-06 operator close and re-protect controls (D-26)
+- [x] 20-18-PLAN.md - Emergency close with stored validated lot filters, migration 0009 (D-21, Q3)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 20-19-PLAN.md - Coordinator and closer rebuild, startup recovery order (D-08, D-30)
-- [ ] 20-20-PLAN.md - Symbol ownership invariant, owner decision O-D (T-F)
-- [ ] 20-21-PLAN.md - Tick work order: lot-filter refresh and risk-reducing first, owner decision O-E (D-20, D-21)
-- [ ] 20-25-PLAN.md - SAFE_MODE exit rows 6 and 7, owner decision O-B (T-E)
+- [x] 20-19-PLAN.md - Coordinator and closer rebuild, startup recovery order (D-08, D-30)
+- [x] 20-20-PLAN.md - Symbol ownership invariant, owner decision O-D (T-F)
+- [x] 20-21-PLAN.md - Tick work order: lot-filter refresh and risk-reducing first, owner decision O-E (D-20, D-21)
+- [x] 20-25-PLAN.md - SAFE_MODE exit rows 6 and 7, owner decision O-B (T-E)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 20-22-PLAN.md - Alert producers and the OPS-05 acceptance matrix (D-23, D-24)
+- [x] 20-22-PLAN.md - Alert producers and the OPS-05 acceptance matrix (D-23, D-24)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 20-23-PLAN.md - Old-rule tests rewritten, G2-016 drills, Phase 20 gate (D-27, D-28, F-604)
+- [x] 20-23-PLAN.md - Old-rule tests rewritten, G2-016 drills, Phase 20 gate (D-27, D-28, F-604)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 20-24-PLAN.md - Deferred register, GLOSSARY rows and canonical docs (no owner-gated wording)
+- [x] 20-24-PLAN.md - Deferred register, GLOSSARY rows and canonical docs (no owner-gated wording)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 20-26-PLAN.md - Criterion 2 / RISK-03 wording aligned with D077, owner verification O-A (D-05)
+- [x] 20-26-PLAN.md - Criterion 2 / RISK-03 wording aligned with D077, owner verification O-A (D-05)
+
+**Gap closure** *(after the deep review and the Demo evidence of 2026-10-22; verification status `human_needed`)*
+- [x] 20-27-PLAN.md - Execution lane: evidence-row identity, gate refusal reaches NOT_SENT, manual close with a flat position, open-algo-orders stop confirmation, -4116, -5040
+- [x] 20-28-PLAN.md - Reconcile lane: TP1 fill is not UNSYNCED_ALGO, no SAFE_MODE re-entry rows, exit ownership and restore checks, stale resting-entry alert
+- [x] 20-29-PLAN.md - Ops lane: unreadable spill directory fails closed, gate state file hardening, bounded supervisor wait
+- [x] 20-30-PLAN.md - Future feed time is stale, implausible persisted gate deadline is untrusted
 
 ### Phase 21: Account Equity + Daily Loss from Binance
 
@@ -1372,7 +1378,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
 | 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
-| 20. Reconcile + SAFE_MODE Hardening + Alerts | 6/26 | In Progress|  |
+| 20. Reconcile + SAFE_MODE Hardening + Alerts | 30/30 | Executed, human_needed | 2026-10-23 |
 | 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |

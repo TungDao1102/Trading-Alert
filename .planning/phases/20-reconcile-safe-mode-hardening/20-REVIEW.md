@@ -1,5 +1,6 @@
 ---
 phase: 20-reconcile-safe-mode-hardening
+closure_note: "CR-C1 and the warnings fixed by gap plans 20-27..20-30 (2026-10-23); the rest are in 20-DEFERRED.md"
 reviewed: 2026-10-22T00:00:00Z
 depth: deep
 files_reviewed: 42
