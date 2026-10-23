@@ -22,8 +22,9 @@ Divergence kinds (the only kinds the reconciler emits):
     swept — the sweeper never places rescue protection per Pitfall 1).
     One exception (plan 20-31, W1; D079, D-10): since Phase 19 the stop is placed only after a
     fill, so a local ENTRY that is certainly still waiting for its first fill (local status NEW,
-    no exposure on its symbol, exchange status NEW or the order absent) is not this divergence.
-    Any doubt keeps it (fail closed); an absent entry is reported as UNSYNCED_NORMAL.
+    no exposure on its symbol, and the order open on the exchange with status NEW) is not this
+    divergence. Any doubt keeps it (fail closed); an entry missing from the exchange keeps both
+    this kind and UNSYNCED_NORMAL.
   - UNSYNCED_NORMAL: local normal order with no matching exchange
     normal order (the order disappeared or was filled externally).
   - UNSYNCED_ALGO: local algo order with no matching exchange algo
@@ -832,15 +833,16 @@ def _entry_awaits_fill(order_intent: Any, truth_normal: Any, *, exposed_symbols:
       - there is no exposure on the symbol: no non-zero exchange position and no non-zero local
         position intent (a One-way position is the symbol's total, so a fill of this entry
         cannot hide behind another plan's);
-      - the entry is either missing from the exchange open orders (then the UNSYNCED_NORMAL
-        divergence reports it; a fill would show as a position, checked above) or the exchange
-        shows it with status exactly NEW.
+      - the exchange shows the entry among its open orders with status exactly NEW. An entry
+        that is missing from the exchange may have filled, expired or been cancelled and is not
+        proof of "no fill": it keeps both ENTRY_WITHOUT_PROTECTIVE and UNSYNCED_NORMAL (the
+        plan 20-31 rule never narrows a divergence on the strength of an absent order).
     """
     if _get_field(order_intent, "status") != OrderStatus.NEW.value:
         return False
     if _get_field(order_intent, "symbol") in exposed_symbols:
         return False
-    return truth_normal is None or _get_field(truth_normal, "status") == OrderStatus.NEW.value
+    return truth_normal is not None and _get_field(truth_normal, "status") == OrderStatus.NEW.value
 
 
 def _is_protective_role(order_role: str) -> bool:

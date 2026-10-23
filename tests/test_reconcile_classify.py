@@ -505,15 +505,16 @@ def test_an_entry_that_the_exchange_shows_with_any_status_but_new_is_still_flagg
     assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
 
 
-def test_an_awaiting_entry_missing_on_the_exchange_stays_unsynced_normal() -> None:
+def test_an_awaiting_entry_missing_on_the_exchange_keeps_both_divergences() -> None:
+    """Gone from the book is no proof of "no fill" (it may have filled, expired or been
+    cancelled): UNSYNCED_NORMAL stays and so does ENTRY_WITHOUT_PROTECTIVE (test_phase8 WR-13)."""
     diff = _awaiting_compare()
 
-    assert _kinds(diff) == ["UNSYNCED_NORMAL"]
+    assert set(_kinds(diff)) == {"UNSYNCED_NORMAL", "ENTRY_WITHOUT_PROTECTIVE"}
     assert diff.agreement is False
 
 
-def test_an_awaiting_entry_missing_on_the_exchange_with_a_position_is_also_flagged() -> None:
-    """Gone from the book and a position on the symbol: it filled, and nothing protects it."""
+def test_an_awaiting_entry_missing_on_the_exchange_with_a_position_is_flagged_too() -> None:
     diff = _awaiting_compare(truth_positions=[make_position("BTCUSDT", "0.004")])
 
     assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
