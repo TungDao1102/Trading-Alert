@@ -556,6 +556,47 @@ recorded_at_utc  TIMESTAMPTZ, database clock at the insert (default now())
 - `amount` semantics: on Demo, `realizedPnl` excludes commission, so the commission is its own component; this is demo-observed, not mainnet, and live R stays INCOMPLETE until Phase 24 verifies it. Demo returned no FUNDING income rows (demo-observed, not mainnet), so the funding component has not been seen from the real exchange yet.
 - No delete path and no retention rule: retention is owner-open O-1 and no number is invented.
 
+### 2.21 `risk_reservations`
+
+The durable risk reservation of each trade plan (Phase 21, plan 21-12, D-16, D-17, F-407). The portfolio caps (max open positions, aggregate open risk, cluster cap) must count every plan that holds risk, not only the filled positions, and two concurrent approvals must not both pass. One row per plan holds the plan's reservation for its whole life. The reserved amount is the sized `realized_risk` (the risk after rounding), never the risk budget.
+
+```text
+trade_plan_id      PK, VARCHAR(128), FK trade_plans RESTRICT
+approval_id        NULL, VARCHAR(128), FK approvals RESTRICT (set when the row becomes RESERVED)
+plan_hash          VARCHAR(64) (the hash of the plan the risk was sized for)
+symbol             VARCHAR(32)
+position_side      VARCHAR(8), LONG / SHORT
+quantity           NUMERIC(38,18), > 0
+realized_risk      NUMERIC(38,18), > 0
+status             VARCHAR(16), REQUESTED / RESERVED / PLACED / OPEN / RELEASED
+release_reason     NULL, VARCHAR(32), one of the nine release reasons, set only with RELEASED
+requested_at_utc   TIMESTAMPTZ
+reserved_at_utc    NULL, TIMESTAMPTZ
+placed_at_utc      NULL, TIMESTAMPTZ
+opened_at_utc      NULL, TIMESTAMPTZ
+released_at_utc    NULL, TIMESTAMPTZ, set only with RELEASED
+updated_at_utc     TIMESTAMPTZ (the time of the last transition)
+```
+
+- Alembic revision `0011_risk_reservations` (down revision `0010_daily_risk_state`). Named constraints: `pk_risk_reservations`, `fk_risk_reservations_trade_plan_id`, `fk_risk_reservations_approval_id`, `ck_risk_reservations_status`, `ck_risk_reservations_side`, `ck_risk_reservations_quantity_positive`, `ck_risk_reservations_risk_positive`, `ck_risk_reservations_release_reason`, `ck_risk_reservations_released_coherent` (`status = 'RELEASED'` exactly when a reason and a release time are stored), `ck_risk_reservations_approval_coherent` (an approval id while RESERVED, PLACED or OPEN); index `ix_risk_reservations_status`. No backfill.
+- Lifecycle: `REQUESTED` (issued, not counted) -> `RESERVED` (approved, counted) -> `PLACED` (entry consumed and sent, counted) -> `OPEN` (filled, counted) -> `RELEASED` (terminal, not counted). The caps count RESERVED, PLACED and OPEN rows.
+- Release table (`RELEASE_SOURCE_STATUSES` in `src/risk/reservations.py`, enforced by `PgRiskReservationStore.release`). A permitted source status becomes RELEASED with the reason and time; an already RELEASED row is a no-op that keeps the FIRST stored reason (two terminal signals can race); any other source status and an absent plan raise `RowConflict`. A PLACED or OPEN row is never released by a plan-status or refusal reason, because the entry may still fill or the position is live; only the exchange outcome releases it.
+
+| Reason | Terminal plan state | Permitted source statuses |
+|---|---|---|
+| `APPROVAL_SKIPPED` | approval SKIPPED (SKIP / CANCEL of a PENDING approval) | REQUESTED |
+| `APPROVAL_EXPIRED` | approval EXPIRED | REQUESTED |
+| `PLAN_EXPIRED` | plan EXPIRED, or an unplaced plan past its expiry | REQUESTED, RESERVED |
+| `PLAN_INVALIDATED` | plan INVALIDATED | REQUESTED, RESERVED |
+| `PLAN_SUPERSEDED` | plan SUPERSEDED | REQUESTED, RESERVED |
+| `PLACEMENT_REFUSED` | a final pre-placement refusal of an approved plan | RESERVED |
+| `ENTRY_REJECTED` | entry intent REJECTED (RESERVED when the POST was never acknowledged, PLACED otherwise) | RESERVED, PLACED |
+| `ENTRY_ENDED_NO_FILL` | resting entry ended with no fill (cancelled, expired, DAILY_STOP) | PLACED |
+| `POSITION_CLOSED` | filled position is flat again | OPEN |
+
+- Writers: `PgRiskReservationStore.register_request` at plan issue (Phase 24 issuer; a repeat with the same identity is a no-op, another identity raises `RowConflict`); `reserve_in` inside the approval transaction (plan 21-15), which locks today's `daily_risk_days` row `FOR UPDATE`, reads the counted rows, judges the stored `realized_risk` with the shared `check_portfolio` (`reservation_verdict`) and turns REQUESTED into RESERVED or raises `ReservationRefused` and changes nothing; the Phase 24 callers of `mark_placed`, `mark_open` and `release`, with the status-to-reason mappings of plan 21-11 (`src/execution/live_risk_inputs.py`). `mark_placed` (RESERVED -> PLACED) and `mark_open` (PLACED -> OPEN) are no-ops on repeat and `RowConflict` otherwise, so a RELEASED row can never be counted again.
+- Readers: `list_counted` for the caps (ordered by symbol, position side, plan id) and `get`. One row per plan; no in-memory copy, so a restart rebuilds the counted view from the table; no delete path.
+
 ## 3. Canonical state machines
 
 Canonical states are defined in `GLOSSARY.md`. The legal transitions between them are `GLOSSARY.md` section 11 (six tables: Signal, TradePlan, Order, Position, Approval, ExecutionIntent) and are implemented once in `src/domain/transitions.py`; the Phase 17 persistence status values (`ExecutionIntentStatus`, approval `consumption_status`, `live_inputs_status`, `SystemStateKey`) are `GLOSSARY.md` section 12. The section 11 tables are an auto-mode default awaiting user confirmation (D051).
