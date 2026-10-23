@@ -22,7 +22,7 @@ Source: `21-CONTEXT.md` D-09; `19-OWNER-GAPS.md` section 2b; plan 21-05 and 21-1
 
 ## O-1 Retention and the equity-age number (D-03, D-07)
 
-Status: ANSWERED by the owner (2026-10-23); NOT YET APPLIED. The number is not in the repository: `account.max_equity_age_ms` stays `NOT_CONFIGURED` until the owner writes the DECISIONS row (draft: `21-DEC-O1-DRAFT.md`) and the config and the gate test change together.
+Status: DECIDED and APPLIED (owner answer 2026-10-23; the owner then asked the assistant to apply it). Recorded as DECISIONS D084; `account.max_equity_age_ms` = 15000 with provenance `DECISION` in `config/execution/execution-limits-v1.toml`; the tests that pinned the key at `NOT_CONFIGURED` were updated in the same change. Fourteen required keys stay `NOT_CONFIGURED`, so the live path still refuses.
 
 Owner answer, verbatim:
 
@@ -30,9 +30,9 @@ Owner answer, verbatim:
 
 Reading of the answer, as the assistant understands it (the owner's words above are the record): (1) `account.max_equity_age_ms` = 15000 (milliseconds, the unit of the key); (2) no retention rule for the persisted day state (`daily_risk_days`, `daily_loss_components`, `risk_reservations`): every row is kept. Both were the assistant's recommendation of the same day (15000 ms from the Demo timing of the three REST reads, observed at about 1 to 2 seconds in the probe runs; keep all because the rows are small and are the audit trail of each DAILY_STOP and refusal); the owner adopted them.
 
-Built default in Phase 21: the limit key `account.max_equity_age_ms` is `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml` (plan 21-02), so the live path refuses while it is unset. The persisted day-state tables have no delete or purge method (`src/persistence/day_risk.py`, plan 21-09) and no retention rule, which already matches the answer to part 2: nothing to build.
+Built default in Phase 21 (before D084): the limit key `account.max_equity_age_ms` was `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml` (plan 21-02), so the live path refused while it was unset. The persisted day-state tables have no delete or purge method (`src/persistence/day_risk.py`, plan 21-09) and no retention rule, which already matches the answer to part 2: nothing to build.
 
-Who decides: the owner (answered above). Writing the number needs a DECISIONS row and the provenance label `DECISION`, which only the owner writes.
+Who decides: the owner (answered above). D084 was written by the assistant on the owner's instruction ("làm giúp tôi luôn", 2026-10-23); the wording is the draft `21-DEC-O1-DRAFT.md`.
 
 Source: `21-CONTEXT.md` D-03, D-07, OWNER-OPEN O-1; `config/execution/execution-limits-v1.toml` header.
 

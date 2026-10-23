@@ -41,9 +41,12 @@ EXPECTED_UNSET = (
     "stale_feed.max_mark_price_age_ms",
     "stale_feed.max_user_data_silence_ms",
     "alerts.dedupe_window_ms",
-    # Phase 21 (plan 21-02; D-03, F-012): the sixteenth key, the first required Phase 21 key.
-    "account.max_equity_age_ms",
 )
+# Phase 21 (plan 21-02; D-03, F-012): the sixteenth key, the first required Phase 21 key. The owner
+# set it on 2026-10-23 (DECISIONS D084, 15000 ms), so the committed file no longer leaves it unset.
+EQUITY_AGE_KEY = "account.max_equity_age_ms"
+EQUITY_AGE_DECIDED_MS = 15000
+ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY)
 
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
 # "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
@@ -78,6 +81,7 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.min_remaining_validity_seconds is None
     assert limits.max_mark_price_age_ms is None
     assert limits.max_last_price_age_ms is None
+    assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS
     assert limits.unset_keys() == EXPECTED_UNSET
     for field_name in PHASE20_FIELDS.values():
         assert getattr(limits, field_name) is None, field_name
@@ -96,8 +100,8 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
         assert "reconcile.tick_interval_ms" in message
-        # The fifteen dotted names come in file order: protection, pre_placement, reconcile,
-        # stale_feed, alerts, account.
+        # The fourteen dotted names still unset come in file order: protection, pre_placement,
+        # reconcile, stale_feed, alerts (account.max_equity_age_ms was set by D084).
         assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
             EXPECTED_UNSET
         )
@@ -376,7 +380,7 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         reconcile_entry_stale_grace_ms=None,
         account_max_equity_age_ms=None,
     )
-    assert limits.unset_keys() == EXPECTED_UNSET
+    assert limits.unset_keys() == ALL_REQUIRED_KEYS
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
 
 
@@ -418,13 +422,17 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
     assert "entry_terminal_timeout_ms" in text
 
 
-def test_the_committed_file_names_only_the_not_configured_word() -> None:
+def test_the_committed_file_names_only_not_configured_except_the_equity_age() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
-    assert not re.search(r"^\s*[a-z_]+\s*=\s*[-+]?\d", text, flags=re.MULTILINE)
+    # The only number in the file is the owner's D084 equity age (2026-10-23).
+    numeric = re.findall(r"^\s*([a-z_]+)\s*=\s*[-+]?\d+", text, flags=re.MULTILINE)
+    assert numeric == ["max_equity_age_ms"]
+    assert f"max_equity_age_ms = {EQUITY_AGE_DECIDED_MS}\n" in text
     # Sixteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
     # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys, plan
     # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 32
+    # The equity age has a number and the label DECISION since D084: 32 minus 2.
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -455,7 +463,7 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
         assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
     # The fifteen required keys plus the alert-only key of plan 20-28, in file order.
-    assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(EXPECTED_UNSET)
+    assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(ALL_REQUIRED_KEYS)
     assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
         dotted_keys.index("reconcile.lot_filter_refresh_interval_ms") + 1
@@ -580,12 +588,17 @@ def test_a_missing_phase_20_section_is_refused_naming_its_keys(section: str) -> 
         assert f"{section}.{key}" in message
 
 
-def test_the_real_file_has_every_section_and_label_unset() -> None:
+def test_the_real_file_has_every_section_and_label_unset_except_the_decided_equity_age() -> None:
     import tomllib
 
     document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
     for section, keys in el.EXECUTION_LIMIT_KEYS.items():
         for key in keys:
+            if f"{section}.{key}" == EQUITY_AGE_KEY:
+                # Set by the owner on 2026-10-23 (D084): a number and the label DECISION.
+                assert document[section][key] == EQUITY_AGE_DECIDED_MS
+                assert document["provenance"][section][key] == "DECISION"
+                continue
             assert document[section][key] == el.NOT_CONFIGURED_WORD, (section, key)
             assert document["provenance"][section][key] == el.NOT_CONFIGURED_WORD, (section, key)
 
@@ -678,17 +691,18 @@ def _account_document(value: Any = 5, label: str = "DECISION") -> dict[str, Any]
     return document
 
 
-def test_the_committed_file_leaves_the_account_equity_age_unset_and_required() -> None:
+def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     limits = el.load_execution_limits(LIMITS_FILE)
-    assert limits.account_max_equity_age_ms is None
-    assert limits.unset_keys()[-1] == _ACCOUNT_KEY
-    assert limits.unset_keys()[:-1] == EXPECTED_UNSET[:-1]
-    assert len(limits.unset_keys()) == 15
+    assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS  # DECISIONS D084
+    assert _ACCOUNT_KEY not in limits.unset_keys()
+    assert limits.unset_keys() == EXPECTED_UNSET
+    assert len(limits.unset_keys()) == 14
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
+    # Setting this one key does not open the live path: fourteen required keys stay unset.
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
-    assert info.value.keys[-1] == _ACCOUNT_KEY
+    assert _ACCOUNT_KEY not in info.value.keys
     assert not any(character.isdigit() for character in str(info.value))
 
 

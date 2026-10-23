@@ -7,8 +7,9 @@ This file asserts, against the real tree and without any network or live evidenc
   (`PHASE21_PURE_MODULES`); the new execution modules read no wall clock, hold no quote-asset
   literal and import no adapter, persistence module, SDK or database client
   (`PHASE21_EXECUTION_MODULES`);
-- the limit `account.max_equity_age_ms` is `NOT_CONFIGURED` (value and provenance) and required, so
-  the live path refuses while the owner has not set it (O-1);
+- the limit `account.max_equity_age_ms` is required and holds the owner's number 15000 with the
+  provenance `DECISION` (O-1, DECISIONS D084, 2026-10-23); the other required keys stay
+  `NOT_CONFIGURED`, so the live path still refuses;
 - the `RejectionReason` enum still has 21 members; both verification flags
   (`LIVE_NET_PNL_SEMANTICS_VERIFIED`, `FUNDING_SOURCE_VERIFIED`) are False; `daily_stop` is an
   expiry trigger; the migration head is `0011_risk_reservations`; the OPS-05 rows of the daily
@@ -18,11 +19,11 @@ This file asserts, against the real tree and without any network or live evidenc
   or run (`REQUIREMENT_TESTS`); the owner records name O-1 to O-6.
 
 A failure message names the missing path, symbol or test. Nothing here changes behavior and nothing
-here claims an owner item is solved or a requirement complete: the equity-age number (O-1), the
-funding-source evidence (O-2, the owner chose option A; the pre-canary check stays an open
-recommendation), multi-asset support (O-3), realizedPnl semantics on mainnet (O-4), the equity
-basis (O-5) and the latch against the backtest (O-6) stay with the owner
-(`21-OWNER-DECISIONS.md`, `21-DEFERRED.md`). EXEC-01 and OPS-02 stay Pending; OPS-02 is an owner
+here claims an owner item is solved or a requirement complete: the funding-source evidence
+(O-2, the owner chose option A; the pre-canary check stays an open recommendation), multi-asset
+support (O-3), realizedPnl semantics on mainnet (O-4), the equity basis (O-5) and the latch
+against the backtest (O-6) stay with the owner (`21-OWNER-DECISIONS.md`, `21-DEFERRED.md`).
+EXEC-01 and OPS-02 stay Pending; OPS-02 is an owner
 attestation (D-21) and appears below only through its secret-free reads and logs.
 
 Evidence label: executed structural tests. Nothing here touches Binance, Telegram or a database;
@@ -137,14 +138,14 @@ def test_invariant_1b_execution_modules_read_no_clock_and_import_no_adapter_or_s
 
 
 # --------------------------------------------------------------------------- #
-# The equity-age limit: new, unset, required (D-03, O-1).
+# The equity-age limit: required, set by the owner on 2026-10-23 (D-03, O-1, DECISIONS D084).
 # --------------------------------------------------------------------------- #
 
 EXECUTION_LIMITS_FILE = ROOT / "config" / "execution" / "execution-limits-v1.toml"
 EQUITY_AGE_KEY = "account.max_equity_age_ms"
 
 
-def test_invariant_2_the_equity_age_limit_is_not_configured_and_required() -> None:
+def test_invariant_2_the_equity_age_limit_is_the_owner_number_and_required() -> None:
     from src.execution.execution_limits import (
         ALERT_ONLY_LIMIT_KEYS,
         NOT_CONFIGURED_WORD,
@@ -153,12 +154,20 @@ def test_invariant_2_the_equity_age_limit_is_not_configured_and_required() -> No
 
     section, key = EQUITY_AGE_KEY.split(".")
     document = tomllib.loads(EXECUTION_LIMITS_FILE.read_text(encoding="utf-8"))
-    assert document[section][key] == NOT_CONFIGURED_WORD, "the owner sets the number (O-1)"
-    assert document["provenance"][section][key] == NOT_CONFIGURED_WORD
+    assert document[section][key] == 15000, "the owner number of D084 (O-1)"
+    assert document["provenance"][section][key] == "DECISION"
     assert EQUITY_AGE_KEY not in ALERT_ONLY_LIMIT_KEYS, "the key must be required, not alert-only"
     limits = load_execution_limits(EXECUTION_LIMITS_FILE)
-    assert EQUITY_AGE_KEY in limits.unset_keys(), "an unset equity age must refuse the live path"
-    assert limits.account_max_equity_age_ms is None
+    assert limits.account_max_equity_age_ms == 15000
+    assert EQUITY_AGE_KEY not in limits.unset_keys()
+    # Setting this key does not open the live path: other required keys stay NOT_CONFIGURED.
+    assert limits.unset_keys(), "the live path must still refuse while other keys are unset"
+    assert NOT_CONFIGURED_WORD in EXECUTION_LIMITS_FILE.read_text(encoding="utf-8")
+    decisions = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
+    assert any(
+        line.startswith("| D084 |") and "15000" in line and EQUITY_AGE_KEY in line
+        for line in decisions.splitlines()
+    ), "DECISIONS D084 must record the equity age number"
 
 
 # --------------------------------------------------------------------------- #

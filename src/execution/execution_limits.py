@@ -174,13 +174,13 @@ class ExecutionLimits:
     ``goodTillDate`` of a resting entry the reconcile loop waits before it alerts that Binance did
     not expire it (alert only). It is an ALERT-ONLY key (``ALERT_ONLY_LIMIT_KEYS``): unset, it
     disables that one check and nothing else.
-    ``account_max_equity_age_ms`` (plan 21-02, D-03, F-012; owner number open under O-1): the
-    maximum age, in milliseconds, of the account equity reading used for live sizing, for the
-    daily-loss day-start base and for the approval reservation gate. The age is the injected now
-    minus the injected clock reading taken before the REST request, so it is only over-estimated;
-    an age greater than this value, or negative, is stale (NO_TRADE UNCERTAIN_ACCOUNT_STATE), and
-    an age exactly equal to it passes. It is a REQUIRED key: it is not in ``ALERT_ONLY_LIMIT_KEYS``,
-    so while it is unset the live path refuses.
+    ``account_max_equity_age_ms`` (plan 21-02, D-03, F-012; the owner set 15000 on 2026-10-23,
+    DECISIONS D084): the maximum age, in milliseconds, of the account equity reading used for
+    live sizing, for the daily-loss day-start base and for the approval reservation gate. The age
+    is the injected now minus the injected clock reading taken before the REST request, so it is
+    only over-estimated; an age greater than this value, or negative, is stale (NO_TRADE
+    UNCERTAIN_ACCOUNT_STATE), and an age exactly equal to it passes. It is a REQUIRED key: it is
+    not in ``ALERT_ONLY_LIMIT_KEYS``, so while it is unset the live path refuses.
     """
 
     max_unprotected_ms: int | None

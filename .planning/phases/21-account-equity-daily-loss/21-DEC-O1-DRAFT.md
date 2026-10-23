@@ -1,6 +1,6 @@
-# Draft DECISIONS row for Phase 21 owner item O-1 (NOT WRITTEN)
+# Draft DECISIONS row for Phase 21 owner item O-1 (WRITTEN AS D084)
 
-PROPOSED BY THE ASSISTANT, NOT ACCEPTED. `docs/DECISIONS.md` is the owner's file: nothing here was added to it. The id is provisional (the next free id after D083 at the time of writing; the owner assigns the real one).
+The owner asked the assistant to apply it (2026-10-23) and it was written as D084 in `docs/DECISIONS.md`, with the config, the provenance label and the tests changed in the same commit. This file keeps the draft wording for the record; the row in `docs/DECISIONS.md` wins on any difference.
 
 Owner answer of 2026-10-23, verbatim: "1 để 15000, 2 giữ toàn bộ".
 

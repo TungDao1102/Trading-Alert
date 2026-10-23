@@ -51,7 +51,7 @@ max_user_data_silence_ms = "NOT_CONFIGURED"
 dedupe_window_ms = "NOT_CONFIGURED"
 
 [account]
-max_equity_age_ms = "NOT_CONFIGURED"
+max_equity_age_ms = 15000
 
 [provenance.protection]
 max_unprotected_ms = "NOT_CONFIGURED"
@@ -79,4 +79,4 @@ max_user_data_silence_ms = "NOT_CONFIGURED"
 dedupe_window_ms = "NOT_CONFIGURED"
 
 [provenance.account]
-max_equity_age_ms = "NOT_CONFIGURED"
+max_equity_age_ms = "DECISION"
