@@ -37,6 +37,7 @@ from tests.support.reconcile_doubles import (
     make_plan_protection,
     make_position,
 )
+from tests.support.reconcile_rig import NOW, build_rig
 
 H1 = "1" * 64
 H2 = "2" * 64
@@ -401,21 +402,191 @@ def test_a_quiet_protected_plan_that_the_exchange_mirrors_is_agreement() -> None
     assert diff.agreement is True
 
 
-def test_observed_limit_a_resting_entry_with_no_fill_is_entry_without_protective() -> None:
-    """OBSERVED LIMITATION, pinned so a fix is a conscious change (see the plan 20-12 SUMMARY).
+# --------------------------------------------------------------------------- #
+# A resting entry that has had no fill (plan 20-31, W1; D079, D-10).
+#
+# Since Phase 19 the stop is placed only AFTER a fill, so an entry that rests unfilled is the
+# normal state of an approved plan, not a divergence. Fail closed stays: any sign of a fill, or a
+# fill state the local side does not know, is still ENTRY_WITHOUT_PROTECTIVE.
+# --------------------------------------------------------------------------- #
 
-    Compare v2 (plan 20-04) still applies its pre-Phase-19 rule to every open local ENTRY: an
-    entry with no matching stop is ENTRY_WITHOUT_PROTECTIVE, although since Phase 19 (D-10) the
-    stop is placed only after a fill. A tick therefore reports a plan in AWAITING_FILL as a
-    divergence (SAFE_MODE, delegated to the coordinator, UNPROTECTED_POSITION alert). It fails
-    closed; the rule belongs to compare.py, which this plan does not edit.
-    """
+
+def _kinds(diff: Any) -> list[str]:
+    return [d.kind for d in diff.divergences]
+
+
+def _awaiting_compare(**exchange: Any) -> Any:
     case = next(c for c in CASES if c.name == "awaiting")
     local = derive_local_intent([_plan(case)], [])
-    diff = compare(
+    return compare(
         **local.compare_kwargs(),
+        **{"truth_normal_orders": [], "truth_algo_orders": [], "truth_positions": [], **exchange},
+    )
+
+
+def test_a_resting_entry_with_no_fill_is_agreement() -> None:
+    diff = _awaiting_compare(truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")])
+
+    assert diff.agreement is True
+    assert _kinds(diff) == []
+
+
+def test_a_zero_amount_exchange_row_is_not_a_fill() -> None:
+    diff = _awaiting_compare(
+        truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
+        truth_positions=[make_position("BTCUSDT", "0")],
+    )
+
+    assert diff.agreement is True
+
+
+async def test_a_tick_over_a_resting_unfilled_entry_enters_no_safe_mode_and_alerts_nothing() -> (
+    None
+):
+    awaiting = _plan(next(c for c in CASES if c.name == "awaiting"))
+    rig = build_rig(plans=(awaiting,), normal=(make_open_order(ENTRY_ID, "BTCUSDT"),))
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.agreement is True
+    assert report.safe_mode_reasons == ()
+    assert rig.safe_mode.enter_calls == []
+    assert [a for a in rig.alerts.alerts if a.event == ALERT_UNPROTECTED_POSITION] == []
+    assert rig.alerts.alerts == []
+    assert report.delegated == () and report.undelegated == ()
+
+
+async def test_a_tick_over_a_filled_entry_without_a_stop_still_alerts_and_enters_safe_mode() -> (
+    None
+):
+    awaiting = _plan(next(c for c in CASES if c.name == "awaiting"))
+    rig = build_rig(
+        plans=(awaiting,),
+        normal=(make_open_order(ENTRY_ID, "BTCUSDT"),),
+        positions=(make_position("BTCUSDT", "0.004"),),
+    )
+
+    report = await rig.loop.tick(now_utc=NOW)
+
+    assert report.agreement is False
+    assert "ENTRY_WITHOUT_PROTECTIVE" in [d.kind for d in report.divergences]
+    assert "ENTRY_WITHOUT_PROTECTIVE" in report.safe_mode_reasons
+    assert ALERT_UNPROTECTED_POSITION in {a.event for a in rig.alerts.alerts}
+
+
+def test_a_resting_entry_with_an_exchange_position_on_the_symbol_is_still_flagged() -> None:
+    """The entry may have filled between two reads: a position on the symbol is exposure."""
+    diff = _awaiting_compare(
+        truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
+        truth_positions=[make_position("BTCUSDT", "0.004")],
+    )
+
+    assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
+    assert diff.agreement is False
+
+
+def test_a_position_on_another_symbol_does_not_make_the_entry_filled() -> None:
+    diff = _awaiting_compare(
+        truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
+        truth_positions=[make_position("ETHUSDT", "0.5")],
+    )
+
+    assert "ENTRY_WITHOUT_PROTECTIVE" not in _kinds(diff)
+
+
+@pytest.mark.parametrize("status", ["PARTIALLY_FILLED", "FILLED", "UNKNOWN", ""])
+def test_an_entry_that_the_exchange_shows_with_any_status_but_new_is_still_flagged(
+    status: str,
+) -> None:
+    diff = _awaiting_compare(
+        truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT", status=status)]
+    )
+
+    assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
+
+
+def test_an_awaiting_entry_missing_on_the_exchange_stays_unsynced_normal() -> None:
+    diff = _awaiting_compare()
+
+    assert _kinds(diff) == ["UNSYNCED_NORMAL"]
+    assert diff.agreement is False
+
+
+def test_an_awaiting_entry_missing_on_the_exchange_with_a_position_is_also_flagged() -> None:
+    """Gone from the book and a position on the symbol: it filled, and nothing protects it."""
+    diff = _awaiting_compare(truth_positions=[make_position("BTCUSDT", "0.004")])
+
+    assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
+    assert "UNSYNCED_NORMAL" in _kinds(diff)
+
+
+def test_an_unresolved_entry_may_have_filled_and_is_still_flagged() -> None:
+    """ENTRY_UNRESOLVED (SUBMITTING) and a SENT row: the fill state is unknown."""
+    case = next(c for c in CASES if c.name == "unresolved")
+    for local in (
+        derive_local_intent([_plan(case)], []),
+        derive_local_intent([], [make_intent_record(H1, "ENTRY", status="SENT")]),
+    ):
+        diff = compare(
+            **local.compare_kwargs(),
+            truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
+            truth_algo_orders=[],
+            truth_positions=[],
+        )
+        assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
+
+
+@pytest.mark.parametrize("status", ["PARTIALLY_FILLED", "SUBMITTING", "PLANNED", None])
+def test_only_a_local_status_of_new_means_no_fill(status: str | None) -> None:
+    entry = {
+        "client_order_id": ENTRY_ID,
+        "symbol": "BTCUSDT",
+        "order_role": "ENTRY",
+        "status": status,
+        "plan_hash": H1,
+    }
+    diff = compare(
+        local_open_orders=[entry],
+        local_open_algos=[],
+        local_open_positions=[],
         truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
         truth_algo_orders=[],
         truth_positions=[],
     )
-    assert [d.kind for d in diff.divergences] == ["ENTRY_WITHOUT_PROTECTIVE"]
+
+    assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
+
+
+def test_a_local_position_intent_on_the_symbol_means_the_entry_may_have_filled() -> None:
+    case = next(c for c in CASES if c.name == "awaiting")
+    local = derive_local_intent([_plan(case)], [])
+    other = derive_local_intent(
+        [_plan(next(c for c in CASES if c.name == "protected"), symbol="BTCUSDT")], []
+    )
+    diff = compare(
+        local_open_orders=local.orders,
+        local_open_algos=(),
+        local_open_positions=other.positions,
+        truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
+        truth_algo_orders=[],
+        truth_positions=[],
+    )
+
+    assert "ENTRY_WITHOUT_PROTECTIVE" in _kinds(diff)
+
+
+def test_a_resting_entry_next_to_a_protected_plan_on_another_symbol_agrees() -> None:
+    awaiting = _plan(next(c for c in CASES if c.name == "awaiting"))
+    protected = make_plan_protection(
+        H2, symbol="ETHUSDT", state="PROTECTED", side="LONG", quantity="0.5"
+    )
+    stop_id = derive_algo_client_id(plan_hash=H2, role=OrderRole.STOP_LOSS.value)
+    local = derive_local_intent([awaiting, protected], [])
+    diff = compare(
+        **local.compare_kwargs(),
+        truth_normal_orders=[make_open_order(ENTRY_ID, "BTCUSDT")],
+        truth_algo_orders=[make_algo_order(stop_id, "ETHUSDT")],
+        truth_positions=[make_position("ETHUSDT", "0.5")],
+    )
+
+    assert diff.agreement is True
