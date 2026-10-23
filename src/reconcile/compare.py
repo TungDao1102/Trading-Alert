@@ -20,6 +20,11 @@ Divergence kinds (the only kinds the reconciler emits):
   - ENTRY_WITHOUT_PROTECTIVE: local normal ENTRY with no matching
     algo protective for the same symbol (drives SAFE_MODE; never
     swept — the sweeper never places rescue protection per Pitfall 1).
+    One exception (plan 20-31, W1; D079, D-10): since Phase 19 the stop is placed only after a
+    fill, so a local ENTRY that is certainly still waiting for its first fill (local status NEW,
+    no exposure on its symbol, and the order open on the exchange with status NEW) is not this
+    divergence. Any doubt keeps it (fail closed); an entry missing from the exchange keeps both
+    this kind and UNSYNCED_NORMAL.
   - UNSYNCED_NORMAL: local normal order with no matching exchange
     normal order (the order disappeared or was filled externally).
   - UNSYNCED_ALGO: local algo order with no matching exchange algo
@@ -568,6 +573,13 @@ def compare(
                 )
             )
 
+    # Symbols that carry exposure on either side (non-zero local position intent or non-zero
+    # exchange position). A resting entry on such a symbol may have filled: plan 20-31 (W1).
+    exposed_symbols: set[Any] = {key[0] for key in local_position_keys}
+    for truth_row in truth_positions:
+        if not _is_zero_like(_get_field(truth_row, "position_amt")):
+            exposed_symbols.add(_get_field(truth_row, "symbol"))
+
     # Pass 2 — for each local normal order intent, classify it.
     for order_intent in local_normal_by_client_id.values():
         client_order_id = _get_field(order_intent, "client_order_id")
@@ -582,7 +594,11 @@ def compare(
                 and _get_field(a, "client_algo_id") in truth_algo_by_client_id
                 for a in local_algo_by_client_id.values()
             )
-            if not has_protective:
+            if not has_protective and not _entry_awaits_fill(
+                order_intent,
+                truth_normal,
+                exposed_symbols=exposed_symbols,
+            ):
                 divergences.append(
                     Divergence(
                         kind=DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
@@ -803,6 +819,30 @@ def _leg_absence_explained(
     if (side == "LONG" and amount > 0) or (side == "SHORT" and amount < 0):
         return bool(abs(amount) < bound)
     return False
+
+
+def _entry_awaits_fill(order_intent: Any, truth_normal: Any, *, exposed_symbols: set[Any]) -> bool:
+    """True only when the entry is certainly still waiting for its first fill (plan 20-31, W1).
+
+    Since Phase 19 (D079, D-10) the stop is placed after a fill, so a resting entry that has had
+    no fill has nothing to protect and is not ENTRY_WITHOUT_PROTECTIVE. Every doubt reads as "may
+    have filled" and keeps the divergence (fail closed):
+
+      - the local status is exactly NEW (what the coordinator derives from AWAITING_FILL);
+        PLANNED, SUBMITTING, PARTIALLY_FILLED, a missing or any other status is not "no fill";
+      - there is no exposure on the symbol: no non-zero exchange position and no non-zero local
+        position intent (a One-way position is the symbol's total, so a fill of this entry
+        cannot hide behind another plan's);
+      - the exchange shows the entry among its open orders with status exactly NEW. An entry
+        that is missing from the exchange may have filled, expired or been cancelled and is not
+        proof of "no fill": it keeps both ENTRY_WITHOUT_PROTECTIVE and UNSYNCED_NORMAL (the
+        plan 20-31 rule never narrows a divergence on the strength of an absent order).
+    """
+    if _get_field(order_intent, "status") != OrderStatus.NEW.value:
+        return False
+    if _get_field(order_intent, "symbol") in exposed_symbols:
+        return False
+    return truth_normal is not None and _get_field(truth_normal, "status") == OrderStatus.NEW.value
 
 
 def _is_protective_role(order_role: str) -> bool:

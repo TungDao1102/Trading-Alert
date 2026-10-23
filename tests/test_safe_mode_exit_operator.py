@@ -35,14 +35,18 @@ from typing import Any
 
 import pytest
 from src.adapters.binance_usdm import PositionSnapshot
+from src.domain.enums import OrderRole
+from src.execution.order_ids import derive_client_order_id
 from src.reconcile.compare import LocalActivePlan
-from src.reconcile.local_intent import LocalIntent
+from src.reconcile.local_intent import LocalIntent, derive_local_intent
 from src.reconcile.safe_mode import (
     ExitDecision,
     ExitReadiness,
     SafeModeController,
     build_exit_readiness,
 )
+
+from tests.support.reconcile_doubles import make_open_order, make_plan_protection
 
 T0 = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 T1 = T0 + timedelta(minutes=5)
@@ -562,6 +566,53 @@ async def test_row4_an_exchange_position_with_an_empty_successful_local_read_ref
     rig = _rig(adapter=FakeAdapter(positions=[_position()]))
 
     decision = await _exit(rig, local_intent_fn=lambda: EMPTY_INTENT)
+
+    assert decision == ExitDecision(exited=False, refusals=("COMPARE_NOT_CLEAN",))
+    _assert_still_in_safe_mode(rig)
+
+
+_H1 = "1" * 64
+_ENTRY_ID = derive_client_order_id(plan_hash=_H1, role=OrderRole.ENTRY.value)
+
+
+def _awaiting_local() -> LocalIntent:
+    """The local intent of a plan whose GTD entry rests with no fill (state AWAITING_FILL)."""
+    plan = make_plan_protection(
+        _H1,
+        state="AWAITING_FILL",
+        first_fill=False,
+        stop_confirmed=False,
+        entry_terminal=False,
+    )
+    return derive_local_intent([plan], [])
+
+
+async def test_row4_an_unfilled_resting_gtd_entry_does_not_refuse_the_exit() -> None:
+    """Plan 20-31 (W1): since D079 the stop is placed after a fill, so a resting unfilled entry
+    is not ENTRY_WITHOUT_PROTECTIVE and must not keep the operator out of SAFE_MODE."""
+    rig = _rig(adapter=FakeAdapter(normal=[make_open_order(_ENTRY_ID, "BTCUSDT")]))
+
+    decision = await _exit(rig, local_intent_fn=_awaiting_local)
+
+    assert decision == ExitDecision(exited=True, refusals=())
+    assert rig.controller.in_safe_mode is False
+
+
+async def test_row4_a_resting_entry_with_a_position_on_the_symbol_still_refuses_the_exit() -> None:
+    rig = _rig(
+        adapter=FakeAdapter(normal=[make_open_order(_ENTRY_ID, "BTCUSDT")], positions=[_position()])
+    )
+
+    decision = await _exit(rig, local_intent_fn=_awaiting_local)
+
+    assert decision == ExitDecision(exited=False, refusals=("COMPARE_NOT_CLEAN",))
+    _assert_still_in_safe_mode(rig)
+
+
+async def test_row4_an_awaiting_entry_gone_from_the_exchange_still_refuses_the_exit() -> None:
+    rig = _rig(adapter=FakeAdapter())
+
+    decision = await _exit(rig, local_intent_fn=_awaiting_local)
 
     assert decision == ExitDecision(exited=False, refusals=("COMPARE_NOT_CLEAN",))
     _assert_still_in_safe_mode(rig)
