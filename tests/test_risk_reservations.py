@@ -17,9 +17,14 @@ import pytest
 from src.domain.enums import DailyState, RejectionReason
 from src.risk import reservations as reservations_module
 from src.risk.reservations import (
+    COUNTED_STATUSES,
+    RELEASE_SOURCE_STATUSES,
     CountedReservation,
+    ExchangeExposure,
+    ReleaseReason,
     ReservationRequest,
     ReservationStatus,
+    open_positions_from_reservations,
     reservation_verdict,
 )
 
@@ -271,3 +276,181 @@ def test_module_reads_no_clock_and_builds_no_float() -> None:
                 assert func.id != "float", "float constructor"
             if isinstance(func, ast.Attribute):
                 assert func.attr not in {"now", "utcnow", "today", "time", "monotonic"}, func.attr
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 - the open-position view
+# --------------------------------------------------------------------------- #
+
+
+def _three_rows() -> tuple[CountedReservation, ...]:
+    return (
+        _counted("plan-c", "SOLUSDT", "SHORT", ReservationStatus.OPEN, "4", HASH_C),
+        _counted("plan-a", "BTCUSDT", "LONG", ReservationStatus.RESERVED, "3"),
+        _counted("plan-b", "ETHUSDT", "LONG", ReservationStatus.PLACED, "2", HASH_B),
+    )
+
+
+def test_view_counts_reserved_placed_and_open_sorted() -> None:
+    positions = open_positions_from_reservations(
+        counted=_three_rows(),
+        exclude_trade_plan_id="plan-d",
+        exchange_exposures=(ExchangeExposure("SOLUSDT", Decimal("-0.1")),),
+    )
+    assert positions is not None
+    assert [(p.symbol, p.position_side, p.open_risk) for p in positions] == [
+        ("BTCUSDT", "LONG", Decimal("3")),
+        ("ETHUSDT", "LONG", Decimal("2")),
+        ("SOLUSDT", "SHORT", Decimal("4")),
+    ]
+    assert all(p.daily_pnl_contribution == Decimal("0") for p in positions)
+
+
+def test_view_excludes_the_named_plan() -> None:
+    positions = open_positions_from_reservations(
+        counted=_three_rows(), exclude_trade_plan_id="plan-b", exchange_exposures=()
+    )
+    assert positions is not None
+    assert [p.symbol for p in positions] == ["BTCUSDT", "SOLUSDT"]
+
+
+def test_view_sorts_ties_by_trade_plan_id() -> None:
+    rows = (
+        _counted("plan-z", "BTCUSDT", "LONG", ReservationStatus.RESERVED, "2"),
+        _counted("plan-y", "BTCUSDT", "LONG", ReservationStatus.RESERVED, "1", HASH_B),
+    )
+    positions = open_positions_from_reservations(
+        counted=rows, exclude_trade_plan_id="none", exchange_exposures=()
+    )
+    assert positions is not None
+    assert [p.open_risk for p in positions] == [Decimal("1"), Decimal("2")]
+
+
+def test_unexplained_exchange_position_makes_the_view_unknown() -> None:
+    assert (
+        open_positions_from_reservations(
+            counted=_three_rows(),
+            exclude_trade_plan_id="plan-d",
+            exchange_exposures=(ExchangeExposure("BNBUSDT", Decimal("0.5")),),
+        )
+        is None
+    )
+
+
+def test_exposure_on_the_wrong_side_is_unexplained() -> None:
+    assert (
+        open_positions_from_reservations(
+            counted=_three_rows(),
+            exclude_trade_plan_id="plan-d",
+            exchange_exposures=(ExchangeExposure("SOLUSDT", Decimal("0.1")),),
+        )
+        is None
+    )
+
+
+def test_reserved_row_alone_does_not_explain_an_exchange_position() -> None:
+    assert (
+        open_positions_from_reservations(
+            counted=_three_rows(),
+            exclude_trade_plan_id="plan-d",
+            exchange_exposures=(ExchangeExposure("BTCUSDT", Decimal("0.1")),),
+        )
+        is None
+    )
+
+
+def test_the_excluded_row_still_explains_an_exposure() -> None:
+    # At placement the candidate's own row is PLACED/OPEN and explains its own exposure.
+    positions = open_positions_from_reservations(
+        counted=_three_rows(),
+        exclude_trade_plan_id="plan-b",
+        exchange_exposures=(ExchangeExposure("ETHUSDT", Decimal("1")),),
+    )
+    assert positions is not None
+    assert [p.symbol for p in positions] == ["BTCUSDT", "SOLUSDT"]
+
+
+def test_zero_exposure_is_ignored() -> None:
+    positions = open_positions_from_reservations(
+        counted=(),
+        exclude_trade_plan_id="plan-d",
+        exchange_exposures=(ExchangeExposure("BNBUSDT", Decimal("0")),),
+    )
+    assert positions == ()
+
+
+@pytest.mark.parametrize("status", [ReservationStatus.REQUESTED, ReservationStatus.RELEASED])
+def test_counted_reservation_refuses_an_uncounted_status(status: ReservationStatus) -> None:
+    with pytest.raises(ValueError):
+        _counted("plan-a", "BTCUSDT", "LONG", status, "1")
+
+
+def test_counted_reservation_refuses_negative_risk_and_bad_side() -> None:
+    with pytest.raises(ValueError):
+        _counted("plan-a", "BTCUSDT", "LONG", ReservationStatus.RESERVED, "-1")
+    with pytest.raises(ValueError):
+        _counted("plan-a", "BTCUSDT", "BOTH", ReservationStatus.RESERVED, "1")
+
+
+def test_exchange_exposure_validates_its_fields() -> None:
+    with pytest.raises(ValueError):
+        ExchangeExposure("", Decimal("1"))
+    with pytest.raises(TypeError):
+        ExchangeExposure("BTCUSDT", 1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        ExchangeExposure("BTCUSDT", Decimal("NaN"))
+
+
+def test_enum_members_are_pinned() -> None:
+    assert {s.value for s in ReservationStatus} == {
+        "REQUESTED",
+        "RESERVED",
+        "PLACED",
+        "OPEN",
+        "RELEASED",
+    }
+    assert {r.value for r in ReleaseReason} == {
+        "APPROVAL_EXPIRED",
+        "APPROVAL_SKIPPED",
+        "PLAN_EXPIRED",
+        "PLAN_INVALIDATED",
+        "PLAN_SUPERSEDED",
+        "PLACEMENT_REFUSED",
+        "ENTRY_REJECTED",
+        "ENTRY_ENDED_NO_FILL",
+        "POSITION_CLOSED",
+    }
+    assert COUNTED_STATUSES == frozenset(
+        {ReservationStatus.RESERVED, ReservationStatus.PLACED, ReservationStatus.OPEN}
+    )
+
+
+def test_release_source_statuses_literal_oracle() -> None:
+    s = ReservationStatus
+    r = ReleaseReason
+    expected = {
+        r.APPROVAL_SKIPPED: frozenset({s.REQUESTED}),
+        r.APPROVAL_EXPIRED: frozenset({s.REQUESTED}),
+        r.PLAN_EXPIRED: frozenset({s.REQUESTED, s.RESERVED}),
+        r.PLAN_INVALIDATED: frozenset({s.REQUESTED, s.RESERVED}),
+        r.PLAN_SUPERSEDED: frozenset({s.REQUESTED, s.RESERVED}),
+        r.PLACEMENT_REFUSED: frozenset({s.RESERVED}),
+        r.ENTRY_REJECTED: frozenset({s.RESERVED, s.PLACED}),
+        r.ENTRY_ENDED_NO_FILL: frozenset({s.PLACED}),
+        r.POSITION_CLOSED: frozenset({s.OPEN}),
+    }
+    assert dict(RELEASE_SOURCE_STATUSES) == expected
+
+
+def test_every_status_but_released_has_an_exit_and_released_is_never_a_source() -> None:
+    union: set[ReservationStatus] = set()
+    for sources in RELEASE_SOURCE_STATUSES.values():
+        assert ReservationStatus.RELEASED not in sources
+        union |= sources
+    assert union == set(ReservationStatus) - {ReservationStatus.RELEASED}
+    assert set(RELEASE_SOURCE_STATUSES) == set(ReleaseReason)
+
+
+def test_release_source_statuses_is_read_only() -> None:
+    with pytest.raises(TypeError):
+        RELEASE_SOURCE_STATUSES[ReleaseReason.PLAN_EXPIRED] = frozenset()  # type: ignore[index]
