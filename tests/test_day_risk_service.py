@@ -1,0 +1,721 @@
+"""LiveDayRiskService (Phase 21, plan 21-13; D-03, D-06 to D-09, D-14, RISK-02).
+
+Fakes only: ``InMemoryDayRiskStore`` (PgDayRiskStore semantics), ``ScriptedDayRiskReader`` and the
+real ``LiveEquitySource`` over ``ScriptedAccountReader`` serving the recorded-Demo snapshots
+(demo-observed, not mainnet). Trade rows are SYNTHETIC and labelled so. Nothing here is wired in a
+running process (Phase 24).
+"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import dataclasses
+import json
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import pytest
+from src.adapters.binance_ratelimit_gate import RateLimitBanActive, RateLimitPauseActive
+from src.adapters.binance_usdm import IncomeRow, UserTradeRow
+from src.domain.enums import DailyState, RejectionReason
+from src.execution.account_equity import LiveEquitySource
+from src.execution.day_risk_service import (
+    FUNDING_INCOME_TYPE,
+    LiveDayRiskService,
+    components_from_income,
+    components_from_user_trade,
+)
+from src.persistence.errors import RowConflict, StoreUnavailable
+from src.risk.daily_loss import (
+    BLOCKED_DAILY_LOSS_UNKNOWN,
+    BLOCKED_DAY_BASE_UNAVAILABLE,
+    BLOCKED_DAY_STATE_MISSING,
+    BLOCKED_DAY_STATE_UNREADABLE,
+    ComponentKind,
+    ComponentSource,
+    DayRiskState,
+    DayStateVerdict,
+    FundingPolicy,
+)
+
+from tests.support.account_fakes import (
+    BALANCES,
+    CONFIG,
+    INFORMATION,
+    RECORDED_DEMO,
+    ScriptedAccountReader,
+    demo_account_snapshots,
+)
+from tests.support.ast_guards import wall_clock_calls
+from tests.support.day_risk_fakes import InMemoryDayRiskStore, ScriptedDayRiskReader
+from tests.support.execution_limits import test_only_execution_limits as only_limits
+from tests.support.virtual_time import VirtualTime
+
+MODULE = Path(__file__).resolve().parent.parent / "src" / "execution" / "day_risk_service.py"
+DAY = date(2026, 10, 23)
+NEXT_DAY = date(2026, 10, 24)
+T0 = datetime(2026, 10, 23, 0, 5, 0, tzinfo=UTC)
+DEMO_EQUITY = Decimal("4999.09343961")
+UNVERIFIED = FundingPolicy.TRADES_WITH_UNVERIFIED_FUNDING
+REQUIRE = FundingPolicy.REQUIRE_VERIFIED_FUNDING_SOURCE
+UNCERTAIN = RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
+PARAMS: dict[str, Any] = {
+    "daily_loss_warning_threshold": Decimal("0.005"),
+    "daily_loss_stop_threshold": Decimal("0.01"),
+    "cluster_cap": Decimal("0.006"),
+    "max_aggregate_open_risk": Decimal("0.01"),
+    "max_open_positions": 2,
+}
+
+
+# ------------------------------------------------------------------------------ helpers
+
+
+def trade(
+    pnl: str,
+    commission: str,
+    *,
+    order_id: int = 1,
+    trade_id: int = 1,
+    at: datetime | None = None,
+    asset: str = "USDT",
+) -> UserTradeRow:
+    """SYNTHETIC fill row (labelled test data, not a recorded Demo row)."""
+    return UserTradeRow(
+        symbol="BTCUSDT",
+        order_id=order_id,
+        trade_id=trade_id,
+        realized_pnl=Decimal(pnl),
+        commission=Decimal(commission),
+        commission_asset=asset,
+        margin_asset="USDT",
+        time_utc=at or T0,
+    )
+
+
+def funding_row(amount: str, *, tran_id: int = 900, asset: str = "USDT") -> IncomeRow:
+    """SYNTHETIC FUNDING_FEE row (no funding row was ever observed on Demo)."""
+    return IncomeRow(
+        symbol="BTCUSDT",
+        income_type=FUNDING_INCOME_TYPE,
+        income=Decimal(amount),
+        asset=asset,
+        tran_id=tran_id,
+        trade_id=None,
+        time_utc=T0,
+    )
+
+
+async def snapshots(equity: Decimal | None = None) -> tuple[Any, Any, Any]:
+    """The recorded-Demo snapshots; with ``equity`` the USDT figures are rescaled to it."""
+    information, balances, config = await demo_account_snapshots()
+    if equity is None:
+        return information, balances, config
+    information = dataclasses.replace(
+        information,
+        total_margin_balance=equity,
+        total_wallet_balance=equity,
+        assets=tuple(
+            dataclasses.replace(row, wallet_balance=equity, margin_balance=equity)
+            if row.asset == "USDT"
+            else row
+            for row in information.assets
+        ),
+    )
+    balances = tuple(
+        dataclasses.replace(row, balance=equity) if row.asset == "USDT" else row for row in balances
+    )
+    return information, balances, config
+
+
+async def account_reader(
+    virtual_time: VirtualTime,
+    *,
+    refreshes: int = 1,
+    advance: int = 0,
+    equity: Decimal | None = None,
+) -> ScriptedAccountReader:
+    information, balances, config = await snapshots(equity)
+    return ScriptedAccountReader(
+        {
+            CONFIG: [config] * refreshes,
+            INFORMATION: [information] * refreshes,
+            BALANCES: [balances] * refreshes,
+        },
+        virtual_time=virtual_time,
+        advance_seconds_per_call=advance,
+    )
+
+
+@dataclass
+class Rig:
+    service: LiveDayRiskService
+    store: InMemoryDayRiskStore
+    reader: ScriptedDayRiskReader
+    account: ScriptedAccountReader
+    clock: VirtualTime
+
+
+async def build(
+    *,
+    start: datetime = T0,
+    store: InMemoryDayRiskStore | None = None,
+    reader: ScriptedDayRiskReader | None = None,
+    account: ScriptedAccountReader | None = None,
+    refreshes: int = 1,
+    advance: int = 0,
+    equity: Decimal | None = None,
+    policy: FundingPolicy = UNVERIFIED,
+    clock: VirtualTime | None = None,
+) -> Rig:
+    clock = clock if clock is not None else VirtualTime(start)
+    if account is None:
+        account = await account_reader(clock, refreshes=refreshes, advance=advance, equity=equity)
+    source = LiveEquitySource(
+        adapter=account, clock=clock, limits=only_limits(), quote_asset="USDT"
+    )
+    day_store = store if store is not None else InMemoryDayRiskStore()
+    day_reader = reader if reader is not None else ScriptedDayRiskReader()
+    service = LiveDayRiskService(
+        reader=day_reader,
+        store=day_store,
+        equity=source,
+        clock=clock,
+        symbols={"BTCUSDT"},
+        quote_asset="USDT",
+        funding_policy=policy,
+        parameter_set=PARAMS,
+    )
+    return Rig(service, day_store, day_reader, account, clock)
+
+
+def assert_blocked(verdict: DayStateVerdict, reason: str) -> None:
+    assert verdict.state is None
+    assert verdict.reason_code == UNCERTAIN
+    assert verdict.blocked_reason == reason
+    assert verdict.loss_quote is None
+    assert not verdict.latch_now
+    assert verdict.alerts_due == ()
+
+
+def stored_day(store: InMemoryDayRiskStore, day: date = DAY) -> DayRiskState:
+    state = store.get_day(day)
+    assert state is not None
+    return state
+
+
+# ------------------------------------------------------------------------ Task 1: tracer
+
+
+async def test_tracer_opens_the_day_from_a_fresh_base_and_evaluates_normal() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    assert verdict.loss_quote == Decimal("0")
+    assert verdict.alerts_due == ()
+    day = stored_day(rig.store)
+    assert day.equity_at_day_start == DEMO_EQUITY
+    assert (
+        datetime(2026, 10, 23, tzinfo=UTC)
+        <= day.base_observed_at_utc
+        < datetime(2026, 10, 24, tzinfo=UTC)
+    )
+    assert day.stop_latched_at_utc is None
+    assert rig.service.last_error_type is None
+
+
+async def test_the_reader_port_gets_the_whole_day_window_for_every_symbol_and_funding() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    day_start = datetime(2026, 10, 23, 0, 0, tzinfo=UTC)
+    assert rig.reader.calls == [
+        ("user_trades_in_window", {"symbol": "BTCUSDT", "start_utc": day_start, "end_utc": T0}),
+        (
+            "income_in_window",
+            {"income_type": "FUNDING_FEE", "start_utc": day_start, "end_utc": T0},
+        ),
+    ]
+
+
+async def test_a_clock_that_moves_3s_during_refresh_still_opens_the_day() -> None:
+    # The reader moves the virtual clock 1 s per call, 3 s during refresh(); the TEST_ONLY bound
+    # is 9137 ms. The earlier caller now_utc would give a negative age (stale).
+    rig = await build(advance=1)
+    before = rig.clock()
+    await rig.service.backfill(now_utc=before)
+    verdict = await rig.service.evaluate(now_utc=before, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    day = stored_day(rig.store)
+    assert day.base_observed_at_utc == before  # the stamp of the START of refresh()
+    assert rig.clock() - before == timedelta(seconds=3)
+
+
+async def test_a_caller_now_older_than_the_reading_stamp_is_not_a_negative_age() -> None:
+    # The caller's now_utc precedes the clock at the start of refresh(): judged with it the
+    # reading would have a negative age (stale). The clock re-read after refresh() is used.
+    rig = await build(start=T0 + timedelta(seconds=2))
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.blocked_reason == BLOCKED_DAILY_LOSS_UNKNOWN  # opened, not yet backfilled
+    assert stored_day(rig.store).base_observed_at_utc == T0 + timedelta(seconds=2)
+
+
+async def test_a_clock_that_moves_12s_during_refresh_is_a_stale_base_and_writes_no_day() -> None:
+    rig = await build(advance=4)  # 12 s during refresh, above the 9137 ms bound
+    before = rig.clock()
+    await rig.service.backfill(now_utc=before)
+    verdict = await rig.service.evaluate(now_utc=before, exposure=False)
+    assert_blocked(verdict, BLOCKED_DAY_BASE_UNAVAILABLE)
+    assert rig.store.get_day(DAY) is None
+    assert rig.store.count("open_day") == 0
+
+
+async def test_a_derived_stop_is_latched_in_the_store_before_the_verdict_returns() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    # SYNTHETIC fill: realized -49.99 and commission 0.02 give the loss 50.01 >= stop 49.9909...
+    rig.reader.trades["BTCUSDT"] = (trade("-49.99", "0.02"),)
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.loss_quote == Decimal("50.01")
+    assert verdict.reason_code == RejectionReason.DAILY_STOP_BLOCK.value
+    assert verdict.latch_now
+    assert verdict.alerts_due == (DailyState.DAILY_STOP,)
+    assert stored_day(rig.store).stop_latched_at_utc == T0
+
+
+def test_components_from_a_user_trade_row() -> None:
+    pnl, commission = components_from_user_trade(trade("-1.5", "0.25", order_id=7, trade_id=9))
+    assert (pnl.kind, pnl.amount, pnl.asset) == (ComponentKind.FILL_PNL, Decimal("-1.5"), "USDT")
+    assert (commission.kind, commission.amount) == (ComponentKind.FILL_COMMISSION, Decimal("-0.25"))
+    assert pnl.source is commission.source is ComponentSource.REST_USER_TRADES
+    assert pnl.source_key == commission.source_key == "BTCUSDT:7:9"
+    assert pnl.event_time_utc == T0 and pnl.utc_day == DAY
+    rebate = components_from_user_trade(trade("0", "-0.1"))[1]
+    assert rebate.amount == Decimal("0.1")
+
+
+def test_components_from_an_income_row() -> None:
+    component = components_from_income(funding_row("-1.5", tran_id=42))
+    assert component.kind is ComponentKind.FUNDING
+    assert component.source is ComponentSource.REST_INCOME
+    assert component.source_key == "BTCUSDT:42"
+    assert component.amount == Decimal("-1.5")
+    account_level = dataclasses.replace(funding_row("1"), symbol=None, tran_id=5)
+    assert components_from_income(account_level).source_key == "ACCOUNT:5"
+    with pytest.raises(ValueError):
+        components_from_income(dataclasses.replace(funding_row("1"), income_type="COMMISSION"))
+
+
+async def test_a_funding_row_counts_in_the_loss() -> None:
+    rig = await build(reader=ScriptedDayRiskReader(income=(funding_row("-1.5"),)))
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    assert verdict.loss_quote == Decimal("1.5")
+
+
+# ------------------------------------------------------------------- Task 2: other branches
+
+
+async def _latched_rig() -> Rig:
+    rig = await build()
+    rig.reader.trades["BTCUSDT"] = (trade("-49.99", "0.02"),)
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.DAILY_STOP
+    return rig
+
+
+async def test_a_restart_inside_the_day_keeps_the_stored_base_and_the_latch() -> None:
+    first = await _latched_rig()
+    later = datetime(2026, 10, 23, 10, 0, tzinfo=UTC)
+    second = await build(start=later, store=first.store, equity=Decimal("4000"))
+    verdict = await second.service.evaluate(now_utc=later, exposure=True)
+    assert verdict.state is DailyState.DAILY_STOP  # the latch, with no backfill yet (D-14)
+    assert not verdict.latch_now
+    assert second.account.calls == []  # no new equity read
+    assert stored_day(first.store).equity_at_day_start == DEMO_EQUITY
+    assert stored_day(first.store).stop_latched_at_utc == T0
+
+
+async def test_an_unlatched_restart_is_unknown_until_its_first_backfill() -> None:
+    first = await build()
+    await first.service.backfill(now_utc=T0)
+    assert (await first.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    later = datetime(2026, 10, 23, 10, 0, tzinfo=UTC)
+    # SYNTHETIC fill: loss 45 is a WARNING against the stored base 4999.09 (stop 49.99) but
+    # would be a DAILY_STOP against a base of 4000 (stop 40): proves the stored base is used.
+    reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-44.99", "0.01"),)})
+    second = await build(start=later, store=first.store, reader=reader, equity=Decimal("4000"))
+    unknown = await second.service.evaluate(now_utc=later, exposure=True)
+    assert_blocked(unknown, BLOCKED_DAILY_LOSS_UNKNOWN)
+    await second.service.backfill(now_utc=later)
+    verdict = await second.service.evaluate(now_utc=later, exposure=True)
+    assert verdict.state is DailyState.WARNING
+    assert verdict.loss_quote == Decimal("45.00")
+    assert second.account.calls == []
+
+
+async def test_the_warning_alert_is_stamped_once_per_day() -> None:
+    rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-30", "0"),)}))
+    await rig.service.backfill(now_utc=T0)
+    first = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert first.state is DailyState.WARNING
+    assert first.alerts_due == (DailyState.WARNING,)
+    assert stored_day(rig.store).warning_alerted_at_utc == T0
+    second = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=1), exposure=False)
+    assert second.state is DailyState.WARNING
+    assert second.alerts_due == ()
+
+
+async def test_a_failing_warning_stamp_drops_the_alert_and_keeps_the_verdict() -> None:
+    rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-30", "0"),)}))
+    await rig.service.backfill(now_utc=T0)
+    rig.store.raise_next("mark_warning_alerted", StoreUnavailable("down"))
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.WARNING
+    assert verdict.alerts_due == ()
+    assert rig.service.last_error_type == "StoreUnavailable"
+
+
+async def test_a_later_gain_on_a_latched_day_keeps_daily_stop() -> None:
+    rig = await _latched_rig()
+    rig.reader.trades["BTCUSDT"] = (
+        trade("-49.99", "0.02"),
+        trade("1000", "0", order_id=2, trade_id=2),
+    )
+    await rig.service.backfill(now_utc=T0 + timedelta(hours=1))
+    verdict = await rig.service.evaluate(now_utc=T0 + timedelta(hours=1), exposure=True)
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.loss_quote == Decimal("0")
+    assert not verdict.latch_now
+
+
+async def _rollover_store() -> InMemoryDayRiskStore:
+    store = InMemoryDayRiskStore()
+    yesterday = DayRiskState(
+        utc_day=DAY,
+        equity_at_day_start=DEMO_EQUITY,
+        base_observed_at_utc=T0,
+        stop_latched_at_utc=T0,
+    )
+    store.open_day(yesterday)
+    return store
+
+
+async def test_rollover_opens_the_new_day_from_a_fresh_in_day_read_without_a_carried_latch() -> (
+    None
+):
+    midnight = datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC)
+    rig = await build(start=midnight, store=await _rollover_store(), equity=Decimal("4800"))
+    unknown = await rig.service.evaluate(now_utc=midnight, exposure=True)
+    assert_blocked(unknown, BLOCKED_DAILY_LOSS_UNKNOWN)  # opened, loss not backfilled yet
+    await rig.service.backfill(now_utc=midnight)
+    verdict = await rig.service.evaluate(now_utc=midnight, exposure=True)
+    assert verdict.state is DailyState.NORMAL
+    new_day = stored_day(rig.store, NEXT_DAY)
+    assert new_day.equity_at_day_start == Decimal("4800")
+    assert new_day.base_observed_at_utc == midnight
+    assert new_day.stop_latched_at_utc is None
+    assert stored_day(rig.store, DAY).stop_latched_at_utc == T0  # yesterday is untouched
+
+
+async def test_a_base_stamped_before_midnight_is_not_accepted_for_the_new_day() -> None:
+    before_midnight = datetime(2026, 10, 23, 23, 59, 59, tzinfo=UTC)
+    rig = await build(start=before_midnight, store=await _rollover_store())
+    verdict = await rig.service.evaluate(
+        now_utc=datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC), exposure=True
+    )
+    assert_blocked(verdict, BLOCKED_DAY_BASE_UNAVAILABLE)
+    assert rig.store.get_day(NEXT_DAY) is None
+
+
+async def test_a_failing_base_read_blocks_every_evaluate_until_a_read_succeeds() -> None:
+    midnight = datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC)
+    clock = VirtualTime(midnight)
+    information, balances, config = await snapshots()
+    account = ScriptedAccountReader(
+        {
+            CONFIG: [RateLimitPauseActive(7), RuntimeError("boom"), config],
+            INFORMATION: [information],
+            BALANCES: [balances],
+        },
+        virtual_time=clock,
+    )
+    rig = await build(start=midnight, store=await _rollover_store(), account=account, clock=clock)
+    service = rig.service
+    source_calls = account
+    for _ in range(2):
+        assert_blocked(
+            await service.evaluate(now_utc=midnight, exposure=True), BLOCKED_DAY_BASE_UNAVAILABLE
+        )
+        assert rig.store.get_day(NEXT_DAY) is None
+    assert source_calls.count(CONFIG) == 2
+    await service.backfill(now_utc=midnight)
+    assert (await service.evaluate(now_utc=midnight, exposure=True)).state is DailyState.NORMAL
+    assert stored_day(rig.store, NEXT_DAY).equity_at_day_start == DEMO_EQUITY
+
+
+@pytest.mark.parametrize("exposure", [True, None])
+async def test_a_missing_state_with_exposure_blocks_and_reads_no_equity(
+    exposure: bool | None,
+) -> None:
+    rig = await build()
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=exposure)
+    assert_blocked(verdict, BLOCKED_DAY_STATE_MISSING)
+    assert rig.account.calls == []
+    assert rig.store.get_day(DAY) is None
+
+
+async def test_a_missing_state_without_exposure_opens_from_a_fresh_read() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    assert rig.account.count(INFORMATION) == 1
+
+
+async def test_an_unreadable_day_row_blocks() -> None:
+    rig = await build()
+    rig.store.raise_next("get_day", StoreUnavailable("down"))
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
+    )
+    assert rig.service.last_error_type == "StoreUnavailable"
+    assert rig.account.calls == []
+
+
+async def test_a_failing_previous_day_check_blocks() -> None:
+    rig = await build()
+    rig.store.raise_next("has_day", StoreUnavailable("down"))
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
+    )
+
+
+async def test_a_failing_open_day_write_blocks_and_opens_nothing() -> None:
+    rig = await build(refreshes=2)
+    rig.store.raise_next("open_day", StoreUnavailable("down"))
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
+    )
+    assert rig.store.get_day(DAY) is None
+
+
+async def test_unreadable_components_block() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    rig.store.raise_next("list_components", StoreUnavailable("down"))
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
+    )
+
+
+async def test_a_failing_latch_write_is_blocked_never_normal_and_the_next_call_latches() -> None:
+    rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-60", "0"),)}))
+    await rig.service.backfill(now_utc=T0)
+    rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
+    )
+    assert stored_day(rig.store).stop_latched_at_utc is None
+    again = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert again.state is DailyState.DAILY_STOP
+    assert stored_day(rig.store).stop_latched_at_utc == T0
+
+
+async def test_two_services_opening_the_same_day_keep_the_first_stored_base() -> None:
+    store = InMemoryDayRiskStore()
+    first = await build(store=store, advance=1, equity=DEMO_EQUITY)
+    second = await build(store=store, advance=1, equity=Decimal("4000"))
+    one, two = await asyncio.gather(
+        first.service.ensure_day(now_utc=T0, exposure=False),
+        second.service.ensure_day(now_utc=T0, exposure=False),
+    )
+    assert isinstance(one, DayRiskState) and isinstance(two, DayRiskState)
+    assert one.equity_at_day_start == two.equity_at_day_start
+    assert store.get_day(DAY) == one == two
+    assert store.count("open_day") == 2
+
+
+@pytest.mark.parametrize(
+    "error", [RateLimitPauseActive(3), RateLimitBanActive(60), RuntimeError("boom 4999.09")]
+)
+@pytest.mark.parametrize("method", ["user_trades_in_window", "income_in_window"])
+async def test_a_failed_backfill_read_leaves_the_loss_unknown_without_a_retry(
+    error: BaseException, method: str
+) -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    rig.reader.calls.clear()
+    rig.reader.fail(method, error)
+    await rig.service.backfill(now_utc=T0 + timedelta(minutes=1))
+    assert rig.service.last_error_type == type(error).__name__
+    assert rig.reader.count("user_trades_in_window") <= 1
+    assert rig.reader.count("income_in_window") <= 1
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0 + timedelta(minutes=1), exposure=False),
+        BLOCKED_DAILY_LOSS_UNKNOWN,
+    )
+    rig.reader.fail(method, None)
+    await rig.service.backfill(now_utc=T0 + timedelta(minutes=2))
+    assert rig.service.last_error_type is None
+    verdict = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=2), exposure=False)
+    assert verdict.state is DailyState.NORMAL
+
+
+async def test_a_failed_backfill_on_a_latched_day_still_answers_daily_stop() -> None:
+    rig = await _latched_rig()
+    rig.reader.fail("user_trades_in_window", RuntimeError("boom"))
+    await rig.service.backfill(now_utc=T0 + timedelta(minutes=1))
+    verdict = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=1), exposure=True)
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.loss_quote is None
+
+
+async def test_a_generation_bump_during_the_reads_keeps_the_loss_unknown() -> None:
+    holder: list[Rig] = []
+
+    def bump(method: str) -> None:
+        if method == "income_in_window":
+            holder[0].service._backfill_generation += 1  # what plan 21-16 does on ACCOUNT_UPDATE
+
+    rig = await build(reader=ScriptedDayRiskReader(on_call=bump))
+    holder.append(rig)
+    await rig.service.backfill(now_utc=T0)
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+    rig.reader._on_call = None
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    rig.service._backfill_generation += 1  # a later stream gap makes the loss unknown again
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+
+
+async def test_a_backfill_of_another_day_does_not_make_the_new_day_known() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    midnight = datetime(2026, 10, 24, 0, 0, tzinfo=UTC)
+    store = rig.store
+    assert store.get_day(DAY) is None
+    store.open_day(
+        DayRiskState(
+            utc_day=NEXT_DAY, equity_at_day_start=DEMO_EQUITY, base_observed_at_utc=midnight
+        )
+    )
+    assert_blocked(
+        await rig.service.evaluate(now_utc=midnight, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+
+
+async def test_a_non_quote_component_makes_the_loss_unknown() -> None:
+    reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-1", "0.01", asset="BNB"),)})
+    rig = await build(reader=reader)
+    await rig.service.backfill(now_utc=T0)
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+
+
+async def test_the_strict_funding_policy_is_unknown_even_after_a_complete_backfill() -> None:
+    rig = await build(policy=REQUIRE)
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.last_error_type is None
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+
+
+async def test_the_recorded_empty_income_answer_keeps_the_loss_known_under_the_lenient_policy() -> (
+    None
+):
+    # Demo returned 0 income rows in four tries (demo-observed, not mainnet).
+    payload = json.loads((RECORDED_DEMO / "income_funding_empty.json").read_text(encoding="utf-8"))
+    assert payload == []
+    rig = await build(reader=ScriptedDayRiskReader(income=tuple(payload)), policy=UNVERIFIED)
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    assert verdict.loss_quote == Decimal("0")
+
+
+async def test_the_store_double_keeps_the_rows_idempotent_and_refuses_a_changed_amount() -> None:
+    rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-1", "0.01"),)}))
+    await rig.service.backfill(now_utc=T0)
+    await rig.service.backfill(now_utc=T0)  # the same keys again: stored once
+    assert len(rig.store.list_components(DAY)) == 2
+    rig.reader.trades["BTCUSDT"] = (trade("-2", "0.01"),)  # same key, another amount
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.last_error_type == RowConflict.__name__
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+
+
+def test_the_funding_policy_has_no_default_and_must_be_a_policy() -> None:
+    def make(**overrides: Any) -> LiveDayRiskService:
+        arguments: dict[str, Any] = {
+            "reader": ScriptedDayRiskReader(),
+            "store": InMemoryDayRiskStore(),
+            "equity": object(),
+            "clock": lambda: T0,
+            "symbols": {"BTCUSDT"},
+            "quote_asset": "USDT",
+            "funding_policy": UNVERIFIED,
+            "parameter_set": PARAMS,
+        }
+        arguments.update(overrides)
+        return LiveDayRiskService(**arguments)
+
+    assert make() is not None
+    omitted = {
+        "reader": ScriptedDayRiskReader(),
+        "store": InMemoryDayRiskStore(),
+        "equity": object(),
+        "clock": lambda: T0,
+        "symbols": {"BTCUSDT"},
+        "quote_asset": "USDT",
+        "parameter_set": PARAMS,
+    }
+    with pytest.raises(TypeError):
+        LiveDayRiskService(**omitted)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        make(funding_policy="TRADES_WITH_UNVERIFIED_FUNDING")
+    with pytest.raises(ValueError):
+        make(symbols=set())
+    with pytest.raises(ValueError):
+        make(quote_asset=" ")
+
+
+# ------------------------------------------------------------------------- module guards
+
+
+def test_the_module_reads_no_wall_clock_no_sdk_or_adapter_and_no_order_endpoint() -> None:
+    assert wall_clock_calls(MODULE) == []
+    tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported.append(node.module)
+    for name in imported:
+        assert not name.startswith(("src.adapters", "src.persistence", "src.db"))
+        assert "binance" not in name and "sqlalchemy" not in name
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not any("order" in name or "cancel" in name for name in called)
+    assert "USDT" not in MODULE.read_text(encoding="utf-8")
