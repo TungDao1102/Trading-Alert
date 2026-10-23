@@ -591,7 +591,7 @@ async def test_spill_directory_missing_is_allowed_and_enters_no_safe_mode(tmp_pa
 async def test_spill_directory_that_cannot_be_listed_is_unreadable_not_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """CR-C1: an unreadable spill (a pre_send row inside) enters SAFE_MODE, not 'nothing pending'."""
+    """CR-C1: a spill that cannot be listed (a pre_send row inside) is unreadable, not empty."""
     import os
 
     from src.ops import spill as spill_module

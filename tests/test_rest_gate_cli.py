@@ -188,6 +188,56 @@ def test_clear_keeps_a_corrupt_file_aside(tmp_path: Path) -> None:
     assert store.load() is not None
 
 
+_UNPARSABLE_BY_EXCEPTION = [
+    pytest.param(
+        b'{"schema_version":1,"ban_until_utc":null,"pause_until_utc":null,'
+        b'"recorded_at_utc":"9999-12-31T23:59:59-05:00",'
+        b'"initialized_at_utc":"2026-10-21T09:00:00Z","initialized_by":"op-1"}',
+        id="year-9999-negative-offset",
+    ),
+    pytest.param(b"[" * 200_000, id="deeply-nested-json"),
+]
+
+
+@pytest.mark.parametrize("content", _UNPARSABLE_BY_EXCEPTION)
+def test_status_on_overflow_and_recursion_files_says_corrupt_and_does_not_crash(
+    tmp_path: Path, content: bytes
+) -> None:
+    """WR-C1: these two files used to crash `status` with OverflowError / RecursionError."""
+    store, clock = _initialized(tmp_path)
+    store.path.write_bytes(content)
+    result = status_report(store, clock())
+    assert result.exit_code == 2
+    assert "corrupt" in _text(result)
+    assert store.path.read_bytes() == content  # read-only
+
+
+@pytest.mark.parametrize("content", _UNPARSABLE_BY_EXCEPTION)
+def test_clear_replaces_overflow_and_recursion_files_and_keeps_them_aside(
+    tmp_path: Path, content: bytes
+) -> None:
+    """WR-C1: the documented remedy for a corrupt file works for these two as well."""
+    store, clock = _initialized(tmp_path)
+    store.path.write_bytes(content)
+    result = clear_state(store, clock(), operator_id="op-2", reason="corrupt", force=False)
+    assert result.exit_code == 0
+    aside = [p for p in tmp_path.iterdir() if ".corrupt-" in p.name]
+    assert len(aside) == 1 and aside[0].read_bytes() == content
+    record = store.load()
+    assert record is not None and record.initialized_by == "op-2"
+
+
+def test_main_clear_replaces_a_recursion_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "gate.json"
+    path.write_bytes(b"[" * 200_000)
+    assert main(["status", "--path", str(path)]) == 2
+    assert "corrupt" in capsys.readouterr().out
+    assert main(["clear", "--path", str(path), "--operator-id", "op-1", "--reason", "fix"]) == 0
+    assert main(["status", "--path", str(path)]) == 0
+
+
 def test_clear_refuses_a_future_deadline_without_force(tmp_path: Path) -> None:
     store, clock = _banned(tmp_path, 120)
     before = store.path.read_bytes()

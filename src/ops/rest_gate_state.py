@@ -9,7 +9,11 @@ A first installation is proven ONLY by `initialize(now_utc=..., operator_id=...)
 record carrying `initialized_at_utc`; a missing file alone never proves a fresh install, and a
 file that does not parse is corruption. Both read as loss of initialized state to the gate.
 
-Writes are atomic: a temporary file in the same directory, fsync, then `replace_with_retry`.
+Writes are atomic: a temporary file in the same directory, fsync, then `replace_with_retry`,
+then a best-effort fsync of the directory (POSIX; a no-op on Windows), so a power loss shortly
+after a 418 does not roll the record back. `initialize()` links the finished temporary file to
+the final name, which fails if the name exists, so two concurrent bootstraps cannot overwrite
+each other.
 The store reads no wall clock: the injected `clock` only names a corrupt file that is set aside
 (the file is kept, never deleted).
 """
@@ -74,11 +78,12 @@ def _parse_time(value: object, *, required: bool) -> datetime | None:
         raise GateStateCorrupt
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+        if parsed.utcoffset() is None:
+            raise GateStateCorrupt
+        # A year-9999 time with a negative offset overflows here (WR-C1).
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         raise GateStateCorrupt from None
-    if parsed.utcoffset() is None:
-        raise GateStateCorrupt
-    return parsed.astimezone(UTC)
 
 
 def encode_record(record: GateStateRecord) -> bytes:
@@ -95,7 +100,21 @@ def encode_record(record: GateStateRecord) -> bytes:
 
 
 def decode_record(data: bytes) -> GateStateRecord:
-    """Parse strictly; any deviation raises `GateStateCorrupt` (no message, no content)."""
+    """Parse strictly; any deviation raises `GateStateCorrupt` (no message, no content).
+
+    Total: whatever the parser raises for bytes it cannot take (`ValueError`, `OverflowError`,
+    `RecursionError`, ...) is reported as `GateStateCorrupt`, so the operator CLI can always
+    read and replace such a file (WR-C1).
+    """
+    try:
+        return _decode_record(data)
+    except GateStateCorrupt:
+        raise
+    except Exception:  # noqa: BLE001 - any other parser failure is a corrupt file
+        raise GateStateCorrupt from None
+
+
+def _decode_record(data: bytes) -> GateStateRecord:
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -121,6 +140,22 @@ def decode_record(data: bytes) -> GateStateRecord:
     )
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort directory fsync where the OS supports it (a no-op on Windows)."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 class FileGateStateStore:
     """`GateStateStore` over one JSON file; see the module docstring."""
 
@@ -144,16 +179,26 @@ class FileGateStateStore:
             candidate = base.with_name(f"{base.name}-{counter}")
         return candidate
 
-    def _write_atomic(self, data: bytes) -> None:
+    def _write_atomic(self, data: bytes, *, exclusive: bool = False) -> None:
+        """Temp file, fsync, replace, directory fsync.
+
+        With `exclusive` the temp file is hard-linked to the final name instead of replacing
+        it: the link fails with `FileExistsError` if the name exists, atomically, so a lost
+        race never overwrites the winner.
+        """
         tmp = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
         try:
             with open(tmp, "wb") as handle:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
-            replace_with_retry(tmp, self._path)
+            if exclusive:
+                os.link(tmp, self._path)
+            else:
+                replace_with_retry(tmp, self._path)
         finally:
             tmp.unlink(missing_ok=True)
+        _fsync_directory(self._path.parent)
 
     def load(self) -> GateStateRecord | None:
         """The record, None for a missing file; a file that does not parse is set aside.
@@ -196,13 +241,17 @@ class FileGateStateStore:
         """The explicit first-install bootstrap: write an initialized record, no deadline.
 
         Refused (`GateStateExists`, file untouched) while any state file exists, a corrupt one
-        included. Run once before the first start of the process.
+        included. The file is created exclusively, so a bootstrap that lost a race with another
+        one is refused too. Run once before the first start of the process.
         """
         record = _fresh_record(now_utc, operator_id)
         if self._path.exists():
             raise GateStateExists
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_atomic(encode_record(record))
+        try:
+            self._write_atomic(encode_record(record), exclusive=True)
+        except FileExistsError:
+            raise GateStateExists from None
         return record
 
     def reinitialize(

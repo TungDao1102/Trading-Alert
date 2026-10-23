@@ -288,7 +288,11 @@ class RestRateLimitGate:
         return None
 
     def check(self) -> None:
-        """Refuse the REST call about to be sent while a ban or a pause is active."""
+        """Refuse the REST call about to be sent while a ban or a pause is active.
+
+        A save that failed earlier is tried again first (WR-C2).
+        """
+        self._retry_failed_save()
         with self._lock:
             blocking = self._blocking_reason()
             if blocking is not None:
@@ -331,6 +335,8 @@ class RestRateLimitGate:
                     changed = True
         if changed:
             self._persist()
+        else:
+            self._retry_failed_save()
         return decision
 
     def restriction(self) -> GateRestriction | None:
@@ -440,6 +446,18 @@ class RestRateLimitGate:
             hook(event)
         except Exception:
             pass
+
+    def _retry_failed_save(self) -> None:
+        """Save again when the last save failed, so the file cannot stay without the deadline.
+
+        Called from `check()` and from a `record()` that changed nothing. A no-op while no save
+        failed, and while another thread is saving. The status stays `PERSISTENCE_FAILED`
+        until a save succeeds. A restart before that would restore a record without the deadline
+        (WR-C2), so every REST call is a chance to close the gap.
+        """
+        if not self._save_failed or self._save_lock.locked():
+            return
+        self._persist()
 
     def _persist(self) -> None:
         """Save the current end times; a no-op unless a valid record was restored.

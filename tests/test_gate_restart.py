@@ -35,7 +35,11 @@ from src.adapters.binance_ratelimit_gate import (
     RestRateLimitGate,
 )
 from src.domain.exchange_errors import ExchangeErrorCategory
-from src.ops.rest_gate_state import FileGateStateStore, GateStateExists
+from src.ops.rest_gate_state import (
+    FileGateStateStore,
+    GateStateExists,
+    decode_record,
+)
 
 from tests.support.ast_guards import forbidden_imports, wall_clock_calls
 from tests.support.limits import (
@@ -366,6 +370,50 @@ def test_corruption_after_initialization_keeps_the_file_and_blocks(
     assert again.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
 
 
+def _overflow_record() -> bytes:
+    """A syntactically valid record whose timestamp overflows `astimezone(UTC)` (WR-C1)."""
+    return (
+        b'{"schema_version":1,"ban_until_utc":null,"pause_until_utc":null,'
+        b'"recorded_at_utc":"9999-12-31T23:59:59-05:00",'
+        b'"initialized_at_utc":"2026-10-21T09:00:00Z","initialized_by":"op-1"}'
+    )
+
+
+def _nested_record() -> bytes:
+    """JSON nested far deeper than the parser's recursion limit (WR-C1)."""
+    return b"[" * 200_000
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_overflow_record(), id="year-9999-negative-offset"),
+        pytest.param(_nested_record(), id="deeply-nested-json"),
+    ],
+)
+def test_overflow_and_recursion_are_corruption_not_crashes(tmp_path: Path, content: bytes) -> None:
+    """WR-C1: `OverflowError` / `RecursionError` from the parser read as a corrupt record."""
+    with pytest.raises(GateStateCorrupt):
+        decode_record(content)
+    store, clock = _initialized(tmp_path)
+    path = tmp_path / "gate.json"
+    path.write_bytes(content)
+    inspection = store.inspect()
+    assert inspection.exists and inspection.corrupt and inspection.record is None
+    assert path.exists()  # inspect never moves the file
+
+    gate, alerts = _gate_with_alerts(store, clock)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    with pytest.raises(GateNotRestored) as info:
+        gate.check()
+    assert info.value.reason == GATE_STATE_UNKNOWN
+    assert alerts.events == [RECOVERY_REQUIRED]
+    aside = [p for p in tmp_path.iterdir() if ".corrupt-" in p.name]
+    assert [p.name for p in aside] == ["gate.json.corrupt-20261021T090000Z"]
+    assert aside[0].read_bytes() == content  # kept, never deleted
+    assert not path.exists()
+
+
 def test_two_corrupt_files_in_one_second_get_distinct_aside_names(tmp_path: Path) -> None:
     store, _ = _initialized(tmp_path)
     for _attempt in range(2):
@@ -480,6 +528,166 @@ def test_state_persistence_failure_keeps_restriction(tmp_path: Path) -> None:
     assert gate.recovery_status() is GateRecoveryStatus.RESTORED_DURABLE
     saved = inner.load()
     assert saved is not None and saved.ban_until_utc == T0 + timedelta(seconds=100)
+
+
+class _CountingStore(_FlakyStore):
+    def __init__(self, inner: FileGateStateStore) -> None:
+        super().__init__(inner)
+        self.saves = 0
+
+    def save(self, record: GateStateRecord) -> None:
+        self.saves += 1
+        super().save(record)
+
+
+def test_a_failed_save_is_retried_by_the_next_check(tmp_path: Path) -> None:
+    """WR-C2: the file must not stay without the deadline after a transient save failure."""
+    inner, clock = _initialized(tmp_path)
+    store = _CountingStore(inner)
+    gate = RestRateLimitGate(policy=_policy(), clock=clock, state_store=store)
+    assert gate.restore() is GateRecoveryStatus.RESTORED_DURABLE
+    store.fail = True
+    gate.record(_C.IP_BANNED, 100)
+    assert gate.recovery_status() is GateRecoveryStatus.PERSISTENCE_FAILED
+    saved = inner.load()
+    assert saved is not None and saved.ban_until_utc is None  # the file is stale
+
+    # Still failing: each check() tries again and the status stays PERSISTENCE_FAILED.
+    before = store.saves
+    with pytest.raises(RateLimitBanActive):
+        gate.check()
+    assert store.saves == before + 1
+    assert gate.recovery_status() is GateRecoveryStatus.PERSISTENCE_FAILED
+
+    # The disk recovers: the next check() writes the deadline without any new 418.
+    store.fail = False
+    clock.advance(10)
+    with pytest.raises(RateLimitBanActive):
+        gate.check()
+    assert gate.recovery_status() is GateRecoveryStatus.RESTORED_DURABLE
+    saved = inner.load()
+    assert saved is not None and saved.ban_until_utc == T0 + timedelta(seconds=100)
+
+    # A restart now restores the ban from the file.
+    second = RestRateLimitGate(policy=_policy(), clock=clock, state_store=inner)
+    assert second.restore() is GateRecoveryStatus.RESTORED_DURABLE
+    with pytest.raises(RateLimitBanActive):
+        second.check()
+
+
+def test_a_failed_save_is_retried_by_a_record_that_changes_nothing(tmp_path: Path) -> None:
+    inner, clock = _initialized(tmp_path)
+    store = _CountingStore(inner)
+    gate = RestRateLimitGate(policy=_policy(), clock=clock, state_store=store)
+    gate.restore()
+    store.fail = True
+    gate.record(_C.IP_BANNED, 100)
+    assert gate.recovery_status() is GateRecoveryStatus.PERSISTENCE_FAILED
+    store.fail = False
+    gate.record(_C.IP_BANNED, 10)  # shorter: the end time does not move
+    assert gate.recovery_status() is GateRecoveryStatus.RESTORED_DURABLE
+    saved = inner.load()
+    assert saved is not None and saved.ban_until_utc == T0 + timedelta(seconds=100)
+
+
+def test_a_gate_that_never_failed_a_save_does_not_save_on_check(tmp_path: Path) -> None:
+    inner, clock = _initialized(tmp_path)
+    store = _CountingStore(inner)
+    gate = RestRateLimitGate(policy=_policy(), clock=clock, state_store=store)
+    gate.restore()
+    gate.record(_C.IP_BANNED, 100)
+    saves = store.saves
+    for _ in range(3):
+        with pytest.raises(RateLimitBanActive):
+            gate.check()
+        gate.restriction()
+    assert store.saves == saves
+
+
+def test_the_state_file_directory_is_fsynced_after_the_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-C9: the order is temp fsync, replace, directory fsync."""
+    import src.ops.rest_gate_state as state_mod
+
+    events: list[str] = []
+    real_replace = state_mod.replace_with_retry
+
+    def replace(src: Path, dst: Path) -> None:
+        events.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(state_mod, "replace_with_retry", replace)
+    monkeypatch.setattr(
+        state_mod, "_fsync_directory", lambda directory: events.append(f"dir:{directory.name}")
+    )
+    store, _ = _initialized(tmp_path)  # the bootstrap links the file; it still syncs the directory
+    assert events == [f"dir:{tmp_path.name}"]
+    record = store.load()
+    assert record is not None
+    store.save(record)
+    assert events[1:] == ["replace", f"dir:{tmp_path.name}"]
+
+
+def test_fsync_directory_opens_syncs_and_closes_the_directory_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    import src.ops.rest_gate_state as state_mod
+
+    calls: list[tuple[str, object]] = []
+
+    def fake_open(path: object, flags: int) -> int:
+        calls.append(("open", Path(str(path))))
+        return 7
+
+    fake_os = types.SimpleNamespace(
+        name="posix",
+        O_RDONLY=0,
+        open=fake_open,
+        fsync=lambda fd: calls.append(("fsync", fd)),
+        close=lambda fd: calls.append(("close", fd)),
+    )
+    monkeypatch.setattr(state_mod, "os", fake_os)
+    state_mod._fsync_directory(tmp_path)
+    assert calls == [("open", tmp_path), ("fsync", 7), ("close", 7)]
+
+    calls.clear()
+    fake_os.name = "nt"  # a no-op where directories cannot be opened (Windows)
+    state_mod._fsync_directory(tmp_path)
+    assert calls == []
+
+    fake_os.name = "posix"
+
+    def denied(path: object, flags: int) -> int:
+        raise OSError("denied")
+
+    fake_os.open = denied
+    state_mod._fsync_directory(tmp_path)  # best effort: never raises
+
+
+def test_initialize_creates_the_file_exclusively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WR-C9: a bootstrap that lost the check-then-write race must not overwrite the winner."""
+    clock = VirtualClock()
+    store = _store(tmp_path, clock)
+    winner = store.initialize(now_utc=clock(), operator_id="op-1")
+    path = tmp_path / "gate.json"
+    before = path.read_bytes()
+    real_exists = Path.exists
+
+    def stale_exists(self: Path) -> bool:  # the loser's exists() ran before the winner wrote
+        return False if self == path else real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", stale_exists)
+    with pytest.raises(GateStateExists):
+        store.initialize(now_utc=clock(), operator_id="op-2")
+    monkeypatch.undo()
+    assert path.read_bytes() == before
+    assert store.load() == winner
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
 
 
 def test_an_alert_hook_that_raises_does_not_open_the_gate(tmp_path: Path) -> None:
