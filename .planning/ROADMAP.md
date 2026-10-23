@@ -1119,11 +1119,11 @@ Input: .planning/phases/21-account-equity-daily-loss/21-NOTES.md
 Plans:
 
 **Wave 1**
-- [ ] 21-02-PLAN.md - Limit key account.max_equity_age_ms, NOT_CONFIGURED and required (D-03, O-1)
-- [ ] 21-03-PLAN.md - Adapter account reads v3/account, v3/balance, accountConfig and the generated Demo fixtures (D-01, D-02, D-21)
-- [ ] 21-04-PLAN.md - Pure live equity resolver (totalMarginBalance, fail closed) and the D-18 snapshot test (F-012, G4-039)
-- [ ] 21-05-PLAN.md - Pure D033 daily-loss fold, day-start thresholds, sticky latch and day-open rule (D-06 to D-11, D-14)
-- [ ] 21-06-PLAN.md - Pure portfolio-cap inputs: reservation verdict, open positions counting resting and approved plans, release reasons for every terminal plan state (D-15, D-16)
+- [x] 21-02-PLAN.md - Limit key account.max_equity_age_ms, NOT_CONFIGURED and required (D-03, O-1)
+- [x] 21-03-PLAN.md - Adapter account reads v3/account, v3/balance, accountConfig and the generated Demo fixtures (D-01, D-02, D-21)
+- [x] 21-04-PLAN.md - Pure live equity resolver (totalMarginBalance, fail closed) and the D-18 snapshot test (F-012, G4-039)
+- [x] 21-05-PLAN.md - Pure D033 daily-loss fold, day-start thresholds, sticky latch and day-open rule (D-06 to D-11, D-14)
+- [x] 21-06-PLAN.md - Pure portfolio-cap inputs: reservation verdict, open positions counting resting and approved plans, release reasons for every terminal plan state (D-15, D-16)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 21-07-PLAN.md - Live equity source: REST truth, stream invalidation, owner age bound, now-after-refresh contract (D-01, D-03)
@@ -1407,7 +1407,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
 | 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 31/31 | Executed, human_needed | 2026-10-23 |
-| 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
+| 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |
 | 24. Live Runtime Composition + Demo Rehearsal | 0/TBD | Not started | - |
