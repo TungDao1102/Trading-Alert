@@ -2,9 +2,9 @@
 phase: "20"
 slug: "reconcile-safe-mode-hardening"
 # status lifecycle: draft (seeded by plan-phase) -> validated (set by validate-phase section 6)
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: validated
+nyquist_compliant: true
+wave_0_complete: true
 created: "2026-10-21"
 ---
 
@@ -73,6 +73,11 @@ minimum the plans must cover (from `20-RESEARCH.md`, corrected by `20-REVIEW-RES
 | Drills | 20-23 | OPS-01 | UNPROTECTED, STALE_FEED and MANUAL_CLOSE drills; `OUTCOME_SAFE_MODE_BLOCKED` emitted; the old no-place outcome retired | unit | `uv run pytest -m "not docker" tests/test_drills.py tests/test_reconcile.py -x` | rewrite |
 | Guards | 20-23 | all | no wall clock, no `float`, no SDK and no placement call in new `src/reconcile` and ops modules; new limit keys guarded and `NOT_CONFIGURED` | AST | `uv run pytest -m "not docker" tests/test_phase20_gate.py tests/test_no_unratified_defaults.py -x` | W0 |
 | Docs and wording | 20-24, 20-26 | all | GLOSSARY / canonical docs match the code; criterion 2 and RISK-03 wording only after O-A | gate | `uv run python scripts/verify_decision_alignment.py all` | update |
+| Gap closure, execution lane | 20-27 | EXEC-02, RISK-03 | evidence-row identity independent of observation time; gate refusal reaches NOT_SENT; manual close cancels legs when flat; stop confirmed through the open-algo-orders listing; `-4116` is exists-awaiting-REST; `-5040` definitive | unit + PG | `uv run pytest -m "not docker" tests/test_emergency_close_gate_refusal.py tests/test_protection_demo_shapes.py tests/test_intent_recovery_unknown_entry.py tests/test_manual_controls.py tests/test_exchange_errors.py -x` | W0 |
+| Gap closure, reconcile lane | 20-28 | OPS-01, EXEC-02, OPS-05 | no SAFE_MODE re-entry rows for an unchanged reason; TP1 fill is not UNSYNCED_ALGO; exit runs the ownership check and needs a complete restore; stale resting-entry alert (alert only) | unit | `uv run pytest -m "not docker" tests/test_safe_mode_reentry.py tests/test_reconcile_tp1_fill.py tests/test_reconcile_stale_entry.py tests/test_safe_mode_exit_operator.py -x` | W0 |
+| Gap closure, ops lane | 20-29 | OPS-01 | unreadable spill directory fails closed; overflow and recursion in the gate state file are corrupt, not crashes; failed save retried; supervisor bounded on an unknown gate | unit | `uv run pytest -m "not docker" tests/test_risk_first_spill.py tests/test_startup_recovery.py tests/test_gate_restart.py tests/test_rest_gate_cli.py tests/test_userdata_supervisor.py -x` | W0 |
+| Gap closure, small fixes | 20-30 | OPS-01, EXEC-02 | a feed time ahead of the clock is stale; an implausible persisted gate deadline is untrusted; pause sleeps sliced | unit | `uv run pytest -m "not docker" tests/test_feed_freshness_skew.py tests/test_gate_restore_bounds.py tests/test_userdata_supervisor_pause_slices.py -x` | W0 |
+| Gap closure, resting entry | 20-31 | OPS-01, EXEC-02 | an unfilled resting entry is not ENTRY_WITHOUT_PROTECTIVE and does not block the operator exit; a filled or vanished entry still is flagged; the deadline step still makes its same-id attempt | unit | `uv run pytest -m "not docker" tests/test_reconcile_classify.py tests/test_safe_mode_exit_operator.py tests/test_protection_deadline_attempt.py -x` | W0 |
 
 Test file names are working names from the research; the planner may rename them.
 
@@ -80,10 +85,10 @@ Test file names are working names from the research; the planner may rename them
 
 ## Wave 0 Requirements
 
-- [ ] `tests/support/reconcile_doubles.py` - recording alert sink, journal that can raise on demand, temp-dir spill, local-intent builders, a fake restriction source.
-- [ ] Extend `tests/support/fake_binance_exchange.py` - seed an exchange-only order, a doubled or negative position, duplicate client ids; model "absent" versus "filled" on cancel.
-- [ ] Extend `tests/support/execution_limits.py` - the new `NOT_CONFIGURED` key set (test-only values).
-- [ ] Shared contract-test base for the in-memory and PG intent stores (T-B).
+- [x] `tests/support/reconcile_doubles.py` - recording alert sink, journal that can raise on demand, temp-dir spill, local-intent builders, a fake restriction source.
+- [x] Extend `tests/support/fake_binance_exchange.py` - seed an exchange-only order, a doubled or negative position, duplicate client ids; model "absent" versus "filled" on cancel.
+- [x] Extend `tests/support/execution_limits.py` - the new `NOT_CONFIGURED` key set (test-only values).
+- [x] Shared contract-test base for the in-memory and PG intent stores (T-B).
 
 ---
 
@@ -91,10 +96,11 @@ Test file names are working names from the research; the planner may rename them
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| Manual close outside the system: do `closePosition` legs auto-cancel (A1, G4-035) | EXEC-02 | needs Binance Demo; owner-run, Phase 25 | owner runs the Demo probe; Phase 20 code must handle both outcomes |
-| GTD expiry reaches a terminal state (A2) | EXEC-02 | Demo observation | owner Demo probe |
+| Manual close outside the system: do `closePosition` legs auto-cancel (A1, G4-035) | EXEC-02 | Observed on Demo 2026-10-22 (both legs end `EXPIRED`); the orphan-sweep path was not exercised on Demo | none further unless the owner wants the orphan case |
+| GTD expiry reaches a terminal state (A2) | EXEC-02 | Not confirmed on Demo (entry still `NEW` 840 s after `goodTillDate`); the scheduled cancel is a Phase 24 blocker | owner Demo probe with a longer wait |
+| A4 (reduce-only MARKET cannot flip a position), P5 stop rejection, P3, `rm` of ALGO_UPDATE | EXEC-02, RISK-03 | never probed | owner Demo probe, Phase 25 |
 | The 11 Demo probes and the numeric `NOT_CONFIGURED` limits | all | owner decision plus Demo evidence | `19-OWNER-GAPS.md` section 2 |
-| ROADMAP criterion 2 and REQUIREMENTS RISK-03 wording (O-A) | RISK-03 | owner acceptance of proposed text | `checkpoint:human-verify` |
+| ROADMAP criterion 2 and REQUIREMENTS RISK-03 wording (O-A) | RISK-03 | owner accepted 2026-10-22 (recorded in the 20-26 SUMMARY) | none |
 
 Everything else has an automated check. No claim in this phase is `[DEMO]`.
 
@@ -102,11 +108,20 @@ Everything else has an automated check. No claim in this phase is `[DEMO]`.
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency under 60s for a targeted file
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency under 60s for a targeted file
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** validated 2026-10-23 at library level (fakes and local PostgreSQL; nothing `[DEMO]`). Every file named in the map exists and the full suite passed on `develop` HEAD `2be65c97`-era code (13234 passed, 20 skipped, 0 failed, run before plan 20-31; 20-31 ran its own 1237 tests); the gate files passed 112 under `TRADING_CI_STRICT=1` with PostgreSQL. Compliance covers library-level behavior only: wiring into a running process is Phase 24 and Demo-only items stay in Manual-Only.
+
+## Validation Audit 2026-10-23
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 (every mapped test file exists; Wave 0 items present) |
+| Rows added | 5 (gap plans 20-27 to 20-31) |
+| Resolved | 0 |
+| Escalated to Manual-Only | 1 (A4 / P5 / P3 / `rm`) |
