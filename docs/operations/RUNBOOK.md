@@ -930,6 +930,8 @@ The exit succeeds only when every readiness row holds in one call; every refusal
 6. the REST gate has no restriction (`GATE_NOT_OPEN`) and its recovery status is `RESTORED_DURABLE` (`RESTORED_BARRIER` is accepted too but reserved; option a1 does not produce it) (`GATE_NOT_RESTORED`; the in-memory, not-restored, unknown-state and persistence-failed statuses all refuse);
 7. the user-data stream state is exactly `LIVE` (`STREAM_NOT_LIVE`).
 
+An unfilled resting entry (GTD LIMIT still `NEW` on the exchange, no position on its symbol) does not block the exit and raises no divergence; a position or an entry that vanished from the exchange does (`COMPARE_NOT_CLEAN`).
+
 On success the order is: journal `SAFE_MODE_EXIT` with the operator id first, persist the exit state second, flip memory last. If the journal row was written and the state save then failed, the journal says EXIT while the durable state still says SAFE_MODE and a retry journals a second EXIT row: read the system-state row as the truth. An open gate means only "no restriction currently known"; it never replaces the fresh Binance reads of row 3.
 
 ### 21.2 Spill directory and replay
