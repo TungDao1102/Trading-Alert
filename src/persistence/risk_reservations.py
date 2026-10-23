@@ -16,7 +16,10 @@ Rules this store keeps:
     plan's stored realized risk with `reservation_verdict` (the shared `check_portfolio`) and
     turns the REQUESTED row into RESERVED, or raises `ReservationRefused` and changes nothing.
     It never commits or rolls back and swallows no exception. Plan 21-15 composes it into the
-    approval transaction.
+    approval transaction with `make_reserving_save_atomic` (decide, then reserve, one
+    transaction, one day-row lock); nothing runs that composition until Phase 24.
+  - `release_requested_in` releases a REQUESTED row inside the approval transaction of a SKIP,
+    CANCEL or EXPIRE decision (APPROVAL_SKIPPED, APPROVAL_EXPIRED; plan 21-15).
   - `release` follows `RELEASE_SOURCE_STATUSES` exactly: a permitted source status becomes
     RELEASED with the reason and time; an already RELEASED row is a no-op that keeps its FIRST
     stored reason (two terminal signals can race, for example the approval expiry and the plan
@@ -35,23 +38,25 @@ time is passed in.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.approval.binding import ApprovalRejected
+from src.approval.mapping import ShortIdMapping
 from src.db.models import RiskReservationRow
 from src.domain.approval import Approval
 from src.domain.canonical import quantize_for_storage
 from src.domain.enums import ApprovalResult, RejectionReason
+from src.persistence.approvals import PgApprovalStore
 from src.persistence.day_risk import PgDayRiskStore
 from src.persistence.errors import ParentRowMissing, PrecisionError, RowConflict
 from src.persistence.uow import OperationalDatabase
@@ -65,6 +70,9 @@ from src.risk.reservations import (
     ReservationStatus,
     reservation_verdict,
 )
+
+if TYPE_CHECKING:
+    from src.adapters.telegram_callbacks import SaveAtomic
 
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
 
@@ -419,6 +427,41 @@ class PgRiskReservationStore:
             session.flush()
             return _to_record(row)
 
+    def release_requested_in(
+        self,
+        session: Session,
+        *,
+        trade_plan_id: str,
+        reason: ReleaseReason,
+        now_utc: datetime,
+    ) -> None:
+        """Release the plan's REQUESTED row inside the caller's transaction (D-16).
+
+        Only the approval reasons (`APPROVAL_SKIPPED`, `APPROVAL_EXPIRED`) are accepted: those
+        are the reasons whose `RELEASE_SOURCE_STATUSES` entry is exactly {REQUESTED}; any other
+        reason raises `ValueError` (a programming error). Zero rows matched is a no-op: the plan
+        has no request, or the row is already RELEASED (for example by PLAN_EXPIRED, whose
+        first reason is kept). A RESERVED row cannot be reached from here, because the
+        decision of a second approval of the plan already failed with `ApprovalAlreadyDecided`.
+        Never commits or rolls back.
+        """
+        _require_utc(now_utc, "now_utc")
+        if RELEASE_SOURCE_STATUSES[reason] != frozenset({_S.REQUESTED}):
+            raise ValueError(f"release_requested_in: {reason.value} does not release REQUESTED")
+        session.execute(
+            update(RiskReservationRow)
+            .where(
+                RiskReservationRow.trade_plan_id == trade_plan_id,
+                RiskReservationRow.status == _S.REQUESTED.value,
+            )
+            .values(
+                status=_S.RELEASED.value,
+                release_reason=reason.value,
+                released_at_utc=now_utc,
+                updated_at_utc=now_utc,
+            )
+        )
+
     @staticmethod
     def _locked(session: Session, trade_plan_id: str) -> RiskReservationRow:
         row = session.execute(
@@ -431,4 +474,69 @@ class PgRiskReservationStore:
         return row
 
 
-__all__ = ["PgRiskReservationStore", "ReservationRecord", "ReservationRefused"]
+def make_reserving_save_atomic(
+    *,
+    approvals: PgApprovalStore,
+    reservations: PgRiskReservationStore,
+    parameter_set: dict[str, Any],
+    daily_loss_quote: Callable[[date], Decimal | None],
+) -> SaveAtomic:
+    """Compose the approval decision and the risk reservation into ONE `SaveAtomic` (D-16, D-17).
+
+    The returned callable has the unchanged `SaveAtomic` signature
+    `(Approval, ShortIdMapping | None) -> None`, so `dispatch_callback` takes it as is. It calls
+    `approvals.save_atomic(approval, mapping, after_decide=hook)`; inside that one transaction:
+
+      1. the approval is DECIDED first (so a lost race still surfaces as `ApprovalAlreadyDecided`);
+      2. the hook then runs on the same session. APPROVED: `reserve_in` locks today's
+         `daily_risk_days` row `FOR UPDATE` (the single lock every approval serialises on),
+         reads the counted rows, judges the stored realized risk with the shared caps and turns
+         the REQUESTED row into RESERVED. SKIPPED (SKIP_USER, SKIP_BUSY, CANCEL) and EXPIRED:
+         the REQUESTED row is released (APPROVAL_SKIPPED, APPROVAL_EXPIRED);
+      3. the mapping is recorded and the transaction commits.
+
+    Any refusal (`ReservationRefused`, a subclass of `ApprovalRejected` that carries the
+    `RejectionReason`) or database error rolls the decision back, so the approval stays PENDING
+    and nothing is approved. The decision time `approval.acted_at_utc` is the reservation time
+    and picks the UTC day; no clock is read. `daily_loss_quote(utc_day)` returns the day's
+    realized-plus-unrealized loss in quote currency or None when unknown (Phase 24 passes the
+    current quote of the day-risk service); it is called only for an APPROVED decision.
+
+    Nothing composes this until Phase 24.
+    """
+
+    def hook(session: Session, approval: Approval) -> None:
+        acted_at = approval.acted_at_utc
+        if acted_at is None:
+            raise ValueError("a decided approval carries acted_at_utc")
+        if approval.status == ApprovalResult.APPROVED:
+            reservations.reserve_in(
+                session,
+                approval=approval,
+                now_utc=acted_at,
+                daily_loss_quote=daily_loss_quote(utc_day_of(acted_at)),
+                parameter_set=parameter_set,
+            )
+            return
+        if approval.status == ApprovalResult.SKIPPED:
+            reason = ReleaseReason.APPROVAL_SKIPPED
+        elif approval.status == ApprovalResult.EXPIRED:
+            reason = ReleaseReason.APPROVAL_EXPIRED
+        else:
+            raise ValueError("the reservation hook needs a decided approval")
+        reservations.release_requested_in(
+            session, trade_plan_id=approval.trade_plan_id, reason=reason, now_utc=acted_at
+        )
+
+    def save_atomic(approval: Approval, mapping: ShortIdMapping | None) -> None:
+        approvals.save_atomic(approval, mapping, after_decide=hook)
+
+    return save_atomic
+
+
+__all__ = [
+    "PgRiskReservationStore",
+    "ReservationRecord",
+    "ReservationRefused",
+    "make_reserving_save_atomic",
+]

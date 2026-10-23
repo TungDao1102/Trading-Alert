@@ -40,6 +40,7 @@ database raises `StoreUnavailable` from the unit of work; there is no retry loop
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, update
@@ -197,8 +198,21 @@ class PgApprovalStore:
         """`SaveApproval`: persist a decision without a mapping."""
         self.save_atomic(approval, None)
 
-    def save_atomic(self, approval: Approval, mapping: ShortIdMapping | None) -> None:
+    def save_atomic(
+        self,
+        approval: Approval,
+        mapping: ShortIdMapping | None,
+        *,
+        after_decide: Callable[[Session, Approval], None] | None = None,
+    ) -> None:
         """Decide a PENDING approval and record its short-id mapping in ONE transaction.
+
+        `after_decide(session, approval)` (Phase 21, plan 21-15; D-16, D-17) is optional and
+        None by default, so every existing caller (paper SHADOW) behaves as before. When given,
+        it runs inside the SAME transaction right after the decision is applied and before the
+        mapping insert; any exception it raises rolls the decision back as a whole, so the
+        approval stays PENDING. It is not called when the decision itself is refused
+        (`ApprovalAlreadyDecided`, `RowConflict`). The hook must not commit or roll back.
 
         Raises:
             ApprovalAlreadyDecided: the approval (or another approval of the same plan) was
@@ -211,6 +225,8 @@ class PgApprovalStore:
             raise ValueError("save_atomic requires a decided approval")
         with self._db.transaction() as session:
             self._decide(session, approval)
+            if after_decide is not None:
+                after_decide(session, approval)
             if mapping is not None:
                 self._record_mapping(session, mapping)
 
