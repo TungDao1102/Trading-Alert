@@ -32,7 +32,7 @@ Account state after the run: BTCUSDT is **ISOLATED x5** (it was CROSSED x20). Th
 
 ## Still not Demo-proven
 
-- Criterion 1 is observed for BTCUSDT one way (set, read back, refusals). The guard itself (plan 22-11) is not built yet.
+- Criterion 1 is observed for BTCUSDT one way (set, read back, refusals). The guard itself (plan 22-11, built after this run) has not been run against Demo: the cases above called each request on its own, not through the guard.
 - Criterion 2: one long sample matches the formula once the entry fee is included. No short, no multi-tier sample.
 - Criterion 3: the netting fact above is observed. The claims of other approved plans are not written by any Phase 22 code (Phase 24 does it), so that part is proven on fakes only.
 - Nothing here is mainnet.
