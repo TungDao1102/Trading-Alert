@@ -1,20 +1,20 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 20
-current_phase_name: Reconcile + SAFE_MODE Hardening + Alerts
-current_plan: 30
-status: verifying
-stopped_at: Phase 21 context gathered
-last_updated: "2026-10-22T14:55:18.357Z"
-last_activity: 2026-10-23
-last_activity_desc: Phase 20 executed with gap plans 20-27..20-30; verification human_needed (20-VERIFICATION.md)
-state_head: 2578b602121810d6b8286c406421bbfeecbc4bfb
+current_phase: 22
+current_phase_name: Leverage, Margin + Liquidation Guard
+current_plan: 1
+status: executed
+stopped_at: Phase 22 executed (16/16), verification human_needed
+last_updated: "2026-10-24T03:27:25.213Z"
+last_activity: 2026-10-24
+last_activity_desc: Phase 22 executed, verification human_needed
+state_head: b2d9ec8347c12976816ec689d451eec94a3785c3
 progress:
   total_phases: 29
   completed_phases: 18
-  total_plans: 278
-  completed_plans: 275
+  total_plans: 315
+  completed_plans: 296
 milestone_name: milestone
 ---
 
@@ -27,21 +27,22 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 21 — Account Equity + Daily Loss from Binance (executed, verification human_needed)
+**Current focus:** Phase 22 — Leverage, Margin + Liquidation Guard
 
 ## Current Position
 
-Phase: 21 (Account Equity + Daily Loss from Binance) — EXECUTED, verification human_needed (21-VERIFICATION.md, no gap; library level, nothing composed into a running process until Phase 24)
+Phase: 22 (Leverage, Margin + Liquidation Guard) — EXECUTED, verification human_needed
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 31 (gap plans 20-27..20-31 merged)
-Total Plans in Phase: 31
-Status: Verified at library level; owner/Demo items open (20-UAT.md partial)
-Last activity: 2026-10-23 — Phase 20 gap closure, UAT and re-verification; Phase 21 planning started
+Current Plan: 1
+Total Plans in Phase: 16
+Status: Phase 22 executed; owner items O-1 to O-4 and Demo samples pending
+Last activity: 2026-10-24 — Phase 22 executed (16/16), verification human_needed
 
 Progress: [██████░░░░] 61%
 
 ### Cross-phase status (2026-10-16)
 
+- Phase 22 (leverage, margin and liquidation guard): all 16 plans executed on develop (2026-10-24), verification human_needed, no blocking gap (`22-VERIFICATION.md`). Library level only: `MarginGuard`, `SymbolConfigGuard`, `BracketCache`, `LiquidationWatch` and gate 5f2 exist but no running process composes them (Phase 24); nothing writes `required_margin` yet and the post-fill watch is inactive until Phase 24. The owner ran six Demo cases on 2026-10-24 (`22-DEMO-RESULTS.md`, single samples, demo-observed, not mainnet): -4047, -4028, -2019 observed; `availableBalance` netted a resting order (flag `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED` stays False until the owner's DECISIONS row); the isolated liquidation formula matches the exchange only with the entry fee netted from the isolated wallet (one long sample). BTCUSDT on Demo is now ISOLATED x5. Open owner items: O-1 target leverage, O-2 liquidation buffer, O-3 bracket age and margin headroom, O-4 close or alert after a failed post-fill check.
 - Phase 21 (account equity and daily loss from Binance): all 16 plans executed on develop (2026-10-23), verification human_needed, no gap (`21-VERIFICATION.md`). Library level only: `LiveEquitySource`, `LiveDayRiskService`, `enforce_daily_state`, `build_live_risk_inputs` and `make_reserving_save_atomic` are composed into no running process until Phase 24. Migrations 0010 (daily risk state) and 0011 (risk reservations); signed adapter registry at sixteen methods. Owner decision O-2 (2026-10-23): option A, `FundingPolicy.TRADES_WITH_UNVERIFIED_FUNDING`; O-1, O-3, O-4, O-5 and O-6 stay OPEN (`21-OWNER-DECISIONS.md`); the assistant's pre-canary FUNDING_FEE check is an OPEN recommendation, not an owner decision. `account.max_equity_age_ms` is `NOT_CONFIGURED` and required. Demo income (2026-10-23, demo-observed, not mainnet): one COMMISSION row, no FUNDING_FEE row. The 2026-10-23 Demo runs of the eight sj2 cases are in `19-OWNER-GAPS.md` section 2b. No requirement was marked complete (EXEC-01 and OPS-02 stay Pending). Full non-docker suite (`-n 4`, strict, PostgreSQL) had one failure, `test_paper_shadow_isolation` (five new read-only adapter methods unclassified), fixed in 90d10ef7; the full suite was not re-run after that fix and no recorded sequential gate exists for Phase 21 yet.
 - Phase 19 (execution plan binding and pre-placement checks): all 17 plans executed on branches phase-19 / p19-15 and merged into develop by the owner (2026-10-20, merges e5ba20a and 6d90d84). Model: fill-driven protection (D-10), GTD LIMIT entry with no entry-time stop, coordinator `src/execution/protection.py`, emergency close, live TP sizing, migration 0005 (sized realized risk); quick task 261020-jua made Q5 true in code (one `place_entry` POST per approval, ambiguous result probed once, otherwise UNKNOWN + SAFE_MODE). Status: complete-pending-owner-read. NOT closed: no requirement is marked complete (EXEC-01, EXEC-02, RISK-04, APRV-01, APRV-02, EXEC-07 stay Pending, no Demo run), D055 stays OPEN (decision rows D079 for D-10 and D080 for Q5 are drafts, not written; D077 and D078 are written rows: D077 the stop-lost row of 19-REVIEW WR-04, D078 the approved-quantity row of 19-REVIEW WR-01), live placement stays disabled, the four `NOT_CONFIGURED` limit keys and the 11 Demo probes belong to the owner (`.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`). The whole suite was NOT run on the merged tree; the owner runs the fresh sequential gate and records `IMAGE_COMMIT=<40 hex>` under `.planning/phases/16-paper-runtime-composition/evidence/`, and plan 16-43 must then read that record instead of `16-65-gate.txt` (the 9b27da5 image predates Phase 19).
 - AGENTS.md (2026-10-20): the generated blocks of commit 0884fea (1,222 lines) were removed; the file is now a ~190-line router (rules, commands, tests with `-n 4`, commit-trailer rule, secrets, execution model, source-of-truth order, a table of where to read). `tests/test_agents_md.py` caps it and checks its paths. `.planning/codebase/` and `.planning/research/` each have a README that states role and trust. `.planning/codebase/*.md` were mapped at commit 4e37e15 (before the Phase 16 fix plans and the Phase 19 merge): run `/gsd-map-codebase` to refresh them; do not run `generate-claude-md` on AGENTS.md.
@@ -659,5 +660,5 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 ## Session Continuity
 
 Last session: 2026-10-22T14:55:14.636Z
-Stopped at: Phase 22 context gathered (--auto, owner delegated the choices); next is /gsd-plan-phase 22
-Resume file: .planning/phases/22-leverage-margin-liquidation-guard/22-CONTEXT.md
+Stopped at: Phase 22 executed and verified (human_needed); next is Phase 23 (or the owner items above)
+Resume file: .planning/phases/22-leverage-margin-liquidation-guard/22-VERIFICATION.md
