@@ -26,6 +26,7 @@ from src.execution.account_equity import (
     equity_reading_from_snapshots,
 )
 from src.execution.execution_limits import ExecutionLimitsNotConfigured
+from src.risk.margin_check import check_available_margin
 from structlog.testing import capture_logs
 
 from tests.support.account_fakes import (
@@ -432,3 +433,67 @@ def test_the_module_reads_no_wall_clock_and_imports_no_sdk_or_adapter() -> None:
     imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
     assert not any("src.adapters" in line or "binance" in line for line in imports)
     assert "float(" not in source
+
+
+# --------------------------------------------------------------------------- check_margin (22-10)
+
+
+async def test_check_margin_is_the_pure_judgement_of_the_sources_reading() -> None:
+    clock = VirtualTime()
+    reader = await _scripted_good(clock, advance_seconds_per_call=1)
+    source = _source(reader, clock)
+    await source.refresh()
+    now = clock()
+    result = source.check_margin(now_utc=now)
+    assert result.reason_code == "OK"
+    assert result.blocked is None
+    assert result.available == DEMO_EQUITY
+    assert result.equity == DEMO_EQUITY
+    assert (reader.count(CONFIG), reader.count(INFORMATION), reader.count(BALANCES)) == (1, 1, 1)
+    expected = check_available_margin(
+        reading=source._reading, now_utc=now, max_age=timedelta(milliseconds=AGE_MS)
+    )
+    assert result == expected
+
+
+async def test_check_margin_is_unusable_before_any_refresh_and_after_invalidate() -> None:
+    clock = VirtualTime()
+    reader = await _scripted_good(clock)
+    source = _source(reader, clock)
+    before = source.check_margin(now_utc=clock())
+    assert before.blocked == "READING_UNUSABLE"
+    assert before.reason_code == UNCERTAIN
+    await source.refresh()
+    assert source.check_margin(now_utc=clock()).reason_code == "OK"
+    source.invalidate(reason="ACCOUNT_UPDATE")
+    after = source.check_margin(now_utc=clock())
+    assert after.blocked == "READING_UNUSABLE"
+    assert after.available is None
+
+
+async def test_check_margin_honours_the_freshness_contract_and_the_age_bound() -> None:
+    clock = VirtualTime()
+    reader = await _scripted_good(clock, advance_seconds_per_call=1)
+    source = _source(reader, clock)
+    now_before = clock()
+    await clock.advance(1)
+    await source.refresh()
+    assert source.check_margin(now_utc=now_before).blocked == "READING_UNUSABLE"  # negative age
+    now_after = clock()
+    assert source.check_margin(now_utc=now_after).reason_code == "OK"
+    await clock.advance(AGE_MS // 1000 + 1)  # 3 s + 10 s is past the 9.137 s bound
+    assert source.check_margin(now_utc=clock()).blocked == "READING_UNUSABLE"
+
+
+async def test_check_margin_reports_a_hedge_account_from_the_same_config_read() -> None:
+    clock = VirtualTime()
+    information, balances, _ = await demo_account_snapshots()
+    hedge = AccountConfigSnapshot(multi_assets_margin=False, dual_side_position=True)
+    reader = ScriptedAccountReader(
+        {CONFIG: [hedge], INFORMATION: [information], BALANCES: [balances]}
+    )
+    source = _source(reader, clock)
+    await source.refresh()
+    assert source.check_margin(now_utc=clock()).blocked == "HEDGE_MODE"
+    assert source.check(now_utc=clock()).equity == DEMO_EQUITY  # the equity path is unchanged
+    assert reader.count(CONFIG) == 1  # no second position-mode call

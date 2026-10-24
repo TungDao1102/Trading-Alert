@@ -17,10 +17,16 @@ from pathlib import Path
 import pytest
 from src.domain.enums import Direction, RejectionReason
 from src.risk import margin_check
+from src.risk.live_equity import AccountEquityReading
 from src.risk.margin_check import (
     AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED,
+    BLOCKED_HEDGE_MODE,
+    BLOCKED_MULTI_ASSETS_MODE,
+    BLOCKED_READING_UNUSABLE,
+    AvailableMarginCheck,
     MarginClaim,
     MarginVerdict,
+    check_available_margin,
     estimated_fees,
     estimated_open_loss,
     free_margin_basis,
@@ -615,3 +621,198 @@ def test_netting_constant_is_a_final_false_literal_in_source() -> None:
     assert len(values) == 1
     assert isinstance(values[0], ast.Constant)
     assert values[0].value is False
+
+
+# --- check_available_margin (plan 22-10; D-07, D-13, criterion 4, F-965, F-020) -----------------
+
+NOW = datetime(2026, 10, 24, 12, 0, 0, tzinfo=UTC)
+MAX_AGE = timedelta(seconds=60)
+DEMO_EQUITY = Decimal("4999.09343961")
+
+
+def _reading(**overrides: object) -> AccountEquityReading:
+    """A fresh recorded-Demo-shaped reading (demo-observed, not mainnet): no open order."""
+    kwargs: dict[str, object] = {
+        "total_margin_balance": DEMO_EQUITY,
+        "total_wallet_balance": DEMO_EQUITY,
+        "total_unrealized_profit": Decimal("0.00000000"),
+        "quote_asset_margin_balance": DEMO_EQUITY,
+        "balance_endpoint_wallet": DEMO_EQUITY,
+        "multi_assets_margin": False,
+        "available_balance": DEMO_EQUITY,
+        "total_open_order_initial_margin": Decimal("0.00000000"),
+        "quote_asset_available_balance": DEMO_EQUITY,
+        "dual_side_position": False,
+        "observed_at_utc": NOW - timedelta(seconds=10),
+    }
+    kwargs.update(overrides)
+    return AccountEquityReading(**kwargs)  # type: ignore[arg-type]
+
+
+def _check(
+    reading: AccountEquityReading | None, *, now_utc: datetime = NOW, max_age: timedelta = MAX_AGE
+) -> AvailableMarginCheck:
+    return check_available_margin(reading=reading, now_utc=now_utc, max_age=max_age)
+
+
+def _assert_blocked(result: AvailableMarginCheck, blocked: str) -> None:
+    assert result.reason_code == UNCERTAIN
+    assert result.blocked == blocked
+    assert result.available is None
+    assert result.equity is None
+    assert result.observed_at_utc is None
+
+
+def test_a_fresh_recorded_reading_is_ok() -> None:
+    reading = _reading()
+    result = _check(reading)
+    assert result.available == Decimal("4999.09343961")
+    assert result.equity == Decimal("4999.09343961")
+    assert result.observed_at_utc == reading.observed_at_utc
+    assert result.reason_code == "OK"
+    assert result.blocked is None
+
+
+def test_no_reading_is_unusable() -> None:
+    _assert_blocked(_check(None), BLOCKED_READING_UNUSABLE)
+
+
+def test_the_age_bound_is_inclusive_and_one_microsecond_past_it_is_unusable() -> None:
+    assert _check(_reading(observed_at_utc=NOW - MAX_AGE)).reason_code == "OK"
+    late = _reading(observed_at_utc=NOW - MAX_AGE - timedelta(microseconds=1))
+    _assert_blocked(_check(late), BLOCKED_READING_UNUSABLE)
+
+
+def test_a_future_dated_reading_is_unusable() -> None:
+    future = _reading(observed_at_utc=NOW + timedelta(microseconds=1))
+    _assert_blocked(_check(future), BLOCKED_READING_UNUSABLE)
+
+
+_ZERO = Decimal("0")
+_ONE_OFF = Decimal("4999.09343962")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"quote_asset_margin_balance": None},
+        {"quote_asset_margin_balance": Decimal("1")},
+        {"balance_endpoint_wallet": None},
+        {"balance_endpoint_wallet": Decimal("1")},
+        {"total_wallet_balance": Decimal("1")},
+        {
+            "total_margin_balance": _ZERO,
+            "total_wallet_balance": _ZERO,
+            "quote_asset_margin_balance": _ZERO,
+            "balance_endpoint_wallet": _ZERO,
+        },
+        {"quote_asset_available_balance": None},
+        {"quote_asset_available_balance": Decimal("4999.09343960")},
+        {"available_balance": _ONE_OFF},
+    ],
+)
+def test_a_failed_identity_or_a_mismatching_available_balance_is_unusable(
+    overrides: dict[str, object],
+) -> None:
+    _assert_blocked(_check(_reading(**overrides)), BLOCKED_READING_UNUSABLE)
+
+
+def test_the_two_available_balance_figures_are_compared_by_value() -> None:
+    same = _reading(available_balance=Decimal("4999.0934396100"))
+    assert _check(same).reason_code == "OK"
+
+
+def test_a_hedge_account_is_reported_as_hedge_mode() -> None:
+    result = _check(_reading(dual_side_position=True))
+    assert result.reason_code == UNCERTAIN
+    assert result.blocked == BLOCKED_HEDGE_MODE == "HEDGE_MODE"
+    assert result.available is None and result.equity is None
+
+
+def test_a_multi_assets_account_is_reported_as_multi_assets_mode() -> None:
+    result = _check(_reading(multi_assets_margin=True))
+    assert result.reason_code == UNCERTAIN
+    assert result.blocked == BLOCKED_MULTI_ASSETS_MODE == "MULTI_ASSETS_MODE"
+    assert result.available is None and result.equity is None
+
+
+_STALE = NOW - MAX_AGE - timedelta(seconds=1)
+_FUTURE = NOW + timedelta(seconds=1)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"observed_at_utc": _STALE, "dual_side_position": True}, BLOCKED_READING_UNUSABLE),
+        ({"observed_at_utc": _FUTURE, "multi_assets_margin": True}, BLOCKED_READING_UNUSABLE),
+        ({"dual_side_position": True}, BLOCKED_HEDGE_MODE),
+        ({"multi_assets_margin": True}, BLOCKED_MULTI_ASSETS_MODE),
+        ({"dual_side_position": True, "multi_assets_margin": True}, BLOCKED_HEDGE_MODE),
+        ({}, None),
+    ],
+)
+def test_the_refusal_order_is_unusable_then_hedge_then_multi_assets(
+    overrides: dict[str, object], expected: str | None
+) -> None:
+    assert _check(_reading(**overrides)).blocked == expected
+
+
+def test_the_available_figure_is_the_value_of_the_single_basis_function() -> None:
+    reading = _reading(
+        available_balance=Decimal("4959.09343961"),
+        total_open_order_initial_margin=Decimal("40.00000000"),
+        quote_asset_available_balance=Decimal("4959.09343961"),
+    )
+    result = _check(reading)
+    assert result.reason_code == "OK"
+    assert result.available == free_margin_basis(
+        available_balance=reading.available_balance,
+        total_open_order_initial_margin=reading.total_open_order_initial_margin,
+    )
+    assert result.equity == DEMO_EQUITY  # the equity does not depend on availableBalance
+
+
+def test_programming_errors_raise() -> None:
+    naive = datetime(2026, 10, 24, 12, 0, 0)
+    offset = datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone(timedelta(hours=7)))
+    with pytest.raises(ValueError):
+        _check(_reading(), now_utc=naive)
+    with pytest.raises(ValueError):
+        _check(_reading(), now_utc=offset)
+    with pytest.raises(ValueError):
+        _check(_reading(), max_age=timedelta(0))
+    with pytest.raises(ValueError):
+        _check(None, max_age=timedelta(seconds=-1))
+
+
+def test_the_check_result_couples_its_fields() -> None:
+    ok = {"available": Decimal("1"), "equity": Decimal("1"), "observed_at_utc": NOW}
+    assert AvailableMarginCheck(**ok, reason_code="OK", blocked=None).blocked is None  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AvailableMarginCheck(**ok, reason_code="OK", blocked=BLOCKED_HEDGE_MODE)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AvailableMarginCheck(**ok, reason_code=UNCERTAIN, blocked=BLOCKED_HEDGE_MODE)  # type: ignore[arg-type]
+    none = {"available": None, "equity": None, "observed_at_utc": None}
+    with pytest.raises(ValueError):
+        AvailableMarginCheck(**none, reason_code=UNCERTAIN, blocked=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AvailableMarginCheck(**none, reason_code=UNCERTAIN, blocked="OTHER")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AvailableMarginCheck(**none, reason_code="OK", blocked=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AvailableMarginCheck(**none, reason_code="NOT_A_REASON", blocked=BLOCKED_HEDGE_MODE)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        AvailableMarginCheck(
+            available=1.5,  # type: ignore[arg-type]
+            equity=Decimal("1"),
+            observed_at_utc=NOW,
+            reason_code="OK",
+            blocked=None,
+        )
+
+
+def test_the_blocked_values_are_plain_strings_not_rejection_reasons() -> None:
+    values = {BLOCKED_READING_UNUSABLE, BLOCKED_HEDGE_MODE, BLOCKED_MULTI_ASSETS_MODE}
+    assert values == {"READING_UNUSABLE", "HEDGE_MODE", "MULTI_ASSETS_MODE"}
+    assert all(type(value) is str for value in values)
+    assert not values & {r.value for r in RejectionReason}

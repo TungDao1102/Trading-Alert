@@ -37,8 +37,30 @@ A1): the basis of the free margin is `free_margin_basis` alone, and whether `ava
 already nets the margin of resting orders is `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED`
 alone.
 
-Purity (Phase 5 D-05): stdlib, Decimal, `src.domain.enums` and `src.risk.reservations` only; no
-clock, no SDK, no adapters, no store, no floats, no quote-asset name. Sizing and quantization are
+The reading (plan 22-10). `check_available_margin` is the one pure judgement of the fresh
+account reading for the margin guard. The reading carries, under the equity's single stamp, the
+exchange's `availableBalance`, the open-order margin total, the quote-asset row's
+`availableBalance` and the account's position and margin mode (all from the answers the equity
+read already makes; no extra call). The order of the refusals is fixed and tested:
+
+    1. unusable: no reading, a reading older than `max_age` or future-dated (the mode flags of a
+       stale reading are not trusted, so staleness is reported before the mode);
+    2. hedge mode (`dual_side_position`): the guard must neither size nor mutate a hedge account;
+    3. multi-assets mode: the margin would mix assets;
+    4. unusable: an equity identity of `check_equity_reading` fails (unchanged Phase 21 rules),
+       the quote-asset row's `availableBalance` is missing, or it differs from the top-level
+       `availableBalance` (exact equality, no tolerance).
+
+The two mode refusals come BEFORE the equity identities and are reported with their own
+`blocked` value, so the guard can give a plain reason before it mutates anything (criterion 4).
+Every non-OK outcome has `reason_code` `UNCERTAIN_ACCOUNT_STATE` (the existing enum value,
+amendment A3) and a `blocked` value: the three `BLOCKED_*` constants are plain strings, not
+`RejectionReason` members. Otherwise the available margin is `free_margin_basis(...)` and the
+equity is the equity of `check_equity_reading` (never `availableBalance`).
+
+Purity (Phase 5 D-05): stdlib, Decimal, `src.domain.enums`, `src.risk.reservations` and
+`src.risk.live_equity` only; no clock, no SDK, no adapters, no store, no floats, no quote-asset
+name. Sizing and quantization are
 untouched (RISK-01): this module judges the notional of the already-sized quantity at the
 already-snapped limit price.
 """
@@ -52,6 +74,7 @@ from decimal import Decimal
 from typing import Final
 
 from src.domain.enums import Direction, RejectionReason
+from src.risk.live_equity import AccountEquityReading, check_equity_reading
 from src.risk.reservations import ReservationStatus
 
 _OK = "OK"
@@ -63,6 +86,14 @@ _CLAIM_STATUSES = frozenset({ReservationStatus.RESERVED, ReservationStatus.PLACE
 
 # The headroom is basis points of the margin needed.
 BASIS_POINT_DENOMINATOR: Final[int] = 10000
+
+# Why `check_available_margin` refused (plain strings; the guard maps them to its own codes).
+BLOCKED_READING_UNUSABLE: Final[str] = "READING_UNUSABLE"
+BLOCKED_HEDGE_MODE: Final[str] = "HEDGE_MODE"
+BLOCKED_MULTI_ASSETS_MODE: Final[str] = "MULTI_ASSETS_MODE"
+_BLOCKED_VALUES = frozenset(
+    {BLOCKED_READING_UNUSABLE, BLOCKED_HEDGE_MODE, BLOCKED_MULTI_ASSETS_MODE}
+)
 
 
 def _require_utc_aware(value: object, field_name: str) -> None:
@@ -331,3 +362,105 @@ def other_claims_margin(
             return None
         total += claim.required_margin
     return total
+
+
+@dataclass(frozen=True)
+class AvailableMarginCheck:
+    """The judged free margin of one reading, or the plain reason it cannot be trusted.
+
+    OK: `available`, `equity` and `observed_at_utc` are set, `reason_code` is `OK` and `blocked`
+    is None. Otherwise all three figures are None, `reason_code` is `UNCERTAIN_ACCOUNT_STATE` and
+    `blocked` is one of the three `BLOCKED_*` constants.
+    """
+
+    available: Decimal | None
+    equity: Decimal | None
+    observed_at_utc: datetime | None
+    reason_code: str
+    blocked: str | None
+
+    def __post_init__(self) -> None:
+        if self.reason_code not in _REASON_CODES and self.reason_code != _OK:
+            raise ValueError(f"unknown reason_code {self.reason_code!r}")
+        if self.available is not None:
+            _require_amount(self.available, "available")
+        if self.equity is not None:
+            _require_amount(self.equity, "equity")
+        if self.observed_at_utc is not None:
+            _require_utc_aware(self.observed_at_utc, "observed_at_utc")
+        usable = (
+            self.available is not None
+            and self.equity is not None
+            and self.observed_at_utc is not None
+        )
+        if self.reason_code == _OK:
+            if not usable or self.blocked is not None:
+                raise ValueError("an OK check needs its figures and no blocked value")
+            return
+        if self.reason_code != _UNCERTAIN:
+            raise ValueError("a refused check carries UNCERTAIN_ACCOUNT_STATE")
+        if (
+            self.available is not None
+            or self.equity is not None
+            or self.observed_at_utc is not None
+        ):
+            raise ValueError("a refused check carries no figures")
+        if self.blocked not in _BLOCKED_VALUES:
+            raise ValueError("a refused check needs a known blocked value")
+
+
+def _refused(blocked: str) -> AvailableMarginCheck:
+    return AvailableMarginCheck(
+        available=None,
+        equity=None,
+        observed_at_utc=None,
+        reason_code=_UNCERTAIN,
+        blocked=blocked,
+    )
+
+
+def check_available_margin(
+    *,
+    reading: AccountEquityReading | None,
+    now_utc: datetime,
+    max_age: timedelta,
+) -> AvailableMarginCheck:
+    """Judge the one fresh account reading for the margin guard (D-07, D-13, criterion 4).
+
+    The order is unusable (no reading, older than `max_age`, future-dated), hedge mode,
+    multi-assets mode, then the equity identities and the `availableBalance` cross-check (see the
+    module docstring). An age equal to `max_age` passes.
+
+    Raises:
+        ValueError: `now_utc` is naive or non-UTC, or `max_age` is not positive (programming
+            errors, not market states).
+    """
+    _require_utc_aware(now_utc, "now_utc")
+    if max_age <= timedelta(0):
+        raise ValueError(f"max_age must be positive, got {max_age}")
+    if reading is None:
+        return _refused(BLOCKED_READING_UNUSABLE)
+    age = now_utc - reading.observed_at_utc
+    if age > max_age or age < timedelta(0):
+        return _refused(BLOCKED_READING_UNUSABLE)
+    if reading.dual_side_position:
+        return _refused(BLOCKED_HEDGE_MODE)
+    if reading.multi_assets_margin:
+        return _refused(BLOCKED_MULTI_ASSETS_MODE)
+    equity_check = check_equity_reading(reading=reading, now_utc=now_utc, max_age=max_age)
+    if equity_check.equity is None or equity_check.observed_at_utc is None:
+        return _refused(BLOCKED_READING_UNUSABLE)
+    quote_available = reading.quote_asset_available_balance
+    if quote_available is None or quote_available != reading.available_balance:
+        return _refused(BLOCKED_READING_UNUSABLE)
+    available = free_margin_basis(
+        available_balance=reading.available_balance,
+        total_open_order_initial_margin=reading.total_open_order_initial_margin,
+    )
+    return AvailableMarginCheck(
+        available=available,
+        equity=equity_check.equity,
+        observed_at_utc=equity_check.observed_at_utc,
+        reason_code=_OK,
+        blocked=None,
+    )

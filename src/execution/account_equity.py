@@ -47,6 +47,7 @@ from src.risk.live_equity import (
     check_equity_reading,
     resolve_live_equity,
 )
+from src.risk.margin_check import AvailableMarginCheck, check_available_margin
 
 _AGE_KEY = "account.max_equity_age_ms"
 _ONE_MS = timedelta(milliseconds=1)
@@ -217,6 +218,15 @@ class LiveEquitySource:
         captured before the call can precede the stamp: a negative age, stale by design, D-03).
         """
         return check_equity_reading(reading=self._reading, now_utc=now_utc, max_age=self._max_age)
+
+    def check_margin(self, *, now_utc: datetime) -> AvailableMarginCheck:
+        """The free margin, the equity and the account mode of the last reading, or a refusal.
+
+        The same reading, stamp and age bound as ``check``/``resolve`` (never an older reading,
+        Pitfall 6): ``check_available_margin`` applied to it. ``now_utc`` must be read from the
+        injected clock AFTER ``refresh`` returned (D-03).
+        """
+        return check_available_margin(reading=self._reading, now_utc=now_utc, max_age=self._max_age)
 
     def resolve(self, *, risk_rate: Decimal, now_utc: datetime) -> LiveEquityResult:
         """``AccountState(equity, risk_rate)`` from the last reading, or NO_TRADE.
