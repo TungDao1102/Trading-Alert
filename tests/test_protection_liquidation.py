@@ -436,6 +436,65 @@ async def test_a_restored_plan_starts_unchecked() -> None:
     assert tracked.liquidation_checked is False
 
 
+class _NoBrackets:
+    async def get(self, *, symbol: str) -> None:
+        return None
+
+
+class _NoFee:
+    async def entry_fee_rate(self, *, symbol: str) -> None:
+        return None
+
+
+def _real_watch(policy: LiquidationFailurePolicy) -> LiquidationWatch:
+    return LiquidationWatch(
+        brackets=_NoBrackets(), fee_rates=_NoFee(), limits=limits_with(), policy=policy
+    )
+
+
+async def test_a_plan_without_a_leverage_is_not_closed_when_the_value_is_far_away() -> None:
+    """WR-03: a restored plan (persisted snapshot: leverage UNKNOWN) keeps its healthy position."""
+    from tests.support.protection_doubles import complete_constraint_snapshot
+
+    watch = _real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    rig = await _rig_with_price(
+        watch, plan_constraint_snapshot=complete_constraint_snapshot(leverage=None)
+    )
+    assert rig.entry.plan_constraint_snapshot.leverage is None
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert not _entered_b6(rig)
+    assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
+    assert rig.closer.calls == []  # type: ignore[union-attr]
+    # (An incomplete snapshot also leaves the take-profits unattached, which is its own SAFE_MODE
+    # reason; the liquidation check adds none and closes nothing.)
+    assert "CLOSE_REQUIRED" not in rig.safe_mode.entered_reasons
+    (note,) = _events(rig, EVENT_LIQUIDATION_CHECKED)
+    assert note["action"] == "OK"
+    assert note["local_price"] == "NONE"  # the comparison was skipped
+
+
+async def test_a_plan_without_a_leverage_is_still_closed_when_the_value_is_inside_the_buffer() -> (
+    None
+):
+    from tests.support.protection_doubles import complete_constraint_snapshot
+
+    watch = _real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    # Entry 60000, stop 59000, TEST_ONLY buffer 137 bps = 822: 58900 is inside the buffer.
+    rig = await _rig_with_price(
+        watch,
+        price=D("58900"),
+        plan_constraint_snapshot=complete_constraint_snapshot(leverage=None),
+    )
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert _entered_b6(rig)
+
+
 @pytest.mark.parametrize("bad", [object(), "check", 1])
 async def test_the_constructor_refuses_a_watch_without_a_callable_check(bad: Any) -> None:
     rig = await make_rig(register=False)
