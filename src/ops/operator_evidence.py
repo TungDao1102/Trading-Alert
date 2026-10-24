@@ -215,6 +215,7 @@ EVIDENCE_CASE_KEYS: tuple[str, ...] = (
     "income_history",
     # Phase 22 plan 22-05: owner-run symbol-configuration cases (SJ3_CASES), before gtd_expiry.
     "symbol_config_change",
+    "available_balance_resting",
     "gtd_expiry",
 )
 _NEAR_TRIGGER_FRACTION = "near_trigger_fraction"

@@ -330,17 +330,31 @@ def default_fake_book(
     return bids, asks
 
 
-def fake_account_information() -> ProbeObservation:
-    return ok_observation(
-        "account_information",
-        {
-            "totalWalletBalance": FAKE_BALANCE,
-            "availableBalance": FAKE_BALANCE,
-            "assets.0.asset": FAKE_BALANCE_ASSET,
-            "assets.0.walletBalance": FAKE_BALANCE,
-            "positions.0.symbol": "BTCUSDT",
-        },
-    )
+def fake_account_information(
+    open_order_margin: Decimal | None = None,
+    position: dict[str, str] | None = None,
+) -> ProbeObservation:
+    """The FAKE account answer; the Phase 22 arguments add figures only when they are given.
+
+    `open_order_margin` (plan 22-09): a FAKE resting-order initial margin. The figures it moves
+    are the fake's own arithmetic, NOT an exchange fact: whether availableBalance really nets a
+    resting order is exactly what the owner-run `available_balance_with_resting_order` case
+    observes (assumption A1). `position` adds `positions.0.<name>` figures (isolated inputs).
+    """
+    summary = {
+        "totalWalletBalance": FAKE_BALANCE,
+        "availableBalance": FAKE_BALANCE,
+        "assets.0.asset": FAKE_BALANCE_ASSET,
+        "assets.0.walletBalance": FAKE_BALANCE,
+        "positions.0.symbol": "BTCUSDT",
+    }
+    if open_order_margin is not None:
+        summary["availableBalance"] = format(Decimal(FAKE_BALANCE) - open_order_margin, "f")
+        summary["totalOpenOrderInitialMargin"] = format(open_order_margin, "f")
+        summary["assets.0.openOrderInitialMargin"] = format(open_order_margin, "f")
+    for name, value in (position or {}).items():
+        summary[f"positions.0.{name}"] = value
+    return ok_observation("account_information", summary)
 
 
 def fake_account_balance_all() -> ProbeObservation:
@@ -562,6 +576,13 @@ class FakeProbePort:
         # Phase 22 plan 22-05: the FAKE symbol configuration (account defaults) and its changes.
         self.config_margin_type = "CROSSED"
         self.config_leverage = "20"
+        # Phase 22 plan 22-09: FAKE account figures of the SJ3 cases. `resting_order_margin` is a
+        # made-up initial margin per resting order (None: the account answer is the static one);
+        # `position_extras` adds row fields (entry price, liquidation price, ...) to every
+        # position row; `account_position_figures` adds `positions.0.*` to the account answer.
+        self.resting_order_margin: Decimal | None = None
+        self.position_extras: dict[str, str] = {}
+        self.account_position_figures: dict[str, str] = {}
 
     # ----- scenario helpers (plan 18-23) -------------------------------------- #
 
@@ -976,6 +997,7 @@ class FakeProbePort:
                             "symbol": symbol,
                             "position_side": side,
                             "position_amt": format(amount, "f"),
+                            **self.position_extras,
                         }
                         for side, amount in self.positions_rows
                     ]
@@ -1018,7 +1040,16 @@ class FakeProbePort:
     # ----- quick task 261021-sj0: the capture operations --------------------------- #
 
     async def account_information(self) -> ProbeObservation:
-        return self._answer("account_information", {}, fake_account_information)
+        def default() -> ProbeObservation:
+            margin = (
+                None
+                if self.resting_order_margin is None
+                else self.resting_order_margin * len(self.open_order_ids)
+            )
+            figures = self.account_position_figures if self.positions_rows else None
+            return fake_account_information(margin, figures)
+
+        return self._answer("account_information", {}, default)
 
     async def account_balance_all(self) -> ProbeObservation:
         return self._answer("account_balance_all", {}, fake_account_balance_all)

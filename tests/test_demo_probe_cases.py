@@ -81,6 +81,7 @@ EXPECTED_ORDER = (
     "income_history_read",
     # Phase 22 plan 22-05: the first owner-run symbol-configuration case, before the long GTD case
     "symbol_config_change_to_isolated",
+    "available_balance_with_resting_order",
     "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
@@ -111,6 +112,7 @@ ALL_OPTIONAL = (
     "recv_window_error",
     "income_history",
     "symbol_config_change",  # Phase 22 plan 22-05
+    "available_balance_resting",  # Phase 22 plan 22-09
     "gtd_expiry",
 )
 
@@ -193,13 +195,13 @@ def test_case_order_is_the_d16_order_of_risk() -> None:
     assert dp.SJ1_CASES == EXPECTED_ORDER[28:33]
     assert dp.SJ2_CASES == EXPECTED_ORDER[33:41]
     # Phase 22 plan 22-05: the SJ3 group follows the SJ2 group; gtd_entry_expiry_status stays last
-    assert dp.SJ3_CASES == EXPECTED_ORDER[41:42]
+    assert dp.SJ3_CASES == EXPECTED_ORDER[41:43]
     assert EXPECTED_ORDER[41] == "symbol_config_change_to_isolated"
     assert EXPECTED_ORDER.index("symbol_config_change_to_isolated") == (
         EXPECTED_ORDER.index("income_history_read") + 1
     )
     assert EXPECTED_ORDER[-1] == "gtd_entry_expiry_status"
-    assert EXPECTED_ORDER[-2] == "symbol_config_change_to_isolated"
+    assert EXPECTED_ORDER[-2] == "available_balance_with_resting_order"
 
 
 def test_this_plan_registers_the_four_read_only_handlers() -> None:

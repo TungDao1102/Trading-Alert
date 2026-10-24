@@ -70,6 +70,7 @@ trigger_cancel_race = <OWNER: true or false>
 recv_window_error = <OWNER: true or false>
 income_history = <OWNER: true or false>
 symbol_config_change = <OWNER: true or false>
+available_balance_resting = <OWNER: true or false>
 gtd_expiry = <OWNER: true or false>
 ```
 
@@ -310,7 +311,8 @@ The order of the case ids in one run without `--only` is the `CASE_ORDER` of the
 21. `timestamp_outside_recv_window` (key `recv_window_error`)
 22. `income_history_read` (key `income_history`): reads the income of the whole run window, so it runs after the order cases
 23. `symbol_config_change_to_isolated` (key `symbol_config_change`): changes the symbol to ISOLATED and your `config_target_leverage`; does not restore the old configuration
-24. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
+24. `available_balance_with_resting_order` (key `available_balance_resting`): reads the account figures before and after ONE far resting order; draws no conclusion
+25. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
 
 A complete probe-limits file with every one of these keys on. Every number is yours: nothing is proposed, every placeholder is written `<OWNER: ...>`, and the loader refuses the file until you replace each one. The three Phase 18 optional cases stay off here (they are your earlier decisions; enabling `market_lot_size_out_of_range` also needs `market_lot_probe_quantity`).
 
@@ -358,6 +360,7 @@ trigger_cancel_race = true
 recv_window_error = true
 income_history = true
 symbol_config_change = true
+available_balance_resting = true
 gtd_expiry = true
 ```
 

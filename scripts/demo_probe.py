@@ -330,6 +330,7 @@ OPTIONAL_CASES: Mapping[str, str] = MappingProxyType(
         # Phase 22 plan 22-05: the owner-run symbol-configuration cases (SJ3_CASES), before the
         # gtd case; plan 22-09 appends five more.
         "symbol_config_change": "symbol_config_change_to_isolated",
+        "available_balance_resting": "available_balance_with_resting_order",
         "gtd_expiry": "gtd_entry_expiry_status",
     }
 )
@@ -369,7 +370,10 @@ SJ2_CASES: tuple[str, ...] = (
 )
 # Phase 22 (D-18): the owner-run symbol-configuration cases, in CASE_ORDER order (before
 # gtd_entry_expiry_status). Plan 22-05 adds the first; plan 22-09 appends five.
-SJ3_CASES: tuple[str, ...] = ("symbol_config_change_to_isolated",)
+SJ3_CASES: tuple[str, ...] = (
+    "symbol_config_change_to_isolated",
+    "available_balance_with_resting_order",
+)
 # The cases whose REST answers are also written as fixture files in an executed run.
 FIXTURE_CASES: tuple[str, ...] = (*CAPTURE_CASES, *SJ1_CASES, *SJ2_CASES, *SJ3_CASES)
 
@@ -4444,6 +4448,36 @@ def _record_config_change(case: _WriteCase, answer: ProbeObservation, prefix: st
                 case.detail(f"{prefix}{key}", answer.summary[key])
 
 
+@dataclass(frozen=True)
+class _ConfigReading:
+    """One symbol-configuration read: the answer and the two texts the SJ3 cases act on."""
+
+    answer: ProbeObservation
+    margin_type: str | None
+    leverage: str | None
+
+
+async def _read_symbol_config(case: _WriteCase, label: str, prefix: str) -> _ConfigReading:
+    """Read the symbol configuration once, record it as read, parse marginType and leverage."""
+    answer = await case.ask(label, case.port.symbol_config(symbol=case.symbol))
+    _record_config_read(case, answer, prefix)
+    if not answer.ok:
+        return _ConfigReading(answer, None, None)
+    return _ConfigReading(
+        answer, _summary_value(answer, "marginType"), _summary_value(answer, "leverage")
+    )
+
+
+def _is_isolated_at(reading: _ConfigReading, leverage: int) -> bool:
+    """The configuration reads ISOLATED (any casing) at exactly `leverage`."""
+    return (
+        reading.answer.ok
+        and reading.margin_type is not None
+        and reading.margin_type.upper() == "ISOLATED"
+        and reading.leverage == str(leverage)
+    )
+
+
 async def _symbol_config_change_to_isolated(case: _WriteCase) -> CaseResult:
     # Phase 22 (D-18): change the symbol from its account default (Demo, 2026-10-04: BTCUSDT was
     # x20 CROSSED) to ISOLATED and the owner's leverage, then read the configuration back. Every
@@ -4457,15 +4491,14 @@ async def _symbol_config_change_to_isolated(case: _WriteCase) -> CaseResult:
         return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
     case.detail("requested_margin_type", "ISOLATED")
     case.detail("requested_leverage", str(leverage))
-    before = await case.ask("config_before_read", case.port.symbol_config(symbol=case.symbol))
-    _record_config_read(case, before, "config_before_")
-    if not before.ok:
+    before = await _read_symbol_config(case, "config_before_read", "config_before_")
+    if not before.answer.ok:
         return case.not_observed(
-            f"the previous configuration could not be read ({_class_code(before)}): "
+            f"the previous configuration could not be read ({_class_code(before.answer)}): "
             "nothing was changed, so the owner could not restore it"
         )
-    previous_margin = _summary_value(before, "marginType")
-    previous_leverage = _summary_value(before, "leverage")
+    previous_margin = before.margin_type
+    previous_leverage = before.leverage
     case.detail("previous_margin_type", previous_margin or "NOT_OBSERVED: absent")
     case.detail("previous_leverage", previous_leverage or "NOT_OBSERVED: absent")
     already = (
@@ -4493,6 +4526,127 @@ async def _symbol_config_change_to_isolated(case: _WriteCase) -> CaseResult:
         "the previous configuration "
         f"(marginType={previous_margin}, leverage={previous_leverage}) was NOT restored: "
         "the owner decides"
+    )
+    return case.observed()
+
+
+def _account_figure(answer: ProbeObservation, wire: str) -> Decimal | None:
+    """A top-level figure of an ``account_information`` answer as a Decimal; None if unreadable."""
+    text = answer.summary.get(wire) if answer.ok else None
+    return _decimal_or_none(text) if text is not None else None
+
+
+def _quote_asset_figure(
+    answer: ProbeObservation, symbol: str, wire: str
+) -> tuple[str | None, str | None]:
+    """(asset, text) of `wire` in the account asset row whose asset ends the symbol name.
+
+    The quote asset is not guessed: of the ``assets.<i>.asset`` rows the symbol name ends with,
+    the longest asset name wins (BTCUSDT: the USDT row). (None, None) when no row matches.
+    """
+    best: tuple[str, str] | None = None
+    for key, value in answer.summary.items():
+        parts = key.split(".")
+        if len(parts) != 3 or parts[0] != "assets" or parts[2] != "asset":
+            continue
+        if symbol.endswith(value) and (best is None or len(value) > len(best[0])):
+            best = (value, parts[1])
+    if best is None:
+        return None, None
+    return best[0], answer.summary.get(f"assets.{best[1]}.{wire}")
+
+
+def _record_quote_row(case: _WriteCase, answer: ProbeObservation, suffix: str) -> Decimal | None:
+    """The quote-asset row's open-order initial margin of one account read (None if unread)."""
+    asset, text = (None, None)
+    if answer.ok:
+        asset, text = _quote_asset_figure(answer, case.symbol, "openOrderInitialMargin")
+    case.detail(
+        f"quote_asset_{suffix}", asset if asset is not None else "NOT_OBSERVED: no matching row"
+    )
+    case.detail(
+        f"quote_row_open_order_initial_margin_{suffix}",
+        text if text is not None else "NOT_OBSERVED: not answered",
+    )
+    return _decimal_or_none(text) if text is not None else None
+
+
+def _record_delta(
+    case: _WriteCase, name: str, before: Decimal | None, after: Decimal | None
+) -> Decimal | None:
+    """The exact difference after minus before; "NOT_OBSERVED" (never zero) if either is unread."""
+    if before is None or after is None:
+        case.detail(name, "NOT_OBSERVED: a figure was not read")
+        return None
+    delta = after - before
+    case.detail(name, format(delta, "f"))
+    return delta
+
+
+async def _available_balance_with_resting_order(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, assumption A1): what does `availableBalance` do while an order rests? The
+    # API reference does not say; the support-center text says the initial margin of resting orders
+    # is deducted. The case records the account figures before and after ONE far resting BUY
+    # LIMIT of the owner's approved quantity (owner caps apply), the symbol configuration at that
+    # time and the exact deltas. It draws NO conclusion and invents no threshold: the owner decides
+    # whether AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED changes (a DECISIONS row). Observed on
+    # Demo only, never mainnet (D-19).
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    price = market.far_below(case.fraction)
+    quantity = case.quantity
+    case.detail("far_price", format(price, "f"))
+    case.detail("approved_quantity", format(quantity, "f"))
+    if price >= market.mark:
+        return case.not_observed("the far price is not below the mark: the order could fill")
+    case.check_bounds([(quantity, price)])  # refused here, before anything is sent
+    configuration = await _read_symbol_config(case, "symbol_config_read", "config_")
+    leverage = _leverage_of(configuration.answer) if configuration.answer.ok else None
+    notional = quantity * price
+    case.detail("implied_notional", format(notional, "f"))
+    if leverage is not None:
+        case.detail("implied_initial_margin", format(notional / leverage, "f"))
+    else:
+        case.detail("implied_initial_margin", "NOT_OBSERVED: the leverage is unknown")
+    before = await case.ask("account_information_before", case.port.account_information())
+    available_before = _record_margin_figures(case, before, "before")
+    quote_before = _record_quote_row(case, before, "before")
+    client_id = case.client_id("abr")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit("resting_limit", client_id=client_id, side=SIDE_BUY, price=price)
+    _record_order_answer(case, placed)
+    after = await case.ask("account_information_after", case.port.account_information())
+    available_after = _record_margin_figures(case, after, "after")
+    quote_after = _record_quote_row(case, after, "after")
+    if placed.ok:
+        canceled = await case.cancel("resting_cancel", client_id)
+        case.detail("cancel_accepted", _flag_text(canceled.ok))
+    available_delta = _record_delta(
+        case, "available_balance_delta", available_before, available_after
+    )
+    order_margin_delta = _record_delta(
+        case,
+        "open_order_margin_delta",
+        _account_figure(before, "totalOpenOrderInitialMargin"),
+        _account_figure(after, "totalOpenOrderInitialMargin"),
+    )
+    _record_delta(case, "quote_row_open_order_margin_delta", quote_before, quote_after)
+    case.detail(
+        "available_decreased",
+        _flag_text(available_delta < 0) if available_delta is not None else "NOT_OBSERVED",
+    )
+    case.detail(
+        "open_order_margin_increased",
+        _flag_text(order_margin_delta > 0) if order_margin_delta is not None else "NOT_OBSERVED",
+    )
+    held = await case.held_quantity("position_read_after")
+    case.detail("position_after", format(held, "f"))
+    case.notes.append(
+        "no conclusion is drawn here: run the case twice, once at the account's current "
+        "configuration and once after symbol_config_change_to_isolated, because the "
+        "open-order term can differ with the margin type (22-RESEARCH 2.6)"
     )
     return case.observed()
 
@@ -4804,6 +4958,16 @@ async def case_symbol_config_change_to_isolated(context: CaseContext) -> CaseRes
     )
 
 
+async def case_available_balance_with_resting_order(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, A1): availableBalance before and after ONE far resting BUY."""
+    return await run_write_case(
+        context,
+        _available_balance_with_resting_order,
+        case_id="available_balance_with_resting_order",
+        reduce_only=True,
+    )
+
+
 async def case_exchange_info_read_for_close(context: CaseContext) -> CaseResult:
     """Owner opt-in (A10, Q3): the live exchangeInfo filters and the read time; no order."""
     return await run_write_case(
@@ -4991,6 +5155,7 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "timestamp_outside_recv_window": case_timestamp_outside_recv_window,
     "income_history_read": case_income_history_read,
     "symbol_config_change_to_isolated": case_symbol_config_change_to_isolated,
+    "available_balance_with_resting_order": case_available_balance_with_resting_order,
     "gtd_entry_expiry_status": case_gtd_entry_expiry_status,
 }
 

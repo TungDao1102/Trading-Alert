@@ -468,8 +468,8 @@ SJ2_KEYS = (
 )
 
 
-# Phase 22 plan 22-05: the first owner-run symbol-configuration key, before gtd_expiry.
-SJ3_KEYS = ("symbol_config_change",)
+# Phase 22 plans 22-05 and 22-09: the owner-run symbol-configuration keys, before gtd_expiry.
+SJ3_KEYS = ("symbol_config_change", "available_balance_resting")
 
 
 def test_the_evidence_case_keys_are_the_ten_the_five_and_the_eight_in_script_order() -> None:
@@ -480,7 +480,7 @@ def test_the_evidence_case_keys_are_the_ten_the_five_and_the_eight_in_script_ord
         *SJ3_KEYS,  # Phase 22 plan 22-05
         NEW_KEYS[9],
     )
-    assert oe.EVIDENCE_CASE_KEYS[-2] == "symbol_config_change"  # right before the long case
+    assert oe.EVIDENCE_CASE_KEYS[-2] == SJ3_KEYS[-1]  # right before the long case
     assert oe.EVIDENCE_CASE_KEYS[-1] == "gtd_expiry"  # the case that waits runs last
     assert "EVIDENCE_CASE_KEYS" in oe.__all__
     assert not set(oe.EVIDENCE_CASE_KEYS) & set(oe.OPTIONAL_CASE_KEYS)
