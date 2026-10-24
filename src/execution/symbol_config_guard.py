@@ -139,6 +139,8 @@ class SymbolConfigGuard:
             raise TypeError("target_leverage must be an int")
         if target_leverage < 1:
             raise ValueError("target_leverage must be at least 1")
+        if target_leverage > TARGET_LEVERAGE:
+            raise ValueError("target_leverage must not exceed the D035 cap")
         self._adapter = adapter
         self._target_leverage = target_leverage
 

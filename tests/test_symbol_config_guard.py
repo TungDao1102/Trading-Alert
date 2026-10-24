@@ -487,3 +487,14 @@ def test_the_module_is_pure() -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     ]
     assert [text for text in texts if "USDT" in text] == []
+
+
+@pytest.mark.parametrize("target", [6, 20, 125])
+def test_a_target_above_the_d035_cap_is_refused_at_construction(target: int) -> None:
+    with pytest.raises(ValueError, match="D035 cap"):
+        SymbolConfigGuard(adapter=object(), target_leverage=target)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("target", [1, 2, 3, 4, 5])
+def test_a_target_up_to_the_d035_cap_is_accepted(target: int) -> None:
+    SymbolConfigGuard(adapter=object(), target_leverage=target)  # type: ignore[arg-type]
