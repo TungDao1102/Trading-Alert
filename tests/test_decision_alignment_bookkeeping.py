@@ -67,6 +67,8 @@ PRE_PHASE_12_REFERENCED = {
 PHASE_12_CODES = {"STOP_TOO_TIGHT", "COST_TO_RISK_EXCEEDED"}
 # Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005); the manager now references it.
 PHASE_20_CODES = {"ENTRY_WITHOUT_PROTECTIVE"}
+# Phase 22 (plan 22-04): the margin predicate emits INSUFFICIENT_MARGIN, an existing enum member.
+PHASE_22_CODES = {"INSUFFICIENT_MARGIN"}
 
 
 def test_referenced_codes_are_the_seventeen_plus_optional_phase_12_codes() -> None:
@@ -74,7 +76,7 @@ def test_referenced_codes_are_the_seventeen_plus_optional_phase_12_codes() -> No
     # Superset/subset pair: the two cost-guard codes become referenced when plan 12-06
     # lands, so this assertion needs no edit then.
     assert PRE_PHASE_12_REFERENCED <= referenced
-    assert referenced <= PRE_PHASE_12_REFERENCED | PHASE_12_CODES | PHASE_20_CODES
+    assert referenced <= PRE_PHASE_12_REFERENCED | PHASE_12_CODES | PHASE_20_CODES | PHASE_22_CODES
 
 
 def test_real_glossary_split_is_21_canonical_and_5_retired() -> None:
