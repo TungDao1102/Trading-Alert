@@ -45,20 +45,34 @@ already-snapped limit price.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Final
 
 from src.domain.enums import Direction, RejectionReason
+from src.risk.reservations import ReservationStatus
 
 _OK = "OK"
 _REASON_CODES = frozenset({r.value for r in RejectionReason})
 _INSUFFICIENT = RejectionReason.INSUFFICIENT_MARGIN.value
 _UNCERTAIN = RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
 _SIDES = frozenset({d.value for d in Direction})
+_CLAIM_STATUSES = frozenset({ReservationStatus.RESERVED, ReservationStatus.PLACED})
 
 # The headroom is basis points of the margin needed.
 BASIS_POINT_DENOMINATOR: Final[int] = 10000
+
+
+def _require_utc_aware(value: object, field_name: str) -> None:
+    """Reject non-datetime, naive and non-UTC values."""
+    if not isinstance(value, datetime):
+        raise TypeError(f"{field_name} must be datetime, got {type(value).__name__}")
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
 def _require_amount(value: object, field_name: str) -> Decimal:
@@ -221,3 +235,99 @@ def margin_verdict(
     return MarginVerdict(
         ok=False, reason_code=_INSUFFICIENT, required=required, available=available
     )
+
+
+# --- claims on margin and the two seams ---------------------------------------------------------
+
+# Amendment A1. The API reference does not say whether `availableBalance` already nets the
+# initial margin of resting orders; the support-center article says it does; no recorded payload
+# shows it. The owner-run Demo case `available_balance_with_resting_order` (plan 22-09) settles
+# it. While this is False every PLACED claim is counted in addition to `availableBalance`
+# (conservative: it may refuse a plan it could have admitted, never admit one it should refuse).
+# It changes only with an owner DECISIONS row after that case, never by a code edit alone.
+AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED: Final[bool] = False
+
+
+def free_margin_basis(
+    *,
+    available_balance: Decimal,
+    total_open_order_initial_margin: Decimal,
+) -> Decimal:
+    """The free margin the check judges: ONE function, so the owner-run case changes one line.
+
+    Today it is `availableBalance` as the exchange reports it (the documented seam: if the
+    owner-run case shows that `availableBalance` does not net the margin of resting orders,
+    this becomes `available_balance - total_open_order_initial_margin`). Both arguments must be
+    finite Decimals; the result is returned as is, even when negative.
+    """
+    available = _require_amount(available_balance, "available_balance")
+    _require_amount(total_open_order_initial_margin, "total_open_order_initial_margin")
+    return available
+
+
+@dataclass(frozen=True)
+class MarginClaim:
+    """One stored claim on margin: a RESERVED or PLACED reservation row of another plan.
+
+    `required_margin` is the initial margin the plan was judged to need, None when unknown (the
+    sum is then unknown and the verdict fails closed). `placed_at_utc` is when the entry was sent;
+    a PLACED claim requires it, a RESERVED claim may carry None.
+    """
+
+    trade_plan_id: str
+    status: ReservationStatus
+    required_margin: Decimal | None
+    placed_at_utc: datetime | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trade_plan_id, str) or not self.trade_plan_id:
+            raise ValueError("trade_plan_id must be a non-empty string")
+        if self.status not in _CLAIM_STATUSES:
+            raise ValueError(f"a margin claim is RESERVED or PLACED, got {self.status!r}")
+        if self.required_margin is not None:
+            _require_positive(self.required_margin, "required_margin")
+        if self.status is ReservationStatus.PLACED:
+            if self.placed_at_utc is None:
+                raise ValueError("a PLACED claim requires placed_at_utc")
+            _require_utc_aware(self.placed_at_utc, "placed_at_utc")
+        elif self.placed_at_utc is not None:
+            _require_utc_aware(self.placed_at_utc, "placed_at_utc")
+
+
+def other_claims_margin(
+    *,
+    claims: Sequence[MarginClaim],
+    exclude_trade_plan_id: str,
+    reading_observed_at_utc: datetime,
+    resting_orders_netted: bool,
+) -> Decimal | None:
+    """Sum of the margin of every other claim, or None when a counted claim's margin is unknown.
+
+    A RESERVED claim always counts. A PLACED claim counts unless the exchange already nets it:
+    with `resting_orders_netted` False it always counts; with True it counts only when
+    `placed_at_utc` is strictly after `reading_observed_at_utc` (the reading cannot show it
+    yet). The candidate's own row (`exclude_trade_plan_id`) is never counted, whatever its
+    status. A RELEASED or OPEN row is never a claim (an OPEN position is in `availableBalance`
+    as position margin).
+
+    Pitfall 5: a PLACED entry must be subtracted in exactly one place, by the exchange inside
+    `availableBalance` or by this sum. Counting it in both over-refuses, in neither over-admits.
+    While the netting is unverified the sum counts it, which can only over-refuse.
+    """
+    _require_utc_aware(reading_observed_at_utc, "reading_observed_at_utc")
+    if not isinstance(resting_orders_netted, bool):
+        raise TypeError(
+            f"resting_orders_netted must be bool, got {type(resting_orders_netted).__name__}"
+        )
+    total = Decimal(0)
+    for claim in claims:
+        if claim.trade_plan_id == exclude_trade_plan_id:
+            continue
+        if claim.status is ReservationStatus.PLACED and resting_orders_netted:
+            placed_at = claim.placed_at_utc
+            if placed_at is None or placed_at <= reading_observed_at_utc:
+                continue
+        if claim.required_margin is None:
+            return None
+        total += claim.required_margin
+    return total

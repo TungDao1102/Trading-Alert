@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,12 +18,17 @@ import pytest
 from src.domain.enums import Direction, RejectionReason
 from src.risk import margin_check
 from src.risk.margin_check import (
+    AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED,
+    MarginClaim,
     MarginVerdict,
     estimated_fees,
     estimated_open_loss,
+    free_margin_basis,
     margin_verdict,
+    other_claims_margin,
     required_initial_margin,
 )
+from src.risk.reservations import ReservationStatus
 
 from tests.support.ast_guards import float_constructor_calls, forbidden_imports, wall_clock_calls
 
@@ -32,6 +38,9 @@ MODULE = REPO_ROOT / "src" / "risk" / "margin_check.py"
 INSUFFICIENT = "INSUFFICIENT_MARGIN"
 UNCERTAIN = "UNCERTAIN_ACCOUNT_STATE"
 RATE = Decimal("0.0004")
+T = datetime(2026, 10, 24, 12, 0, 0, tzinfo=UTC)
+BEFORE = T - timedelta(seconds=5)
+AFTER = T + timedelta(seconds=5)
 DEMO_AVAILABLE = Decimal("4998.39137539")
 
 
@@ -333,3 +342,276 @@ def test_module_numeric_literals_are_only_zero_one_and_the_bps_denominator() -> 
                 continue
             assert node.value in allowed, node.value
     assert margin_check.BASIS_POINT_DENOMINATOR == 10000
+
+
+# --- MarginClaim ------------------------------------------------------------------------------
+
+
+def _claim(
+    plan: str = "P2",
+    status: ReservationStatus = ReservationStatus.RESERVED,
+    margin: Decimal | None = Decimal("50"),
+    placed_at: datetime | None = None,
+) -> MarginClaim:
+    return MarginClaim(
+        trade_plan_id=plan, status=status, required_margin=margin, placed_at_utc=placed_at
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ReservationStatus.REQUESTED,
+        ReservationStatus.OPEN,
+        ReservationStatus.RELEASED,
+    ],
+)
+def test_claim_accepts_only_reserved_or_placed(status: ReservationStatus) -> None:
+    with pytest.raises(ValueError):
+        _claim(status=status, placed_at=BEFORE)
+
+
+def test_claim_margin_is_positive_decimal_or_none() -> None:
+    assert _claim(margin=None).required_margin is None
+    for bad in (Decimal("0"), Decimal("-1"), Decimal("NaN")):
+        with pytest.raises(ValueError):
+            _claim(margin=bad)
+    for bad_type in (50, 50.0, "50"):
+        with pytest.raises(TypeError):
+            _claim(margin=bad_type)  # type: ignore[arg-type]
+
+
+def test_placed_claim_requires_an_aware_utc_placement_time() -> None:
+    with pytest.raises(ValueError):
+        _claim(status=ReservationStatus.PLACED, placed_at=None)
+    with pytest.raises(ValueError):
+        _claim(status=ReservationStatus.PLACED, placed_at=datetime(2026, 10, 24, 12, 0, 0))
+    with pytest.raises(ValueError):
+        _claim(
+            status=ReservationStatus.PLACED,
+            placed_at=datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone(timedelta(hours=7))),
+        )
+    assert _claim(status=ReservationStatus.PLACED, placed_at=BEFORE).placed_at_utc == BEFORE
+
+
+def test_reserved_claim_may_carry_no_placement_time_and_unknown_margin() -> None:
+    claim = _claim(margin=None, placed_at=None)
+    assert claim.status is ReservationStatus.RESERVED
+
+
+def test_claim_needs_a_plan_id() -> None:
+    with pytest.raises(ValueError):
+        _claim(plan="")
+
+
+# --- free_margin_basis ------------------------------------------------------------------------
+
+
+def test_free_margin_basis_is_available_balance_today() -> None:
+    basis = free_margin_basis(
+        available_balance=Decimal("123.45"), total_open_order_initial_margin=Decimal("40")
+    )
+    assert basis == Decimal("123.45")
+
+
+def test_free_margin_basis_returns_a_negative_value_as_is() -> None:
+    basis = free_margin_basis(
+        available_balance=Decimal("-7"), total_open_order_initial_margin=Decimal("0")
+    )
+    assert basis == Decimal("-7")
+
+
+@pytest.mark.parametrize("bad", [1, 1.5, "1", None, Decimal("NaN"), Decimal("Infinity")])
+def test_free_margin_basis_validates_both_arguments(bad: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        free_margin_basis(
+            available_balance=bad,  # type: ignore[arg-type]
+            total_open_order_initial_margin=Decimal("0"),
+        )
+    with pytest.raises((TypeError, ValueError)):
+        free_margin_basis(
+            available_balance=Decimal("1"),
+            total_open_order_initial_margin=bad,  # type: ignore[arg-type]
+        )
+
+
+# --- other_claims_margin ----------------------------------------------------------------------
+
+
+def _two_claims(placed_at: datetime) -> list[MarginClaim]:
+    return [
+        _claim(plan="P2", status=ReservationStatus.RESERVED, margin=Decimal("50")),
+        _claim(
+            plan="P3",
+            status=ReservationStatus.PLACED,
+            margin=Decimal("30"),
+            placed_at=placed_at,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "netted, placed_at, expected",
+    [
+        (False, BEFORE, "80"),  # unverified: the PLACED claim is counted in addition
+        (True, BEFORE, "50"),  # the exchange already shows it in availableBalance
+        (True, AFTER, "80"),  # placed after the reading: the exchange has not shown it yet
+        (False, AFTER, "80"),
+        (True, T, "50"),  # equality is not strictly after the reading
+    ],
+)
+def test_other_claims_margin_netting(netted: bool, placed_at: datetime, expected: str) -> None:
+    total = other_claims_margin(
+        claims=_two_claims(placed_at),
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=netted,
+    )
+    assert total == Decimal(expected)
+
+
+@pytest.mark.parametrize("netted", [False, True])
+def test_reserved_claims_are_always_counted(netted: bool) -> None:
+    total = other_claims_margin(
+        claims=[_claim(margin=Decimal("50"))],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=netted,
+    )
+    assert total == Decimal("50")
+
+
+@pytest.mark.parametrize("netted", [False, True])
+def test_the_candidates_own_row_is_never_counted(netted: bool) -> None:
+    total = other_claims_margin(
+        claims=[
+            _claim(plan="P1", margin=Decimal("999")),
+            _claim(
+                plan="P1",
+                status=ReservationStatus.PLACED,
+                margin=Decimal("999"),
+                placed_at=AFTER,
+            ),
+            _claim(plan="P2", margin=Decimal("7")),
+        ],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=netted,
+    )
+    assert total == Decimal("7")
+
+
+def test_no_claims_is_zero() -> None:
+    total = other_claims_margin(
+        claims=[],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=False,
+    )
+    assert total == Decimal("0")
+
+
+@pytest.mark.parametrize("netted", [False, True])
+def test_an_unknown_counted_margin_makes_the_sum_unknown(netted: bool) -> None:
+    total = other_claims_margin(
+        claims=[_claim(plan="P2", margin=Decimal("50")), _claim(plan="P3", margin=None)],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=netted,
+    )
+    assert total is None
+
+
+def test_an_unknown_margin_of_a_netted_placed_claim_is_not_counted() -> None:
+    total = other_claims_margin(
+        claims=[
+            _claim(plan="P2", margin=Decimal("50")),
+            _claim(plan="P3", status=ReservationStatus.PLACED, margin=None, placed_at=BEFORE),
+        ],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=True,
+    )
+    assert total == Decimal("50")
+
+
+def test_an_unknown_margin_of_the_excluded_plan_is_ignored() -> None:
+    total = other_claims_margin(
+        claims=[_claim(plan="P1", margin=None), _claim(plan="P2", margin=Decimal("5"))],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=False,
+    )
+    assert total == Decimal("5")
+
+
+def test_other_claims_margin_rejects_a_naive_reading_time() -> None:
+    with pytest.raises(ValueError):
+        other_claims_margin(
+            claims=[],
+            exclude_trade_plan_id="P1",
+            reading_observed_at_utc=datetime(2026, 10, 24, 12, 0, 0),
+            resting_orders_netted=False,
+        )
+
+
+# --- the verdict with other claims and with unknowns ------------------------------------------
+
+
+def test_verdict_with_other_claims_adds_them_to_the_need() -> None:
+    # need 160 + 0.64 + 50 = 210.64; headroom 500 bps = 10.532; total 221.172.
+    passing = _verdict(available_balance=Decimal("221.172"), others_margin=Decimal("50"))
+    assert passing.ok is True
+    assert passing.required == Decimal("221.172")
+    failing = _verdict(available_balance=Decimal("221.171999"), others_margin=Decimal("50"))
+    assert failing.ok is False
+    assert failing.reason_code == INSUFFICIENT
+
+
+def test_unknown_other_claims_are_uncertain_account_state_not_insufficient() -> None:
+    verdict = _verdict(available_balance=Decimal("1000000"), others_margin=None)
+    assert verdict.ok is False
+    assert verdict.reason_code == UNCERTAIN
+    assert verdict.required is None
+    assert verdict.available == Decimal("1000000")
+
+
+def test_end_to_end_claims_to_verdict() -> None:
+    others = other_claims_margin(
+        claims=[_claim(margin=Decimal("50"))],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED,
+    )
+    free = free_margin_basis(
+        available_balance=Decimal("221.172"), total_open_order_initial_margin=Decimal("0")
+    )
+    assert _verdict(available_balance=free, others_margin=others).ok is True
+
+
+# --- the netting constant ---------------------------------------------------------------------
+
+
+def test_netting_constant_is_false_until_the_owner_run_case() -> None:
+    assert AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is False
+
+
+def test_resting_orders_netted_is_a_required_keyword() -> None:
+    params = inspect.signature(other_claims_margin).parameters
+    assert params["resting_orders_netted"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["resting_orders_netted"].default is inspect.Parameter.empty
+
+
+def test_netting_constant_is_a_final_false_literal_in_source() -> None:
+    tree = ast.parse(MODULE.read_text(encoding="utf-8"))
+    values = [
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED"
+        and node.value is not None
+    ]
+    assert len(values) == 1
+    assert isinstance(values[0], ast.Constant)
+    assert values[0].value is False
