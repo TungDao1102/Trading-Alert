@@ -26,6 +26,17 @@ the protective stops of the open positions; then it alerts.
   open system ENTRY order that matches no placed plan is reported in `unmatched_entry_orders`,
   never guessed at or cancelled (D082, alert-only spirit).
 - **Alert fields.** Subject `utc-day-YYYY-MM-DD`, an upper-case reason, no amount, no equity.
+- **An incomplete cancel is alerted (review WR-07).** The `DAILY_STOP` alert is due once, on the
+  call that latches. A refused or unverified cancel (`not_cancelled`, `unverified`) and an open
+  system ENTRY order with no placed plan (`unmatched_entry_orders`) are alerted on EVERY call
+  that finds them, under the same event with the reasons `ENTRY_CANCEL_INCOMPLETE` and
+  `UNMATCHED_ENTRY_ORDER`: the sink dedupes by (event, subject, reason), so the stop alert does
+  not swallow them and a repeat inside the dedupe window is only counted.
+- **A failed alert is reported (review WR-07).** An exception from the sink is never raised, but
+  its event and class name go to `DailyStopOutcome.alerts_failed`. A sink that queued the alert
+  and then raised `AuditRecordLost` is listed there too (queued, audit row lost); one that raised
+  before queuing lost the alert, and the caller keeps retrying the next call (the incomplete-cancel
+  alerts repeat; the one-shot stop alert does not, so the caller should log `alerts_failed`).
 
 Plain data in, plain data out: the caller (Phase 24 composition, fed by the service of plan
 21-13) passes the verdict and the placed plans read from the reservation rows of plan 21-12.
@@ -58,6 +69,9 @@ DAILY_STOP_TRIGGER = "daily_stop"
 ALERT_DAILY_STOP = "DAILY_STOP"
 ALERT_DAILY_LOSS_WARNING = "DAILY_LOSS_WARNING"
 ALERT_DB_FAILURE = "DB_FAILURE"
+# Reasons of the extra DAILY_STOP alerts (WR-07): the same event, so the OPS-05 matrix is unchanged.
+ALERT_REASON_ENTRY_CANCEL_INCOMPLETE = "ENTRY_CANCEL_INCOMPLETE"
+ALERT_REASON_UNMATCHED_ENTRY_ORDER = "UNMATCHED_ENTRY_ORDER"
 
 _ALERT_BY_STATE: dict[DailyState, str] = {
     DailyState.DAILY_STOP: ALERT_DAILY_STOP,
@@ -109,7 +123,10 @@ class DailyStopOutcome:
     GONE_NOT_CANCELED and UNKNOWN.
     `not_cancelled`: `(trade_plan_id, exception type name)` for a refused or failing read/cancel.
     `unmatched_entry_orders`: client order ids of open system ENTRY orders with no placed plan.
-    `alerts_emitted`: the alert events the sink took without raising.
+    `alerts_emitted`: the alert events the sink took without raising (an event repeats when it
+    was emitted with two reasons).
+    `alerts_failed`: `(event, exception class name)` for each alert whose sink call raised, in
+    emission order; never a message (WR-07).
     """
 
     cancelled: tuple[str, ...]
@@ -117,6 +134,7 @@ class DailyStopOutcome:
     not_cancelled: tuple[tuple[str, str], ...]
     unmatched_entry_orders: tuple[str, ...]
     alerts_emitted: tuple[str, ...]
+    alerts_failed: tuple[tuple[str, str], ...] = ()
 
 
 def day_alert_subject(utc_day: date) -> str:
@@ -193,6 +211,7 @@ def _emit(
     reason: str,
     now_utc: datetime,
     emitted: list[str],
+    failed: list[tuple[str, str]],
 ) -> None:
     try:
         alert_sink.alert(
@@ -201,7 +220,8 @@ def _emit(
             reason=reason,
             now_utc=now_utc,
         )
-    except Exception:  # noqa: BLE001 - the latch is the durable record (WR-C6)
+    except Exception as exc:  # noqa: BLE001 - the latch is the durable record (WR-C6)
+        failed.append((event, type(exc).__name__))  # the class name only, never a message
         return
     emitted.append(event)
 
@@ -226,6 +246,7 @@ async def enforce_daily_state(
     not_cancelled: list[tuple[str, str]] = []
     unmatched: list[str] = []
     emitted: list[str] = []
+    failed: list[tuple[str, str]] = []
 
     if verdict.state is DailyState.DAILY_STOP:
         cancelled, unverified, not_cancelled, unmatched = await _cancel_entries(
@@ -245,6 +266,7 @@ async def enforce_daily_state(
                 reason=str(verdict.blocked_reason),
                 now_utc=now_utc,
                 emitted=emitted,
+                failed=failed,
             )
     else:
         for state in verdict.alerts_due:
@@ -258,7 +280,26 @@ async def enforce_daily_state(
                 reason=state.value,
                 now_utc=now_utc,
                 emitted=emitted,
+                failed=failed,
             )
+
+    if verdict.state is DailyState.DAILY_STOP:
+        # WR-07: the stop alert is one-shot; what the cancels did not finish is alerted on
+        # every call that finds it (after the cancels, so a journal outage never delays them).
+        for reason, found in (
+            (ALERT_REASON_ENTRY_CANCEL_INCOMPLETE, bool(not_cancelled or unverified)),
+            (ALERT_REASON_UNMATCHED_ENTRY_ORDER, bool(unmatched)),
+        ):
+            if found:
+                _emit(
+                    alert_sink,
+                    event=ALERT_DAILY_STOP,
+                    verdict=verdict,
+                    reason=reason,
+                    now_utc=now_utc,
+                    emitted=emitted,
+                    failed=failed,
+                )
 
     return DailyStopOutcome(
         cancelled=tuple(sorted(cancelled)),
@@ -266,6 +307,7 @@ async def enforce_daily_state(
         not_cancelled=tuple(sorted(not_cancelled)),
         unmatched_entry_orders=tuple(sorted(unmatched)),
         alerts_emitted=tuple(emitted),
+        alerts_failed=tuple(failed),
     )
 
 
@@ -273,6 +315,8 @@ __all__ = [
     "ALERT_DAILY_LOSS_WARNING",
     "ALERT_DAILY_STOP",
     "ALERT_DB_FAILURE",
+    "ALERT_REASON_ENTRY_CANCEL_INCOMPLETE",
+    "ALERT_REASON_UNMATCHED_ENTRY_ORDER",
     "DAILY_STOP_TRIGGER",
     "DailyStopOutcome",
     "PlacedPlanRef",

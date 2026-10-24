@@ -25,6 +25,8 @@ from src.domain.enums import DailyState, RejectionReason
 from src.execution.daily_stop import (
     ALERT_DAILY_LOSS_WARNING,
     ALERT_DAILY_STOP,
+    ALERT_REASON_ENTRY_CANCEL_INCOMPLETE,
+    ALERT_REASON_UNMATCHED_ENTRY_ORDER,
     DAILY_STOP_TRIGGER,
     DailyStopOutcome,
     PlacedPlanRef,
@@ -258,7 +260,11 @@ async def test_a_gate_refusal_on_one_cancel_does_not_stop_the_others_and_the_ale
     # Symbols are visited in sorted order: BTCUSDT (plan P) is refused first.
     assert outcome.not_cancelled == ((PLAN_P, "RateLimitPauseActive"),)
     assert outcome.cancelled == (PLAN_Q,)
-    assert [a.event for a in sink.alerts] == [ALERT_DAILY_STOP]
+    # The stop alert, then (WR-07) the incomplete cancel under its own reason.
+    assert [(a.event, a.reason) for a in sink.alerts] == [
+        (ALERT_DAILY_STOP, "DAILY_STOP"),
+        (ALERT_DAILY_STOP, ALERT_REASON_ENTRY_CANCEL_INCOMPLETE),
+    ]
     assert len(fake.calls_to("cancel_algo_order")) == 0
     assert len(fake.calls_to("cancel_normal_order")) == 2  # no retry inside one call
 
@@ -275,7 +281,10 @@ async def test_a_failing_open_order_read_marks_every_plan_of_that_symbol_not_can
 
     assert outcome.not_cancelled == ((PLAN_P, "RateLimitPauseActive"),)
     assert fake.calls_to("cancel_normal_order") == []
-    assert [a.event for a in sink.alerts] == [ALERT_DAILY_STOP]
+    assert [(a.event, a.reason) for a in sink.alerts] == [
+        (ALERT_DAILY_STOP, "DAILY_STOP"),
+        (ALERT_DAILY_STOP, ALERT_REASON_ENTRY_CANCEL_INCOMPLETE),
+    ]
 
 
 class _FillsOnCancel(BinanceSemanticsFakeAdapter):
@@ -300,7 +309,76 @@ async def test_a_fill_racing_the_cancel_is_unverified_and_left_to_the_coordinato
     assert fake.calls_to("place_market_close") == []
     assert fake.calls_to("place_algo_protective") == []
     assert fake.calls_to("cancel_algo_order") == []
-    assert [a.event for a in sink.alerts] == [ALERT_DAILY_STOP]
+    assert [(a.event, a.reason) for a in sink.alerts] == [
+        (ALERT_DAILY_STOP, "DAILY_STOP"),
+        (ALERT_DAILY_STOP, ALERT_REASON_ENTRY_CANCEL_INCOMPLETE),
+    ]
+
+
+async def test_a_clean_cancel_alerts_the_stop_once_and_nothing_about_the_cancel() -> None:
+    fake = BinanceSemanticsFakeAdapter()
+    await _rest_entry(fake, HASH_P)
+    sink = RecordingAlertSink()
+
+    outcome = await _enforce(
+        fake, _verdict(), [PlacedPlanRef(PLAN_P, HASH_P, "BTCUSDT")], RecordingJournal(), sink
+    )
+
+    assert outcome.cancelled == (PLAN_P,)
+    assert [(a.event, a.reason) for a in sink.alerts] == [(ALERT_DAILY_STOP, "DAILY_STOP")]
+
+
+async def test_an_incomplete_cancel_is_alerted_again_on_every_call_while_the_latch_holds() -> None:
+    # WR-07: the DAILY_STOP alert itself is due once (alerts_due), a later call is the retry of
+    # the cancel; if that retry also fails the operator must hear it, not only the first time.
+    fake = BinanceSemanticsFakeAdapter()
+    await _rest_entry(fake, HASH_P)
+    fake.fail_next("cancel_normal_order", RateLimitPauseActive(30))
+    sink = RecordingAlertSink()
+    held = _verdict(latch_now=False, alerts_due=())
+
+    outcome = await _enforce(
+        fake, held, [PlacedPlanRef(PLAN_P, HASH_P, "BTCUSDT")], RecordingJournal(), sink
+    )
+
+    assert outcome.not_cancelled == ((PLAN_P, "RateLimitPauseActive"),)
+    assert [(a.event, a.reason) for a in sink.alerts] == [
+        (ALERT_DAILY_STOP, ALERT_REASON_ENTRY_CANCEL_INCOMPLETE)
+    ]
+
+
+async def test_an_unmatched_system_entry_on_a_stopped_day_is_alerted() -> None:
+    fake = BinanceSemanticsFakeAdapter()
+    await _rest_entry(fake, HASH_P)
+    stray_id = await _rest_entry(fake, HASH_R)
+    sink = RecordingAlertSink()
+
+    outcome = await _enforce(
+        fake, _verdict(), [PlacedPlanRef(PLAN_P, HASH_P, "BTCUSDT")], RecordingJournal(), sink
+    )
+
+    assert outcome.unmatched_entry_orders == (stray_id,)
+    assert stray_id in fake.open_orders  # alert only, never cancelled
+    assert [(a.event, a.reason) for a in sink.alerts] == [
+        (ALERT_DAILY_STOP, "DAILY_STOP"),
+        (ALERT_DAILY_STOP, ALERT_REASON_UNMATCHED_ENTRY_ORDER),
+    ]
+    assert all(a.subject == SUBJECT for a in sink.alerts)
+
+
+async def test_the_real_sink_does_not_dedupe_the_incomplete_cancel_into_the_stop_alert() -> None:
+    fake = BinanceSemanticsFakeAdapter()
+    await _rest_entry(fake, HASH_P)
+    fake.fail_next("cancel_normal_order", RateLimitPauseActive(30))
+    journal = TraceJournal()
+    sink = _sink(journal)
+
+    await _enforce(fake, _verdict(), [PlacedPlanRef(PLAN_P, HASH_P, "BTCUSDT")], journal, sink)
+
+    assert [(a.event, a.reason) for a in sink.queue] == [
+        ("DAILY_STOP", "DAILY_STOP"),
+        ("DAILY_STOP", ALERT_REASON_ENTRY_CANCEL_INCOMPLETE),
+    ]
 
 
 async def test_an_unmatched_system_entry_is_reported_never_cancelled_and_foreign_is_ignored() -> (
@@ -470,6 +548,8 @@ async def test_a_failing_alert_sink_does_not_undo_the_cancels(exc: BaseException
 
     assert outcome.cancelled == (PLAN_P,)
     assert outcome.alerts_emitted == ()
+    # WR-07: the failure is reported with its class name only, never silently dropped.
+    assert outcome.alerts_failed == ((ALERT_DAILY_STOP, type(exc).__name__),)
     assert sink.attempts == 1
     assert entry_id not in fake.open_orders
 
