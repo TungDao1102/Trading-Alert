@@ -147,7 +147,8 @@ once and asks the watch whether the exchange ``liquidationPrice`` lies beyond th
 owner's buffer. A CLOSE verdict (a danger, or an unknown value such as the cross-margin sentinel
 "0") enters CLOSE_REQUIRED through the existing path with the branch code
 ``B6_LIQUIDATION_TOO_CLOSE``: no new state, edge or order type, the confirmed stop is kept.
-OK_DIFFERS and ALERT_ONLY_FAILED journal and alert (event DIVERGENCE) and change nothing. The check
+ALERT_ONLY_FAILED journals and alerts (event DIVERGENCE) and changes nothing; OK_DIFFERS is
+calibration data and only journals (WR-05: no owner tolerance exists to alert on). The check
 never runs before the stop is confirmed, so the stop placement, the entry-remainder cancel and
 every deadline run first and unchanged; it runs once per plan (also after a restore). Whether a
 failed check closes or only alerts is O-4 and lives in the watch's required policy, not here.
@@ -208,6 +209,7 @@ from src.execution.intent_store import ExecutionIntentStore
 from src.execution.liquidation_watch import (
     LIQUIDATION_TOO_CLOSE_AFTER_FILL,
     LIQUIDATION_UNKNOWN_AFTER_FILL,
+    LiquidationFailurePolicy,
     LiquidationWatchAction,
     LiquidationWatchInput,
     LiquidationWatchPort,
@@ -1659,8 +1661,10 @@ class ProtectionCoordinator:
         read in the PROTECTED step, which also attaches the take-profits, or after a restore). An
         unreadable position read is journaled and the plan stays unchecked (the next step tries
         again); a flat read marks it checked without a call; a watch that raises, a position row
-        the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed).
-        The check places and cancels nothing; the stop is never touched.
+        the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed),
+        unless the watch's policy is explicitly ``ALERT_ONLY`` (owner item O-4, WR-04): then it is
+        journaled and alerted as an unknown value, like the watch's own unknown verdict. The check
+        places and cancels nothing; the stop is never touched.
         """
         watch = self._liquidation_watch
         if watch is None or tracked.liquidation_checked:
@@ -1711,12 +1715,16 @@ class ProtectionCoordinator:
             if not isinstance(verdict, LiquidationWatchVerdict):
                 raise TypeError("verdict")
         except Exception as exc:  # noqa: BLE001 - an unjudgeable position is closed (fail closed)
+            now = self._now()
             self._journal_note(
-                tracked,
-                EVENT_LIQUIDATION_CHECK_ERROR,
-                {"error_type": type(exc).__name__},
-                self._now(),
+                tracked, EVENT_LIQUIDATION_CHECK_ERROR, {"error_type": type(exc).__name__}, now
             )
+            # WR-04: the owner's policy (O-4) governs the error paths as it governs an unknown
+            # exchange value. Only an EXPLICIT ALERT_ONLY alerts instead of closing; a watch that
+            # exposes no readable policy keeps the fail-closed close.
+            if getattr(watch, "policy", None) is LiquidationFailurePolicy.ALERT_ONLY:
+                self._liquidation_alert(tracked, LIQUIDATION_UNKNOWN_AFTER_FILL, now)
+                return False
             await self._enter_close_required(tracked, BRANCH_B6_LIQUIDATION_TOO_CLOSE)
             return True
         now = self._now()
@@ -1733,8 +1741,13 @@ class ProtectionCoordinator:
         if verdict.action is LiquidationWatchAction.OK:
             self._journal_note(tracked, EVENT_LIQUIDATION_CHECKED, payload, now)
         elif verdict.action is LiquidationWatchAction.OK_DIFFERS:
+            # WR-05: calibration data only. The exchange value passed the strict predicate and
+            # decided; the local price omits funding and the exit fee, so a difference at the
+            # exchange's own places is the normal case (the recorded Demo position differs) and a
+            # critical DIVERGENCE alert on it would train the operator to ignore the event type
+            # that also carries real reconciliation divergences. An alert needs a tolerance the
+            # owner sets (no such number exists); until then the journal row is the record.
             self._journal_note(tracked, EVENT_LIQUIDATION_PRICE_DIFFERS, payload, now)
-            self._liquidation_alert(tracked, verdict.reason, now)
         else:
             self._journal_note(tracked, EVENT_LIQUIDATION_FAILED_ALERT_ONLY, payload, now)
             known = (LIQUIDATION_TOO_CLOSE_AFTER_FILL, LIQUIDATION_UNKNOWN_AFTER_FILL)

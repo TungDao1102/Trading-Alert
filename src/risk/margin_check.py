@@ -304,8 +304,12 @@ class MarginClaim:
     """One stored claim on margin: a RESERVED or PLACED reservation row of another plan.
 
     `required_margin` is the initial margin the plan was judged to need, None when unknown (the
-    sum is then unknown and the verdict fails closed). `placed_at_utc` is when the entry was sent;
-    a PLACED claim requires it, a RESERVED claim may carry None.
+    sum is then unknown and the verdict fails closed). `placed_at_utc` is the instant the exchange
+    ACKNOWLEDGED the entry, read from the process clock after the POST answer (or the probe that
+    found the order) and never before the POST is sent (22-REVIEW WR-06): the account reading is
+    stamped from the same clock before its first request, so a `placed_at_utc` not after that
+    stamp proves the exchange already held the order and nets it. A PLACED claim requires it, a
+    RESERVED claim may carry None.
     """
 
     trade_plan_id: str

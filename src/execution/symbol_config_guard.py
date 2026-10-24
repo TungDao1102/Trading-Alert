@@ -144,6 +144,11 @@ class SymbolConfigGuard:
         self._adapter = adapter
         self._target_leverage = target_leverage
 
+    @property
+    def target_leverage(self) -> int:
+        """The leverage ``ensure`` sets and verifies (never above the D035 cap)."""
+        return self._target_leverage
+
     async def ensure(self, *, symbol: str, symbol_is_flat: bool) -> ConfigGuardResult:
         """Make ``symbol`` ISOLATED at the target leverage (verified by a read), or refuse.
 

@@ -224,7 +224,8 @@ async def test_ok_verdict_journals_once_and_the_plan_is_never_checked_again() ->
     assert rig.safe_mode.entered_reasons == []
 
 
-async def test_ok_differs_journals_both_exact_prices_and_alerts_without_an_amount() -> None:
+async def test_ok_differs_journals_both_exact_prices_and_raises_no_alert() -> None:
+    """WR-05: the recorded Demo position differs by the rounded wallet; that is calibration."""
     watch = ScriptedWatch(
         _verdict(
             LiquidationWatchAction.OK_DIFFERS,
@@ -241,10 +242,10 @@ async def test_ok_differs_journals_both_exact_prices_and_alerts_without_an_amoun
     (note,) = _events(rig, EVENT_LIQUIDATION_PRICE_DIFFERS)
     assert note["exchange_price"] == "64968.85373637"
     assert note["local_price"] == "64968.853735"
-    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
-        ("DIVERGENCE", LIQUIDATION_PRICE_DIFFERS)
-    ]
-    assert not any(ch.isdigit() for ch in rig.alerts.alerts[0].reason)
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_PRICE_DIFFERS]
+    assert note["reason"] == LIQUIDATION_PRICE_DIFFERS
+    assert rig.alerts.alerts == []  # no owner tolerance exists, so a difference never alerts
+    assert rig.safe_mode.entered_reasons == []
     assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
     assert rig.closer.calls == []  # type: ignore[union-attr]
 
@@ -292,6 +293,75 @@ async def test_a_verdict_of_the_wrong_type_is_a_close() -> None:
 
     assert _entered_b6(rig)
     assert _events(rig, EVENT_LIQUIDATION_CHECK_ERROR)[0]["error_type"] == "TypeError"
+
+
+@dataclass
+class PolicyWatch(ScriptedWatch):
+    """A scripted watch that also exposes the owner's policy (O-4), as the real watch does."""
+
+    policy: LiquidationFailurePolicy = LiquidationFailurePolicy.CLOSE_POSITION
+
+
+def _put_row_field(fake: BinanceSemanticsFakeAdapter, **changes: Any) -> None:
+    original = fake.snapshot_positions
+
+    async def edited(**kwargs: Any) -> Any:
+        rows = await original(**kwargs)
+        return [replace(row, **changes) for row in rows]
+
+    fake.snapshot_positions = edited  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("case", ["raises", "wrong type", "bad row"])
+async def test_alert_only_policy_alerts_instead_of_closing_on_the_error_paths(case: str) -> None:
+    """WR-04: ALERT_ONLY is the owner's policy for every unknown, including the error paths."""
+    if case == "raises":
+        watch: Any = PolicyWatch(
+            error=RuntimeError("secret detail"), policy=LiquidationFailurePolicy.ALERT_ONLY
+        )
+    elif case == "wrong type":
+        watch = PolicyWatch("OK", policy=LiquidationFailurePolicy.ALERT_ONLY)
+    else:
+        watch = _real_watch(LiquidationFailurePolicy.ALERT_ONLY)
+    rig = await _rig_with_price(watch)
+    if case == "bad row":
+        _put_row_field(rig.fake, entry_price=None)
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert not _entered_b6(rig)
+    assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
+    assert rig.closer.calls == []  # type: ignore[union-attr]
+    assert "CLOSE_REQUIRED" not in rig.safe_mode.entered_reasons
+    (note,) = _events(rig, EVENT_LIQUIDATION_CHECK_ERROR)
+    assert "secret detail" not in json.dumps(note)
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("DIVERGENCE", LIQUIDATION_UNKNOWN_AFTER_FILL)
+    ]
+    # Once per plan: a later step neither asks again nor alerts again.
+    await rig.clock.advance(1)
+    await rig.coordinator.step()
+    assert len(rig.alerts.alerts) == 1
+
+
+@pytest.mark.parametrize("case", ["raises", "wrong type", "bad row"])
+async def test_close_position_policy_still_closes_on_the_error_paths(case: str) -> None:
+    if case == "raises":
+        watch: Any = PolicyWatch(error=RuntimeError("x"))
+    elif case == "wrong type":
+        watch = PolicyWatch("OK")
+    else:
+        watch = _real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    rig = await _rig_with_price(watch)
+    if case == "bad row":
+        _put_row_field(rig.fake, entry_price=None)
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert _entered_b6(rig)
+    assert len(rig.closer.calls) == 1  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("value", [None, D("0"), D("0.00000000")])
@@ -434,6 +504,65 @@ async def test_a_restored_plan_starts_unchecked() -> None:
     rig = await make_rig(register=False)
     tracked = _Tracked(rig.entry, restored_state=ProtectionState.PROTECTED)
     assert tracked.liquidation_checked is False
+
+
+class _NoBrackets:
+    async def get(self, *, symbol: str) -> None:
+        return None
+
+
+class _NoFee:
+    async def entry_fee_rate(self, *, symbol: str) -> None:
+        return None
+
+
+def _real_watch(policy: LiquidationFailurePolicy) -> LiquidationWatch:
+    return LiquidationWatch(
+        brackets=_NoBrackets(), fee_rates=_NoFee(), limits=limits_with(), policy=policy
+    )
+
+
+async def test_a_plan_without_a_leverage_is_not_closed_when_the_value_is_far_away() -> None:
+    """WR-03: a restored plan (persisted snapshot: leverage UNKNOWN) keeps its healthy position."""
+    from tests.support.protection_doubles import complete_constraint_snapshot
+
+    watch = _real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    rig = await _rig_with_price(
+        watch, plan_constraint_snapshot=complete_constraint_snapshot(leverage=None)
+    )
+    assert rig.entry.plan_constraint_snapshot.leverage is None
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert not _entered_b6(rig)
+    assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
+    assert rig.closer.calls == []  # type: ignore[union-attr]
+    # (An incomplete snapshot also leaves the take-profits unattached, which is its own SAFE_MODE
+    # reason; the liquidation check adds none and closes nothing.)
+    assert "CLOSE_REQUIRED" not in rig.safe_mode.entered_reasons
+    (note,) = _events(rig, EVENT_LIQUIDATION_CHECKED)
+    assert note["action"] == "OK"
+    assert note["local_price"] == "NONE"  # the comparison was skipped
+
+
+async def test_a_plan_without_a_leverage_is_still_closed_when_the_value_is_inside_the_buffer() -> (
+    None
+):
+    from tests.support.protection_doubles import complete_constraint_snapshot
+
+    watch = _real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    # Entry 60000, stop 59000, TEST_ONLY buffer 137 bps = 822: 58900 is inside the buffer.
+    rig = await _rig_with_price(
+        watch,
+        price=D("58900"),
+        plan_constraint_snapshot=complete_constraint_snapshot(leverage=None),
+    )
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert _entered_b6(rig)
 
 
 @pytest.mark.parametrize("bad", [object(), "check", 1])

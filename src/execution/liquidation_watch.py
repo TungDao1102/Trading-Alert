@@ -22,8 +22,10 @@ The three inputs of the judgement:
 The unknown rule (Pitfall 7, amendment A10, D-12). An exchange value of None, zero, negative or
 not finite is UNKNOWN and fails closed. Zero is the cross-margin sentinel on every recorded Demo
 row (22-DEMO-RESULTS; Demo-observed, not mainnet) and must never be read as "far away". So is an
-input needed to judge it that is unknown: leverage None or below one, or inverted stop geometry
-(a LONG stop not below the entry, a SHORT stop not above it).
+input needed to judge it that is unknown: a leverage below one, or inverted stop geometry (a LONG
+stop not below the entry, a SHORT stop not above it). A leverage of None (a plan restored after a
+restart: the persisted snapshot holds UNKNOWN) is NOT unknown for the decision, which does not use
+it; it only skips the local comparison (WR-03).
 
 The policy (OWNER-OPEN O-4). Whether a failed check closes the position or only alerts is the
 owner's open decision. ``LiquidationFailurePolicy`` has both members built: ``CLOSE_POSITION`` (the
@@ -102,7 +104,8 @@ class LiquidationWatchInput:
     """One position as the coordinator read it from REST, plus the plan's stop and leverage.
 
     ``entry_price`` is the position's actual average entry price. ``leverage`` is the leverage the
-    pre-entry guard verified (None when unknown). ``exchange_liquidation_price`` is None or any
+    pre-entry guard verified (None when unknown, as on a restored plan; the decision does not use
+    it, only the optional local comparison). ``exchange_liquidation_price`` is None or any
     Decimal as read: zero, negative and non-finite values are judged UNKNOWN by the watch.
     """
 
@@ -174,7 +177,12 @@ class EntryFeeRateSource(Protocol):
 
 
 class LiquidationWatchPort(Protocol):
-    """What the protection coordinator calls, once per plan."""
+    """What the protection coordinator calls, once per plan.
+
+    A port MAY expose ``policy`` (a ``LiquidationFailurePolicy``): the coordinator reads it, with
+    ``getattr``, only on its own error paths, where only an explicit ``ALERT_ONLY`` softens a close
+    into an alert (WR-04). A port without a policy keeps the fail-closed close.
+    """
 
     async def check(self, inputs: LiquidationWatchInput) -> LiquidationWatchVerdict: ...
 
@@ -257,10 +265,15 @@ class LiquidationWatch:
             if inputs.side == _LONG
             else inputs.stop_price <= inputs.entry_price
         )
+        # The leverage is NOT an input of the decision (WR-03): the strict predicate needs the
+        # exchange value, the stop, the fill price and the buffer only. A plan restored after a
+        # restart has no leverage (the persisted snapshot is write-once and holds UNKNOWN), and a
+        # healthy position with a REST-confirmed stop must not be closed for that; the leverage only
+        # feeds the local comparison, which is skipped when it is None. A leverage that IS given but
+        # below one is malformed input and stays unknown.
         if (
             _is_unknown_exchange_value(exchange)
-            or leverage is None
-            or leverage < 1
+            or (leverage is not None and leverage < 1)
             or inverted
             or exchange is None
         ):

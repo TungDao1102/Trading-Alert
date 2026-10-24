@@ -228,8 +228,8 @@ async def test_an_unknown_exchange_value_fails_closed(
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"leverage": None},
         {"leverage": 0},
+        {"leverage": -3},
         {"side": "SHORT", "stop_price": D("79000")},
         {"side": "SHORT", "stop_price": D("80000")},
         {"side": "LONG", "stop_price": D("80000")},
@@ -240,6 +240,49 @@ async def test_an_input_needed_to_judge_that_is_unknown_fails_closed(
     overrides: dict[str, Any],
 ) -> None:
     verdict = await _watch().check(_inputs(**overrides))
+    assert verdict.action is LiquidationWatchAction.CLOSE
+    assert verdict.reason == LIQUIDATION_UNKNOWN_AFTER_FILL
+
+
+# --- a missing leverage is not an unknown input (WR-03) ----------------------------------
+
+
+@pytest.mark.parametrize("policy", [CLOSE_POLICY, ALERT_POLICY])
+async def test_a_missing_leverage_does_not_decide_a_passing_exchange_value(
+    policy: LiquidationFailurePolicy,
+) -> None:
+    # A plan restored after a restart has no leverage; the exchange value is far beyond the stop.
+    brackets = _Brackets(reading=_Reading(demo_brackets()))
+    verdict = await _watch(policy=policy, brackets=brackets).check(_inputs(leverage=None))
+    assert verdict.action is LiquidationWatchAction.OK
+    assert verdict.reason == LIQUIDATION_OK
+    assert verdict.exchange_price == D("64257.03")
+    assert verdict.local_price is None  # the comparison is skipped, nothing is asked
+    assert brackets.calls == []
+
+
+@pytest.mark.parametrize(
+    ("policy", "action"),
+    [
+        (CLOSE_POLICY, LiquidationWatchAction.CLOSE),
+        (ALERT_POLICY, LiquidationWatchAction.ALERT_ONLY_FAILED),
+    ],
+)
+async def test_a_missing_leverage_still_fails_an_exchange_value_inside_the_buffer(
+    policy: LiquidationFailurePolicy, action: LiquidationWatchAction
+) -> None:
+    verdict = await _watch(policy=policy).check(
+        _inputs(leverage=None, exchange_liquidation_price=D("65000"))
+    )
+    assert verdict.action is action
+    assert verdict.reason == LIQUIDATION_TOO_CLOSE_AFTER_FILL
+
+
+@pytest.mark.parametrize("value", [None, D("0"), D("-1"), D("NaN")])
+async def test_a_missing_leverage_does_not_soften_an_unknown_exchange_value(
+    value: Decimal | None,
+) -> None:
+    verdict = await _watch().check(_inputs(leverage=None, exchange_liquidation_price=value))
     assert verdict.action is LiquidationWatchAction.CLOSE
     assert verdict.reason == LIQUIDATION_UNKNOWN_AFTER_FILL
 

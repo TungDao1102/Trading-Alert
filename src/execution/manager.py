@@ -56,6 +56,7 @@ guard; the deterministic ids only let a probe find an order whose response was l
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
@@ -118,6 +119,7 @@ from src.execution.placement import (
 )
 from src.execution.pre_placement import (
     LIMITS_NOT_CONFIGURED,
+    SYMBOL_HAS_OPEN_ORDER,
     PrePlacementInputs,
     check_position_mode,
     evaluate_pre_placement,
@@ -475,11 +477,66 @@ def _live_cost_rates_are_verified(
     return observed <= now_utc <= expires
 
 
+# Placements in flight in THIS process, keyed by (adapter, symbol) and holding the approval id
+# that owns the slot (22-REVIEW WR-02). Gate 5f2 widened the window between the same-symbol check
+# of gate 5e and the consume from one REST call to several, and nothing arbitrated two different
+# approvals of one symbol in that window. There is no await between the check and the claim below,
+# so on one event loop the claim is atomic; a DB-level arbiter would need a migration and is not
+# part of this fix.
+_PLACEMENTS_IN_FLIGHT: dict[tuple[int, str], str] = {}
+
+
+def _in_flight_slot(kwargs: Mapping[str, Any]) -> tuple[tuple[int, str], str] | None:
+    """(slot key, approval id) of a call, or None when they cannot be read (the call then runs
+    unserialized and the gates inside refuse whatever is malformed)."""
+    try:
+        symbol = kwargs["live_context"].signal.symbol  # the symbol gate 1c binds the plan to
+        approval_id = kwargs["approval"].approval_id
+        adapter = kwargs["adapter"]
+    except (KeyError, AttributeError, TypeError):
+        return None
+    if not isinstance(symbol, str) or not isinstance(approval_id, str):
+        return None
+    return (id(adapter), symbol), approval_id
+
+
+def _one_placement_per_symbol[**P](
+    fn: Callable[P, Awaitable[ExecutionOutcome]],
+) -> Callable[P, Awaitable[ExecutionOutcome]]:
+    """Refuse a SECOND approval of a symbol while another approval is placing it (WR-02).
+
+    The same approval arriving again (an at-least-once Telegram callback replay) is not refused:
+    it passes through to the stored-outcome replay and the consume race exactly as before, and it
+    never takes or frees the slot of the call that owns it. The refusal is the existing
+    SYMBOL_HAS_OPEN_ORDER: an order for the symbol is in flight.
+    """
+
+    @functools.wraps(fn)
+    async def serialized(*args: P.args, **kwargs: P.kwargs) -> ExecutionOutcome:
+        slot = _in_flight_slot(kwargs) if not args else None
+        if slot is None:
+            return await fn(*args, **kwargs)
+        key, approval_id = slot
+        owner = _PLACEMENTS_IN_FLIGHT.get(key)
+        if owner is not None:
+            if owner == approval_id:
+                return await fn(*args, **kwargs)
+            return ExecutionOutcome(is_no_trade=True, reason_code=SYMBOL_HAS_OPEN_ORDER)
+        _PLACEMENTS_IN_FLIGHT[key] = approval_id
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _PLACEMENTS_IN_FLIGHT.pop(key, None)
+
+    return serialized
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — execute_approved_plan.
 # --------------------------------------------------------------------------- #
 
 
+@_one_placement_per_symbol
 async def execute_approved_plan(
     *,
     callback: Any,
@@ -500,6 +557,9 @@ async def execute_approved_plan(
     live_context: LivePlacementContext,
 ) -> ExecutionOutcome:
     """Run the fixed-order pipeline: binding → enablement → SAFE_MODE → gates → risk → place.
+
+    A SECOND approval of a symbol that another approval is placing in this process is refused
+    with SYMBOL_HAS_OPEN_ORDER before any gate (22-REVIEW WR-02, `_one_placement_per_symbol`).
 
     Per D-01/D-03/D-04/D-05: the manager is a pure function of inputs
     plus injected `now_utc`. It never reads the wall clock, never
@@ -557,6 +617,9 @@ async def execute_approved_plan(
           margin for exactly the order that will be sent. A NO_TRADE verdict returns its code
           (a guard that raises, or a request that cannot be built, is UNCERTAIN_ACCOUNT_STATE),
           before anything is consumed. A pass completes the in-memory plan snapshot.
+      5f3. Clock-dependent recheck (22-REVIEW WR-02): the guard takes several REST calls, so
+          the pure pre-placement evaluation of gate 5e runs again with a clock read after it
+          (mark and last price age, remaining validity); the readings are unchanged.
       7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
          protection registry (plan 19-15, D-10). No protective order is placed here: the stop
          is placed after the first fill by `src/execution/protection.py`.
@@ -941,7 +1004,7 @@ async def execute_approved_plan(
     # "not available" and refuses. The same single reading measures the last-price age.
     mark_checked_at_utc = _clock_or_none(live_context.clock)
     pre_placement_reason = evaluate_pre_placement(
-        PrePlacementInputs(
+        pre_placement_inputs := PrePlacementInputs(
             side=bound.side,
             plan_status=_plan_status(trade_plan),
             signal_invalidated=live_context.signal.invalidated_at_utc is not None,
@@ -1048,6 +1111,25 @@ async def execute_approved_plan(
         )
     if guard_verdict.is_no_trade:
         return ExecutionOutcome(is_no_trade=True, reason_code=guard_verdict.reason_code)
+
+    # Gate 5f3 (22-REVIEW WR-02): the guard takes several REST calls, so the clock-dependent part
+    # of gate 5e is judged AGAIN at an instant read after it: the mark and last price ages
+    # (`max_mark_price_age_ms`, `max_last_price_age_ms`) and the remaining validity before the
+    # exchange's goodTillDate floor are measured when the order is about to be consumed and sent,
+    # not before the guard. The readings themselves are unchanged (the same pure evaluation with a
+    # fresh instant, so it can only tighten); an unreadable clock refuses like gate 5e. Nothing is
+    # consumed yet.
+    recheck_at_utc = _clock_or_none(live_context.clock)
+    recheck_reason = evaluate_pre_placement(
+        replace(
+            pre_placement_inputs,
+            now_utc=now_utc if recheck_at_utc is None else max(now_utc, recheck_at_utc),
+            mark_checked_at_utc=recheck_at_utc,
+            last_checked_at_utc=recheck_at_utc,
+        )
+    )
+    if recheck_reason is not None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=recheck_reason)
 
     # Gate 5g (plan 19-15, D-10): build the hand-off record BEFORE anything is consumed or sent.
     # A plan the protection coordinator would refuse by construction (for example a TP1 share of

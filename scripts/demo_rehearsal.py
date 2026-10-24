@@ -79,6 +79,9 @@ from src.adapters.binance_limits import (  # noqa: E402
 from src.adapters.binance_public import LastPriceReading, MarkPriceReading  # noqa: E402
 from src.adapters.binance_ratelimit_gate import RestRateLimitGate  # noqa: E402
 from src.adapters.binance_usdm import (  # noqa: E402
+    AccountBalanceRow,
+    AccountConfigSnapshot,
+    AccountInformationSnapshot,
     AlgoOrderProbe,
     AlgoPlacementResult,
     BinanceUsdmAdapter,
@@ -92,7 +95,9 @@ from src.adapters.binance_usdm import (  # noqa: E402
     OrderProbe,
     PositionModeResult,
     PositionSnapshot,
+    SymbolConfigSnapshot,
     SymbolFilters,
+    SymbolLeverageBrackets,
 )
 from src.adapters.telegram_callbacks import (  # noqa: E402
     DispatchResult,
@@ -146,7 +151,7 @@ from src.execution.manager import (  # noqa: E402
     execute_approved_plan,
     expire_pending_entry,
 )
-from src.execution.margin_guard import MarginGuardPort  # noqa: E402
+from src.execution.margin_guard import MarginGuard, MarginGuardPort  # noqa: E402
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id  # noqa: E402
 from src.execution.placement import (  # noqa: E402
     PRICE_ROUND_DOWN,
@@ -225,6 +230,9 @@ OUTCOME_ABORTED = "ABORTED_NO_ORDER"
 OUTCOME_FAILED = "FAILED"
 # Plan 22-15 (D-17): the abort code of a run whose margin guard was not composed (Phase 24).
 MARGIN_GUARD_NOT_COMPOSED = "MARGIN_GUARD_NOT_COMPOSED"
+# 22-REVIEW WR-08: a real MarginGuard handed in directly could have been built over the raw
+# adapter, around the DRY_RUN rule and the host guard; it must come from `margin_guard_factory`.
+MARGIN_GUARD_NOT_GUARDED = "MARGIN_GUARD_NOT_GUARDED"
 
 SCENARIOS = ("taps", "far", "fill")
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300
@@ -787,7 +795,64 @@ class GuardedAdapter:
             self._recorder.record_exchange_record(probe)
         return probe
 
+    # ----- Phase 22 margin guard reads (22-REVIEW WR-08) --------------------- #
+    # A MarginGuard must be built over THIS adapter (`margin_guard_factory`), never over the raw
+    # inner one, so every read and both configuration POSTs pass the host guard, the error log
+    # and the evidence record below.
+
+    async def account_config_snapshot(self) -> AccountConfigSnapshot:
+        return await self._call(
+            "account_config_snapshot", lambda: self._inner.account_config_snapshot()
+        )
+
+    async def account_information_snapshot(self) -> AccountInformationSnapshot:
+        return await self._call(
+            "account_information_snapshot", lambda: self._inner.account_information_snapshot()
+        )
+
+    async def account_balances_snapshot(self) -> tuple[AccountBalanceRow, ...]:
+        return await self._call(
+            "account_balances_snapshot", lambda: self._inner.account_balances_snapshot()
+        )
+
+    async def symbol_config_snapshot(self, *, symbol: str) -> SymbolConfigSnapshot:
+        return await self._call(
+            "symbol_config_snapshot", lambda: self._inner.symbol_config_snapshot(symbol=symbol)
+        )
+
+    async def leverage_brackets_snapshot(self, *, symbol: str) -> SymbolLeverageBrackets:
+        return await self._call(
+            "leverage_brackets_snapshot",
+            lambda: self._inner.leverage_brackets_snapshot(symbol=symbol),
+        )
+
     # ----- mutating methods (blocked in DRY_RUN) ------------------------------ #
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> None:
+        """The margin-type POST: counted, only PLANNED in DRY_RUN (nothing reaches the host)."""
+        self.mutating_attempts += 1
+        if self._mode is RunMode.DRY_RUN:
+            self._recorder.record_planned_request(
+                "change_margin_type", {"symbol": symbol, "margin_type": margin_type}
+            )
+            return
+        await self._call(
+            "change_margin_type",
+            lambda: self._inner.change_margin_type(symbol=symbol, margin_type=margin_type),
+        )
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> None:
+        """The leverage POST: counted, only PLANNED in DRY_RUN (nothing reaches the host)."""
+        self.mutating_attempts += 1
+        if self._mode is RunMode.DRY_RUN:
+            self._recorder.record_planned_request(
+                "change_initial_leverage", {"symbol": symbol, "leverage": leverage}
+            )
+            return
+        await self._call(
+            "change_initial_leverage",
+            lambda: self._inner.change_initial_leverage(symbol=symbol, leverage=leverage),
+        )
 
     async def place_entry(
         self,
@@ -1305,7 +1370,24 @@ def build_context(
     drift_limits: DriftLimits | None = None,
     snapshot_live_inputs: Mapping[str, Any] | None = None,
     margin_guard: MarginGuardPort | None = None,
+    margin_guard_factory: Callable[[GuardedAdapter], MarginGuardPort] | None = None,
 ) -> RunContext:
+    # 22-REVIEW WR-08. A real guard talks to the exchange (three account reads, the symbol
+    # configuration, the brackets) and may POST the account configuration. It is only allowed
+    # when it was built over `guarded` (the factory receives it), so DRY_RUN never reaches a
+    # mutating method and the host guard, the error log and the evidence record see every call.
+    # A scripted guard (a test double) is not a `MarginGuard` and is accepted as before.
+    if margin_guard_factory is not None:
+        if margin_guard is not None:
+            raise RehearsalAbort(
+                f"{MARGIN_GUARD_NOT_GUARDED}: give either margin_guard or margin_guard_factory"
+            )
+        margin_guard = margin_guard_factory(guarded)
+    elif isinstance(margin_guard, MarginGuard):
+        raise RehearsalAbort(
+            f"{MARGIN_GUARD_NOT_GUARDED}: a real MarginGuard must be built over the guarded "
+            "adapter (margin_guard_factory); no order was attempted"
+        )
     journal = RunJournal()
     return RunContext(
         guarded=guarded,
@@ -2972,6 +3054,7 @@ def main(
     execution_limits: ExecutionLimits | None = None,
     snapshot_live_inputs: Mapping[str, Any] | None = None,
     margin_guard: MarginGuardPort | None = None,
+    margin_guard_factory: Callable[[GuardedAdapter], MarginGuardPort] | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -3039,6 +3122,7 @@ def main(
             drift_limits=drift_limits,
             snapshot_live_inputs=snapshot_live_inputs,
             margin_guard=margin_guard,
+            margin_guard_factory=margin_guard_factory,
         )
         run_ctx = ctx
 
