@@ -138,6 +138,21 @@ plus the owner grace ``protection.entry_unknown_grace_ms``, the plan moves to EN
 queried only on every ``UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS``-th step until it is found (a stream
 fill is acted on at once).
 
+Plan 22-13 (D-12, amendment A10, owner item O-4) adds ONE optional post-fill comparison: with a
+``liquidation_watch`` (default None: no comparison, no new journal event, every earlier caller and
+test unchanged), the first step of a plan in PROTECTED_ENTRY_OPEN or PROTECTED, that is after the
+stop is REST-confirmed and before the supervision of that step (COMPLETE and TP_UNAVAILABLE count
+too when an unreadable position read or a restore left the plan unchecked), reads the position
+once and asks the watch whether the exchange ``liquidationPrice`` lies beyond the stop by the
+owner's buffer. A CLOSE verdict (a danger, or an unknown value such as the cross-margin sentinel
+"0") enters CLOSE_REQUIRED through the existing path with the branch code
+``B6_LIQUIDATION_TOO_CLOSE``: no new state, edge or order type, the confirmed stop is kept.
+OK_DIFFERS and ALERT_ONLY_FAILED journal and alert (event DIVERGENCE) and change nothing. The check
+never runs before the stop is confirmed, so the stop placement, the entry-remainder cancel and
+every deadline run first and unchanged; it runs once per plan (also after a restore). Whether a
+failed check closes or only alerts is O-4 and lives in the watch's required policy, not here.
+Phase 24 composition must pass the watch.
+
 Design rules:
 
 * Step-driven. There is no internal sleep and no running loop: the caller (Phase 24, research
@@ -190,6 +205,14 @@ from src.execution.cancel_verification import PROVEN_GONE, CancelVerdict
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.intent_store import ExecutionIntentStore
+from src.execution.liquidation_watch import (
+    LIQUIDATION_TOO_CLOSE_AFTER_FILL,
+    LIQUIDATION_UNKNOWN_AFTER_FILL,
+    LiquidationWatchAction,
+    LiquidationWatchInput,
+    LiquidationWatchPort,
+    LiquidationWatchVerdict,
+)
 from src.execution.order_ids import derive_algo_client_id
 from src.execution.pending_actions import (
     NOTE_CLOSE_FAILED_BY_POLICY,
@@ -235,6 +258,9 @@ ALERT_TP_UNAVAILABLE = "TP_UNAVAILABLE"
 # Plan 20-22 (D-24): the exchange definitively rejected the stop after a fill (branch B5). Distinct
 # from PROTECTION_HANDOFF_FAILED (the entry could not be handed to the coordinator).
 ALERT_PROTECTIVE_REJECTED = "PROTECTIVE_REJECTED"
+# Plan 22-13 (D-12): the post-fill liquidation comparison found a divergence (HIGH in the alert
+# matrix). A literal: ``src.execution`` must not import ``src.reconcile``.
+ALERT_LIQUIDATION_DIVERGENCE = "DIVERGENCE"
 
 # The branch codes of 19-NOTES.md "Fill, stop and entry remainder" (D-12): the reason journaled on
 # the transition into CLOSE_REQUIRED, the reason of the critical alert and the reason handed to the
@@ -250,6 +276,9 @@ BRANCH_NO_POSITION_BUT_EXPOSED = "NO_POSITION_ON_STOP_BUT_EXPOSED"
 BRANCH_B4_STOP_LOST_UNRESOLVED = "B4_STOP_LOST_UNRESOLVED"
 # Plan 20-17 (D-26): an explicit operator close; the existing close flow runs unchanged.
 BRANCH_OPERATOR_CLOSE = "OPERATOR_CLOSE"
+# Plan 22-13 (D-12, A10): the exchange liquidation price of the filled position is inside the
+# buffer beyond the stop, or unknown (None / zero); the existing close flow runs unchanged.
+BRANCH_B6_LIQUIDATION_TOO_CLOSE = "B6_LIQUIDATION_TOO_CLOSE"
 
 EVENT_PROTECTION_TRANSITION = "PROTECTION_TRANSITION"
 EVENT_PROTECTION_TRANSITION_REJECTED = "PROTECTION_TRANSITION_REJECTED"
@@ -275,6 +304,12 @@ EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
 EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
 # Plan 20-19 (D-08): one note per plan the coordinator rebuilt after a restart.
 EVENT_PROTECTION_RESTORED = "PROTECTION_RESTORED"
+# Plan 22-13 (D-12): the post-fill liquidation comparison (exact prices as text: calibration
+# data, not account figures). Only journaled when a liquidation watch is attached.
+EVENT_LIQUIDATION_CHECKED = "PROTECTION_LIQUIDATION_CHECKED"
+EVENT_LIQUIDATION_PRICE_DIFFERS = "PROTECTION_LIQUIDATION_PRICE_DIFFERS"
+EVENT_LIQUIDATION_FAILED_ALERT_ONLY = "PROTECTION_LIQUIDATION_FAILED_ALERT_ONLY"
+EVENT_LIQUIDATION_CHECK_ERROR = "PROTECTION_LIQUIDATION_CHECK_ERROR"
 
 # Plan 20-17 (D-26): the audit rows of the two operator controls (ids, codes and states only).
 EVENT_OPERATOR_CLOSE_REQUESTED = "OPERATOR_CLOSE_REQUESTED"
@@ -732,6 +767,9 @@ class _Tracked:
         # Plan 20-27: a placement answered -4116, so the id exists; set until REST confirms the
         # stop or both reads deny it.
         self.stop_exists_unconfirmed = False
+        # Plan 22-13: whether the post-fill liquidation comparison has run for this plan. A
+        # restored plan starts False, so the comparison runs once after a restart as well.
+        self.liquidation_checked = False
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -764,6 +802,11 @@ def _refusal_reason(exc: BaseException) -> str:
     return reason if isinstance(reason, str) and reason != "" else type(exc).__name__
 
 
+def _price_text(value: Decimal | None) -> str:
+    """A price as plain positional text for the journal ("NONE" when unknown)."""
+    return "NONE" if value is None else format(value, "f")
+
+
 def _optional_text(value: object) -> str | None:
     return None if value is None else str(value)
 
@@ -794,7 +837,12 @@ class ProtectionCoordinator:
         pending_actions: PendingActionStore | None = None,
         spill: IntentSpill | None = None,
         restore_required: bool = False,
+        liquidation_watch: LiquidationWatchPort | None = None,
     ) -> None:
+        if liquidation_watch is not None and not callable(
+            getattr(liquidation_watch, "check", None)
+        ):
+            raise TypeError("liquidation_watch must be None or provide a callable check")
         limits.require_live_ready()
         max_unprotected_ms = limits.max_unprotected_ms
         entry_terminal_timeout_ms = limits.entry_terminal_timeout_ms
@@ -834,6 +882,8 @@ class ProtectionCoordinator:
         # new entries and reports the restore incomplete until ``restore`` has run.
         self._restore_required = restore_required
         self._restored = False
+        # Plan 22-13 (D-12, A10): None means no post-fill comparison (zero behavior change).
+        self._liquidation_watch = liquidation_watch
 
     # ------------------------------------------------------------------ #
     # Registry surface.
@@ -1370,11 +1420,20 @@ class ProtectionCoordinator:
                 else:
                     await self._poll_unresolved_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
+                if state is ProtectionState.PROTECTED_ENTRY_OPEN:
+                    if await self._check_liquidation_once(tracked):
+                        return
                 await self._confirm(tracked, recheck=recheck)
             elif state is ProtectionState.PROTECTED:
+                if await self._check_liquidation_once(tracked):
+                    return
                 if await self._supervise_stop(tracked):
                     await self._attach_take_profits(tracked)
             elif state in (ProtectionState.COMPLETE, ProtectionState.TP_UNAVAILABLE):
+                # Still unchecked here only when the PROTECTED step could not read the position
+                # (or the plan was restored already past PROTECTED): the stop is confirmed.
+                if await self._check_liquidation_once(tracked):
+                    return
                 if await self._supervise_stop(tracked):
                     await self._watch_exit(tracked)
             elif state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
@@ -1586,6 +1645,115 @@ class ProtectionCoordinator:
             {"status": "NONE" if status is None else status},
             self._now(),
         )
+
+    # ------------------------------------------------------------------ #
+    # Post-fill liquidation comparison (plan 22-13; D-12, amendment A10, owner item O-4).
+    # ------------------------------------------------------------------ #
+
+    async def _check_liquidation_once(self, tracked: _Tracked) -> bool:
+        """Once per plan: ask the watch about the exchange liquidation price of the position.
+
+        True only when the plan was moved to CLOSE_REQUIRED (the caller then ends the step). Runs
+        from PROTECTED_ENTRY_OPEN, PROTECTED, COMPLETE and TP_UNAVAILABLE only, so the stop is
+        already REST-confirmed (the last two are reached unchecked after an unreadable position
+        read in the PROTECTED step, which also attaches the take-profits, or after a restore). An
+        unreadable position read is journaled and the plan stays unchecked (the next step tries
+        again); a flat read marks it checked without a call; a watch that raises, a position row
+        the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed).
+        The check places and cancels nothing; the stop is never touched.
+        """
+        watch = self._liquidation_watch
+        if watch is None or tracked.liquidation_checked:
+            return False
+        entry = tracked.entry
+        answer = await self._guarded(self._adapter.snapshot_positions(symbol=entry.symbol))
+        if isinstance(answer, BaseException):
+            if not isinstance(answer, Exception):
+                raise answer
+            self._journal_note(
+                tracked,
+                EVENT_REST_FAILED,
+                {"call": "snapshot_positions", "error_type": type(answer).__name__},
+                self._now(),
+            )
+            return False
+        row = next(
+            (
+                candidate
+                for candidate in answer
+                if _attr(candidate, "symbol") == entry.symbol
+                and (
+                    not isinstance(_attr(candidate, "position_amt"), Decimal)
+                    or _attr(candidate, "position_amt") != _ZERO
+                )
+            ),
+            None,
+        )
+        tracked.liquidation_checked = True
+        if row is None:
+            return False
+        verdict: LiquidationWatchVerdict | None = None
+        try:
+            amount = _attr(row, "position_amt")
+            if not isinstance(amount, Decimal):
+                raise TypeError("position_amt")
+            verdict = await watch.check(
+                LiquidationWatchInput(
+                    symbol=entry.symbol,
+                    side=entry.side,
+                    stop_price=entry.sl_trigger_price,
+                    leverage=entry.plan_constraint_snapshot.leverage,
+                    quantity=abs(amount),
+                    entry_price=_attr(row, "entry_price"),
+                    exchange_liquidation_price=_attr(row, "liquidation_price"),
+                )
+            )
+            if not isinstance(verdict, LiquidationWatchVerdict):
+                raise TypeError("verdict")
+        except Exception as exc:  # noqa: BLE001 - an unjudgeable position is closed (fail closed)
+            self._journal_note(
+                tracked,
+                EVENT_LIQUIDATION_CHECK_ERROR,
+                {"error_type": type(exc).__name__},
+                self._now(),
+            )
+            await self._enter_close_required(tracked, BRANCH_B6_LIQUIDATION_TOO_CLOSE)
+            return True
+        now = self._now()
+        payload = {
+            "action": verdict.action.value,
+            "reason": verdict.reason,
+            "exchange_price": _price_text(verdict.exchange_price),
+            "local_price": _price_text(verdict.local_price),
+        }
+        if verdict.action is LiquidationWatchAction.CLOSE:
+            self._journal_note(tracked, EVENT_LIQUIDATION_CHECKED, payload, now)
+            await self._enter_close_required(tracked, BRANCH_B6_LIQUIDATION_TOO_CLOSE)
+            return True
+        if verdict.action is LiquidationWatchAction.OK:
+            self._journal_note(tracked, EVENT_LIQUIDATION_CHECKED, payload, now)
+        elif verdict.action is LiquidationWatchAction.OK_DIFFERS:
+            self._journal_note(tracked, EVENT_LIQUIDATION_PRICE_DIFFERS, payload, now)
+            self._liquidation_alert(tracked, verdict.reason, now)
+        else:
+            self._journal_note(tracked, EVENT_LIQUIDATION_FAILED_ALERT_ONLY, payload, now)
+            known = (LIQUIDATION_TOO_CLOSE_AFTER_FILL, LIQUIDATION_UNKNOWN_AFTER_FILL)
+            reason = verdict.reason if verdict.reason in known else LIQUIDATION_TOO_CLOSE_AFTER_FILL
+            self._liquidation_alert(tracked, reason, now)
+        return False
+
+    def _liquidation_alert(self, tracked: _Tracked, reason: str, now: datetime) -> None:
+        """One HIGH DIVERGENCE alert; the reason is a fixed code and never carries an amount."""
+        try:
+            self._alerts.critical(
+                event=ALERT_LIQUIDATION_DIVERGENCE,
+                plan_hash=tracked.entry.plan_hash,
+                symbol=tracked.entry.symbol,
+                reason=reason,
+                now_utc=now,
+            )
+        except Exception:  # noqa: BLE001, S110 - the journal row already exists
+            pass
 
     async def _position_is_open(self, tracked: _Tracked) -> bool | None:
         """True when REST shows a non-zero position of the symbol; None when it cannot be read."""
@@ -2836,6 +3004,7 @@ class ProtectionCoordinator:
 
 __all__ = [
     "ALERT_CLOSE_REQUIRED",
+    "ALERT_LIQUIDATION_DIVERGENCE",
     "ALERT_PROTECTIVE_REJECTED",
     "ALERT_TP_UNAVAILABLE",
     "BLOCKING_STATES",
@@ -2845,6 +3014,7 @@ __all__ = [
     "BRANCH_B4_FILL_AFTER_STOP",
     "BRANCH_B4_STOP_LOST_UNRESOLVED",
     "BRANCH_B5_STOP_REJECTED",
+    "BRANCH_B6_LIQUIDATION_TOO_CLOSE",
     "BRANCH_NO_POSITION_BUT_EXPOSED",
     "BRANCH_OPERATOR_CLOSE",
     "DIVERGENCE_KIND_DOUBLED_POSITION",
@@ -2860,6 +3030,10 @@ __all__ = [
     "EVENT_ENTRY_CANCEL_NOT_SENT",
     "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
+    "EVENT_LIQUIDATION_CHECKED",
+    "EVENT_LIQUIDATION_CHECK_ERROR",
+    "EVENT_LIQUIDATION_FAILED_ALERT_ONLY",
+    "EVENT_LIQUIDATION_PRICE_DIFFERS",
     "EVENT_OPERATOR_CLOSE_REQUESTED",
     "EVENT_OPERATOR_PROTECT_REFUSED",
     "EVENT_OPERATOR_PROTECT_STEPPED",
