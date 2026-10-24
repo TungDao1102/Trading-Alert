@@ -79,6 +79,7 @@ follow the same posture: no signature change in the four new methods.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -576,6 +577,40 @@ class SymbolConfigSnapshot:
     leverage: int
     is_auto_add_margin: bool
     max_notional_value: Decimal
+
+
+@dataclass(frozen=True)
+class LeverageBracketRow:
+    """One bracket of `leverage_brackets_snapshot` (plan 22-01, D-08).
+
+    `maint_margin_ratio` and `cum` (the cumulative maintenance amount) are the exchange numbers
+    as exact Decimals. The SDK 17.4.0 models carry them as floats; the adapter converts them with
+    `Decimal(repr(value))`, never `Decimal(float)` (22-RESEARCH Pitfall 4).
+    """
+
+    bracket: int
+    initial_leverage: int
+    notional_floor: Decimal
+    notional_cap: Decimal
+    maint_margin_ratio: Decimal
+    cum: Decimal
+
+
+@dataclass(frozen=True)
+class SymbolLeverageBrackets:
+    """Result of `leverage_brackets_snapshot` (GET /fapi/v1/leverageBracket, plan 22-01).
+
+    The bracket numbers are INPUTS read from the exchange, never defaults: no bracket value,
+    maintenance ratio or leverage may become a constant of `src/` or a parameter (D-08). The
+    recorded Demo table differs from the mainnet figure (Demo first bracket 125x, the mainnet
+    figure of the official change-log is 150x; demo-observed, not mainnet, 22-RESEARCH 2.4).
+    `notional_coef` is carried as read (None when absent) and is not interpreted here: the guard
+    refuses a value other than 1. `brackets` keeps the response order.
+    """
+
+    symbol: str
+    notional_coef: Decimal | None
+    brackets: tuple[LeverageBracketRow, ...]
 
 
 # The exchange window rule for userTrades (SDK 17.4.0 docstring): startTime to endTime may not
@@ -1766,6 +1801,42 @@ class BinanceUsdmAdapter:
             ),
         )
 
+    async def leverage_brackets_snapshot(self, *, symbol: str) -> SymbolLeverageBrackets:
+        """Read the exchange leverage brackets of one symbol (GET /fapi/v1/leverageBracket, 22-01).
+
+        USER_DATA, through the official SDK `rest_api.notional_and_leverage_brackets(symbol,
+        recv_window)` and `_sdk_call` (policy, shared REST gate, never retried). The SDK answer is
+        a oneOf wrapper (`actual_instance`: a list of entries, or one entry); both shapes are
+        unwrapped and exactly one entry for the requested symbol is required. The floats the SDK
+        models carry (`maintMarginRatio`, `cum`, `notionalCoef`) become Decimal through
+        `Decimal(repr(value))`; None, bool and non-finite values are refused. Every `ValueError`
+        names the field only, never the value; nothing about the response is logged.
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.notional_and_leverage_brackets, symbol=symbol
+        )
+        raw = response.data()
+        raw = getattr(raw, "actual_instance", raw)
+        if raw is None:
+            raise ValueError("leverage bracket response empty: refusing to fabricate")
+        entries = raw if isinstance(raw, list) else [raw]
+        if len(entries) != 1:
+            raise ValueError("leverage bracket answer must hold exactly one entry for the symbol")
+        entry = entries[0]
+        if entry.symbol != symbol:
+            raise ValueError("leverage bracket entry is for another symbol: refusing to use it")
+        raw_brackets = entry.brackets
+        if not isinstance(raw_brackets, list) or len(raw_brackets) == 0:
+            raise ValueError("brackets missing or empty: refusing to fabricate")
+        coef = entry.notional_coef
+        return SymbolLeverageBrackets(
+            symbol=symbol,
+            notional_coef=None
+            if coef is None
+            else _exchange_number_to_decimal(coef, "notionalCoef"),
+            brackets=tuple(_row_to_leverage_bracket(item) for item in raw_brackets),
+        )
+
     async def user_trades_in_window(
         self, *, symbol: str, start_utc: datetime, end_utc: datetime
     ) -> tuple[UserTradeRow, ...]:
@@ -2200,6 +2271,43 @@ def _require_exchange_int(value: Any, field_name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"exchange field {field_name} missing or not an integer")
     return value
+
+
+def _exchange_number_to_decimal(value: Any, field_name: str) -> Decimal:
+    """A non-negative finite exchange number (SDK float or int) as an exact Decimal (22-01).
+
+    The SDK models carry the bracket ratios as `StrictFloat | StrictInt`. A float becomes
+    `Decimal(repr(value))`, the shortest text that round-trips (`0.004` -> `Decimal("0.004")`),
+    never `Decimal(value)`, which would expose the binary expansion (22-RESEARCH Pitfall 4).
+    None, bool, text, non-finite and negative values raise `ValueError` naming the field only.
+    """
+    message = f"exchange field {field_name} missing or not a finite non-negative number"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(message)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(message)
+    if value < 0:
+        raise ValueError(message)
+    return Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
+
+
+def _row_to_leverage_bracket(item: Any) -> LeverageBracketRow:
+    """Project one SDK bracket into `LeverageBracketRow`; a bad field raises, naming it (22-01)."""
+    initial_leverage = _require_exchange_int(item.initial_leverage, "initialLeverage")
+    if initial_leverage < 1:
+        raise ValueError("exchange field initialLeverage below 1")
+    notional_floor = _require_exchange_int(item.notional_floor, "notionalFloor")
+    notional_cap = _require_exchange_int(item.notional_cap, "notionalCap")
+    if notional_floor < 0 or notional_cap < 0:
+        raise ValueError("exchange field notionalFloor or notionalCap negative")
+    return LeverageBracketRow(
+        bracket=_require_exchange_int(item.bracket, "bracket"),
+        initial_leverage=initial_leverage,
+        notional_floor=Decimal(notional_floor),
+        notional_cap=Decimal(notional_cap),
+        maint_margin_ratio=_exchange_number_to_decimal(item.maint_margin_ratio, "maintMarginRatio"),
+        cum=_exchange_number_to_decimal(item.cum, "cum"),
+    )
 
 
 def _require_exchange_text(value: Any, field_name: str) -> str:

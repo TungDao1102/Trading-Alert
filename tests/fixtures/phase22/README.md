@@ -14,14 +14,24 @@ the real SDK models with `from_dict`.
 | File | Source (under `.planning/phases/19-execution-plan-binding-price-check/evidence/fixtures/`) | Endpoint | Label |
 |---|---|---|---|
 | `recorded_demo/symbol_config.json` | `account_read_only_capture-rest-004-symbol_config.json` | `GET /fapi/v1/symbolConfig` | RECORDED_DEMO |
+| `recorded_demo/leverage_brackets.json` | `account_read_only_capture-rest-005-leverage_brackets.json` | `GET /fapi/v1/leverageBracket` | RECORDED_DEMO |
 
 ## Conversions applied
 
 The recorded summary has text for every value. The generator gives the non-string SDK fields
-their JSON type (table `WIRE_TYPES` in the script, from the SDK 17.4.0 models): `leverage`
-(integer) and `isAutoAddMargin` (boolean). Any other text for such a field stops the run with a
-`ValueError`. `marginType` and `maxNotionalValue` stay text; the adapter parses the amount to
-`Decimal`.
+their JSON type (table `WIRE_TYPES` in the script, from the SDK 17.4.0 models): `leverage`,
+`bracket`, `initialLeverage`, `notionalCap` and `notionalFloor` (integer), `isAutoAddMargin`
+(boolean) and `maintMarginRatio` and `cum` (JSON number: the SDK declares them `StrictFloat` or
+`StrictInt`, so the text `0.004` is written as the number `0.004`, `0.0` as `0.0`, `50.0` as
+`50.0`). Any other text for such a field stops the run with a `ValueError`. `marginType` and
+`maxNotionalValue` stay text; the adapter parses the amount to `Decimal`.
+
+## The bracket table is Demo, not mainnet
+
+`leverage_brackets.json` holds the Demo table of `BTCUSDT`: ten brackets, the first at 125x. The
+mainnet figure quoted by the official change-log is 150x (22-RESEARCH 2.4). The values are test
+inputs only: no bracket value, maintenance ratio or leverage is a constant of `src/` or of a
+parameter file (D-08), and a test asserts that no source file imports this directory.
 
 ## What the Demo capture does not show
 

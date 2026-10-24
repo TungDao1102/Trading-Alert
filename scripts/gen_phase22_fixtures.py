@@ -2,10 +2,11 @@
 
 Reads the owner-run Demo capture of 2026-10-22 (Phase 19 evidence, evidence commit 48a26473) and
 writes, under `tests/fixtures/phase22/recorded_demo/`, the SDK wire shape of the configuration
-reads the adapter parses (`GET /fapi/v1/symbolConfig`). The capture files hold the FLATTENED
-`observation.summary` map the probe wrote (keys such as `0.leverage`, every value text), not raw
-responses. This script unflattens that map (digit segments become list positions) and gives the
-non-string wire fields back their JSON type (`WIRE_TYPES`). Nothing is typed by hand (AGENTS.md).
+reads the adapter parses (`GET /fapi/v1/symbolConfig`, `GET /fapi/v1/leverageBracket`). The
+capture files hold the FLATTENED `observation.summary` map the probe wrote (keys such as
+`0.leverage`, every value text), not raw responses. This script unflattens that map (digit
+segments become list positions) and gives the non-string wire fields back their JSON type
+(`WIRE_TYPES`). Nothing is typed by hand (AGENTS.md).
 
 Demo values: demo-observed, not mainnet. This script imports nothing from `src/` or `tests/`,
 reads only committed files and makes no network call. Running it twice gives byte-identical
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -32,11 +34,23 @@ DEFAULT_SRC = (
 DEFAULT_OUT = REPO_ROOT / "tests" / "fixtures" / "phase22"
 RECORDED_SUBDIR = "recorded_demo"
 
+# A plain non-negative decimal number: no sign, no exponent, no NaN or Infinity.
+_NUMBER_TEXT = re.compile(r"\d+(?:\.\d+)?")
+
 # Non-string SDK wire fields (per the installed SDK 17.4.0 models) and the JSON type they take.
 # Any other recorded text for such a field is a ValueError. Every field not listed stays text.
+# "number" is a JSON number: the SDK declares `maintMarginRatio` and `cum` StrictFloat or
+# StrictInt, so the fixture must carry numbers, not text. The recorded text is written back as
+# the same number ("0.004" -> 0.004, "0.0" -> 0.0, "50.0" -> 50.0, "7" -> 7).
 WIRE_TYPES: dict[str, str] = {
     "isAutoAddMargin": "bool",
     "leverage": "int",
+    "bracket": "int",
+    "initialLeverage": "int",
+    "notionalCap": "int",
+    "notionalFloor": "int",
+    "maintMarginRatio": "number",
+    "cum": "number",
 }
 
 # (source capture file, output file) pairs written by `main`.
@@ -44,6 +58,10 @@ OUTPUTS: tuple[tuple[str, str], ...] = (
     (
         "account_read_only_capture-rest-004-symbol_config.json",
         "symbol_config.json",
+    ),
+    (
+        "account_read_only_capture-rest-005-leverage_brackets.json",
+        "leverage_brackets.json",
     ),
 )
 
@@ -66,6 +84,10 @@ def _convert(field: str, text: Any) -> Any:
         if not digits.isdigit():
             raise ValueError(f"field {field}: recorded text is not an integer")
         return int(text)
+    if kind == "number":
+        if _NUMBER_TEXT.fullmatch(text) is None:
+            raise ValueError(f"field {field}: recorded text is not a plain number")
+        return float(text) if "." in text else int(text)
     raise ValueError(f"field {field}: unknown wire type")
 
 

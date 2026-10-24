@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from binance_common.errors import BadRequestError
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    NotionalAndLeverageBracketsResponse,
     SymbolConfigurationResponse,
 )
 from src.adapters.binance_ratelimit_gate import (
@@ -29,8 +30,10 @@ from src.adapters.binance_ratelimit_gate import (
 )
 from src.adapters.binance_usdm import (
     BinanceUsdmAdapter,
+    LeverageBracketRow,
     SignedCallPolicyMissing,
     SymbolConfigSnapshot,
+    SymbolLeverageBrackets,
 )
 from src.domain.exchange_errors import ExchangeErrorCategory
 from structlog.testing import capture_logs
@@ -243,3 +246,217 @@ async def test_a_successful_symbol_config_read_logs_no_value() -> None:
     text = json.dumps(events, default=str)
     assert "20000000" not in text
     assert "CROSSED" not in text
+
+
+# --------------------------------------------------------------------------- leverageBracket
+
+BRACKETS = "notional_and_leverage_brackets"
+
+
+def _brackets_payload(fixture: Any = None) -> Any:
+    """The SDK oneOf wrapper the real `notional_and_leverage_brackets` returns."""
+    model = NotionalAndLeverageBracketsResponse.from_dict(
+        fixture if fixture is not None else _fixture("leverage_brackets.json")
+    )
+    assert model is not None
+    return model
+
+
+def _bracket(**overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "bracket": 1,
+        "initial_leverage": 125,
+        "notional_floor": 0,
+        "notional_cap": 50000,
+        "maint_margin_ratio": 0.004,
+        "cum": 0.0,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def _entry(brackets: Any = "default", **overrides: Any) -> SimpleNamespace:
+    fields: dict[str, Any] = {
+        "symbol": "BTCUSDT",
+        "notional_coef": None,
+        "brackets": [_bracket()] if brackets == "default" else brackets,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+async def test_leverage_brackets_snapshot_reads_the_recorded_demo_table_as_exact_decimals() -> None:
+    adapter, rest, _ = _adapter({BRACKETS: _brackets_payload()})
+    table = await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert isinstance(table, SymbolLeverageBrackets)
+    assert table.symbol == "BTCUSDT"
+    assert table.notional_coef is None
+    assert isinstance(table.brackets, tuple) and len(table.brackets) == 10
+    assert all(isinstance(row, LeverageBracketRow) for row in table.brackets)
+    assert [row.bracket for row in table.brackets] == list(range(1, 11))  # response order kept
+    assert table.brackets[0] == LeverageBracketRow(
+        bracket=1,
+        initial_leverage=125,
+        notional_floor=Decimal("0"),
+        notional_cap=Decimal("50000"),
+        maint_margin_ratio=Decimal("0.004"),
+        cum=Decimal("0"),
+    )
+    assert table.brackets[3] == LeverageBracketRow(
+        bracket=4,
+        initial_leverage=20,
+        notional_floor=Decimal("3000000"),
+        notional_cap=Decimal("20000000"),
+        maint_margin_ratio=Decimal("0.025"),
+        cum=Decimal("46300"),
+    )
+    for row in table.brackets:
+        for number in (row.notional_floor, row.notional_cap, row.maint_margin_ratio, row.cum):
+            assert isinstance(number, Decimal)
+    assert rest.calls(BRACKETS) == 1
+    assert rest.kwargs[BRACKETS] == [{"symbol": "BTCUSDT", "recv_window": RECV_WINDOW}]
+
+
+async def test_the_maintenance_ratio_is_decimal_of_the_repr_not_of_the_float() -> None:
+    adapter, _, _ = _adapter({BRACKETS: _brackets_payload()})
+    table = await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    ratio = table.brackets[0].maint_margin_ratio
+    assert ratio == Decimal("0.004")
+    # Decimal(float) exposes the binary expansion: it must NOT be what the adapter returns
+    # (22-RESEARCH Pitfall 4, T-22-01).
+    assert Decimal(0.004) != Decimal("0.004")
+    assert ratio != Decimal(0.004)
+    assert str(ratio) == "0.004"
+
+
+async def test_the_object_answer_shape_parses_to_the_same_result() -> None:
+    entry = _fixture("leverage_brackets.json")[0]
+    # SDK 17.4.0 quirk: the object shape (Response2) declares `cum` as StrictInt only, while the
+    # list shape accepts StrictFloat too. The recorded sums are whole numbers, so the derived
+    # object answer carries them as integers; the parsed result must be the same.
+    for bracket in entry["brackets"]:
+        assert bracket["cum"] == int(bracket["cum"])
+        bracket["cum"] = int(bracket["cum"])
+    adapter, _, _ = _adapter({BRACKETS: _brackets_payload(entry)})
+    from_object = await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    adapter, _, _ = _adapter({BRACKETS: _brackets_payload()})
+    from_list = await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert from_object == from_list
+
+
+async def test_a_present_notional_coef_is_carried_as_a_decimal_and_not_interpreted() -> None:
+    adapter, _, _ = _adapter({BRACKETS: [_entry(notional_coef=1.5)]})
+    table = await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert table.notional_coef == Decimal("1.5")
+    adapter, _, _ = _adapter({BRACKETS: [_entry(notional_coef=1)]})
+    assert (await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")).notional_coef == Decimal(1)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        [],
+        [_entry(), _entry()],
+        [_entry(symbol="ETHUSDT")],
+        _entry(symbol="ETHUSDT"),
+        None,
+    ],
+    ids=["empty", "two_entries", "other_symbol", "other_symbol_object", "no_data"],
+)
+async def test_a_wrong_number_of_entries_or_another_symbol_raises(answer: Any) -> None:
+    adapter, _, _ = _adapter({BRACKETS: answer})
+    with pytest.raises(ValueError, match="leverage bracket"):
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+
+
+@pytest.mark.parametrize(
+    ("field", "attribute", "bad"),
+    [
+        ("maintMarginRatio", "maint_margin_ratio", None),
+        ("maintMarginRatio", "maint_margin_ratio", True),
+        ("maintMarginRatio", "maint_margin_ratio", float("nan")),
+        ("maintMarginRatio", "maint_margin_ratio", float("inf")),
+        ("maintMarginRatio", "maint_margin_ratio", -0.004),
+        ("maintMarginRatio", "maint_margin_ratio", "0.004"),
+        ("cum", "cum", None),
+        ("cum", "cum", False),
+        ("cum", "cum", float("nan")),
+        ("cum", "cum", float("-inf")),
+        ("cum", "cum", -1.0),
+        ("initialLeverage", "initial_leverage", True),
+        ("initialLeverage", "initial_leverage", 0),
+        ("initialLeverage", "initial_leverage", None),
+        ("bracket", "bracket", None),
+        ("bracket", "bracket", True),
+        ("notionalFloor", "notional_floor", None),
+        ("notionalFloor", "notional_floor", 1.5),
+        ("notionalCap", "notional_cap", None),
+        ("notionalCap", "notional_cap", True),
+    ],
+)
+async def test_a_bad_bracket_field_raises_naming_the_field_only(
+    field: str, attribute: str, bad: Any
+) -> None:
+    adapter, _, _ = _adapter({BRACKETS: [_entry([_bracket(**{attribute: bad})])]})
+    with pytest.raises(ValueError, match=field) as caught:
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    message = str(caught.value)
+    if isinstance(bad, str):
+        assert bad not in message.replace(field, "")
+    assert "nan" not in message.lower().replace(field.lower(), "")
+
+
+@pytest.mark.parametrize("brackets", [None, [], "x"], ids=["missing", "empty", "not_a_list"])
+async def test_a_missing_or_empty_bracket_list_raises(brackets: Any) -> None:
+    adapter, _, _ = _adapter({BRACKETS: [_entry(brackets)]})
+    with pytest.raises(ValueError, match="brackets"):
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+
+
+@pytest.mark.parametrize("bad", [True, "1", float("nan"), -1])
+async def test_a_bad_notional_coef_raises(bad: Any) -> None:
+    adapter, _, _ = _adapter({BRACKETS: [_entry(notional_coef=bad)]})
+    with pytest.raises(ValueError, match="notionalCoef"):
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+
+
+async def test_leverage_brackets_snapshot_is_refused_by_a_paused_gate_before_the_sdk() -> None:
+    adapter, rest, gate = _adapter({BRACKETS: _brackets_payload()})
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, None)
+    with pytest.raises(RateLimitPauseActive):
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert rest.calls(BRACKETS) == 0
+
+
+async def test_leverage_brackets_snapshot_is_refused_by_a_ban_before_the_sdk() -> None:
+    adapter, rest, gate = _adapter({BRACKETS: _brackets_payload()})
+    gate.record(ExchangeErrorCategory.IP_BANNED, None)
+    with pytest.raises(RateLimitBanActive):
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert rest.calls(BRACKETS) == 0
+
+
+async def test_leverage_brackets_snapshot_without_a_policy_fails_closed() -> None:
+    adapter, rest, _ = _adapter({BRACKETS: _brackets_payload()}, policy=False)
+    with pytest.raises(SignedCallPolicyMissing):
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert rest.calls(BRACKETS) == 0
+
+
+async def test_leverage_brackets_snapshot_propagates_an_sdk_error_and_never_retries() -> None:
+    adapter, rest, _ = _adapter({BRACKETS: _brackets_payload()})
+    boom = BadRequestError("rejected", -1000)
+    rest.errors[BRACKETS] = boom
+    with pytest.raises(BadRequestError) as caught:
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    assert caught.value is boom
+    assert rest.calls(BRACKETS) == 1
+
+
+async def test_a_successful_leverage_brackets_read_logs_no_bracket_value() -> None:
+    adapter, _, _ = _adapter({BRACKETS: _brackets_payload()})
+    with capture_logs() as events:
+        await adapter.leverage_brackets_snapshot(symbol="BTCUSDT")
+    text = json.dumps(events, default=str)
+    for digits in ("0.004", "46300", "20000000", "125"):
+        assert digits not in text
