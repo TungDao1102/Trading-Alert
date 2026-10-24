@@ -54,9 +54,9 @@ dedupe_window_ms = "NOT_CONFIGURED"
 max_equity_age_ms = 15000
 
 [margin]
-liquidation_buffer_bps = "NOT_CONFIGURED"
-max_bracket_age_ms = "NOT_CONFIGURED"
-headroom_bps = "NOT_CONFIGURED"
+liquidation_buffer_bps = 300
+max_bracket_age_ms = 60000
+headroom_bps = 1000
 
 [provenance.protection]
 max_unprotected_ms = "NOT_CONFIGURED"
@@ -87,6 +87,6 @@ dedupe_window_ms = "NOT_CONFIGURED"
 max_equity_age_ms = "DECISION"
 
 [provenance.margin]
-liquidation_buffer_bps = "NOT_CONFIGURED"
-max_bracket_age_ms = "NOT_CONFIGURED"
-headroom_bps = "NOT_CONFIGURED"
+liquidation_buffer_bps = "DECISION"
+max_bracket_age_ms = "DECISION"
+headroom_bps = "DECISION"

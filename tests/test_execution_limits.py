@@ -46,8 +46,9 @@ EXPECTED_UNSET = (
 # set it on 2026-10-23 (DECISIONS D084, 15000 ms), so the committed file no longer leaves it unset.
 EQUITY_AGE_KEY = "account.max_equity_age_ms"
 EQUITY_AGE_DECIDED_MS = 15000
-# Phase 22 (plan 22-02; D-10, D-11, D-13, amendment A4): the three margin keys, REQUIRED and
-# NOT_CONFIGURED (OWNER-OPEN O-2, O-3). The section is the last one, after `account`.
+# Phase 22 (plan 22-02; D-10, D-11, D-13, amendment A4): the three margin keys, REQUIRED. The owner
+# set them on 2026-10-24 (DECISIONS D085, O-2 and O-3), so the committed file no longer leaves
+# them unset. The section is the last one, after `account`.
 MARGIN_KEYS = (
     "margin.liquidation_buffer_bps",
     "margin.max_bracket_age_ms",
@@ -58,9 +59,15 @@ MARGIN_FIELDS = {
     "margin.max_bracket_age_ms": "margin_max_bracket_age_ms",
     "margin.headroom_bps": "margin_headroom_bps",
 }
-# The keys the committed file leaves unset, in file order: the fourteen of Phases 19 and 20, then
-# the three margin keys (the equity age between them is set, DECISIONS D084).
-COMMITTED_UNSET = (*EXPECTED_UNSET, *MARGIN_KEYS)
+# The numbers the owner set for the margin keys (DECISIONS D085, 2026-10-24), provenance DECISION.
+MARGIN_DECIDED = {
+    "margin.liquidation_buffer_bps": 300,
+    "margin.max_bracket_age_ms": 60000,
+    "margin.headroom_bps": 1000,
+}
+# The keys the committed file leaves unset, in file order: the fourteen of Phases 19 and 20 (the
+# equity age is set by D084, the three margin keys by D085).
+COMMITTED_UNSET = EXPECTED_UNSET
 # Every required key in file order, the equity age included.
 ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, *MARGIN_KEYS)
 
@@ -101,8 +108,8 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.unset_keys() == COMMITTED_UNSET
     for field_name in PHASE20_FIELDS.values():
         assert getattr(limits, field_name) is None, field_name
-    for field_name in MARGIN_FIELDS.values():
-        assert getattr(limits, field_name) is None, field_name
+    for dotted, field_name in MARGIN_FIELDS.items():
+        assert getattr(limits, field_name) == MARGIN_DECIDED[dotted], field_name  # D085
 
 
 def test_require_live_ready_refuses_naming_every_key() -> None:
@@ -118,8 +125,9 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
         assert "reconcile.tick_interval_ms" in message
-        # The seventeen dotted names still unset come in file order: protection, pre_placement,
-        # reconcile, stale_feed, alerts, then margin (account.max_equity_age_ms was set by D084).
+        # The fourteen dotted names still unset come in file order: protection, pre_placement,
+        # reconcile, stale_feed, alerts (account.max_equity_age_ms was set by D084 and the three
+        # margin keys by D085).
         assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
             COMMITTED_UNSET
         )
@@ -446,18 +454,24 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
     assert "entry_terminal_timeout_ms" in text
 
 
-def test_the_committed_file_names_only_not_configured_except_the_equity_age() -> None:
+def test_the_committed_file_names_only_not_configured_except_the_owner_numbers() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
-    # The only number in the file is the owner's D084 equity age (2026-10-23).
+    # The only numbers in the file are the owner's D084 equity age (2026-10-23) and the three
+    # D085 margin keys (2026-10-24).
     numeric = re.findall(r"^\s*([a-z_]+)\s*=\s*[-+]?\d+", text, flags=re.MULTILINE)
-    assert numeric == ["max_equity_age_ms"]
+    assert numeric == [
+        "max_equity_age_ms",
+        "liquidation_buffer_bps",
+        "max_bracket_age_ms",
+        "headroom_bps",
+    ]
     assert f"max_equity_age_ms = {EQUITY_AGE_DECIDED_MS}\n" in text
     # Nineteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
     # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys, plan
     # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms,
     # plan 22-02 the three margin keys). The equity age has a number and the label DECISION since
-    # D084: 38 minus 2 = 36.
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 36
+    # D084 and the three margin keys since D085: 38 minus 2 minus 6 = 30.
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -613,7 +627,7 @@ def test_a_missing_phase_20_section_is_refused_naming_its_keys(section: str) -> 
         assert f"{section}.{key}" in message
 
 
-def test_the_real_file_has_every_section_and_label_unset_except_the_decided_equity_age() -> None:
+def test_the_real_file_has_every_section_and_label_unset_except_the_decided_keys() -> None:
     import tomllib
 
     document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
@@ -622,6 +636,11 @@ def test_the_real_file_has_every_section_and_label_unset_except_the_decided_equi
             if f"{section}.{key}" == EQUITY_AGE_KEY:
                 # Set by the owner on 2026-10-23 (D084): a number and the label DECISION.
                 assert document[section][key] == EQUITY_AGE_DECIDED_MS
+                assert document["provenance"][section][key] == "DECISION"
+                continue
+            if f"{section}.{key}" in MARGIN_DECIDED:
+                # Set by the owner on 2026-10-24 (D085): a number and the label DECISION.
+                assert document[section][key] == MARGIN_DECIDED[f"{section}.{key}"]
                 assert document["provenance"][section][key] == "DECISION"
                 continue
             assert document[section][key] == el.NOT_CONFIGURED_WORD, (section, key)
@@ -721,10 +740,11 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS  # DECISIONS D084
     assert _ACCOUNT_KEY not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
-    assert len(limits.unset_keys()) == 17
+    assert len(limits.unset_keys()) == 14
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
-    # Setting this one key does not open the live path: seventeen required keys stay unset.
+    # Setting this key (and, since D085, the three margin keys) does not open the live path:
+    # fourteen required keys stay unset.
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
     assert _ACCOUNT_KEY not in info.value.keys
@@ -799,7 +819,8 @@ def test_the_account_test_only_value_is_set_and_may_be_unset_by_override() -> No
 
 # --------------------------------------------------------------------------- #
 # Plan 22-02 (D-10, D-11, D-13, amendment A4; OWNER-OPEN O-2, O-3): the margin section, three
-# REQUIRED keys, positive integers only (basis points and milliseconds), NOT_CONFIGURED.
+# REQUIRED keys, positive integers only (basis points and milliseconds). NOT_CONFIGURED until the
+# owner answer of 2026-10-24 (DECISIONS D085): 300, 60000 and 1000, provenance DECISION.
 # --------------------------------------------------------------------------- #
 
 _MARGIN_KEYS_UNDER_TEST = MARGIN_KEYS
@@ -826,25 +847,29 @@ def test_the_margin_keys_are_required_not_alert_only() -> None:
     assert len(ALL_REQUIRED_KEYS) == 18
 
 
-def test_the_committed_file_holds_the_margin_keys_unset_with_the_not_configured_label() -> None:
+def test_the_committed_file_holds_the_margin_keys_set_with_the_decision_label() -> None:
     import tomllib
 
     document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
     for key in el.EXECUTION_LIMIT_KEYS["margin"]:
-        assert document["margin"][key] == el.NOT_CONFIGURED_WORD, key
-        assert document["provenance"]["margin"][key] == el.NOT_CONFIGURED_WORD, key
+        assert document["margin"][key] == MARGIN_DECIDED[f"margin.{key}"], key  # DECISIONS D085
+        assert document["provenance"]["margin"][key] == "DECISION", key
     limits = el.load_execution_limits(LIMITS_FILE)
-    assert limits.unset_keys()[-3:] == MARGIN_KEYS
+    for dotted in MARGIN_KEYS:
+        assert dotted not in limits.unset_keys()
+    assert limits.unset_keys() == COMMITTED_UNSET
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
 
 
-def test_require_live_ready_names_the_three_margin_keys_and_no_digit() -> None:
+def test_require_live_ready_still_refuses_and_no_longer_names_the_margin_keys() -> None:
+    # D085 set the three margin keys; fourteen other required keys keep the live path refused.
     limits = el.load_execution_limits(LIMITS_FILE)
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
+    assert len(info.value.keys) == 14
     for dotted in MARGIN_KEYS:
-        assert dotted in info.value.keys
-        assert dotted in str(info.value)
+        assert dotted not in info.value.keys
+        assert dotted not in str(info.value)
     assert not any(character.isdigit() for character in str(info.value))
 
 

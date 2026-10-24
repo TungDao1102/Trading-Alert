@@ -398,14 +398,17 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
     rows = [line for line in lines if re.match(r"\| D\d+ \|", line)]
     ids = [re.match(r"\| (D\d+) \|", row).group(1) for row in rows]  # type: ignore[union-attr]
     after_d078 = ids[ids.index("D078") + 1 :]
-    assert after_d078 == ["D079", "D080", "D081", "D082", "D083", "D084"], (
-        f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083 and "
-        "Phase 21 wrote D084 (the equity age, 2026-10-23)"
+    assert after_d078 == ["D079", "D080", "D081", "D082", "D083", "D084", "D085", "D086"], (
+        f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
+        "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
+        "wrote D085 (Phase 22 O-1 to O-4) and D086 (Phase 21 O-3 to O-6)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:
         assert "2026-10-22, owner instruction" in row, row[:40]
     assert "2026-10-23, owner answer" in rows[first + 5], rows[first + 5][:40]
+    for row in rows[first + 6 : first + 8]:
+        assert "2026-10-24, owner answer" in row, row[:40]
     assert len(ids) == len(set(ids)), "a DECISIONS row id is duplicated"
     d055 = [row for row in rows if row.startswith("| D055 |")]
     assert len(d055) == 1

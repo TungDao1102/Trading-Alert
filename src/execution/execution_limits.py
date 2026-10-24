@@ -1,8 +1,9 @@
 """The Phase 19 execution limits and their fail-closed loader (plan 19-01; D-07, D-13).
 
 No number lives in this module. The eighteen required safety keys (seven of Phase 19, seven of
-Phase 20, one of Phase 21, three of Phase 22; seventeen of them still without a number the owner
-has chosen) are optional fields of a frozen dataclass that default to nothing: they reach the
+Phase 20, one of Phase 21, three of Phase 22; fourteen of them still without a number the owner
+has chosen: the owner set the Phase 21 key by D084 and the three Phase 22 keys by D085) are
+optional fields of a frozen dataclass that default to nothing: they reach the
 process only through ``config/execution/execution-limits-v1.toml``, where each value is the word
 ``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While any field is ``None`` the
 live path refuses:
@@ -193,8 +194,9 @@ class ExecutionLimits:
     maximum age, in milliseconds, of the cached leverage-bracket set. ``margin_headroom_bps``
     (plan 22-02, D-13, OWNER-OPEN O-3): the headroom, in basis points of the margin the order
     needs, that the available balance must keep. All three are positive integers only
-    (amendment A4), REQUIRED (not in ``ALERT_ONLY_LIMIT_KEYS``) and NOT_CONFIGURED until the
-    owner decides: no number is chosen here, and the consumers (plans 22-12, 22-13 and 22-14)
+    (amendment A4) and REQUIRED (not in ``ALERT_ONLY_LIMIT_KEYS``). The owner set them on
+    2026-10-24 (DECISIONS D085), provenance DECISION, in the values file. No number is chosen
+    here, and the consumers (plans 22-12, 22-13 and 22-14)
     read them from a loaded object. With the three margin keys the file holds nineteen keys,
     eighteen required and one alert-only.
     """

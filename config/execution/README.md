@@ -1,12 +1,12 @@
 # Execution protection, pre-placement and reconcile limits
 
 This directory holds the nineteen safety limits of the execution path, eighteen required and one
-alert-only (the owner has chosen the number of one of them, the equity age of Phase 21): the seven of Phase 19 (D-07, D-13, the owner's
+alert-only (the owner has chosen the number of four of them: the equity age of Phase 21, D084, and the three margin keys of Phase 22, D085): the seven of Phase 19 (D-07, D-13, the owner's
 19-REVIEW WR-05 and WR-03 decisions and the last-price check of quick task 261020-l4p), the eight
 of Phase 20 (plan 20-01; D-25, D-11, D-21, D-23, T-H; plan 20-28 added the alert-only
 `reconcile.entry_stale_grace_ms`) the one of Phase 21 (plan 21-02; D-03) and the three of Phase 22 (plan 22-02; D-10, D-11, D-13).
 The values file
-`execution-limits-v1.toml` holds only the word `NOT_CONFIGURED` for every key until the owner fills the numbers in, after the Demo probes
+`execution-limits-v1.toml` holds the word `NOT_CONFIGURED` for every key until the owner fills the number in (four are filled), after the Demo probes
 listed in `19-NOTES.md` (OWNER-OPEN O-04 and O-05).
 **This README lists the required keys and what they mean. It carries no value, and the code
 carries no default for any of them.** `tests/test_no_unratified_defaults.py` scans `src/` and
@@ -95,11 +95,11 @@ One key per line, so the checks of plan 19-01 can parse the list.
 
 ### `[margin]` (Phase 22; D-10, D-11, D-13, amendment A4; OWNER-OPEN O-2, O-3)
 
-All three keys are REQUIRED (they keep the live path refused while they are `NOT_CONFIGURED`), are positive integers only (basis points and milliseconds) and are `NOT_CONFIGURED` until the owner decides. The code carries no default for any of them, and the limits gate of the manager refuses every placement before the margin guard can run while one is unset.
+All three keys are REQUIRED (they would keep the live path refused while they are `NOT_CONFIGURED`) and are positive integers only (basis points and milliseconds). The owner set all three on 2026-10-24 (DECISIONS D085, provenance `DECISION`): 300 basis points for the liquidation buffer, 60000 milliseconds for the bracket age and 1000 basis points for the headroom. The code carries no default for any of them, and the limits gate of the manager refuses every placement before the margin guard can run while one is unset. Setting them does not open the live path: fourteen required keys stay `NOT_CONFIGURED`.
 
-- `margin.liquidation_buffer_bps` - the liquidation buffer, in basis points of the entry price; the margin guard compares it as a price distance beyond the stop (D-09, D-10, OWNER-OPEN O-2; used by plans 22-13 and 22-14; basis points).
-- `margin.max_bracket_age_ms` - the maximum age of the cached leverage-bracket set before the margin guard refuses it as stale (D-11, OWNER-OPEN O-3; used by plans 22-12 and 22-14; milliseconds).
-- `margin.headroom_bps` - the headroom, in basis points of the margin the order needs, that the available balance must keep after the order (D-13, OWNER-OPEN O-3; used by plan 22-14; basis points).
+- `margin.liquidation_buffer_bps` - the liquidation buffer, in basis points of the entry price; the margin guard compares it as a price distance beyond the stop (D-09, D-10, OWNER-OPEN O-2, decided by D085; used by plans 22-13 and 22-14; basis points). It stays an execution-limits key and is not a registry parameter; the owner accepted this deviation from RISK_MANAGEMENT section 9.
+- `margin.max_bracket_age_ms` - the maximum age of the cached leverage-bracket set before the margin guard refuses it as stale (D-11, OWNER-OPEN O-3, decided by D085; used by plans 22-12 and 22-14; milliseconds).
+- `margin.headroom_bps` - the headroom, in basis points of the margin the order needs, that the available balance must keep after the order (D-13, OWNER-OPEN O-3, decided by D085; used by plan 22-14; basis points).
 
 ## Phase 20 notes
 
