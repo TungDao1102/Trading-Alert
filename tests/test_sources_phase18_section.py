@@ -238,10 +238,25 @@ def test_phase18_heading_is_not_the_phase11_heading() -> None:
     assert not heading.startswith(exchange.SOURCES_SECTION_TITLE)
 
 
+# Changed on purpose (Phase 22 plan 22-03, inherited item G3-001): one sentence is appended to the
+# last cell of the Change-Position-Mode row; the row still starts with "Not fetched" and nothing
+# else in the section moved. The pin stays on the original bytes: the sentence is removed first.
+PHASE22_APPENDED_SENTENCE = (
+    ". Phase 22 (inherited item G3-001): the wording (weight 30 for the read, rejection codes "
+    "-4067 and -4068, the one dualSidePosition shared by UM and CM) was re-confirmed on 2026-10-23 "
+    "from the official OpenAPI document, cited from 22-RESEARCH "
+    "(OpenAPI document read 2026-10-23); "
+    "not re-fetched during execution; see the section 'Facts read for Phase 22'. "
+    "The page itself is still not fetched"
+)
+
+
 def test_phase11_section_unchanged() -> None:
     body = _section(_sources_text(), exchange.SOURCES_SECTION_TITLE)
     assert body
-    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == PHASE11_SECTION_SHA256
+    assert body.count(PHASE22_APPENDED_SENTENCE) == 1
+    original = body.replace(PHASE22_APPENDED_SENTENCE, "")
+    assert hashlib.sha256(original.encode("utf-8")).hexdigest() == PHASE11_SECTION_SHA256
 
 
 # --------------------------------------------------------------------------- Task 3
