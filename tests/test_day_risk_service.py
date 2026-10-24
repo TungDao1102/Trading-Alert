@@ -517,17 +517,63 @@ async def test_unreadable_components_block() -> None:
     )
 
 
-async def test_a_failing_latch_write_is_blocked_never_normal_and_the_next_call_latches() -> None:
+async def test_a_failing_latch_write_still_answers_daily_stop_and_the_next_call_latches() -> None:
+    # WR-01: the verdict is risk-reducing (the caller cancels resting entries), so a latch that
+    # cannot be written does not turn it into a state-less NO_TRADE; the next call persists it.
     rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-60", "0"),)}))
     await rig.service.backfill(now_utc=T0)
     rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    first = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert first.state is DailyState.DAILY_STOP
+    assert first.reason_code == RejectionReason.DAILY_STOP_BLOCK.value
+    assert rig.service.last_error_type == "StoreUnavailable"
+    assert stored_day(rig.store).stop_latched_at_utc is None
+    again = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=1), exposure=False)
+    assert again.state is DailyState.DAILY_STOP
+    assert stored_day(rig.store).stop_latched_at_utc == T0  # the first failure time, now stored
+
+
+async def test_an_unpersisted_stop_holds_in_process_when_the_loss_falls() -> None:
+    # WR-01: a stop whose latch write failed must not lapse in the same process when a later
+    # gain lowers the loss below the stop (D-14: sticky for the rest of the UTC day).
+    rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-60", "0"),)}))
+    await rig.service.backfill(now_utc=T0)
+    rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.DAILY_STOP
+    rig.reader.trades["BTCUSDT"] = (trade("-60", "0"), trade("1000", "0", order_id=2, trade_id=2))
+    later = T0 + timedelta(hours=1)
+    await rig.service.backfill(now_utc=later)
+    held = await rig.service.evaluate(now_utc=later, exposure=True)  # latch write fails again
+    assert held.state is DailyState.DAILY_STOP
+    assert held.loss_quote == Decimal("0")
+    assert stored_day(rig.store).stop_latched_at_utc is None
+    final = await rig.service.evaluate(now_utc=later, exposure=True)  # the store is back
+    assert final.state is DailyState.DAILY_STOP
+    assert stored_day(rig.store).stop_latched_at_utc == T0
+
+
+async def test_a_latched_day_with_unreadable_components_still_answers_daily_stop() -> None:
+    # WR-01 (reproduced by the reviewer): the latch held at 10:00; at 10:05 the components read
+    # fails. The answer must stay DAILY_STOP so the caller retries the entry cancels.
+    rig = await _latched_rig()
+    rig.store.raise_next("list_components", StoreUnavailable("down"))
+    verdict = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=5), exposure=True)
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.reason_code == RejectionReason.DAILY_STOP_BLOCK.value
+    assert verdict.loss_quote is None  # the loss is unknown, the latch answers
+    assert not verdict.latch_now
+    assert rig.service.last_error_type == "StoreUnavailable"
+
+
+async def test_an_unlatched_day_with_unreadable_components_still_blocks() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    rig.store.raise_next("list_components", StoreUnavailable("down"))
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
     )
-    assert stored_day(rig.store).stop_latched_at_utc is None
-    again = await rig.service.evaluate(now_utc=T0, exposure=False)
-    assert again.state is DailyState.DAILY_STOP
-    assert stored_day(rig.store).stop_latched_at_utc == T0
 
 
 async def test_two_services_opening_the_same_day_keep_the_first_stored_base() -> None:

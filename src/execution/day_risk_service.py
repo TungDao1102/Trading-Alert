@@ -28,9 +28,12 @@ Rules this module keeps:
   sleep, no default), and the generation is bumped by the stream path of plan 21-16
   (ACCOUNT_UPDATE, stream gaps, unusable fills), which makes the loss unknown again until the
   next backfill. ``_backfill_generation`` is that private counter.
-* D-14, the latch. A newly derived DAILY_STOP is persisted (``latch_stop``) BEFORE the verdict is
+* D-14, the latch. A newly derived DAILY_STOP is persisted (``latch_stop``) before the verdict is
   returned; a held latch stays DAILY_STOP for the rest of the UTC day, also after a restart and
-  whatever the loss does. A WARNING alert is stamped once per day (``mark_warning_alerted``).
+  whatever the loss does. If the write fails the verdict is still DAILY_STOP (it only reduces
+  risk: the caller cancels resting entries) and the stop is held in process and re-written on
+  the next call (WR-01); a held latch also answers DAILY_STOP when the components cannot be
+  read. A WARNING alert is stamped once per day (``mark_warning_alerted``).
 * Fail closed. Any store, reader or equity failure gives a blocked verdict (NO_TRADE,
   UNCERTAIN_ACCOUNT_STATE with a blocked reason), never a default loss or a fresh day. Only the
   exception TYPE name is kept (``last_error_type``), never a message.
@@ -245,6 +248,8 @@ class LiveDayRiskService:
         self._last_error_type: str | None = None
         # Days opened by ``evaluate``; ``current_daily_loss_quote`` answers only for these.
         self._evaluated_days: set[date] = set()
+        # Days whose newly derived DAILY_STOP could not be written (WR-01): day -> first stamp.
+        self._unpersisted_stops: dict[date, datetime] = {}
 
     @property
     def last_error_type(self) -> str | None:
@@ -416,20 +421,32 @@ class LiveDayRiskService:
     # ------------------------------------------------------------------ evaluate
 
     async def evaluate(self, *, now_utc: datetime, exposure: bool | None) -> DayStateVerdict:
-        """The day's verdict: persisted latch first, then thresholds against the day-start base."""
+        """The day's verdict: persisted latch first, then thresholds against the day-start base.
+
+        A held latch answers DAILY_STOP whatever else fails (WR-01): an unreadable components
+        read leaves the loss unknown but keeps the stop, and a stop whose latch write failed
+        still answers DAILY_STOP (risk-reducing: the caller cancels resting entries) and is held
+        in process until the write succeeds.
+        """
         opened = await self.ensure_day(now_utc=now_utc, exposure=exposure)
         if isinstance(opened, DayStateVerdict):
             return opened
         day = opened.utc_day
         self._evaluated_days.add(day)
+        opened = self._apply_unpersisted_stop(opened)
+        latched = opened.stop_latched_at_utc is not None
+        stored_components: tuple[LossComponent, ...] | None
         try:
             stored_components = tuple(self._store.list_components(day))
         except Exception as exc:  # noqa: BLE001 - unreadable components are an unknown loss
-            return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
-        known = self._backfill_is_current(day)
+            if not latched:
+                return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
+            self._last_error_type = type(exc).__name__
+            stored_components = None  # the held latch still answers DAILY_STOP below
+        known = stored_components is not None and self._backfill_is_current(day)
         try:
             loss = fold_daily_loss(
-                components=stored_components,
+                components=stored_components or (),
                 utc_day=day,
                 quote_asset=self._quote_asset,
                 trades_complete=known,
@@ -452,8 +469,11 @@ class LiveDayRiskService:
         if verdict.latch_now:
             try:
                 self._store.latch_stop(utc_day=day, at_utc=now_utc)
-            except Exception as exc:  # noqa: BLE001 - never act on a stop that is not persisted
-                return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
+            except Exception as exc:  # noqa: BLE001 - the stop is kept, the write is retried
+                # WR-01: the verdict stays DAILY_STOP (the caller cancels resting entries, which
+                # only reduces risk) and the stop is held in process until the write succeeds.
+                self._last_error_type = type(exc).__name__
+                self._unpersisted_stops[day] = now_utc
         if DailyState.WARNING in verdict.alerts_due:
             try:
                 self._store.mark_warning_alerted(utc_day=day, at_utc=now_utc)
@@ -462,6 +482,22 @@ class LiveDayRiskService:
                 remaining = tuple(a for a in verdict.alerts_due if a is not DailyState.WARNING)
                 verdict = dataclasses.replace(verdict, alerts_due=remaining)
         return verdict
+
+    def _apply_unpersisted_stop(self, opened: DayRiskState) -> DayRiskState:
+        """Re-try a latch write that failed earlier; hold the stop in process meanwhile (WR-01)."""
+        stamp = self._unpersisted_stops.get(opened.utc_day)
+        if stamp is None:
+            return opened
+        if opened.stop_latched_at_utc is not None:
+            del self._unpersisted_stops[opened.utc_day]
+            return opened
+        try:
+            self._store.latch_stop(utc_day=opened.utc_day, at_utc=stamp)
+        except Exception as exc:  # noqa: BLE001 - still unpersisted, still a stop
+            self._last_error_type = type(exc).__name__
+        else:
+            del self._unpersisted_stops[opened.utc_day]
+        return dataclasses.replace(opened, stop_latched_at_utc=stamp)
 
     def _backfill_is_current(self, day: date) -> bool:
         """True when both completeness marks belong to ``day`` and the current generation."""
