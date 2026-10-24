@@ -46,7 +46,23 @@ EXPECTED_UNSET = (
 # set it on 2026-10-23 (DECISIONS D084, 15000 ms), so the committed file no longer leaves it unset.
 EQUITY_AGE_KEY = "account.max_equity_age_ms"
 EQUITY_AGE_DECIDED_MS = 15000
-ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY)
+# Phase 22 (plan 22-02; D-10, D-11, D-13, amendment A4): the three margin keys, REQUIRED and
+# NOT_CONFIGURED (OWNER-OPEN O-2, O-3). The section is the last one, after `account`.
+MARGIN_KEYS = (
+    "margin.liquidation_buffer_bps",
+    "margin.max_bracket_age_ms",
+    "margin.headroom_bps",
+)
+MARGIN_FIELDS = {
+    "margin.liquidation_buffer_bps": "margin_liquidation_buffer_bps",
+    "margin.max_bracket_age_ms": "margin_max_bracket_age_ms",
+    "margin.headroom_bps": "margin_headroom_bps",
+}
+# The keys the committed file leaves unset, in file order: the fourteen of Phases 19 and 20, then
+# the three margin keys (the equity age between them is set, DECISIONS D084).
+COMMITTED_UNSET = (*EXPECTED_UNSET, *MARGIN_KEYS)
+# Every required key in file order, the equity age included.
+ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, *MARGIN_KEYS)
 
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
 # "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
@@ -82,8 +98,10 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.max_mark_price_age_ms is None
     assert limits.max_last_price_age_ms is None
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS
-    assert limits.unset_keys() == EXPECTED_UNSET
+    assert limits.unset_keys() == COMMITTED_UNSET
     for field_name in PHASE20_FIELDS.values():
+        assert getattr(limits, field_name) is None, field_name
+    for field_name in MARGIN_FIELDS.values():
         assert getattr(limits, field_name) is None, field_name
 
 
@@ -92,18 +110,18 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
     try:
         limits.require_live_ready()
     except el.ExecutionLimitsNotConfigured as exc:
-        assert exc.keys == EXPECTED_UNSET
+        assert exc.keys == COMMITTED_UNSET
         message = str(exc)
-        for key in EXPECTED_UNSET:
+        for key in COMMITTED_UNSET:
             assert key in message
         assert str(ROOT) not in message
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
         assert "reconcile.tick_interval_ms" in message
-        # The fourteen dotted names still unset come in file order: protection, pre_placement,
-        # reconcile, stale_feed, alerts (account.max_equity_age_ms was set by D084).
+        # The seventeen dotted names still unset come in file order: protection, pre_placement,
+        # reconcile, stale_feed, alerts, then margin (account.max_equity_age_ms was set by D084).
         assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
-            EXPECTED_UNSET
+            COMMITTED_UNSET
         )
     else:  # pragma: no cover - the assertion above must run
         raise AssertionError("require_live_ready did not refuse")
@@ -126,6 +144,9 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.stale_feed_max_user_data_silence_ms == 11
     assert limits.alerts_dedupe_window_ms == 10
     assert limits.account_max_equity_age_ms == 10
+    assert limits.margin_liquidation_buffer_bps == 10
+    assert limits.margin_max_bracket_age_ms == 11
+    assert limits.margin_headroom_bps == 12
     assert limits.unset_keys() == ()
     assert limits.require_live_ready() is None
 
@@ -379,6 +400,9 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         alerts_dedupe_window_ms=None,
         reconcile_entry_stale_grace_ms=None,
         account_max_equity_age_ms=None,
+        margin_liquidation_buffer_bps=None,
+        margin_max_bracket_age_ms=None,
+        margin_headroom_bps=None,
     )
     assert limits.unset_keys() == ALL_REQUIRED_KEYS
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
@@ -428,11 +452,12 @@ def test_the_committed_file_names_only_not_configured_except_the_equity_age() ->
     numeric = re.findall(r"^\s*([a-z_]+)\s*=\s*[-+]?\d+", text, flags=re.MULTILINE)
     assert numeric == ["max_equity_age_ms"]
     assert f"max_equity_age_ms = {EQUITY_AGE_DECIDED_MS}\n" in text
-    # Sixteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
+    # Nineteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
     # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys, plan
-    # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms).
-    # The equity age has a number and the label DECISION since D084: 32 minus 2.
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
+    # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms,
+    # plan 22-02 the three margin keys). The equity age has a number and the label DECISION since
+    # D084: 38 minus 2 = 36.
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 36
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -462,7 +487,7 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     for section, count in _PHASE20_SECTIONS.items():
         assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    # The fifteen required keys plus the alert-only key of plan 20-28, in file order.
+    # The eighteen required keys plus the alert-only key of plan 20-28, in file order.
     assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(ALL_REQUIRED_KEYS)
     assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
@@ -695,19 +720,19 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     limits = el.load_execution_limits(LIMITS_FILE)
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS  # DECISIONS D084
     assert _ACCOUNT_KEY not in limits.unset_keys()
-    assert limits.unset_keys() == EXPECTED_UNSET
-    assert len(limits.unset_keys()) == 14
+    assert limits.unset_keys() == COMMITTED_UNSET
+    assert len(limits.unset_keys()) == 17
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
-    # Setting this one key does not open the live path: fourteen required keys stay unset.
+    # Setting this one key does not open the live path: seventeen required keys stay unset.
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
     assert _ACCOUNT_KEY not in info.value.keys
     assert not any(character.isdigit() for character in str(info.value))
 
 
-def test_the_account_section_is_the_last_section_and_has_the_prefixed_field() -> None:
-    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "account"
+def test_the_account_section_precedes_margin_and_has_the_prefixed_field() -> None:
+    assert list(el.EXECUTION_LIMIT_KEYS)[-2:] == ["account", "margin"]
     assert el.EXECUTION_LIMIT_KEYS["account"] == ("max_equity_age_ms",)
     assert el.EXECUTION_LIMIT_FIELDS[_ACCOUNT_KEY] == _ACCOUNT_FIELD
     assert _ACCOUNT_FIELD in el.ExecutionLimits.__dataclass_fields__
@@ -770,3 +795,136 @@ def test_the_account_test_only_value_is_set_and_may_be_unset_by_override() -> No
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         unset.require_live_ready()
     assert info.value.keys == (_ACCOUNT_KEY,)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 22-02 (D-10, D-11, D-13, amendment A4; OWNER-OPEN O-2, O-3): the margin section, three
+# REQUIRED keys, positive integers only (basis points and milliseconds), NOT_CONFIGURED.
+# --------------------------------------------------------------------------- #
+
+_MARGIN_KEYS_UNDER_TEST = MARGIN_KEYS
+
+
+def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fields() -> None:
+    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "margin"
+    assert el.EXECUTION_LIMIT_KEYS["margin"] == (
+        "liquidation_buffer_bps",
+        "max_bracket_age_ms",
+        "headroom_bps",
+    )
+    for dotted, field_name in MARGIN_FIELDS.items():
+        assert el.EXECUTION_LIMIT_FIELDS[dotted] == field_name, dotted
+        assert field_name in el.ExecutionLimits.__dataclass_fields__, field_name
+    dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
+    assert len(dotted_keys) == 19
+    assert dotted_keys[-3:] == list(MARGIN_KEYS)
+
+
+def test_the_margin_keys_are_required_not_alert_only() -> None:
+    for dotted in MARGIN_KEYS:
+        assert dotted not in el.ALERT_ONLY_LIMIT_KEYS, dotted
+    assert len(ALL_REQUIRED_KEYS) == 18
+
+
+def test_the_committed_file_holds_the_margin_keys_unset_with_the_not_configured_label() -> None:
+    import tomllib
+
+    document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
+    for key in el.EXECUTION_LIMIT_KEYS["margin"]:
+        assert document["margin"][key] == el.NOT_CONFIGURED_WORD, key
+        assert document["provenance"]["margin"][key] == el.NOT_CONFIGURED_WORD, key
+    limits = el.load_execution_limits(LIMITS_FILE)
+    assert limits.unset_keys()[-3:] == MARGIN_KEYS
+    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
+
+
+def test_require_live_ready_names_the_three_margin_keys_and_no_digit() -> None:
+    limits = el.load_execution_limits(LIMITS_FILE)
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        limits.require_live_ready()
+    for dotted in MARGIN_KEYS:
+        assert dotted in info.value.keys
+        assert dotted in str(info.value)
+    assert not any(character.isdigit() for character in str(info.value))
+
+
+def _margin_document(**values: Any) -> dict[str, Any]:
+    """A valid all-set document whose margin values come from literals (5, 6, 7)."""
+    document = _document()
+    for offset, key in enumerate(el.EXECUTION_LIMIT_KEYS["margin"]):
+        document["margin"][key] = values.get(key, 5 + offset)
+        document["provenance"]["margin"][key] = "DECISION"
+    return document
+
+
+def test_a_set_margin_section_loads_into_its_prefixed_fields() -> None:
+    limits = el.parse_execution_limits(_margin_document())
+    assert limits.margin_liquidation_buffer_bps == 5
+    assert limits.margin_max_bracket_age_ms == 6
+    assert limits.margin_headroom_bps == 7
+    assert limits.unset_keys() == ()
+    assert limits.require_live_ready() is None
+
+
+def test_a_document_without_the_margin_section_is_refused_naming_its_keys() -> None:
+    document = _margin_document()
+    del document["margin"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    message = str(info.value)
+    for dotted in MARGIN_KEYS:
+        assert dotted in message
+
+
+def test_a_margin_section_without_provenance_is_refused_naming_its_keys() -> None:
+    document = _margin_document()
+    del document["provenance"]["margin"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    message = str(info.value)
+    for dotted in MARGIN_KEYS:
+        assert dotted in message
+        assert "missing provenance label" in message
+
+
+def test_an_unknown_key_in_the_margin_section_is_refused() -> None:
+    document = _margin_document()
+    document["margin"]["surprise_bps"] = 5
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert "margin.surprise_bps" in str(info.value)
+
+
+@pytest.mark.parametrize("dotted", _MARGIN_KEYS_UNDER_TEST)
+@pytest.mark.parametrize(
+    ("mutate", "value_text"),
+    [pytest.param(m, v, id=case) for case, m, v in _PHASE20_REFUSALS],
+)
+def test_every_malformed_margin_entry_is_refused_by_name(
+    dotted: str, mutate: Any, value_text: str
+) -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(mutate(_margin_document(), dotted))
+    message = str(info.value)
+    assert dotted in message
+    if value_text:
+        assert value_text not in message
+
+
+def test_the_margin_test_only_values_are_the_fixed_fake_numbers() -> None:
+    values = tl.TEST_ONLY_EXECUTION_LIMIT_VALUES
+    assert values["margin.liquidation_buffer_bps"] == 137
+    assert values["margin.max_bracket_age_ms"] == 4141
+    assert values["margin.headroom_bps"] == 233
+    limits = tl.test_only_execution_limits()
+    for dotted, field_name in MARGIN_FIELDS.items():
+        assert getattr(limits, field_name) == values[dotted], dotted
+
+
+@pytest.mark.parametrize("dotted", MARGIN_KEYS)
+def test_overriding_one_margin_field_with_none_leaves_exactly_that_key_unset(dotted: str) -> None:
+    unset = tl.test_only_execution_limits(**{MARGIN_FIELDS[dotted]: None})
+    assert unset.unset_keys() == (dotted,)
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        unset.require_live_ready()
+    assert info.value.keys == (dotted,)

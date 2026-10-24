@@ -53,6 +53,11 @@ dedupe_window_ms = "NOT_CONFIGURED"
 [account]
 max_equity_age_ms = 15000
 
+[margin]
+liquidation_buffer_bps = "NOT_CONFIGURED"
+max_bracket_age_ms = "NOT_CONFIGURED"
+headroom_bps = "NOT_CONFIGURED"
+
 [provenance.protection]
 max_unprotected_ms = "NOT_CONFIGURED"
 entry_terminal_timeout_ms = "NOT_CONFIGURED"
@@ -80,3 +85,8 @@ dedupe_window_ms = "NOT_CONFIGURED"
 
 [provenance.account]
 max_equity_age_ms = "DECISION"
+
+[provenance.margin]
+liquidation_buffer_bps = "NOT_CONFIGURED"
+max_bracket_age_ms = "NOT_CONFIGURED"
+headroom_bps = "NOT_CONFIGURED"

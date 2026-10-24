@@ -1,10 +1,11 @@
 """The Phase 19 execution limits and their fail-closed loader (plan 19-01; D-07, D-13).
 
-No number lives in this module. The fifteen required safety numbers the owner has not chosen yet
-(seven of Phase 19, seven of Phase 20, one of Phase 21) are optional fields of a frozen dataclass
-that default to nothing: they reach the process only through
-``config/execution/execution-limits-v1.toml``, where each value is the word ``NOT_CONFIGURED``
-until the owner sets it (OWNER-OPEN O-04). While any field is ``None`` the live path refuses:
+No number lives in this module. The eighteen required safety keys (seven of Phase 19, seven of
+Phase 20, one of Phase 21, three of Phase 22; seventeen of them still without a number the owner
+has chosen) are optional fields of a frozen dataclass that default to nothing: they reach the
+process only through ``config/execution/execution-limits-v1.toml``, where each value is the word
+``NOT_CONFIGURED`` until the owner sets it (OWNER-OPEN O-04). While any field is ``None`` the
+live path refuses:
 ``ExecutionLimits.require_live_ready`` raises ``ExecutionLimitsNotConfigured`` naming the unset
 keys. One further key (plan 20-28,
 ``reconcile.entry_stale_grace_ms``) only switches an alert on: it is an ALERT-ONLY key, loaded and
@@ -18,8 +19,9 @@ by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended
 The file format (``config/execution/README.md``):
 
 * exactly the sections ``protection``, ``pre_placement``, ``reconcile``, ``stale_feed``,
-  ``alerts``, ``account`` and ``provenance`` (plan 20-01 adds ``reconcile``, ``stale_feed`` and
-  ``alerts``, D-25; plan 21-02 adds ``account``, D-03);
+  ``alerts``, ``account``, ``margin`` and ``provenance`` (plan 20-01 adds ``reconcile``,
+  ``stale_feed`` and ``alerts``, D-25; plan 21-02 adds ``account``, D-03; plan 22-02 adds
+  ``margin``, D-10, D-11, D-13);
 * exactly the keys of ``EXECUTION_LIMIT_KEYS``; a missing or unknown key refuses to load;
 * each value is a positive integer (not a boolean, not a float, not zero) or exactly the
   string ``NOT_CONFIGURED`` (read as ``None``);
@@ -65,6 +67,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "stale_feed": ("max_mark_price_age_ms", "max_user_data_silence_ms"),
         "alerts": ("dedupe_window_ms",),
         "account": ("max_equity_age_ms",),
+        "margin": ("liquidation_buffer_bps", "max_bracket_age_ms", "headroom_bps"),
     }
 )
 
@@ -73,7 +76,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
 # ``limits.max_unprotected_ms`` and so on). Every Phase 20 key is ``<section>_<key>``, because
 # ``stale_feed.max_mark_price_age_ms`` shares its key text with
 # ``pre_placement.max_mark_price_age_ms`` (plan 20-01; D-25, T-H). The Phase 21 key follows the same
-# ``<section>_<key>`` rule (plan 21-02; D-03).
+# ``<section>_<key>`` rule (plan 21-02; D-03), and so do the three Phase 22 keys (plan 22-02).
 EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
     {
         "protection.max_unprotected_ms": "max_unprotected_ms",
@@ -92,6 +95,9 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
         "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
         "account.max_equity_age_ms": "account_max_equity_age_ms",
+        "margin.liquidation_buffer_bps": "margin_liquidation_buffer_bps",
+        "margin.max_bracket_age_ms": "margin_max_bracket_age_ms",
+        "margin.headroom_bps": "margin_headroom_bps",
     }
 )
 
@@ -141,7 +147,7 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The sixteen owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
+    """The nineteen owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
@@ -181,6 +187,16 @@ class ExecutionLimits:
     only over-estimated; an age greater than this value, or negative, is stale (NO_TRADE
     UNCERTAIN_ACCOUNT_STATE), and an age exactly equal to it passes. It is a REQUIRED key: it is
     not in ``ALERT_ONLY_LIMIT_KEYS``, so while it is unset the live path refuses.
+    ``margin_liquidation_buffer_bps`` (plan 22-02, D-09, D-10, OWNER-OPEN O-2): the liquidation
+    buffer, in basis points of the ENTRY price; the margin guard compares it as a price distance
+    beyond the stop. ``margin_max_bracket_age_ms`` (plan 22-02, D-11, OWNER-OPEN O-3): the
+    maximum age, in milliseconds, of the cached leverage-bracket set. ``margin_headroom_bps``
+    (plan 22-02, D-13, OWNER-OPEN O-3): the headroom, in basis points of the margin the order
+    needs, that the available balance must keep. All three are positive integers only
+    (amendment A4), REQUIRED (not in ``ALERT_ONLY_LIMIT_KEYS``) and NOT_CONFIGURED until the
+    owner decides: no number is chosen here, and the consumers (plans 22-12, 22-13 and 22-14)
+    read them from a loaded object. With the three margin keys the file holds nineteen keys,
+    eighteen required and one alert-only.
     """
 
     max_unprotected_ms: int | None
@@ -199,6 +215,9 @@ class ExecutionLimits:
     alerts_dedupe_window_ms: int | None
     reconcile_entry_stale_grace_ms: int | None
     account_max_equity_age_ms: int | None
+    margin_liquidation_buffer_bps: int | None
+    margin_max_bracket_age_ms: int | None
+    margin_headroom_bps: int | None
 
     def _unset(self, *, alert_only: bool) -> tuple[str, ...]:
         return tuple(

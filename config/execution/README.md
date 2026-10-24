@@ -1,10 +1,11 @@
 # Execution protection, pre-placement and reconcile limits
 
-This directory holds the sixteen safety limits of the execution path that the owner has not
-chosen yet, fifteen required and one alert-only: the seven of Phase 19 (D-07, D-13, the owner's
+This directory holds the nineteen safety limits of the execution path, eighteen required and one
+alert-only (the owner has chosen the number of one of them, the equity age of Phase 21): the seven of Phase 19 (D-07, D-13, the owner's
 19-REVIEW WR-05 and WR-03 decisions and the last-price check of quick task 261020-l4p), the eight
 of Phase 20 (plan 20-01; D-25, D-11, D-21, D-23, T-H; plan 20-28 added the alert-only
-`reconcile.entry_stale_grace_ms`) and the one of Phase 21 (plan 21-02; D-03). The values file
+`reconcile.entry_stale_grace_ms`) the one of Phase 21 (plan 21-02; D-03) and the three of Phase 22 (plan 22-02; D-10, D-11, D-13).
+The values file
 `execution-limits-v1.toml` holds only the word `NOT_CONFIGURED` for every key until the owner fills the numbers in, after the Demo probes
 listed in `19-NOTES.md` (OWNER-OPEN O-04 and O-05).
 **This README lists the required keys and what they mean. It carries no value, and the code
@@ -12,7 +13,7 @@ carries no default for any of them.** `tests/test_no_unratified_defaults.py` sca
 `scripts/` so that no key name below is ever given a number in code.
 
 The loader is `load_execution_limits(path)` in `src/execution/execution_limits.py`. It returns
-an `ExecutionLimits` whose sixteen fields are `None` while the file says `NOT_CONFIGURED`.
+an `ExecutionLimits` whose nineteen fields are `None` while the file says `NOT_CONFIGURED`.
 `ExecutionLimits.require_live_ready()` raises `ExecutionLimitsNotConfigured` naming the unset
 keys, so the live path refuses while any key is `NOT_CONFIGURED` (the manager gate and the
 coordinator check that call it are wired by later Phase 19 plans). The loader refuses to load,
@@ -24,21 +25,21 @@ only, never a value or a path.
 ## Separation from the Binance limits file
 
 `config/binance/binance-limits-v1.toml` is ratified and pinned by sha256 in the DECISIONS row
-of Phase 18, and its loader and README tests demand exactly the keys of that file. The sixteen keys
+of Phase 18, and its loader and README tests demand exactly the keys of that file. The nineteen keys
 here therefore live in a separate file with a separate loader; the Binance file and its README
 are not edited.
 
 ## File format
 
 - Exactly the sections `[protection]`, `[pre_placement]`, `[reconcile]`, `[stale_feed]`,
-  `[alerts]`, `[account]` and `[provenance]`.
-- Exactly the sixteen keys below, each written once; nothing else is accepted.
+  `[alerts]`, `[account]`, `[margin]` and `[provenance]`.
+- Exactly the nineteen keys below, each written once; nothing else is accepted.
 - Every value is a TOML integer that is not a boolean, strictly positive (a float, a boolean,
   zero or a negative number is refused), or exactly the TOML string `"NOT_CONFIGURED"`, which
   loads as `None` and means "the owner has not chosen yet". No other string is accepted.
 - The `ExecutionLimits` field of a Phase 19 key is the key text (`max_unprotected_ms`); the field
-  of a Phase 20 or Phase 21 key is `<section>_<key>` (`reconcile_tick_interval_ms`,
-  `account_max_equity_age_ms`), because
+  of a Phase 20, Phase 21 or Phase 22 key is `<section>_<key>` (`reconcile_tick_interval_ms`,
+  `account_max_equity_age_ms`, `margin_headroom_bps`), because
   `stale_feed.max_mark_price_age_ms` shares its key text with `pre_placement.max_mark_price_age_ms`.
   `EXECUTION_LIMIT_FIELDS` in the loader is the only place that mapping lives.
 - The key `entry_terminal_timeout_ms` carries the `_ms` suffix for unit clarity; D-13 names the
@@ -90,17 +91,25 @@ One key per line, so the checks of plan 19-01 can parse the list.
 
 ### `[account]` (Phase 21, D-03; F-012)
 
-- `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the other fourteen required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). The owner set 15000 on 2026-10-23 (DECISIONS D084, provenance `DECISION`); the code carries no default.
+- `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the other required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). The owner set 15000 on 2026-10-23 (DECISIONS D084, provenance `DECISION`); the code carries no default.
+
+### `[margin]` (Phase 22; D-10, D-11, D-13, amendment A4; OWNER-OPEN O-2, O-3)
+
+All three keys are REQUIRED (they keep the live path refused while they are `NOT_CONFIGURED`), are positive integers only (basis points and milliseconds) and are `NOT_CONFIGURED` until the owner decides. The code carries no default for any of them, and the limits gate of the manager refuses every placement before the margin guard can run while one is unset.
+
+- `margin.liquidation_buffer_bps` - the liquidation buffer, in basis points of the entry price; the margin guard compares it as a price distance beyond the stop (D-09, D-10, OWNER-OPEN O-2; used by plans 22-13 and 22-14; basis points).
+- `margin.max_bracket_age_ms` - the maximum age of the cached leverage-bracket set before the margin guard refuses it as stale (D-11, OWNER-OPEN O-3; used by plans 22-12 and 22-14; milliseconds).
+- `margin.headroom_bps` - the headroom, in basis points of the margin the order needs, that the available balance must keep after the order (D-13, OWNER-OPEN O-3; used by plan 22-14; basis points).
 
 ## Phase 20 notes
 
-Of the sixteen keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
+Of the nineteen keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
 `require_live_ready()` leave it out (`ALERT_ONLY_LIMIT_KEYS` in the loader), so the sentence below
-about the live path refusing covers the fifteen required keys, `account.max_equity_age_ms`
-(Phase 21, D-03) among them.
+about the live path refusing covers the eighteen required keys, `account.max_equity_age_ms`
+(Phase 21, D-03) among them and the three `margin` keys (Phase 22) too.
 
 `stale_feed.max_user_data_silence_ms` is not the paper runtime's `max_ws_message_silence_seconds`
 (`src/paper/coverage.py`); the two are separate keys in separate files and neither reads the other.
-A value for any of the sixteen keys is the owner's number (OWNER-OPEN O-04, decision O-G): setting
+A value for any of the nineteen keys is the owner's number (OWNER-OPEN O-04, decision O-G): setting
 one needs a DECISIONS row and the provenance label `DECISION`. Until then each stays
 `NOT_CONFIGURED` and the live path refuses, naming the key.
