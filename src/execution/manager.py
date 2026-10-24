@@ -33,6 +33,15 @@ force and the entry is never re-sent; the coordinator protects a fill if the ent
 exist. O-01 stays open: this module does not enable live orders; LIVE stays
 blocked until the owner accepts the D055 closure draft and runs the Demo probes.
 
+Phase 22 (plan 22-15): gate 5f2 calls the pre-entry margin guard (`live_context.margin_guard`,
+`src/execution/margin_guard.py`) after the position mode and BEFORE the hand-off record and the
+consume, so a refusal leaves no ENTRY intent row and the approval can be retried (amendment A7).
+A pass supplies the exchange-verified margin type, leverage and equity, which replace the
+in-memory plan constraint snapshot handed to the protection coordinator (amendment A8; the
+persisted write-once snapshot row is untouched). A configuration POST the guard sent is journaled
+as MARGIN_CONFIG_CHANGED and an unverifiable configuration raises one DIVERGENCE alert, both best
+effort (amendment A9). The guard is reached only after the enablement, limits and SAFE_MODE gates.
+
 Phase 17 (D-13/D-14): the approval is consumed durably by writing the ENTRY execution intent
 BEFORE `place_entry` runs, through the `ExecutionIntentStore` Protocol (the STOP_LOSS intent of
 F-703 is now written by the coordinator before its own `place_algo_protective`). A replayed
@@ -96,6 +105,7 @@ from src.execution.constraint_snapshot import snapshot_is_valid_for_live
 from src.execution.intent_store import ExecutionIntentStore, IntentRecord
 from src.execution.live_context import LivePlacementContext
 from src.execution.lot_split import lot_filters_from_plan_snapshot
+from src.execution.margin_guard import MarginGuardRequest, MarginGuardVerdict
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.placement import (
     ProtectiveTemplate,
@@ -257,6 +267,10 @@ def resolve_position_mode(result: Any) -> str:
 # fixed reasons (a stored-outcome replay, and losing the consume race).
 ALERT_DUPLICATE_EXECUTION_ATTEMPT = "DUPLICATE_EXECUTION_ATTEMPT"
 ALERT_MANUAL_CLOSE_ORPHAN_UNVERIFIED = "MANUAL_CLOSE_ORPHAN_UNVERIFIED"
+# Phase 22 (plan 22-15, amendment A9): an existing OPS-05 event, raised when the margin guard could
+# not verify the symbol configuration; the journal event of a configuration the guard changed.
+ALERT_DIVERGENCE = "DIVERGENCE"
+EVENT_MARGIN_CONFIG_CHANGED = "MARGIN_CONFIG_CHANGED"
 _DUPLICATE_STORED_OUTCOME_REPLAY = "STORED_OUTCOME_REPLAY"
 _DUPLICATE_CONSUME_RACE_LOST = "CONSUME_RACE_LOST"
 
@@ -538,6 +552,11 @@ async def execute_approved_plan(
           D-11).
       5f. Position mode (D-02, D-14): an unreadable mode is UNCERTAIN_ACCOUNT_STATE and a
           Hedge account is HEDGE_MODE_UNSUPPORTED, both before anything is consumed.
+      5f2. Margin guard (Phase 22, D-05, D-15, amendments A7, A8): `live_context.margin_guard`
+          verifies ISOLATED margin and the leverage, the liquidation distance and the available
+          margin for exactly the order that will be sent. A NO_TRADE verdict returns its code
+          (a guard that raises, or a request that cannot be built, is UNCERTAIN_ACCOUNT_STATE),
+          before anything is consumed. A pass completes the in-memory plan snapshot.
       7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
          protection registry (plan 19-15, D-10). No protective order is placed here: the stop
          is placed after the first fill by `src/execution/protection.py`.
@@ -973,11 +992,78 @@ async def execute_approved_plan(
         return ExecutionOutcome(is_no_trade=True, reason_code=position_mode_reason)
     order_position_side = "BOTH"  # One-way is the only supported mode past gate 5f.
 
+    # Gate 5f2 (Phase 22, plan 22-15; D-05, D-15, amendments A7, A8, A9): the margin guard. It sits
+    # after gates 2, 2b and 3 (it may POST an account configuration, so it is never reached while
+    # live placement is disabled, a limit is unset or SAFE_MODE is on) and after the position mode,
+    # and BEFORE the hand-off record and the consume: a refusal costs nothing and the approval can
+    # be retried. The request carries exactly what will be placed. Any failure to build the
+    # request, to call the guard or to read its answer is NO_TRADE (fail closed); a BaseException
+    # such as a cancellation propagates.
+    try:
+        guard_mark_price = _mark_price_of(mark_reading)
+        if guard_mark_price is None:
+            raise ValueError("the gate 5e mark price is not usable")
+        guard_request = MarginGuardRequest(
+            trade_plan_id=trade_plan.trade_plan_id,
+            symbol=bound.symbol,
+            side=bound.side,
+            quantity=quantity,
+            limit_price=limit_price,
+            stop_price=sl_trigger_price,
+            mark_price=guard_mark_price,
+            fee_rate_entry=cost_rates.fee_rate_entry,
+            fee_rate_exit=cost_rates.fee_rate_exit,
+            symbol_is_flat=_symbol_is_flat(
+                bound.symbol,
+                _position_symbols(
+                    bound.symbol,
+                    positions,
+                    frozenset(p.symbol for p in risk_kwargs["open_positions"]),
+                ),
+                _open_order_symbols(bound.symbol, (normal_orders, algo_orders)),
+            ),
+        )
+        guard_verdict = await live_context.margin_guard.evaluate(guard_request)
+        if not isinstance(guard_verdict, MarginGuardVerdict):
+            raise TypeError("margin guard answered something that is not a verdict")
+    except Exception:  # noqa: BLE001 — an unusable guard is a refusal, never a pass
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
+        )
+    if guard_verdict.config_changed:
+        _journal_margin_config_changed(
+            journal,
+            trade_plan=trade_plan,
+            symbol=bound.symbol,
+            verdict=guard_verdict,
+            now_utc=now_utc,
+        )
+    if guard_verdict.alert_reason is not None:
+        _alert_margin_divergence(
+            live_context,
+            symbol=bound.symbol,
+            plan_hash=trade_plan.plan_hash,
+            reason=guard_verdict.alert_reason,
+            now_utc=now_utc,
+        )
+    if guard_verdict.is_no_trade:
+        return ExecutionOutcome(is_no_trade=True, reason_code=guard_verdict.reason_code)
+
     # Gate 5g (plan 19-15, D-10): build the hand-off record BEFORE anything is consumed or sent.
     # A plan the protection coordinator would refuse by construction (for example a TP1 share of
     # the whole position) must not reach the exchange only to be cancelled afterwards. Pure: no
     # adapter call, nothing consumed.
     try:
+        # Amendment A8 (D-05, G4-039): the margin type, leverage and equity the exchange verified
+        # complete the IN-MEMORY snapshot handed to protection; the persisted write-once row and
+        # `live_context.plan_constraint_snapshot` itself are not touched. An invalid verified value
+        # is PROTECTION_INPUTS_INVALID below.
+        verified_snapshot = replace(
+            live_context.plan_constraint_snapshot,
+            margin_type=guard_verdict.margin_type,
+            leverage=guard_verdict.leverage,
+            equity_used=guard_verdict.equity_used,
+        )
         good_till_ms = good_till_date_ms(trade_plan.expiry_utc)
         resting_entry = RestingEntry(
             approval_id=approval.approval_id,
@@ -995,7 +1081,7 @@ async def execute_approved_plan(
             tp1_quantity_fraction=live_context.tp1_quantity_fraction,
             working_type=live_context.plan_constraint_snapshot.working_type,
             position_mode=position_mode,
-            plan_constraint_snapshot=live_context.plan_constraint_snapshot,
+            plan_constraint_snapshot=verified_snapshot,
             snapshot_ttl=risk_kwargs["ttl"],
             registered_at_utc=now_utc,
             # The `goodTillDate` the entry is sent with (19-REVIEW WR-05: the coordinator measures
@@ -1350,6 +1436,96 @@ def _position_symbols(symbol: str, rows: Any, reconciled: frozenset[str]) -> fro
         row_symbol = _get_attr_or_key(row, "symbol")
         symbols.add(row_symbol if isinstance(row_symbol, str) and row_symbol else symbol)
     return frozenset(symbols)
+
+
+def _symbol_is_flat(
+    symbol: str,
+    position_symbols: frozenset[str] | None,
+    open_order_symbols: frozenset[str] | None,
+) -> bool:
+    """True only when both gate 5e reads were usable and `symbol` has no position or order."""
+    if position_symbols is None or open_order_symbols is None:
+        return False
+    return symbol not in position_symbols and symbol not in open_order_symbols
+
+
+def _journal_margin_config_changed(
+    journal: Any,
+    *,
+    trade_plan: Any,
+    symbol: str,
+    verdict: MarginGuardVerdict,
+    now_utc: datetime,
+) -> None:
+    """Journal that the guard SENT a margin configuration POST (Pitfall 9). Best-effort.
+
+    Evidence only, never an automatic restore: the payload names the symbol, the trade plan and
+    the previous and the verified margin type and leverage (configuration words and numbers; no
+    balance, no equity, no exception text). A journal that raises never changes the outcome.
+    """
+    try:
+        body = json.dumps(
+            {
+                "previous_leverage": verdict.previous_leverage,
+                "previous_margin_type": verdict.previous_margin_type,
+                "symbol": symbol,
+                "trade_plan_id": trade_plan.trade_plan_id,
+                "verified_leverage": verdict.leverage,
+                "verified_margin_type": verdict.margin_type,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        journal.record(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="mgcc",
+                    event_type=EVENT_MARGIN_CONFIG_CHANGED,
+                    entity_id=trade_plan.plan_hash,
+                    occurred_at_utc=now_utc,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now_utc,
+                event_type=EVENT_MARGIN_CONFIG_CHANGED,
+                entity_type="TradePlan",
+                entity_id=trade_plan.plan_hash,
+                correlation_id=f"execution_margin_guard_{trade_plan.plan_hash}",
+                trade_plan_id=trade_plan.trade_plan_id,
+                payload_json=body,
+            )
+        )
+    except Exception:  # noqa: BLE001, S110 - evidence is best effort; the guard verdict stands
+        pass
+
+
+def _alert_margin_divergence(
+    live_context: LivePlacementContext,
+    *,
+    symbol: str,
+    plan_hash: str,
+    reason: str,
+    now_utc: datetime,
+) -> None:
+    """Alert an unverifiable margin configuration (amendment A9). Best-effort, fixed code only.
+
+    The event is the existing OPS-05 DIVERGENCE; the reason is the guard's fixed alert reason and
+    nothing else (no amount, no balance, no exception text) reaches the sink. No sink, or a sink
+    that raises, never changes the outcome.
+    """
+    sink = live_context.alert_sink
+    if sink is None:
+        return
+    try:
+        sink.alert(
+            event=ALERT_DIVERGENCE,
+            subject=plan_hash,
+            reason=reason,
+            now_utc=now_utc,
+            plan_hash=plan_hash,
+            symbol=symbol,
+        )
+    except Exception:  # noqa: BLE001, S110 - the refusal is the answer, not the alert
+        pass
 
 
 def _reconciliation_required() -> ExecutionOutcome:

@@ -507,6 +507,7 @@ def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
 
     from tests.support import execution_limits as test_limits
     from tests.support.limits import TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS
+    from tests.support.margin_guard_stub import StubMarginGuard
 
     live = case_input["live"]
     values: dict[str, Any] = {
@@ -524,6 +525,8 @@ def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
             live["tp1_quantity_fraction"], "tp1_quantity_fraction"
         ),
         "clock": lambda: _post_read_instant(case_input),
+        # Phase 22 (plan 22-15): the guard is a REQUIRED field; the default stub passes.
+        "margin_guard": StubMarginGuard(),
     }
     values.update(overrides)
     return LivePlacementContext(**values)
@@ -2905,10 +2908,12 @@ def test_live_context_validates_every_field() -> None:
         "gtd_clock_margin",
         "tp1_quantity_fraction",
         "clock",
+        "margin_guard",
         "alert_sink",
     }
     # Every field is required except the optional alert sink (plan 20-22): building without one
-    # raises TypeError.
+    # raises TypeError. Phase 22 (plan 22-15) adds the required margin_guard: no None default
+    # that would skip the checks (CR-07).
     assert fields["alert_sink"] is None
     for name in fields:
         if name == "alert_sink":
@@ -2926,6 +2931,7 @@ def test_live_context_validates_every_field() -> None:
         "gtd_clock_margin": 0.5,
         "tp1_quantity_fraction": 0.5,
         "clock": object(),
+        "margin_guard": object(),
         "alert_sink": object(),
     }
     for name, bad in bad_values.items():
@@ -2969,6 +2975,8 @@ def test_live_context_module_is_pure() -> None:
         "src.domain.signal",
         "src.execution.constraint_snapshot",
         "src.execution.execution_limits",
+        # Phase 22 (plan 22-15): the type of the required margin_guard field.
+        "src.execution.margin_guard",
         "src.execution.protection",
     }
 
@@ -4153,3 +4161,310 @@ async def test_pure_refusals_run_before_the_first_read() -> None:
         outcome = await _run_plan(adapter, case_input=case_input, **kwargs)
         assert outcome.is_no_trade is True
         assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 (plan 22-15): gate 5f2, the margin guard (D-05, D-15, amendments A7, A8).
+# --------------------------------------------------------------------------- #
+
+
+class _EventAdapter(FakeExecutionAdapter):
+    """The fake adapter that also appends the two calls the guard is ordered between."""
+
+    def __init__(self, log: list[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._log = log
+
+    async def get_position_mode(self) -> Any:
+        self._log.append("get_position_mode")
+        return await super().get_position_mode()
+
+    async def place_entry(self, **kwargs: Any) -> Any:
+        self._log.append("place_entry")
+        return await super().place_entry(**kwargs)
+
+
+def _filled_plan_snapshot(case_input: dict[str, Any]) -> Any:
+    """The plan snapshot that also carries the seven filter values (margin side still unknown)."""
+    return _build_plan_snapshot(
+        case_input,
+        max_quantity=Decimal("1000"),
+        market_lot_min_quantity=Decimal("0.001"),
+        market_lot_max_quantity=Decimal("120"),
+        market_lot_step_size=Decimal("0.001"),
+        percent_price_multiplier_up=Decimal("1.0500"),
+        percent_price_multiplier_down=Decimal("0.9500"),
+        percent_price_multiplier_decimals=4,
+    )
+
+
+async def test_gate_5f2_orders_the_position_mode_the_guard_and_the_placement() -> None:
+    """A7: the guard runs after the position mode (5f) and before the entry is sent, and it is
+    called once with exactly what is placed (T-22-55)."""
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    log: list[str] = []
+    guard = StubMarginGuard(event_log=log)
+    adapter = _EventAdapter(log)
+    registry = StubProtectionRegistry()
+    outcome = await _run_plan(
+        adapter,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=guard
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert log == ["get_position_mode", "guard.evaluate", "place_entry"]
+    assert guard.calls == 1
+
+    request = guard.requests[0]
+    entry_kwargs = next(c for c in adapter.calls if c["method"] == "place_entry")["kwargs"]
+    assert request.symbol == case_input["symbol"]
+    assert request.side == case_input["candidate_position_side"]
+    assert request.quantity == entry_kwargs["quantity"] == Decimal("2.415")
+    assert request.limit_price == entry_kwargs["price"]
+    assert request.limit_price == _coerce_decimal(
+        case_input["expected_limit_price"], "expected_limit_price"
+    )
+    assert request.stop_price == registry.entries[0].sl_trigger_price
+    assert request.mark_price == adapter.mark_reading.mark_price
+    rates = _build_cost_rates(case_input)
+    assert request.fee_rate_entry == rates.fee_rate_entry
+    assert request.fee_rate_exit == rates.fee_rate_exit
+    assert request.trade_plan_id == case_input["trade_plan_id"]
+    assert request.symbol_is_flat is True
+    # The guard is the only addition: the adapter sequence is the unchanged golden one.
+    assert [c["method"] for c in adapter.calls] == _load_expected()["method_sequence"]
+
+
+async def test_a_pass_hands_the_registry_the_snapshot_the_exchange_verified() -> None:
+    """A8, D-05: margin type, leverage and equity come from the verdict, in memory only."""
+    import dataclasses
+
+    from src.execution.constraint_snapshot import snapshot_is_valid_for_live
+
+    from tests.support.margin_guard_stub import (
+        VERIFIED_EQUITY,
+        VERIFIED_LEVERAGE,
+        VERIFIED_MARGIN_TYPE,
+        StubMarginGuard,
+    )
+
+    case_input = _load_input()
+    base = _filled_plan_snapshot(case_input)
+    assert (base.margin_type, base.leverage, base.equity_used) == (None, None, None)
+    registry = StubProtectionRegistry()
+    context = _build_live_context(
+        case_input,
+        plan_constraint_snapshot=base,
+        protection_registry=registry,
+        margin_guard=StubMarginGuard(),
+    )
+    outcome = await _run_plan(FakeExecutionAdapter(), live_context=context)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+    handed = registry.entries[0].plan_constraint_snapshot
+    assert (handed.margin_type, handed.leverage, handed.equity_used) == (
+        VERIFIED_MARGIN_TYPE,
+        VERIFIED_LEVERAGE,
+        VERIFIED_EQUITY,
+    )
+    assert handed == dataclasses.replace(
+        base,
+        margin_type=VERIFIED_MARGIN_TYPE,
+        leverage=VERIFIED_LEVERAGE,
+        equity_used=VERIFIED_EQUITY,
+    )
+    # The context's own (write-once evidence) snapshot is not touched.
+    assert context.plan_constraint_snapshot is base
+    assert (base.margin_type, base.leverage, base.equity_used) == (None, None, None)
+    ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
+    now = _parse_utc(case_input["now_utc"])
+    assert snapshot_is_valid_for_live(handed, now_utc=now, ttl=ttl) is True
+    assert snapshot_is_valid_for_live(base, now_utc=now, ttl=ttl) is False
+
+
+async def test_a_guard_refusal_returns_its_code_and_consumes_nothing() -> None:
+    """A7, T-22-54: a refusal leaves no ENTRY row, sends nothing and the same approval places
+    later with a passing guard."""
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    registry = StubProtectionRegistry()
+    guard = StubMarginGuard(verdict=refusing_verdict("INSUFFICIENT_MARGIN"))
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=guard
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "INSUFFICIENT_MARGIN")
+    assert guard.calls == 1
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+    assert registry.entries == []
+
+    placed = await _run_plan(
+        FakeExecutionAdapter(),
+        intent_store=store,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=StubMarginGuard()
+        ),
+    )
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK")
+    assert store.get_entry(approval_id=case_input["approval_id"]) is not None
+    assert len(registry.entries) == 1
+
+
+async def test_a_plain_string_refusal_code_passes_through_unchanged() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    guard = StubMarginGuard(verdict=refusing_verdict("LIQUIDATION_TOO_CLOSE"))
+    outcome = await _run_plan(
+        FakeExecutionAdapter(), live_context=_build_live_context(_load_input(), margin_guard=guard)
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "LIQUIDATION_TOO_CLOSE")
+
+
+async def test_a_raising_guard_fails_closed_without_leaking_its_text() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    adapter = FakeExecutionAdapter()
+    guard = StubMarginGuard(exception=RuntimeError("secret-account-detail 4999.09"))
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(case_input, margin_guard=guard),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNCERTAIN_ACCOUNT_STATE")
+    assert "secret-account-detail" not in repr(outcome)
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_a_request_that_cannot_be_built_fails_closed_before_the_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.execution import manager
+
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    def _unbuildable(**_: Any) -> Any:
+        raise ValueError("mark_price must be positive")
+
+    monkeypatch.setattr(manager, "MarginGuardRequest", _unbuildable)
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    guard = StubMarginGuard()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(case_input, margin_guard=guard),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNCERTAIN_ACCOUNT_STATE")
+    assert guard.calls == 0
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_the_guard_is_never_reached_when_an_earlier_gate_refuses() -> None:
+    """T-22-53: with live placement disabled, a limit unset, SAFE_MODE on, a Hedge account, an
+    unreadable mode or a position on the symbol, the guard (which can POST an account
+    configuration) is not called, nothing is consumed and no entry is sent."""
+    from src.execution.enablement import LiveEnablementController
+    from src.risk.types import OpenPosition
+
+    from tests.support import execution_limits as test_limits
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    open_position_risk = _build_risk_kwargs(case_input)
+    open_position_risk["open_positions"] = [
+        OpenPosition(
+            symbol="BTCUSDT",
+            position_side="LONG",
+            open_risk=Decimal("1.00"),
+            daily_pnl_contribution=Decimal("0"),
+        )
+    ]
+    scenarios: list[tuple[str, FakeExecutionAdapter, dict[str, Any], dict[str, Any], str]] = [
+        (
+            "live orders disabled",
+            FakeExecutionAdapter(),
+            {},
+            {"enablement": LiveEnablementController(journal=FakeJournal())},
+            "DISABLED",
+        ),
+        (
+            "a limit not configured",
+            FakeExecutionAdapter(),
+            {
+                "execution_limits": test_limits.test_only_execution_limits(
+                    max_mark_price_age_ms=None
+                )
+            },
+            {},
+            "LIMITS_NOT_CONFIGURED",
+        ),
+        (
+            "SAFE_MODE",
+            FakeExecutionAdapter(),
+            {},
+            {"safe_mode_controller": RecordingSafeModeController(in_safe_mode=True)},
+            "RECONCILIATION_REQUIRED",
+        ),
+        (
+            "Hedge account",
+            FakeExecutionAdapter(position_mode="HEDGE"),
+            {},
+            {},
+            "HEDGE_MODE_UNSUPPORTED",
+        ),
+        (
+            "unreadable position mode",
+            FakeExecutionAdapter(position_mode="UNKNOWN"),
+            {},
+            {},
+            "UNCERTAIN_ACCOUNT_STATE",
+        ),
+        (
+            "position on the symbol",
+            FakeExecutionAdapter(),
+            {},
+            {"risk_kwargs": open_position_risk},
+            "SYMBOL_HAS_POSITION",
+        ),
+    ]
+    for label, adapter, context_overrides, run_overrides, reason in scenarios:
+        guard = StubMarginGuard()
+        store = InMemoryExecutionIntentStore()
+        live = _build_live_context(case_input, margin_guard=guard, **context_overrides)
+        outcome = await _run_plan(adapter, intent_store=store, live_context=live, **run_overrides)
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+        assert guard.calls == 0, label
+        assert "place_entry" not in _reads_only(adapter), label
+        assert store.get_entry(approval_id=case_input["approval_id"]) is None, label
+
+
+def test_live_context_margin_guard_needs_a_callable_evaluate() -> None:
+    import dataclasses
+
+    from src.execution.live_context import LivePlacementContext
+
+    context = _build_live_context(_load_input())
+    fields = {f.name: getattr(context, f.name) for f in dataclasses.fields(context)}
+
+    class _NotCallable:
+        evaluate = 1
+
+    with pytest.raises(TypeError):
+        LivePlacementContext(**{**fields, "margin_guard": None})
+    with pytest.raises(TypeError):
+        LivePlacementContext(**{**fields, "margin_guard": _NotCallable()})
