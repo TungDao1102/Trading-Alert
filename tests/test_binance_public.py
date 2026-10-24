@@ -300,6 +300,9 @@ FORBIDDEN_METHODS = frozenset(
         "snapshot_positions",
         "get_position_mode",
         "user_commission_rate",
+        # Phase 22 (plan 22-06): the account-changing configuration POSTs.
+        "change_margin_type",
+        "change_initial_leverage",
     }
 )
 ALLOWED_REST_CALLS = frozenset(

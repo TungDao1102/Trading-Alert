@@ -58,7 +58,7 @@ re-verification policy):
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
   | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
-  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all eighteen SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all twenty SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
   | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
   | account_information_snapshot | account_information_v3(recv_window) | plan 21-03: GET /fapi/v3/account; every field Optional[str] in the model, parsed strictly to Decimal (a missing or non-finite field raises, never a zero); `totalMarginBalance` is the equity field (D-02), `availableBalance` is not read.  # noqa: E501
   | account_balances_snapshot   | futures_account_balance_v3(recv_window) | plan 21-03: GET /fapi/v3/balance; reads asset, balance, crossUnPnl only; the account alias attribute is never read (D-21).  # noqa: E501
@@ -66,6 +66,8 @@ re-verification policy):
   | income_in_window            | get_income_history(income_type, start_time, end_time, page, recv_window) | plan 21-08: GET /fapi/v1/income; pages 1, 2, ... until an empty page; the free-text `info` field is never read; the funding source is unverified on Demo (0 rows in the recorded reads).  # noqa: E501
   | symbol_config_snapshot      | symbol_configuration(symbol, recv_window) | plan 22-01: GET /fapi/v1/symbolConfig (weight 5); `symbol`, `recv_window` Optional; one row for the symbol with `marginType` text, `leverage` StrictInt, `isAutoAddMargin` StrictBool and `maxNotionalValue` text; each parsed strictly (a missing or mistyped field raises, never a default).  # noqa: E501
   | leverage_brackets_snapshot   | notional_and_leverage_brackets(symbol, recv_window) | plan 22-01: GET /fapi/v1/leverageBracket; the answer is a oneOf wrapper (`actual_instance`: a list of entries or one entry), both unwrapped; `maintMarginRatio` and `cum` are SDK floats, converted with Decimal(repr(value)) (the object shape declares `cum` StrictInt only: SDK quirk); no bracket value is a constant of this project.  # noqa: E501
+  | change_margin_type          | change_margin_type(symbol, margin_type, recv_window) | plan 22-06: POST /fapi/v1/marginType (weight 1); `margin_type` is `ChangeMarginTypeMarginTypeEnum` (ISOLATED, CROSSED) converted after a membership check; call kind PLACEMENT (mutating, never retried, never slept on); the answer body is not read; the same-type request is an exchange error (-4046), decided by a symbol_config_snapshot read.  # noqa: E501
+  | change_initial_leverage     | change_initial_leverage(symbol, leverage, recv_window) | plan 22-06: POST /fapi/v1/leverage (weight 1); `leverage` a positive int (not a bool), no cap in the adapter (the guard owns it, D-02); call kind PLACEMENT (never retried); the answer body is not read.  # noqa: E501
   | account_config_snapshot     | futures_account_configuration(recv_window) | plan 21-03: GET /fapi/v1/accountConfig; reads multiAssetsMargin and dualSidePosition as strict bools, nothing else (OPS-02 is an owner attestation).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
@@ -1869,6 +1871,34 @@ class BinanceUsdmAdapter:
             self._sdk.rest_api.change_margin_type,
             symbol=symbol,
             margin_type=ChangeMarginTypeMarginTypeEnum(margin_type),
+        )
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> None:
+        """Change the initial leverage of one symbol (POST /fapi/v1/leverage, plan 22-06).
+
+        TRADE, IP weight 1, through the official SDK `rest_api.change_initial_leverage(symbol,
+        leverage, recv_window)` and `_sdk_call`. Like `change_margin_type` this MUTATES the
+        account configuration: the call kind is PLACEMENT (never retried, never slept on), the
+        shared REST gate and the policy recv window apply, and the original exception
+        propagates unchanged. The answer body is not trusted and is not read; the caller
+        decides by a `symbol_config_snapshot` read. The maximum leverage is symbol-specific (the
+        `initialLeverage` of bracket 1 of the leverage-bracket read, not a constant: the
+        2026-10-09 change-log correction); the adapter enforces NO cap, the guard compares with
+        the D035 cap and the bracket (D-02). A leverage reduction in isolated mode with a
+        position is refused by the exchange (-4161, 22-RESEARCH 2.2). `leverage` must be an
+        int (not a bool) of at least 1; `symbol` a non-empty text.
+        """
+        if not isinstance(symbol, str) or symbol == "":
+            raise ValueError("symbol must be non-empty text")
+        if isinstance(leverage, bool) or not isinstance(leverage, int):
+            raise TypeError("leverage must be an int")
+        if leverage < 1:
+            raise ValueError("leverage must be at least 1")
+        await self._sdk_call(
+            CallKind.PLACEMENT,
+            self._sdk.rest_api.change_initial_leverage,
+            symbol=symbol,
+            leverage=leverage,
         )
 
     async def user_trades_in_window(

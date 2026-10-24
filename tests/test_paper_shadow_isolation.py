@@ -74,6 +74,7 @@ ORDER_SURFACE = frozenset(
         "user_commission_rate",
         # Phase 22: the account-changing configuration POSTs (plan 22-06).
         "change_margin_type",
+        "change_initial_leverage",
         "execute_approved_plan",
     }
 )

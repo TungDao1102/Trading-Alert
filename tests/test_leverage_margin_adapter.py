@@ -543,3 +543,70 @@ async def test_change_margin_type_is_refused_by_a_ban_before_the_sdk() -> None:
     with pytest.raises(RateLimitBanActive):
         await adapter.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED")
     assert rest.calls(CHANGE_MARGIN) == 0
+
+
+# -------------------------------------------------------------- change_initial_leverage (22-06)
+
+
+async def test_change_initial_leverage_sends_one_signed_call() -> None:
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: _ANSWER})
+    result = await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=5)
+    assert result is None
+    assert rest.calls(CHANGE_LEVERAGE) == 1
+    sent = rest.kwargs[CHANGE_LEVERAGE][0]
+    assert sent == {"symbol": "BTCUSDT", "leverage": 5, "recv_window": RECV_WINDOW}
+    assert type(sent["leverage"]) is int
+
+
+async def test_change_initial_leverage_has_no_cap_of_its_own() -> None:
+    # The cap and the bracket belong to the guard (D-02): the adapter sends what it is told.
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: _ANSWER})
+    await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=125)
+    assert rest.kwargs[CHANGE_LEVERAGE][0]["leverage"] == 125
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, 5.0, "5", None, Decimal("5")])
+async def test_change_initial_leverage_refuses_a_bad_leverage_before_any_sdk_call(bad: Any) -> None:
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: _ANSWER})
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=bad)
+    assert rest.calls(CHANGE_LEVERAGE) == 0
+
+
+@pytest.mark.parametrize("bad", ["", None, 5])
+async def test_change_initial_leverage_refuses_a_bad_symbol_before_any_sdk_call(bad: Any) -> None:
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: _ANSWER})
+    with pytest.raises(ValueError):
+        await adapter.change_initial_leverage(symbol=bad, leverage=5)
+    assert rest.calls(CHANGE_LEVERAGE) == 0
+
+
+async def test_change_initial_leverage_never_reads_the_answer_body() -> None:
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: None})
+    assert await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=3) is None
+    assert rest.calls(CHANGE_LEVERAGE) == 1
+
+
+async def test_change_initial_leverage_propagates_the_original_error_after_one_call() -> None:
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: _ANSWER})
+    boom = BadRequestError("reduction refused", -4161)
+    rest.errors[CHANGE_LEVERAGE] = boom
+    with pytest.raises(BadRequestError) as caught:
+        await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=2)
+    assert caught.value is boom
+    assert rest.calls(CHANGE_LEVERAGE) == 1
+
+
+async def test_change_initial_leverage_is_refused_by_a_pause_before_the_sdk() -> None:
+    adapter, rest, gate = _adapter({CHANGE_LEVERAGE: _ANSWER})
+    gate.record(ExchangeErrorCategory.RATE_LIMITED, None)
+    with pytest.raises(RateLimitPauseActive):
+        await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=5)
+    assert rest.calls(CHANGE_LEVERAGE) == 0
+
+
+async def test_change_initial_leverage_without_a_policy_fails_closed() -> None:
+    adapter, rest, _ = _adapter({CHANGE_LEVERAGE: _ANSWER}, policy=False)
+    with pytest.raises(SignedCallPolicyMissing):
+        await adapter.change_initial_leverage(symbol="BTCUSDT", leverage=5)
+    assert rest.calls(CHANGE_LEVERAGE) == 0
