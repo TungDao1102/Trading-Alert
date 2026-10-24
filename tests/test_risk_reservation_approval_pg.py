@@ -12,6 +12,7 @@ aggregate cap alone: 5.5 + 5.5 = 11 > 10, while 5.5 <= 6 and 5.5 <= 10 each.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections.abc import Iterator
@@ -33,6 +34,7 @@ from src.persistence.day_risk import PgDayRiskStore
 from src.persistence.engine import make_sync_engine
 from src.persistence.errors import PersistenceError, StoreUnavailable
 from src.persistence.risk_reservations import (
+    APPROVAL_SERIALISATION_LOCK_KEY,
     PgRiskReservationStore,
     ReservationRefused,
     make_reserving_save_atomic,
@@ -96,6 +98,7 @@ def _decision(
     action: ApprovalAction = ApprovalAction.APPROVE,
     status: ApprovalResult = ApprovalResult.APPROVED,
     token: int = 0x3001,
+    acted_at: datetime = ACTED,
 ) -> Approval:
     return Approval(
         approval_id=approval_id,
@@ -106,7 +109,7 @@ def _decision(
         status=status,
         approval_token_hash=hexid(token),
         requested_at_utc=NOW,
-        acted_at_utc=ACTED,
+        acted_at_utc=acted_at,
         actor_id="operator",
         request_hash="e" * 64,
     )
@@ -262,7 +265,8 @@ class _PausingStore(PgRiskReservationStore):
                     text(
                         "SELECT count(*) FROM pg_stat_activity "
                         "WHERE datname = current_database() AND wait_event_type = 'Lock' "
-                        "AND query ILIKE '%daily_risk_days%'"
+                        "AND (query ILIKE '%daily_risk_days%' "
+                        "OR query ILIKE '%pg_advisory_xact_lock%')"
                     )
                 ).scalar_one()
             self.second_was_blocked = waiting >= 1
@@ -271,10 +275,14 @@ class _PausingStore(PgRiskReservationStore):
         return record
 
 
-def test_two_concurrent_approvals_that_only_one_fits_cannot_both_pass(
-    pg_db: str, engine: Engine, db: OperationalDatabase
-) -> None:
-    _open_today(db)
+def _race(
+    pg_db: str,
+    engine: Engine,
+    db: OperationalDatabase,
+    *,
+    second_acted_at: datetime,
+) -> tuple[dict[str, object], list[_PausingStore], PgRiskReservationStore]:
+    """Two approvals of 5.5 each against the 10 aggregate cap, the first holding its lock."""
     seed = PgRiskReservationStore(db)
     seed.register_request(
         _request(P1, HASH_1, symbol="BNBUSDT", side="LONG", risk="5.5"), now_utc=NOW
@@ -308,7 +316,7 @@ def test_two_concurrent_approvals_that_only_one_fits_cannot_both_pass(
             store = PgRiskReservationStore(thread_db)
             second_started.set()
             _composed_for(thread_db, store)(
-                _decision(A2, P2, token=0x3002),
+                _decision(A2, P2, token=0x3002, acted_at=second_acted_at),
                 None,
             )
             outcomes["second"] = "approved"
@@ -322,6 +330,14 @@ def test_two_concurrent_approvals_that_only_one_fits_cannot_both_pass(
         thread.start()
     for thread in threads:
         thread.join(timeout=90)
+    return outcomes, pausing, seed
+
+
+def test_two_concurrent_approvals_that_only_one_fits_cannot_both_pass(
+    pg_db: str, engine: Engine, db: OperationalDatabase
+) -> None:
+    _open_today(db)
+    outcomes, pausing, seed = _race(pg_db, engine, db, second_acted_at=ACTED)
 
     assert outcomes["first"] == "approved"
     refused = outcomes["second"]
@@ -631,3 +647,37 @@ def test_resolve_callback_propagates_the_cap_refusal_and_the_approval_stays_pend
 
     assert raised.value.reason_code is RejectionReason.AGGREGATE_CAP_REJECT
     assert _approval_status(engine, A2) == "PENDING"
+
+
+def test_two_approvals_acted_on_either_side_of_midnight_still_serialise(
+    pg_db: str, engine: Engine, db: OperationalDatabase
+) -> None:
+    # WR-02: the day-row lock is one lock PER UTC day, so approvals decided at 23:59:59.9 and
+    # 00:00:00.1 took different locks and both read the same counted rows. The advisory lock
+    # taken before the day-row lock is day-independent: the second approval must wait for the
+    # first and then see its reservation (5.5 + 5.5 = 11 > the aggregate cap 10).
+    next_day = datetime(2026, 10, 24, 0, 0, 0, 100000, tzinfo=UTC)
+    _open_today(db)
+    PgDayRiskStore(db).open_day(
+        DayRiskState(
+            utc_day=next_day.date(),
+            equity_at_day_start=D("1000"),
+            base_observed_at_utc=next_day,
+        )
+    )
+    outcomes, pausing, seed = _race(pg_db, engine, db, second_acted_at=next_day)
+    assert outcomes["first"] == "approved"
+    refused = outcomes["second"]
+    assert isinstance(refused, ReservationRefused)
+    assert refused.reason_code is RejectionReason.AGGREGATE_CAP_REJECT
+    assert pausing[0].second_was_blocked is True
+    p2 = seed.get(P2)
+    assert p2 is not None
+    assert (p2.status, p2.approval_id) == (ReservationStatus.REQUESTED, None)
+    assert _approval_status(engine, A2) == "PENDING"
+
+
+def test_the_approval_serialisation_lock_key_is_the_documented_stable_63_bit_key() -> None:
+    digest = hashlib.sha256(b"trading-alert:risk_reservations:approval-serialisation").digest()
+    assert APPROVAL_SERIALISATION_LOCK_KEY == int.from_bytes(digest[:8], "big") & (2**63 - 1)
+    assert 0 < APPROVAL_SERIALISATION_LOCK_KEY < 2**63

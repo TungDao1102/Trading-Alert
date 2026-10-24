@@ -11,8 +11,12 @@ trade plan for its whole life.
 
 Rules this store keeps:
 
-  - `reserve_in` runs inside the CALLER's transaction. It locks today's `daily_risk_days` row
-    `FOR UPDATE` (the one lock every approval serialises on), reads the counted rows, judges the
+  - `reserve_in` runs inside the CALLER's transaction. It first takes a transaction-level
+    PostgreSQL advisory lock on one fixed key (`APPROVAL_SERIALISATION_LOCK_KEY`), the one
+    lock every approval serialises on whatever its UTC day (WR-02: the `daily_risk_days` row
+    is one lock PER day, so approvals decided on either side of 00:00 UTC would not serialise
+    on it). It then locks today's `daily_risk_days` row `FOR UPDATE` (the latch read), reads
+    the counted rows, judges the
     plan's stored realized risk with `reservation_verdict` (the shared `check_portfolio`) and
     turns the REQUESTED row into RESERVED, or raises `ReservationRefused` and changes nothing.
     It never commits or rolls back and swallows no exception. Plan 21-15 composes it into the
@@ -51,7 +55,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -82,6 +86,13 @@ if TYPE_CHECKING:
     from src.adapters.telegram_callbacks import SaveAtomic
 
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
+
+#: The fixed key of the transaction-level advisory lock every approval takes first (WR-02):
+#: the first 8 bytes of SHA-256("trading-alert:risk_reservations:approval-serialisation"), top
+#: bit cleared (the same derivation as the paper instance lease keys). Released by PostgreSQL at
+#: commit or rollback; no unlock call exists or is needed.
+APPROVAL_SERIALISATION_LOCK_KEY = 4302524125686987480
+_APPROVAL_SERIALISATION_LOCK = text("SELECT pg_advisory_xact_lock(:key)")
 
 _S = ReservationStatus
 
@@ -335,7 +346,8 @@ class PgRiskReservationStore:
     ) -> ReservationRecord:
         """Turn the plan's REQUESTED row into RESERVED inside the caller's transaction.
 
-        Order (every step fails closed): lock today's `daily_risk_days` row `FOR UPDATE`; lock
+        Order (every step fails closed): take the day-independent advisory lock (WR-02); lock
+        today's `daily_risk_days` row `FOR UPDATE`; lock
         the plan's reservation row; read the counted rows; resolve the thresholds from the
         STORED day base; judge the stored realized risk with `reservation_verdict`; only a
         passing verdict updates the row. `parameter_set` holds the registry RATES. Never
@@ -352,6 +364,7 @@ class PgRiskReservationStore:
         uncertain = RejectionReason.UNCERTAIN_ACCOUNT_STATE
         if approval.status != ApprovalResult.APPROVED:
             raise ReservationRefused(uncertain)
+        session.execute(_APPROVAL_SERIALISATION_LOCK, {"key": APPROVAL_SERIALISATION_LOCK_KEY})
         day_row = self._day_store.lock_day(session, utc_day_of(now_utc))
         if day_row is None:
             raise ReservationRefused(uncertain)
