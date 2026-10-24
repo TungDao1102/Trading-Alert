@@ -454,3 +454,107 @@ def test_every_status_but_released_has_an_exit_and_released_is_never_a_source() 
 def test_release_source_statuses_is_read_only() -> None:
     with pytest.raises(TypeError):
         RELEASE_SOURCE_STATUSES[ReleaseReason.PLAN_EXPIRED] = frozenset()  # type: ignore[index]
+
+
+# --------------------------------------------------------------------------------------
+# Plan 22-08: the optional margin trio of a request (D-14, amendment A2)
+# --------------------------------------------------------------------------------------
+def _margin_fields(**overrides: Any) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "trade_plan_id": "plan-req",
+        "plan_hash": HASH_D,
+        "symbol": "BTCUSDT",
+        "position_side": "LONG",
+        "quantity": Decimal("0.01"),
+        "realized_risk": Decimal("4"),
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_a_request_without_the_margin_trio_is_the_phase_21_form() -> None:
+    request = ReservationRequest(**_margin_fields())
+
+    assert request.required_margin is None
+    assert request.margin_entry_price is None
+    assert request.margin_leverage is None
+
+
+def test_a_request_with_the_whole_margin_trio_keeps_it() -> None:
+    # 0.01 x 80000 / 5 = 160.
+    request = ReservationRequest(
+        **_margin_fields(
+            required_margin=Decimal("160"),
+            margin_entry_price=Decimal("80000"),
+            margin_leverage=5,
+        )
+    )
+
+    assert request.required_margin == Decimal("160")
+    assert request.margin_entry_price == Decimal("80000")
+    assert request.margin_leverage == 5
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"required_margin": Decimal("160")},
+        {"margin_entry_price": Decimal("80000")},
+        {"margin_leverage": 5},
+        {"required_margin": Decimal("160"), "margin_entry_price": Decimal("80000")},
+        {"required_margin": Decimal("160"), "margin_leverage": 5},
+        {"margin_entry_price": Decimal("80000"), "margin_leverage": 5},
+    ],
+)
+def test_a_request_with_a_partial_margin_trio_is_refused(partial: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        ReservationRequest(**_margin_fields(**partial))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"required_margin": Decimal("0")},
+        {"required_margin": Decimal("-1")},
+        {"required_margin": Decimal("NaN")},
+        {"required_margin": Decimal("Infinity")},
+        {"margin_entry_price": Decimal("0")},
+        {"margin_entry_price": Decimal("-80000")},
+        {"margin_leverage": 0},
+        {"margin_leverage": -3},
+    ],
+)
+def test_a_request_with_a_non_positive_or_non_finite_margin_is_refused(
+    bad: dict[str, Any],
+) -> None:
+    trio: dict[str, Any] = {
+        "required_margin": Decimal("160"),
+        "margin_entry_price": Decimal("80000"),
+        "margin_leverage": 5,
+    }
+    trio.update(bad)
+    with pytest.raises(ValueError):
+        ReservationRequest(**_margin_fields(**trio))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("required_margin", 160),
+        ("required_margin", 160.0),
+        ("margin_entry_price", "80000"),
+        ("margin_leverage", True),
+        ("margin_leverage", Decimal("5")),
+        ("margin_leverage", 5.0),
+        ("margin_leverage", "5"),
+    ],
+)
+def test_a_request_with_a_wrongly_typed_margin_value_is_refused(field: str, value: Any) -> None:
+    trio: dict[str, Any] = {
+        "required_margin": Decimal("160"),
+        "margin_entry_price": Decimal("80000"),
+        "margin_leverage": 5,
+    }
+    trio[field] = value
+    with pytest.raises(TypeError):
+        ReservationRequest(**_margin_fields(**trio))

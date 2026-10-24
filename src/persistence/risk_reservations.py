@@ -28,6 +28,12 @@ Rules this store keeps:
     `RowConflict` otherwise, so a RELEASED row can never be counted again.
   - Every counted reservation is read from the table: a new store instance over the same
     database returns the same rows; nothing is kept in memory.
+  - Plan 22-08 (migration 0012): a request may carry the margin its plan needs (`required_margin`
+    = quantity x `margin_entry_price` / `margin_leverage`, all three set or all None). The trio
+    is part of the identity of `register_request`. `list_margin_claims` returns one `MarginClaim`
+    per RESERVED or PLACED row (None margin for a legacy row: unknown, never zero). The
+    authoritative sum is taken at placement with a fresh exchange reading (amendment A2); the
+    approval transaction (`reserve_in`) is unchanged.
   - There is NO delete path. Messages name the plan, the reason and the status, never an amount.
 
 The pure types and the gate are the ones of `src/risk/reservations.py`; nothing is redefined
@@ -61,6 +67,7 @@ from src.persistence.day_risk import PgDayRiskStore
 from src.persistence.errors import ParentRowMissing, PrecisionError, RowConflict
 from src.persistence.uow import OperationalDatabase
 from src.risk.daily_loss import DayRiskState, day_thresholds, utc_day_of
+from src.risk.margin_check import MarginClaim
 from src.risk.reservations import (
     COUNTED_STATUSES,
     RELEASE_SOURCE_STATUSES,
@@ -170,6 +177,31 @@ def _counted_rows(session: Session) -> tuple[CountedReservation, ...]:
     return tuple(_counted_from_row(row) for row in rows)
 
 
+_MARGIN_CLAIM_STATUSES = (_S.RESERVED, _S.PLACED)
+
+
+def _claim_from_row(row: RiskReservationRow) -> MarginClaim:
+    return MarginClaim(
+        trade_plan_id=row.trade_plan_id,
+        status=ReservationStatus(row.status),
+        required_margin=row.required_margin,
+        placed_at_utc=row.placed_at_utc,
+    )
+
+
+def _margin_claim_rows(session: Session) -> tuple[MarginClaim, ...]:
+    rows = session.scalars(
+        select(RiskReservationRow)
+        .where(RiskReservationRow.status.in_([s.value for s in _MARGIN_CLAIM_STATUSES]))
+        .order_by(
+            RiskReservationRow.symbol,
+            RiskReservationRow.position_side,
+            RiskReservationRow.trade_plan_id,
+        )
+    ).all()
+    return tuple(_claim_from_row(row) for row in rows)
+
+
 class PgRiskReservationStore:
     """The durable risk reservation of each trade plan, on PostgreSQL."""
 
@@ -202,6 +234,21 @@ class PgRiskReservationStore:
         with self._unit(tx) as session:
             return _counted_rows(session)
 
+    def list_margin_claims(self, *, tx: Session | None = None) -> tuple[MarginClaim, ...]:
+        """One margin claim per RESERVED or PLACED row, sorted by (symbol, side, plan id).
+
+        Rebuilt from the table on every call (plan 22-08, D-14). `required_margin` is None for
+        a row without a stored margin (a legacy row): an UNKNOWN claim, never zero, which makes
+        the placement-time sum unknown and the margin check fail closed. `placed_at_utc` comes
+        from the row. REQUESTED, OPEN and RELEASED rows are never claims.
+
+        The authoritative sum is taken by the placement-time guard with a fresh exchange
+        reading (amendment A2); the approval transaction is unchanged, because the exchange
+        reading cannot be taken inside it.
+        """
+        with self._unit(tx) as session:
+            return _margin_claim_rows(session)
+
     # ----------------------------------------------------------------- writes
 
     def register_request(
@@ -209,7 +256,8 @@ class PgRiskReservationStore:
     ) -> ReservationRecord:
         """Store the plan's risk as a REQUESTED row (not counted), once.
 
-        A repeat with the same identity (plan hash, symbol, side, quantity, realized risk) is a
+        A repeat with the same identity (plan hash, symbol, side, quantity, realized risk and
+        the margin trio, where a stored NULL trio differs from a set one and the reverse) is a
         no-op that returns the stored record.
 
         Raises:
@@ -220,6 +268,12 @@ class PgRiskReservationStore:
         _require_utc(now_utc, "now_utc")
         _require_exact_storage(request.quantity, "risk_reservations.quantity")
         _require_exact_storage(request.realized_risk, "risk_reservations.realized_risk")
+        if request.required_margin is not None:
+            _require_exact_storage(request.required_margin, "risk_reservations.required_margin")
+        if request.margin_entry_price is not None:
+            _require_exact_storage(
+                request.margin_entry_price, "risk_reservations.margin_entry_price"
+            )
         try:
             with self._unit(tx) as session:
                 session.execute(
@@ -232,6 +286,9 @@ class PgRiskReservationStore:
                         position_side=request.position_side,
                         quantity=request.quantity,
                         realized_risk=request.realized_risk,
+                        required_margin=request.required_margin,
+                        margin_entry_price=request.margin_entry_price,
+                        margin_leverage=request.margin_leverage,
                         status=_S.REQUESTED.value,
                         release_reason=None,
                         requested_at_utc=now_utc,
@@ -251,6 +308,9 @@ class PgRiskReservationStore:
                     or row.position_side != request.position_side
                     or row.quantity != request.quantity
                     or row.realized_risk != request.realized_risk
+                    or row.required_margin != request.required_margin
+                    or row.margin_entry_price != request.margin_entry_price
+                    or row.margin_leverage != request.margin_leverage
                 ):
                     raise RowConflict(
                         f"risk_reservations {request.trade_plan_id} already registered with "

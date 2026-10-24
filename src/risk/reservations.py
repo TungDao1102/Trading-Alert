@@ -137,6 +137,9 @@ class ReservationRequest:
     position_side: str
     quantity: Decimal
     realized_risk: Decimal
+    required_margin: Decimal | None = None
+    margin_entry_price: Decimal | None = None
+    margin_leverage: int | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.trade_plan_id, "trade_plan_id")
@@ -148,6 +151,28 @@ class ReservationRequest:
             raise ValueError(f"quantity must be > 0, got {self.quantity}")
         if _require_finite_decimal(self.realized_risk, "realized_risk") <= Decimal("0"):
             raise ValueError(f"realized_risk must be > 0, got {self.realized_risk}")
+        self._require_margin_trio()
+
+    def _require_margin_trio(self) -> None:
+        """The margin trio is all None (the Phase 21 form) or all set (plan 22-08, D-14)."""
+        trio = (self.required_margin, self.margin_entry_price, self.margin_leverage)
+        if all(value is None for value in trio):
+            return
+        if any(value is None for value in trio):
+            raise ValueError(
+                "required_margin, margin_entry_price and margin_leverage are all set or all None"
+            )
+        for name, amount in (
+            ("required_margin", self.required_margin),
+            ("margin_entry_price", self.margin_entry_price),
+        ):
+            if _require_finite_decimal(amount, name) <= Decimal("0"):
+                raise ValueError(f"{name} must be > 0, got {amount}")
+        leverage = self.margin_leverage
+        if isinstance(leverage, bool) or not isinstance(leverage, int):
+            raise TypeError(f"margin_leverage must be int, got {type(leverage).__name__}")
+        if leverage < 1:
+            raise ValueError(f"margin_leverage must be >= 1, got {leverage}")
 
 
 @dataclass(frozen=True)

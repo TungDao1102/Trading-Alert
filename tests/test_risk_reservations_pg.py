@@ -449,6 +449,7 @@ def test_the_store_has_no_delete_path() -> None:
     assert names == {
         "get",
         "list_counted",
+        "list_margin_claims",
         "register_request",
         "reserve_in",
         "mark_placed",

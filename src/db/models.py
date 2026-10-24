@@ -1121,6 +1121,10 @@ class RiskReservationRow(Base):
     OPEN (both counted) and RELEASED (terminal, not counted). The approval transaction locks
     today's `daily_risk_days` row and flips REQUESTED to RESERVED through the shared cap gate.
     `realized_risk` is the sized risk after rounding (Pitfall 9). There is no delete path.
+
+    Plan 22-08 (migration 0012) adds the margin the plan needs: `required_margin` =
+    quantity x `margin_entry_price` / `margin_leverage`. The three columns are all NULL (a row
+    from before the migration: an UNKNOWN margin, never zero) or all set.
     """
 
     __tablename__ = "risk_reservations"
@@ -1140,6 +1144,9 @@ class RiskReservationRow(Base):
     opened_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     released_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    required_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    margin_entry_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    margin_leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("trade_plan_id", name="pk_risk_reservations"),
@@ -1181,6 +1188,16 @@ class RiskReservationRow(Base):
         CheckConstraint(
             "status NOT IN ('RESERVED', 'PLACED', 'OPEN') OR approval_id IS NOT NULL",
             name="ck_risk_reservations_approval_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(required_margin IS NULL) = (margin_entry_price IS NULL) "
+            "AND (required_margin IS NULL) = (margin_leverage IS NULL)",
+            name="ck_risk_reservations_margin_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "required_margin IS NULL OR (required_margin > 0 AND margin_entry_price > 0 "
+            "AND margin_leverage >= 1)",
+            name="ck_risk_reservations_margin_positive",
         ).ddl_if(dialect="postgresql"),
         Index("ix_risk_reservations_status", "status"),
     )
