@@ -24,12 +24,17 @@ Rules this module keeps:
   after the reads finished, can make it stale. ``base_observed_at_utc`` keeps the stamp.
 * D-09, the loss sources and the REST arbiter. ``backfill`` reads ``userTrades`` of every live
   symbol and the ``FUNDING_FEE`` income since 00:00 UTC; the rows become ``REST_USER_TRADES`` /
-  ``REST_INCOME`` components. A fill known to the stream and to REST counts once at the most
-  adverse amount (``fold_daily_loss``). The day loss is known only after a backfill that
-  completed in the CURRENT backfill generation: a failed read leaves it unknown (no retry, no
-  sleep, no default), and the generation is bumped by the stream path of plan 21-16
-  (ACCOUNT_UPDATE, stream gaps, unusable fills), which makes the loss unknown again until the
-  next backfill. ``_backfill_generation`` is that private counter.
+  ``REST_INCOME`` components. It also reads the whole-account ``REALIZED_PNL``, ``COMMISSION``
+  and ``INSURANCE_CLEAR`` income (WR-09): a row of a symbol outside the configured ones, an
+  account-level row, or any liquidation clearance fee is a loss the fold cannot see, so the loss
+  stays unknown (``last_error_type`` is ``IncomeOutsideConfiguredSymbols``) instead of being
+  understated. What stays unchecked: income types that are not losses (rebates, transfers) and the
+  equality of the income totals with the folded fills (unverified on mainnet). A fill known to
+  the stream and to REST counts once at the most adverse amount (``fold_daily_loss``). The day
+  loss is known only after a backfill that completed in the CURRENT backfill generation: a
+  failed read leaves it unknown (no retry, no sleep, no default), and the generation is bumped
+  by the stream path of plan 21-16 (ACCOUNT_UPDATE, stream gaps, unusable fills), which makes
+  the loss unknown again until the next backfill. ``_backfill_generation`` is that private counter.
 * D-14, the latch. A newly derived DAILY_STOP is persisted (``latch_stop``) before the verdict is
   returned; a held latch stays DAILY_STOP for the rest of the UTC day, also after a restart and
   whatever the loss does. If the write fails the verdict is still DAILY_STOP (it only reduces
@@ -93,6 +98,20 @@ from src.risk.daily_loss import (
 )
 
 FUNDING_INCOME_TYPE = "FUNDING_FEE"
+# WR-09: income types read only to prove the folded fills are the whole story. REALIZED_PNL and
+# COMMISSION rows of a symbol outside ``symbols`` (or with no symbol) are fills the fold never
+# saw; INSURANCE_CLEAR is the liquidation clearance fee, which has no component kind at all.
+# Any such row makes the loss unknown (never an understated number); equality of the income
+# totals with the folded fills is NOT asserted, its semantics are unverified on mainnet.
+REALIZED_PNL_INCOME_TYPE = "REALIZED_PNL"
+COMMISSION_INCOME_TYPE = "COMMISSION"
+INSURANCE_CLEAR_INCOME_TYPE = "INSURANCE_CLEAR"
+CROSS_CHECK_INCOME_TYPES = (
+    REALIZED_PNL_INCOME_TYPE,
+    COMMISSION_INCOME_TYPE,
+    INSURANCE_CLEAR_INCOME_TYPE,
+)
+OUTSIDE_SYMBOLS_ERROR = "IncomeOutsideConfiguredSymbols"
 # Why the stream path makes the loss unknown until the next backfill (plan 21-16): any
 # ACCOUNT_UPDATE (FUNDING_FEE included) and every stream gap. Frames sent during a gap are not
 # replayed (demo-observed, not mainnet), so a loss computed across a gap is never trusted.
@@ -281,6 +300,7 @@ class LiveDayRiskService:
         generation = self._backfill_generation
         try:
             components: list[LossComponent] = []
+            outside = False
             for symbol in self._symbols:
                 trades = await self._reader.user_trades_in_window(
                     symbol=symbol, start_utc=start, end_utc=now_utc
@@ -291,16 +311,36 @@ class LiveDayRiskService:
                 income_type=FUNDING_INCOME_TYPE, start_utc=start, end_utc=now_utc
             )
             components.extend(components_from_income(row) for row in income)
+            for income_type in CROSS_CHECK_INCOME_TYPES:
+                rows = await self._reader.income_in_window(
+                    income_type=income_type, start_utc=start, end_utc=now_utc
+                )
+                outside = outside or any(
+                    self._is_unfolded_loss_row(row, income_type) for row in rows
+                )
             self._store.add_components(tuple(components))
         except Exception as exc:  # noqa: BLE001 - any failed read or write leaves the loss unknown
             self._trades_complete_for = None
             self._funding_read_ok_for = None
             self._last_error_type = type(exc).__name__
             return
+        if outside:
+            self._trades_complete_for = None
+            self._funding_read_ok_for = None
+            self._last_error_type = OUTSIDE_SYMBOLS_ERROR
+            return
         self._last_error_type = None
         if generation == self._backfill_generation:
             self._trades_complete_for = (day, generation)
             self._funding_read_ok_for = (day, generation)
+
+    def _is_unfolded_loss_row(self, row: Any, requested_type: str) -> bool:
+        """True for a cross-check income row the fold of the configured fills cannot account for."""
+        if row.income_type != requested_type:
+            return False
+        if requested_type == INSURANCE_CLEAR_INCOME_TYPE:
+            return True
+        return row.symbol is None or row.symbol not in self._symbols
 
     # ------------------------------------------------------------------ the stream path
 
@@ -551,8 +591,10 @@ class LiveDayRiskService:
 
 
 __all__ = [
+    "CROSS_CHECK_INCOME_TYPES",
     "FUNDING_INCOME_TYPE",
     "INVALIDATION_REASONS",
+    "OUTSIDE_SYMBOLS_ERROR",
     "DayRiskReadPort",
     "DayRiskStorePort",
     "EquityCheckPort",

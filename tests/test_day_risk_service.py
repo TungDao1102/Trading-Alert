@@ -255,6 +255,19 @@ async def test_the_reader_port_gets_the_whole_day_window_for_every_symbol_and_fu
             "income_in_window",
             {"income_type": "FUNDING_FEE", "start_utc": day_start, "end_utc": T0},
         ),
+        # WR-09: the cross-check reads, whole account, for what the folded fills cannot see.
+        (
+            "income_in_window",
+            {"income_type": "REALIZED_PNL", "start_utc": day_start, "end_utc": T0},
+        ),
+        (
+            "income_in_window",
+            {"income_type": "COMMISSION", "start_utc": day_start, "end_utc": T0},
+        ),
+        (
+            "income_in_window",
+            {"income_type": "INSURANCE_CLEAR", "start_utc": day_start, "end_utc": T0},
+        ),
     ]
 
 
@@ -328,6 +341,65 @@ def test_components_from_an_income_row() -> None:
     assert components_from_income(account_level).source_key == "ACCOUNT:5"
     with pytest.raises(ValueError):
         components_from_income(dataclasses.replace(funding_row("1"), income_type="COMMISSION"))
+
+
+def income_row(income_type: str, symbol: str | None, *, tran_id: int = 700) -> IncomeRow:
+    """SYNTHETIC income row of any type (no such row was observed on Demo)."""
+    return IncomeRow(
+        symbol=symbol,
+        income_type=income_type,
+        income=Decimal("-3"),
+        asset="USDT",
+        tran_id=tran_id,
+        trade_id="1",
+        time_utc=T0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("income_type", "symbol"),
+    [
+        ("REALIZED_PNL", "DOGEUSDT"),  # a symbol outside the configured universe
+        ("COMMISSION", "DOGEUSDT"),
+        ("REALIZED_PNL", None),  # an account-level row has no symbol to match
+        ("INSURANCE_CLEAR", "BTCUSDT"),  # a liquidation clearance fee is never folded
+    ],
+)
+async def test_a_loss_row_the_fold_cannot_see_makes_the_loss_unknown(
+    income_type: str, symbol: str | None
+) -> None:
+    # WR-09: userTrades covers the configured symbols and income only FUNDING_FEE, so a trade
+    # on another symbol or a liquidation fee would be understated, not unknown.
+    reader = ScriptedDayRiskReader(income_by_type={income_type: (income_row(income_type, symbol),)})
+    rig = await build(reader=reader)
+    preopen(rig)
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.last_error_type == "IncomeOutsideConfiguredSymbols"
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+    assert rig.service.current_daily_loss_quote(DAY) is None
+    # A clean backfill later (the rows are gone from the answer) makes it known again.
+    reader.income_by_type.clear()
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.last_error_type is None
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+
+
+async def test_loss_rows_of_the_configured_symbols_do_not_disturb_the_known_loss() -> None:
+    reader = ScriptedDayRiskReader(
+        trades={"BTCUSDT": (trade("-4", "1"),)},
+        income_by_type={
+            "REALIZED_PNL": (income_row("REALIZED_PNL", "BTCUSDT", tran_id=1),),
+            "COMMISSION": (income_row("COMMISSION", "BTCUSDT", tran_id=2),),
+        },
+    )
+    rig = await build(reader=reader)
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL  # 4 + 1 = 5, warning is 24.99 of the base
+    assert verdict.loss_quote == Decimal("5")
+    assert rig.service.last_error_type is None
 
 
 async def test_a_funding_row_counts_in_the_loss() -> None:
