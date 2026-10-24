@@ -29,10 +29,15 @@ mismatch, invalid thresholds or an unexplained exchange position give NO_TRADE
 ``UNCERTAIN_ACCOUNT_STATE`` and no inputs; a latched day gives ``DAILY_STOP_BLOCK``. No default
 value is ever substituted.
 
-Freshness contract for the caller: the ``equity`` result must be resolved with a ``now_utc``
-read from the injected clock AFTER ``LiveEquitySource.refresh()`` returns. The reading is
-stamped at the start of ``refresh()``; a ``now`` captured before the refresh gives a negative
-age, which is stale by design (plan 21-07, D-03).
+Freshness contract (WR-04): the builder takes ``now_utc`` (read from the injected clock AFTER
+``LiveEquitySource.refresh()`` returns) and the owner's ``max_equity_age``
+(``account.max_equity_age_ms``, no default here) and re-checks the equity reading itself: an age
+over the bound, or a negative age, is UNCERTAIN_ACCOUNT_STATE (the reading is stamped at the start
+of ``refresh()``, so a ``now`` captured before the refresh gives a negative age, which is stale by
+design, plan 21-07, D-03). The day row must be today's UTC day, and a day row whose latch is set
+gives DAILY_STOP_BLOCK even if the ``verdict`` was computed before the latch. The verdict carries
+no timestamp, so a verdict of an earlier tick on the same day is not detectable here: the caller
+evaluates the day in the same tick (the latch, which the day row carries, is the sticky part).
 
 The release mappings (bottom of the file) turn every terminal plan state into one
 `ReleaseReason`; the callers are Phase 24 code (see each docstring). RELEASED is terminal.
@@ -44,7 +49,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -62,7 +67,7 @@ from src.execution.pre_placement import (
     VALIDITY_TOO_SHORT,
 )
 from src.execution.protection import ProtectionState
-from src.risk.daily_loss import DayRiskState, DayStateVerdict, day_thresholds
+from src.risk.daily_loss import DayRiskState, DayStateVerdict, day_thresholds, utc_day_of
 from src.risk.live_equity import LiveEquityResult
 from src.risk.reservations import (
     CountedReservation,
@@ -145,6 +150,8 @@ def build_live_risk_inputs(
     exchange_exposures: Sequence[ExchangeExposure],
     candidate_trade_plan_id: str,
     parameter_set: dict[str, Any],
+    now_utc: datetime,
+    max_equity_age: timedelta,
 ) -> LiveRiskInputsResult:
     """Assemble the manager's risk inputs from the live sources, or fail closed.
 
@@ -153,18 +160,36 @@ def build_live_risk_inputs(
     The candidate's own reservation is excluded from ``open_positions`` (D-15, Pitfall 2):
     `check_portfolio` adds the candidate's risk itself.
 
-    Order: equity unknown; day or verdict missing; verdict for another day; latched day
-    (DAILY_STOP_BLOCK); verdict without a state; invalid thresholds; unexplained exchange
-    exposure; unknown loss.
+    ``now_utc`` is the injected clock read after the equity refresh; ``max_equity_age`` the owner's
+    ``account.max_equity_age_ms`` bound (WR-04).
+
+    Order: equity unknown; day or verdict missing; day not today's UTC day; verdict for another
+    day; latched day (the day row's latch or a DAILY_STOP verdict: DAILY_STOP_BLOCK); equity
+    reading too old or future-dated; verdict without a state; invalid thresholds; unexplained
+    exchange exposure; unknown loss.
+
+    Raises:
+        ValueError: ``now_utc`` is naive or non-UTC, or ``max_equity_age`` is not positive.
     """
+    today = utc_day_of(now_utc)
+    if max_equity_age <= timedelta(0):
+        raise ValueError(f"max_equity_age must be positive, got {max_equity_age}")
     if equity.is_no_trade or equity.account_state is None:
         return _no_trade(_UNCERTAIN)
     if day is None or verdict is None:
         return _no_trade(_UNCERTAIN)
-    if verdict.utc_day != day.utc_day:
+    if day.utc_day != today or verdict.utc_day != day.utc_day:
         return _no_trade(_UNCERTAIN)
-    if verdict.state is DailyState.DAILY_STOP:
+    if day.stop_latched_at_utc is not None or verdict.state is DailyState.DAILY_STOP:
         return _no_trade(_DAILY_STOP)
+    if equity.observed_at_utc is None:
+        return _no_trade(_UNCERTAIN)
+    try:
+        age = now_utc - equity.observed_at_utc
+    except TypeError:  # a naive reading stamp is unusable
+        return _no_trade(_UNCERTAIN)
+    if age < timedelta(0) or age > max_equity_age:
+        return _no_trade(_UNCERTAIN)
     if verdict.state is None or verdict.loss_quote is None:
         return _no_trade(_UNCERTAIN)
     thresholds = day_thresholds(parameter_set=parameter_set, day=day)

@@ -57,6 +57,7 @@ NEXT_DAY = date(2026, 10, 24)
 BASE_AT = datetime(2026, 10, 23, 0, 0, 5, tzinfo=UTC)
 NOW = datetime(2026, 10, 23, 12, 0, 0, tzinfo=UTC)
 RISK_RATE = Decimal("0.005")
+MAX_EQUITY_AGE = timedelta(seconds=30)  # TEST_ONLY bound; the live bound is the owner's key
 UNCERTAIN = RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
 DAILY_STOP_BLOCK = RejectionReason.DAILY_STOP_BLOCK.value
 HASH = "a" * 64
@@ -77,6 +78,15 @@ def _equity(value: str = "1010") -> LiveEquityResult:
         reason_code="OK",
         equity=Decimal(value),
         observed_at_utc=NOW,
+    )
+
+
+def _equity_at(observed_at_utc: datetime, value: str = "1010") -> LiveEquityResult:
+    return LiveEquityResult(
+        account_state=AccountState(equity=Decimal(value), risk_rate=RISK_RATE),
+        reason_code="OK",
+        equity=Decimal(value),
+        observed_at_utc=observed_at_utc,
     )
 
 
@@ -148,6 +158,8 @@ def _build(**overrides: Any) -> LiveRiskInputsResult:
         "exchange_exposures": [ExchangeExposure(symbol="SOLUSDT", signed_quantity=Decimal("-0.1"))],
         "candidate_trade_plan_id": "D",
         "parameter_set": RATES,
+        "now_utc": NOW,
+        "max_equity_age": MAX_EQUITY_AGE,
     }
     kwargs.update(overrides)
     return build_live_risk_inputs(**kwargs)
@@ -310,6 +322,62 @@ def test_latched_day_with_unknown_loss_still_blocks_as_daily_stop() -> None:
     result = _build(verdict=_verdict(state=DailyState.DAILY_STOP, loss=None))
     assert result.inputs is None
     assert result.reason_code == DAILY_STOP_BLOCK
+
+
+def test_a_latched_day_row_blocks_even_with_a_verdict_computed_before_the_latch() -> None:
+    # WR-04 (a): the verdict says NORMAL (evaluated before the latch), the day row read after
+    # it carries the latch: the latch (D-14) wins, a later gain cannot re-open the day.
+    latched = DayRiskState(
+        utc_day=DAY,
+        equity_at_day_start=Decimal("1000"),
+        base_observed_at_utc=BASE_AT,
+        stop_latched_at_utc=NOW,
+    )
+    result = _build(day=latched, verdict=_verdict(DailyState.NORMAL, loss="0"))
+    assert result.is_no_trade
+    assert result.reason_code == DAILY_STOP_BLOCK
+
+
+def test_yesterdays_day_row_and_verdict_are_not_todays_inputs() -> None:
+    # WR-04 (b): same-day consistent but a day behind the clock.
+    result = _build(
+        day=_day(utc_day=DAY),
+        verdict=_verdict(utc_day=DAY),
+        now_utc=datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC),
+        equity=_equity_at(datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC)),
+    )
+    assert (result.is_no_trade, result.reason_code) == (True, UNCERTAIN)
+    next_day = DayRiskState(
+        utc_day=NEXT_DAY,
+        equity_at_day_start=Decimal("1000"),
+        base_observed_at_utc=datetime(2026, 10, 24, 0, 0, 5, tzinfo=UTC),
+    )
+    today = _build(
+        day=next_day,
+        verdict=_verdict(utc_day=NEXT_DAY),
+        now_utc=datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC),
+        equity=_equity_at(datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC)),
+    )
+    assert today.reason_code == "OK"
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "ok"),
+    [(0, True), (30, True), (30.000001, False), (3600, False), (-0.000001, False), (-60, False)],
+)
+def test_the_equity_age_is_rechecked_with_the_owner_bound(age_seconds: float, ok: bool) -> None:
+    # WR-04 (c): age equal to the bound passes, over it fails, a future stamp fails.
+    observed = NOW - timedelta(seconds=age_seconds)
+    result = _build(equity=_equity_at(observed))
+    assert result.is_no_trade is (not ok)
+    assert result.reason_code == ("OK" if ok else UNCERTAIN)
+
+
+def test_the_builder_refuses_a_naive_clock_and_a_non_positive_age_bound() -> None:
+    with pytest.raises(ValueError):
+        _build(now_utc=datetime(2026, 10, 23, 12, 0, 0))
+    with pytest.raises(ValueError):
+        _build(max_equity_age=timedelta(0))
 
 
 def test_candidates_own_row_is_excluded_so_an_exact_fit_passes() -> None:

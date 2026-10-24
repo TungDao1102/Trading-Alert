@@ -104,6 +104,8 @@ def _live(
         exchange_exposures=exposures,
         candidate_trade_plan_id="CANDIDATE",
         parameter_set=dict(RATES, max_open_positions=max_positions),
+        now_utc=NOW,
+        max_equity_age=timedelta(seconds=30),  # TEST_ONLY bound
     )
     assert result.inputs is not None
     return result.inputs.open_positions, result.inputs.parameter_set
