@@ -53,6 +53,14 @@ the approved quantity and ``max_notional_quote``; ``insufficient_margin_order`` 
 owner's own ``insufficient_margin_quantity`` (a far LIMIT BUY that can only rest) and is bound by
 ``margin_order_refusal`` instead: no other case may exceed a cap.
 
+Phase 22 plan 22-05 adds the first owner opt-in case that CHANGES the symbol configuration
+(``SJ3_CASES``): ``symbol_config_change_to_isolated`` (D-18). On a flat symbol it reads the
+configuration, requests ISOLATED, requests the owner's ``order.config_target_leverage``, reads the
+configuration back and records every answer (demo-observed, not mainnet: D-19). It never restores
+the previous configuration; it records it so the owner can. Both changes are mutating port
+operations (``change_margin_type``, ``change_initial_leverage``): a dry run plans them and sends
+nothing. No agent runs this case; the owner does.
+
 Safety posture (read before running anything):
 
 * Dry run is the default. Without ``--execute`` every registered handler runs against
@@ -319,6 +327,9 @@ OPTIONAL_CASES: Mapping[str, str] = MappingProxyType(
         "trigger_cancel_race": "trigger_cancel_race",
         "recv_window_error": "timestamp_outside_recv_window",
         "income_history": "income_history_read",
+        # Phase 22 plan 22-05: the owner-run symbol-configuration cases (SJ3_CASES), before the
+        # gtd case; plan 22-09 appends five more.
+        "symbol_config_change": "symbol_config_change_to_isolated",
         "gtd_expiry": "gtd_entry_expiry_status",
     }
 )
@@ -356,8 +367,11 @@ SJ2_CASES: tuple[str, ...] = (
     "timestamp_outside_recv_window",
     "income_history_read",
 )
+# Phase 22 (D-18): the owner-run symbol-configuration cases, in CASE_ORDER order (before
+# gtd_entry_expiry_status). Plan 22-05 adds the first; plan 22-09 appends five.
+SJ3_CASES: tuple[str, ...] = ("symbol_config_change_to_isolated",)
 # The cases whose REST answers are also written as fixture files in an executed run.
-FIXTURE_CASES: tuple[str, ...] = (*CAPTURE_CASES, *SJ1_CASES, *SJ2_CASES)
+FIXTURE_CASES: tuple[str, ...] = (*CAPTURE_CASES, *SJ1_CASES, *SJ2_CASES, *SJ3_CASES)
 
 # Client ids of the probe: the exchange's documented id shape (at most 36 characters).
 CLIENT_ID_PREFIX = "dprobe-"
@@ -379,6 +393,9 @@ MUTATING_OPERATIONS: frozenset[str] = frozenset(
         "cancel_all_open_orders",
         "cancel_all_algo_open_orders",
         "new_gtd_limit_order",
+        # Phase 22 plan 22-05: the two symbol-configuration changes (owner-run only).
+        "change_margin_type",
+        "change_initial_leverage",
     }
 )
 
@@ -716,6 +733,12 @@ class ProbePort(Protocol):
     async def stale_timestamp_read(
         self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
     ) -> ProbeObservation: ...
+
+    # Phase 22 plan 22-05: the two symbol-configuration changes (mutating, sent once each).
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation: ...
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation: ...
 
     def marker(self) -> int: ...
 
@@ -1505,6 +1528,14 @@ class _WriteCase:
         value = self.limits.race_repeats
         if value is None:
             raise ValueError("race_repeats is not set in the probe limits file")
+        return value
+
+    @property
+    def config_target_leverage(self) -> int:
+        """The owner's `config_target_leverage` (Phase 22 plan 22-05): the leverage to request."""
+        value = self.limits.config_target_leverage
+        if value is None:
+            raise ValueError("config_target_leverage is not set in the probe limits file")
         return value
 
     @property
@@ -4376,6 +4407,96 @@ async def _insufficient_margin_order(case: _WriteCase) -> CaseResult:
     return case.observed()
 
 
+def _summary_value(answer: ProbeObservation, name: str) -> str | None:
+    """The first value of a (possibly flattened) answer whose last dotted key part is `name`."""
+    for key, value in answer.summary.items():
+        if key.split(".")[-1] == name:
+            return value
+    return None
+
+
+def _record_config_read(case: _WriteCase, answer: ProbeObservation, prefix: str) -> None:
+    """One symbol-configuration read: the figures exactly as the exchange wrote them.
+
+    The text of `marginType` keeps the exchange's casing (the Demo host's spelling of an
+    ISOLATED symbol is one of the things this case exists to observe; demo-observed, not
+    mainnet).
+    """
+    if not answer.ok:
+        _record_order_answer(case, answer, prefix)
+        return
+    case.detail(f"{prefix}accepted", _flag_text(True))
+    for wire, name in (
+        ("marginType", "margin_type"),
+        ("leverage", "leverage"),
+        ("maxNotionalValue", "max_notional_value"),
+    ):
+        value = _summary_value(answer, wire)
+        case.detail(f"{prefix}{name}", value if value is not None else "NOT_OBSERVED: absent")
+
+
+def _record_config_change(case: _WriteCase, answer: ProbeObservation, prefix: str) -> None:
+    """One configuration-change answer: accepted fields, or HTTP class, code, category, text."""
+    _record_order_answer(case, answer, prefix)
+    if answer.ok:
+        for key in ("code", "msg", "symbol", "leverage", "maxNotionalValue"):
+            if key in answer.summary:
+                case.detail(f"{prefix}{key}", answer.summary[key])
+
+
+async def _symbol_config_change_to_isolated(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18): change the symbol from its account default (Demo, 2026-10-04: BTCUSDT was
+    # x20 CROSSED) to ISOLATED and the owner's leverage, then read the configuration back. Every
+    # answer is the evidence, an error included. The owner's leverage is read first (a missing
+    # value is a ValueError before anything is sent). Nothing is changed unless the symbol is
+    # flat and its previous configuration was read; nothing is restored afterwards (the owner
+    # decides, 22-RESEARCH Open Question 8). Observed on Demo only, never mainnet (D-19).
+    leverage = case.config_target_leverage
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    case.detail("requested_margin_type", "ISOLATED")
+    case.detail("requested_leverage", str(leverage))
+    before = await case.ask("config_before_read", case.port.symbol_config(symbol=case.symbol))
+    _record_config_read(case, before, "config_before_")
+    if not before.ok:
+        return case.not_observed(
+            f"the previous configuration could not be read ({_class_code(before)}): "
+            "nothing was changed, so the owner could not restore it"
+        )
+    previous_margin = _summary_value(before, "marginType")
+    previous_leverage = _summary_value(before, "leverage")
+    case.detail("previous_margin_type", previous_margin or "NOT_OBSERVED: absent")
+    case.detail("previous_leverage", previous_leverage or "NOT_OBSERVED: absent")
+    already = (
+        previous_margin is not None
+        and previous_margin.upper() == "ISOLATED"
+        and previous_leverage == str(leverage)
+    )
+    case.detail("already_at_target", _flag_text(already))
+    margin = await case.ask(
+        "margin_type_change",
+        case.port.change_margin_type(symbol=case.symbol, margin_type="ISOLATED"),
+    )
+    _record_config_change(case, margin, "margin_type_answer_")
+    changed = await case.ask(
+        "leverage_change",
+        case.port.change_initial_leverage(symbol=case.symbol, leverage=leverage),
+    )
+    _record_config_change(case, changed, "leverage_answer_")
+    after = await case.ask("config_after_read", case.port.symbol_config(symbol=case.symbol))
+    _record_config_read(case, after, "config_after_")
+    if after.ok:
+        text = _summary_value(after, "marginType")
+        case.detail("config_after_margin_type_equals_ISOLATED", _flag_text(text == "ISOLATED"))
+    case.notes.append(
+        "the previous configuration "
+        f"(marginType={previous_margin}, leverage={previous_leverage}) was NOT restored: "
+        "the owner decides"
+    )
+    return case.observed()
+
+
 async def _stop_rejected_after_acceptance(case: _WriteCase) -> CaseResult:
     market = await case.market()
     upper = market.marketable_buy()
@@ -4673,6 +4794,16 @@ async def case_income_history_read(context: CaseContext) -> CaseResult:
     )
 
 
+async def case_symbol_config_change_to_isolated(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, D-18): a flat symbol to ISOLATED and the owner's leverage."""
+    return await run_write_case(
+        context,
+        _symbol_config_change_to_isolated,
+        case_id="symbol_config_change_to_isolated",
+        reduce_only=True,
+    )
+
+
 async def case_exchange_info_read_for_close(context: CaseContext) -> CaseResult:
     """Owner opt-in (A10, Q3): the live exchangeInfo filters and the read time; no order."""
     return await run_write_case(
@@ -4859,6 +4990,7 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "trigger_cancel_race": case_trigger_cancel_race,
     "timestamp_outside_recv_window": case_timestamp_outside_recv_window,
     "income_history_read": case_income_history_read,
+    "symbol_config_change_to_isolated": case_symbol_config_change_to_isolated,
     "gtd_entry_expiry_status": case_gtd_entry_expiry_status,
 }
 
@@ -5690,6 +5822,20 @@ class GuardedProbePort:
         self._enter("stale_timestamp_read")
         result: ProbeObservation = await self._adapter.stale_timestamp_read(
             symbol=symbol, recv_window_ms=recv_window_ms, timestamp_behind_ms=timestamp_behind_ms
+        )
+        return result
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation:
+        self._enter("change_margin_type")
+        result: ProbeObservation = await self._adapter.change_margin_type(
+            symbol=symbol, margin_type=margin_type
+        )
+        return result
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation:
+        self._enter("change_initial_leverage")
+        result: ProbeObservation = await self._adapter.change_initial_leverage(
+            symbol=symbol, leverage=leverage
         )
         return result
 

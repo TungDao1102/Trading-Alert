@@ -129,6 +129,14 @@ class FakeProbeRest:
     def get_income_history(self, **kwargs: Any) -> FakeResponse:
         return self._answer("get_income_history", kwargs)
 
+    # ----- symbol configuration changes (Phase 22 plan 22-05) ------------- #
+
+    def change_margin_type(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("change_margin_type", kwargs)
+
+    def change_initial_leverage(self, **kwargs: Any) -> FakeResponse:
+        return self._answer("change_initial_leverage", kwargs)
+
     # ----- public reads, reached through BinancePublicMarketData --------- #
 
     def mark_price(self, **kwargs: Any) -> FakeResponse:
@@ -222,6 +230,9 @@ MUTATING_OPERATIONS: frozenset[str] = frozenset(
         "cancel_all_open_orders",
         "cancel_all_algo_open_orders",
         "new_gtd_limit_order",
+        # Phase 22 plan 22-05
+        "change_margin_type",
+        "change_initial_leverage",
     }
 )
 # The per-case requests (reads a case sends about one id): recorded as planned in a dry run.
@@ -351,9 +362,12 @@ def fake_account_config(dual_side: bool = False) -> ProbeObservation:
     )
 
 
-def fake_symbol_config(symbol: str) -> ProbeObservation:
+def fake_symbol_config(
+    symbol: str, margin_type: str = "CROSSED", leverage: str = "20"
+) -> ProbeObservation:
     return ok_observation(
-        "symbol_config", {"0.symbol": symbol, "0.marginType": "CROSSED", "0.leverage": "20"}
+        "symbol_config",
+        {"0.symbol": symbol, "0.marginType": margin_type, "0.leverage": leverage},
     )
 
 
@@ -378,6 +392,9 @@ TEST_ONLY_RACE_REPEATS = 3
 # Quick task 261023-sj2: the TEST_ONLY quantity of `insufficient_margin` (far above the 150 cap
 # at the far price 48000.00: a notional of 240000).
 TEST_ONLY_MARGIN_QUANTITY = "5"
+# Phase 22 plan 22-05: the TEST_ONLY target leverage of `symbol_config_change` (the owner writes
+# the real one; this is a made-up test number, not a value of the exchange).
+TEST_ONLY_CONFIG_LEVERAGE = 5
 
 _TEST_ONLY_PROBE_LIMITS = """
 [order]
@@ -428,6 +445,8 @@ def write_probe_limits(
         extra_order += f"race_repeats = {TEST_ONLY_RACE_REPEATS}\n"
     if "insufficient_margin" in optional:
         extra_order += f'insufficient_margin_quantity = "{TEST_ONLY_MARGIN_QUANTITY}"\n'
+    if "symbol_config_change" in optional:
+        extra_order += f"config_target_leverage = {TEST_ONLY_CONFIG_LEVERAGE}\n"
 
     if "gtd_expiry" in optional:
         extra_order += f"gtd_lifetime_seconds = {TEST_ONLY_GTD_LIFETIME_SECONDS}\n"
@@ -540,6 +559,9 @@ class FakeProbePort:
         self.orig_qty: dict[str, Decimal] = {}
         self.server_time_ms = FAKE_SERVER_TIME_MS
         self.book_bids, self.book_asks = default_fake_book(self.mark)
+        # Phase 22 plan 22-05: the FAKE symbol configuration (account defaults) and its changes.
+        self.config_margin_type = "CROSSED"
+        self.config_leverage = "20"
 
     # ----- scenario helpers (plan 18-23) -------------------------------------- #
 
@@ -1005,7 +1027,38 @@ class FakeProbePort:
         return self._answer("account_config", {}, lambda: fake_account_config(self.dual_side))
 
     async def symbol_config(self, *, symbol: str) -> ProbeObservation:
-        return self._answer("symbol_config", {"symbol": symbol}, lambda: fake_symbol_config(symbol))
+        return self._answer(
+            "symbol_config",
+            {"symbol": symbol},
+            lambda: fake_symbol_config(symbol, self.config_margin_type, self.config_leverage),
+        )
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation:
+        """FAKE: an accepted change moves the fake configuration (scriptable like any answer)."""
+
+        def default() -> ProbeObservation:
+            self._require_own_symbol({"symbol": symbol})
+            self.config_margin_type = margin_type
+            return ok_observation("change_margin_type", {"code": "200", "msg": "success"})
+
+        return self._answer(
+            "change_margin_type", {"symbol": symbol, "margin_type": margin_type}, default
+        )
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation:
+        """FAKE: an accepted change moves the fake configuration (scriptable like any answer)."""
+
+        def default() -> ProbeObservation:
+            self._require_own_symbol({"symbol": symbol})
+            self.config_leverage = str(leverage)
+            return ok_observation(
+                "change_initial_leverage",
+                {"symbol": symbol, "leverage": str(leverage), "maxNotionalValue": "5000000"},
+            )
+
+        return self._answer(
+            "change_initial_leverage", {"symbol": symbol, "leverage": leverage}, default
+        )
 
     async def leverage_brackets(self, *, symbol: str) -> ProbeObservation:
         return self._answer(
@@ -1365,6 +1418,12 @@ class RecordingProbePort:
         bids, asks = default_fake_book(Decimal(FAKE_MARK_PRICE))
         return fake_order_book(symbol, bids, asks)
 
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation:
+        return self._plan("change_margin_type", {"symbol": symbol, "margin_type": margin_type})
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation:
+        return self._plan("change_initial_leverage", {"symbol": symbol, "leverage": leverage})
+
     async def stale_timestamp_read(
         self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
     ) -> ProbeObservation:
@@ -1412,6 +1471,7 @@ __all__ = [
     "RecordingProbePort",
     "TEST_ONLY_CASE_TIMEOUT_SECONDS",
     "TEST_ONLY_CLEANUP_TIMEOUT_SECONDS",
+    "TEST_ONLY_CONFIG_LEVERAGE",
     "TEST_ONLY_GTD_EXPIRY_WAIT_SECONDS",
     "TEST_ONLY_GTD_LIFETIME_SECONDS",
     "TEST_ONLY_MARGIN_QUANTITY",

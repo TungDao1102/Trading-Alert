@@ -213,6 +213,8 @@ EVIDENCE_CASE_KEYS: tuple[str, ...] = (
     "trigger_cancel_race",
     "recv_window_error",
     "income_history",
+    # Phase 22 plan 22-05: owner-run symbol-configuration cases (SJ3_CASES), before gtd_expiry.
+    "symbol_config_change",
     "gtd_expiry",
 )
 _NEAR_TRIGGER_FRACTION = "near_trigger_fraction"
@@ -232,6 +234,12 @@ _RACE_REPEATS = "race_repeats"
 # `quantity` / `max_notional_quote` cap that every other case obeys.
 _MARGIN_CASE = "insufficient_margin"
 _MARGIN_QUANTITY = "insufficient_margin_quantity"
+# Phase 22 plan 22-05: the SJ3 cases that CHANGE the symbol configuration (margin type, leverage).
+# `order.config_target_leverage` is the owner's leverage for them: required exactly when one is
+# enabled, no default (D-02 keeps the guard's own constant in the guard module; the probe asks for
+# what the owner wrote). Plan 22-09 extends this tuple with its configuration-changing cases.
+_CONFIG_CASES: tuple[str, ...] = ("symbol_config_change",)
+_CONFIG_LEVERAGE = "config_target_leverage"
 # The most place-and-cancel pairs the owner may ask of `cancel_fill_race`: a tool cap on the
 # number of probe orders (each repeat may open and close a position), not a trading number.
 RACE_REPEATS_MAX = 5
@@ -284,7 +292,9 @@ class DemoOrderLimits:
     enabled: a positive integer of at most `RACE_REPEATS_MAX`. `insufficient_margin_quantity`
     (quick task 261023-sj2) is set exactly when `insufficient_margin` is enabled: a positive
     plain decimal the OWNER chose to exceed the available margin; it is the one quantity the
-    probe may send above the cap, and only for that one case.
+    probe may send above the cap, and only for that one case. `config_target_leverage`
+    (Phase 22 plan 22-05) is set exactly when a configuration-changing SJ3 case is enabled
+    (`symbol_config_change`): the leverage the owner asks the probe to request, a positive int.
     """
 
     kind: str
@@ -302,6 +312,7 @@ class DemoOrderLimits:
     gtd_expiry_wait_seconds: int | None
     race_repeats: int | None
     insufficient_margin_quantity: Decimal | None
+    config_target_leverage: int | None
 
     @property
     def enabled_optional_cases(self) -> tuple[str, ...]:
@@ -449,6 +460,25 @@ def _margin_quantity(
     return _decimal(order, dotted, _MARGIN_QUANTITY, problems)
 
 
+def _config_target_leverage(
+    order: Mapping[str, Any],
+    enabled: Mapping[str, bool],
+    config_cases: Sequence[str],
+    problems: list[str],
+) -> int | None:
+    """`order.config_target_leverage`: required exactly when a configuration case is enabled."""
+    dotted = f"order.{_CONFIG_LEVERAGE}"
+    cases = " or ".join(f"optional_cases.{name}" for name in config_cases)
+    if not any(enabled.get(name) is True for name in config_cases):
+        if _CONFIG_LEVERAGE in order:
+            problems.append(f"{dotted} (only allowed when {cases} is true)")
+        return None
+    if _CONFIG_LEVERAGE not in order:
+        problems.append(f"{dotted} (missing key: required when {cases} is true)")
+        return None
+    return _positive_int(order, dotted, _CONFIG_LEVERAGE, problems)
+
+
 def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     """Load the owner's order-limits file of `kind` ("smoke" or "probe").
 
@@ -476,6 +506,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
                 _GTD_LIFETIME,
                 _RACE_REPEATS,
                 _MARGIN_QUANTITY,
+                _CONFIG_LEVERAGE,
             ),
             "waits": (_GTD_WAIT,),
             "optional_cases": EVIDENCE_CASE_KEYS,
@@ -508,6 +539,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     gtd_wait: int | None = None
     race_repeats: int | None = None
     margin_quantity: Decimal | None = None
+    config_leverage: int | None = None
     optional_cases: dict[str, bool] = {}
     if kind == KIND_SMOKE:
         event_wait = _positive_int(
@@ -548,6 +580,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         gtd_lifetime, gtd_wait = _gtd_limits(order, waits, optional_cases, problems)
         race_repeats = _race_repeats(order, optional_cases, problems)
         margin_quantity = _margin_quantity(order, optional_cases, problems)
+        config_leverage = _config_target_leverage(order, optional_cases, _CONFIG_CASES, problems)
 
     if problems:
         raise DemoOrderLimitsRefused(problems)
@@ -567,6 +600,7 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         gtd_expiry_wait_seconds=gtd_wait,
         race_repeats=race_repeats,
         insufficient_margin_quantity=margin_quantity,
+        config_target_leverage=config_leverage,
     )
 
 

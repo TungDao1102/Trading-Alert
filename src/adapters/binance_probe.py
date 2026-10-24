@@ -49,6 +49,13 @@ subtracts a thread-local offset: only the worker thread of this call is ever mad
 other thread keeps the real clock, and the original function is restored when the call ends. The
 answer carries how often the SDK asked the clock (`clock_calls`): 0 means the stale clock was not
 honoured and the case must not draw a conclusion.
+
+Phase 22 plan 22-05 adds the two mutating symbol-configuration operations `change_margin_type`
+and `change_initial_leverage` for the owner-run Demo case `symbol_config_change_to_isolated`
+(D-18). Each is ONE signed SDK call with call kind PLACEMENT (never retried, the error returned
+as data); the margin type is checked against the SDK enum and the leverage as a strict positive
+int before any SDK call. They are in `MUTATING_OPERATIONS` of `scripts/demo_probe.py`, so a dry
+run refuses them. Nothing observed through them is mainnet evidence (D-19: demo-observed only).
 """
 
 from __future__ import annotations
@@ -66,6 +73,7 @@ from typing import Any
 
 import binance_common.utils as sdk_utils
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+    ChangeMarginTypeMarginTypeEnum,
     NewAlgoOrderAlgoTypeEnum,
     NewAlgoOrderClosePositionEnum,
     NewAlgoOrderReduceOnlyEnum,
@@ -136,6 +144,9 @@ SDK_REST_METHODS: frozenset[str] = frozenset(
         "symbol_configuration",
         "notional_and_leverage_brackets",
         "get_income_history",
+        # Phase 22 plan 22-05: the two owner-run configuration changes (mutating, sent once)
+        "change_margin_type",
+        "change_initial_leverage",
     }
 )
 
@@ -202,6 +213,9 @@ _ALGO_ORDER_FIELDS: tuple[str, ...] = (
 )
 _CANCEL_ALGO_FIELDS: tuple[str, ...] = ("algo_id", "client_algo_id", "code", "msg")
 _CANCEL_ALL_FIELDS: tuple[str, ...] = ("code", "msg")
+# Phase 22 plan 22-05: the two answers of a symbol-configuration change, by name (T-18-34).
+_MARGIN_TYPE_CHANGE_FIELDS: tuple[str, ...] = ("code", "msg")
+_LEVERAGE_CHANGE_FIELDS: tuple[str, ...] = ("symbol", "leverage", "max_notional_value")
 # Per-row fields of the three snapshots, named after the production dataclass fields.
 _OPEN_ORDER_ROW_FIELDS: tuple[str, ...] = (
     "symbol",
@@ -500,6 +514,19 @@ def _cancel_algo_summary(raw: Any) -> dict[str, str]:
 
 def _cancel_all_summary(raw: Any) -> dict[str, str]:
     return _fields_summary(raw, _CANCEL_ALL_FIELDS)
+
+
+def _margin_type_change_summary(raw: Any) -> dict[str, str]:
+    return _fields_summary(raw, _MARGIN_TYPE_CHANGE_FIELDS)
+
+
+def _leverage_change_summary(raw: Any) -> dict[str, str]:
+    """`symbol`, `leverage` and `maxNotionalValue` (the wire name, as the exchange spells it)."""
+    out = _fields_summary(raw, _LEVERAGE_CHANGE_FIELDS)
+    maximum = out.pop("max_notional_value", None)
+    if maximum is not None:
+        out["maxNotionalValue"] = maximum
+    return out
 
 
 def _rows(raw: Any) -> list[Any]:
@@ -983,6 +1010,41 @@ class BinanceProbeAdapter:
             call_kind=CallKind.PLACEMENT,
             kwargs=kwargs,
             summarize=_algo_order_summary,
+        )
+
+    # ----- symbol configuration changes (Phase 22 plan 22-05; sent once, never retried) -- #
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation:
+        """POST /fapi/v1/marginType: the exchange answers `{code, msg}`; an error is data.
+
+        `margin_type` must be exactly "ISOLATED" or "CROSSED" (checked before any SDK call).
+        A mutating call: sent once like a placement, never retried (D-18).
+        """
+        member = _member(ChangeMarginTypeMarginTypeEnum, "margin_type", margin_type)
+        return await self._call(
+            "change_margin_type",
+            sdk_method_name="change_margin_type",
+            call_kind=CallKind.PLACEMENT,
+            kwargs={"symbol": symbol, "margin_type": member},
+            summarize=_margin_type_change_summary,
+        )
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation:
+        """POST /fapi/v1/leverage: the exchange answers `{symbol, leverage, maxNotionalValue}`.
+
+        `leverage` must be a strict positive int (a bool, a float or text is refused before
+        any SDK call). A mutating call: sent once like a placement, never retried (D-18).
+        """
+        if not _is_strict_int(leverage):
+            raise TypeError("leverage must be an int (not a bool)")
+        if leverage <= 0:
+            raise ValueError("leverage must be positive")
+        return await self._call(
+            "change_initial_leverage",
+            sdk_method_name="change_initial_leverage",
+            call_kind=CallKind.PLACEMENT,
+            kwargs={"symbol": symbol, "leverage": leverage},
+            summarize=_leverage_change_summary,
         )
 
     # ----- cancels (each sent once, never retried) ------------------------- #
