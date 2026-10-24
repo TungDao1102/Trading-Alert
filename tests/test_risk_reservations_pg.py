@@ -475,7 +475,7 @@ EXPECTED_SOURCES: dict[ReleaseReason, frozenset[ReservationStatus]] = {
     R.PLACEMENT_REFUSED: frozenset({S.RESERVED}),
     R.ENTRY_REJECTED: frozenset({S.RESERVED, S.PLACED}),
     R.ENTRY_ENDED_NO_FILL: frozenset({S.PLACED}),
-    R.POSITION_CLOSED: frozenset({S.OPEN}),
+    R.POSITION_CLOSED: frozenset({S.PLACED, S.OPEN}),  # WR-10: a missed first fill
 }
 
 
@@ -511,6 +511,28 @@ def test_the_expected_table_is_the_mapping_of_the_risk_module() -> None:
     # The store reads the mapping itself, not a copy of it.
     assert store_module.RELEASE_SOURCE_STATUSES is risk_module.RELEASE_SOURCE_STATUSES
     assert "RELEASE_SOURCE_STATUSES[reason]" in inspect.getsource(PgRiskReservationStore.release)
+
+
+def test_a_closed_position_releases_a_placed_row_whose_first_fill_was_never_marked(
+    db: OperationalDatabase, store: PgRiskReservationStore
+) -> None:
+    # WR-10: a stream gap or a restart between the fill and `mark_open` leaves the row PLACED;
+    # protection then reaches FLAT. The row must not stay counted with no way out.
+    open_today(db)
+    store.register_request(request(), now_utc=NOW)
+    reserve(db, store, decided())
+    store.mark_placed(P1, now_utc=LATER)
+    assert [row.status for row in store.list_counted()] == [S.PLACED]
+
+    released = store.release(
+        P1, reason=R.POSITION_CLOSED, now_utc=datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    )
+
+    assert released.status is S.RELEASED
+    assert released.release_reason is R.POSITION_CLOSED
+    assert store.list_counted() == ()
+    with pytest.raises(RowConflict):
+        store.mark_open(P1, now_utc=datetime(2026, 10, 23, 13, 0, tzinfo=UTC))
 
 
 def test_mark_placed_then_mark_open_walk_the_lifecycle(

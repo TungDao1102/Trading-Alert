@@ -91,9 +91,13 @@ _R = ReleaseReason
 
 # The permitted source statuses of each release reason (read-only; the store of plan 21-12
 # enforces it). A PLACED or OPEN row is never released by a plan-status reason: the entry may
-# still fill or the position is live, so only the exchange outcome releases it. Every status
-# except RELEASED is the source of at least one reason and RELEASED is never a source, so no
-# counted reservation is left without an exit (D-16).
+# still fill or the position is live, so only the exchange outcome releases it. POSITION_CLOSED
+# is permitted from PLACED as well as OPEN (review WR-10): a closed position implies its entry
+# filled, and when the first fill was missed (a stream gap, a restart between the fill and
+# `mark_open`) the row is still PLACED, so without this source it would stay counted until a table
+# edit. Every status except RELEASED is the source of at least one reason and RELEASED is never a
+# source, so no counted reservation is left without an exit (D-16). There is no operator release
+# reason: it would need a new CHECK value (a migration) and is left to the owner.
 RELEASE_SOURCE_STATUSES: Mapping[ReleaseReason, frozenset[ReservationStatus]] = MappingProxyType(
     {
         _R.APPROVAL_SKIPPED: frozenset({_S.REQUESTED}),
@@ -104,7 +108,7 @@ RELEASE_SOURCE_STATUSES: Mapping[ReleaseReason, frozenset[ReservationStatus]] = 
         _R.PLACEMENT_REFUSED: frozenset({_S.RESERVED}),
         _R.ENTRY_REJECTED: frozenset({_S.RESERVED, _S.PLACED}),
         _R.ENTRY_ENDED_NO_FILL: frozenset({_S.PLACED}),
-        _R.POSITION_CLOSED: frozenset({_S.OPEN}),
+        _R.POSITION_CLOSED: frozenset({_S.PLACED, _S.OPEN}),
     }
 )
 

@@ -437,7 +437,7 @@ def test_release_source_statuses_literal_oracle() -> None:
         r.PLACEMENT_REFUSED: frozenset({s.RESERVED}),
         r.ENTRY_REJECTED: frozenset({s.RESERVED, s.PLACED}),
         r.ENTRY_ENDED_NO_FILL: frozenset({s.PLACED}),
-        r.POSITION_CLOSED: frozenset({s.OPEN}),
+        r.POSITION_CLOSED: frozenset({s.PLACED, s.OPEN}),  # WR-10: a missed first fill
     }
     assert dict(RELEASE_SOURCE_STATUSES) == expected
 
