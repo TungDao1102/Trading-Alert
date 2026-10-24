@@ -30,6 +30,8 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    ChangeInitialLeverageResponse,
+    ChangeMarginTypeResponse,
     CheckServerTimeResponse,
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
@@ -150,6 +152,11 @@ _SUCCESS_PAYLOADS: dict[str, Any] = {
         [{"symbol": "BTCUSDT", "brackets": [{"bracket": 1, "initialLeverage": 125}]}]
     ),
     "get_income_history": [GetIncomeHistoryResponse(symbol="BTCUSDT", income_type="COMMISSION")],
+    # Phase 22 plan 22-05: the two symbol-configuration changes
+    "change_margin_type": ChangeMarginTypeResponse(code=200, msg="success"),
+    "change_initial_leverage": ChangeInitialLeverageResponse(
+        symbol="BTCUSDT", leverage=5, max_notional_value="5000000"
+    ),
     "mark_price": MarkPriceResponse(
         actual_instance=MarkPriceResponse1(
             symbol="BTCUSDT", mark_price="83748.10", time=1791360000000
@@ -267,6 +274,12 @@ _OPERATIONS: dict[str, _Op] = {
         good_till_date_ms=1791360660000,
     ),
     "live_mark_price": lambda a: a.live_mark_price(symbol="BTCUSDT"),
+    # Phase 22 plan 22-05: the two symbol-configuration changes (mutating, sent once each)
+    "change_margin_type": lambda a: a.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED"),
+    "change_margin_type_crossed": lambda a: a.change_margin_type(
+        symbol="BTCUSDT", margin_type="CROSSED"
+    ),
+    "change_initial_leverage": lambda a: a.change_initial_leverage(symbol="BTCUSDT", leverage=5),
     # quick task 261022-sj1: the server time and the depth read
     "server_time": lambda a: a.server_time(),
     "order_book": lambda a: a.order_book(symbol="BTCUSDT"),
@@ -523,3 +536,44 @@ def test_the_sdk_send_request_reads_the_clock_by_the_name_the_adapter_replaces()
 
     source = inspect.getsource(sdk_utils.send_request)
     assert 'cleaned_payload["timestamp"] = get_timestamp()' in source
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-05: the symbol-configuration changes against the installed SDK.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_margin_type_enum_has_exactly_isolated_and_crossed() -> None:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+        ChangeMarginTypeMarginTypeEnum,
+    )
+
+    assert {member.value for member in ChangeMarginTypeMarginTypeEnum} == {"ISOLATED", "CROSSED"}
+
+
+@pytest.mark.parametrize(
+    ("name", "parameters"),
+    [
+        ("change_margin_type", {"symbol", "margin_type", "recv_window"}),
+        ("change_initial_leverage", {"symbol", "leverage", "recv_window"}),
+    ],
+)
+def test_the_change_methods_take_exactly_the_keywords_the_adapter_sends(
+    name: str, parameters: set[str]
+) -> None:
+    signature = inspect.signature(getattr(SdkRestApi, name))
+    assert set(signature.parameters) - {"self"} == parameters
+    assert name in SDK_REST_METHODS
+
+
+async def test_each_change_makes_one_sdk_call_with_the_policy_window() -> None:
+    recorded = await _record_all()
+    changes = [(name, kwargs) for name, kwargs in recorded if name.startswith("change_")]
+    assert [name for name, _ in changes] == [
+        "change_margin_type",
+        "change_margin_type",
+        "change_initial_leverage",
+    ]
+    for _, kwargs in changes:
+        assert kwargs["recv_window"] == TEST_ONLY_RECV_WINDOW_MS
+        assert kwargs["symbol"] == "BTCUSDT"

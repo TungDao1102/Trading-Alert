@@ -30,6 +30,8 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    ChangeInitialLeverageResponse,
+    ChangeMarginTypeResponse,
     CheckServerTimeResponse,
     CurrentAllAlgoOpenOrdersResponseInner,
     CurrentAllOpenOrdersResponseInner,
@@ -51,6 +53,7 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
     SymbolConfigurationResponse,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+    ChangeMarginTypeMarginTypeEnum,
     NewAlgoOrderAlgoTypeEnum,
     NewAlgoOrderClosePositionEnum,
     NewAlgoOrderReduceOnlyEnum,
@@ -908,6 +911,9 @@ _READ_AND_MUTATING_CALLS = [
     lambda a: a.stale_timestamp_read(  # quick task 261023-sj2
         symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
     ),
+    # Phase 22 plan 22-05: the two symbol-configuration changes are refused after a ban too
+    lambda a: a.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type="ISOLATED"),
+    lambda a: a.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=5),
 ]
 
 
@@ -2063,6 +2069,9 @@ def test_every_public_coroutine_returns_observations_only() -> None:
         "order_book",
         # quick task 261023-sj2
         "stale_timestamp_read",
+        # Phase 22 plan 22-05
+        "change_margin_type",
+        "change_initial_leverage",
     }
     assert {name: text for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {}
 
@@ -2293,3 +2302,99 @@ async def test_the_stale_read_is_refused_after_a_ban_without_an_sdk_call() -> No
             symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
         )
     assert len(rest.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-05: change_margin_type and change_initial_leverage (mutating, sent once).
+# --------------------------------------------------------------------------- #
+
+
+async def test_change_margin_type_sends_the_enum_member_once_and_records_code_and_msg() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("change_margin_type", ChangeMarginTypeResponse(code=200, msg="success"))
+
+    observation = await adapter.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type="ISOLATED")
+
+    assert rest.calls == [
+        (
+            "change_margin_type",
+            {
+                "symbol": TEST_ONLY_SYMBOL,
+                "margin_type": ChangeMarginTypeMarginTypeEnum.ISOLATED,
+                "recv_window": _RECV,
+            },
+        )
+    ]
+    assert observation.operation == "change_margin_type"
+    assert observation.ok is True and observation.error is None
+    assert dict(observation.summary) == {"code": "200", "msg": "success"}
+
+
+@pytest.mark.parametrize("bad", ["isolated", "CROSS", "", "ISOLATED ", 1, None, True])
+async def test_change_margin_type_refuses_any_other_value_before_an_sdk_call(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type=bad)
+    assert rest.calls == []
+
+
+async def test_change_margin_type_records_an_exchange_error_as_data_and_never_retries() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "change_margin_type",
+        BadRequestError(status_code=-4046, error_message="No need to change margin type."),
+    )
+
+    observation = await adapter.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type="ISOLATED")
+
+    assert len(rest.calls) == 1  # sent once
+    assert observation.ok is False and observation.error is not None
+    assert observation.error.code == -4046
+    assert observation.error.http_class == "BAD_REQUEST"
+    assert adapter.banned is False
+
+
+async def test_change_initial_leverage_sends_an_int_once_and_records_the_answer() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "change_initial_leverage",
+        ChangeInitialLeverageResponse(symbol="BTCUSDT", leverage=5, max_notional_value="5000000"),
+    )
+
+    observation = await adapter.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=5)
+
+    assert rest.calls == [
+        (
+            "change_initial_leverage",
+            {"symbol": TEST_ONLY_SYMBOL, "leverage": 5, "recv_window": _RECV},
+        )
+    ]
+    assert type(rest.calls[0][1]["leverage"]) is int
+    assert observation.operation == "change_initial_leverage"
+    assert dict(observation.summary) == {
+        "symbol": "BTCUSDT",
+        "leverage": "5",
+        "maxNotionalValue": "5000000",
+    }
+
+
+@pytest.mark.parametrize("bad", [0, -1, -20, True, False, 5.0, "5", None])
+async def test_change_initial_leverage_refuses_a_non_positive_or_non_int_leverage(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=bad)
+    assert rest.calls == []
+
+
+async def test_change_initial_leverage_records_an_exchange_error_and_never_retries() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "change_initial_leverage",
+        ServerError(status_code=503, error_message="busy"),
+    )
+
+    observation = await adapter.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=5)
+
+    assert len(rest.calls) == 1
+    assert observation.ok is False and observation.error is not None
+    assert observation.error.category == "STATUS_UNKNOWN"  # a change is never re-sent

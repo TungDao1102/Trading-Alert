@@ -86,7 +86,13 @@ def test_the_five_cases_are_registered_with_their_own_keys_and_handlers() -> Non
     assert set(dp.SJ1_CASES) <= set(dp.CASE_ORDER)
     assert not set(dp.SJ1_CASES) & set(dp.CAPTURE_CASES)  # the sj0 ten keep their meaning
     assert dp.CASE_ORDER[-1] == "gtd_entry_expiry_status"  # the case that waits runs last
-    assert dp.FIXTURE_CASES == (*dp.CAPTURE_CASES, *dp.SJ1_CASES, *dp.SJ2_CASES)
+    # Phase 22 plan 22-05: the SJ3 group is appended
+    assert dp.FIXTURE_CASES == (
+        *dp.CAPTURE_CASES,
+        *dp.SJ1_CASES,
+        *dp.SJ2_CASES,
+        *dp.SJ3_CASES,
+    )
 
 
 async def test_a_dry_run_with_every_key_on_has_no_error_and_the_five_not_rehearsed(
@@ -845,6 +851,7 @@ SESSION_VALUES = {
     "cleanup_timeout_seconds": "60",
     "gtd_expiry_wait_seconds": "720",
     "insufficient_margin_quantity": '"5"',
+    "config_target_leverage": "5",  # Phase 22 plan 22-05 (a TEST_ONLY number)
 }
 
 

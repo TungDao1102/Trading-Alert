@@ -272,6 +272,7 @@ def test_the_smoke_kind_loads_every_value_with_decimal_strings(tmp_path: Path) -
         gtd_expiry_wait_seconds=None,
         race_repeats=None,
         insufficient_margin_quantity=None,
+        config_target_leverage=None,  # Phase 22 plan 22-05
     )
     assert limits.enabled_optional_cases == ()
 
@@ -467,8 +468,19 @@ SJ2_KEYS = (
 )
 
 
+# Phase 22 plan 22-05: the first owner-run symbol-configuration key, before gtd_expiry.
+SJ3_KEYS = ("symbol_config_change",)
+
+
 def test_the_evidence_case_keys_are_the_ten_the_five_and_the_eight_in_script_order() -> None:
-    assert oe.EVIDENCE_CASE_KEYS == (*NEW_KEYS[:9], *SJ1_KEYS, *SJ2_KEYS, NEW_KEYS[9])
+    assert oe.EVIDENCE_CASE_KEYS == (
+        *NEW_KEYS[:9],
+        *SJ1_KEYS,
+        *SJ2_KEYS,
+        *SJ3_KEYS,  # Phase 22 plan 22-05
+        NEW_KEYS[9],
+    )
+    assert oe.EVIDENCE_CASE_KEYS[-2] == "symbol_config_change"  # right before the long case
     assert oe.EVIDENCE_CASE_KEYS[-1] == "gtd_expiry"  # the case that waits runs last
     assert "EVIDENCE_CASE_KEYS" in oe.__all__
     assert not set(oe.EVIDENCE_CASE_KEYS) & set(oe.OPTIONAL_CASE_KEYS)
@@ -888,3 +900,83 @@ def test_the_smoke_kind_refuses_the_sj2_case_keys_and_the_margin_quantity(tmp_pa
 def test_the_phase18_file_has_no_margin_quantity() -> None:
     limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
     assert limits.insufficient_margin_quantity is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-05: symbol_config_change and order.config_target_leverage.
+# --------------------------------------------------------------------------- #
+
+CONFIG_LEVERAGE_LINE = "config_target_leverage = 5\n"
+
+
+def _config_text(*, enabled: bool | None, line: str) -> str:
+    """The TEST_ONLY probe file with the flag (None: absent) and one `[order]` line."""
+    text = TEST_ONLY_PROBE_LIMITS
+    if enabled is not None:
+        text = _with_new_keys(("symbol_config_change", "true" if enabled else "false"))
+    return text.replace('symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{line}', 1)
+
+
+def test_the_owner_leverage_is_loaded_exactly_when_the_flag_is_on(tmp_path: Path) -> None:
+    on = oe.load_demo_order_limits(
+        _write(tmp_path, _config_text(enabled=True, line=CONFIG_LEVERAGE_LINE)), kind="probe"
+    )
+    assert on.config_target_leverage == 5 and type(on.config_target_leverage) is int
+    assert "symbol_config_change" in on.enabled_optional_cases
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _config_text(enabled=False, line=""), "off.toml"), kind="probe"
+    )
+    assert off.config_target_leverage is None
+    assert "symbol_config_change" not in off.enabled_optional_cases
+    absent = oe.load_demo_order_limits(
+        _write(tmp_path, _config_text(enabled=None, line=""), "absent.toml"), kind="probe"
+    )
+    assert absent.config_target_leverage is None
+
+
+_POSITIVE = "order.config_target_leverage (must be a positive integer)"
+
+
+@pytest.mark.parametrize(
+    ("line", "enabled", "named"),
+    [
+        ("", True, "order.config_target_leverage (missing key"),
+        ("config_target_leverage = 0\n", True, _POSITIVE),
+        ("config_target_leverage = -5\n", True, _POSITIVE),
+        ("config_target_leverage = true\n", True, _POSITIVE),
+        ("config_target_leverage = 5.0\n", True, _POSITIVE),
+        ('config_target_leverage = "5"\n', True, _POSITIVE),
+        ("config_target_leverage = 5\n", False, "order.config_target_leverage (only allowed when"),
+        ("config_target_leverage = 5\n", None, "order.config_target_leverage (only allowed when"),
+    ],
+)
+def test_the_owner_leverage_is_refused_unless_a_positive_int_and_only_with_its_flag(
+    tmp_path: Path, line: str, enabled: bool | None, named: str
+) -> None:
+    text = _config_text(enabled=enabled, line=line)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert named in str(info.value)
+
+
+def test_an_owner_placeholder_for_the_leverage_is_refused_without_echoing_it(
+    tmp_path: Path,
+) -> None:
+    text = _config_text(enabled=True, line="config_target_leverage = <OWNER: a whole number>\n")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert "OWNER" not in str(info.value)  # a refusal names keys, never a value
+
+
+def test_the_smoke_kind_refuses_the_leverage_key_and_the_config_flag(tmp_path: Path) -> None:
+    text = TEST_ONLY_SMOKE_LIMITS.replace("[order]\n", "[order]\nconfig_target_leverage = 5\n", 1)
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+    flag = TEST_ONLY_SMOKE_LIMITS + "\n[optional_cases]\nsymbol_config_change = true\n"
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, flag, "f.toml"), kind="smoke")
+
+
+def test_the_phase18_file_has_no_config_target_leverage() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.config_target_leverage is None

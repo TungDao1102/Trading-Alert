@@ -117,9 +117,17 @@ def test_the_eight_cases_are_registered_with_their_own_keys_and_handlers() -> No
     assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
     order = list(dp.CASE_ORDER)
     assert order[-1] == "gtd_entry_expiry_status"  # the case that waits runs last
-    assert order[-9:-1] == list(NEW_CASES)  # contiguous, right before the GTD case
+    # Phase 22 plan 22-05: the SJ3 case sits between the SJ2 group and the GTD case
+    assert order[-2] == "symbol_config_change_to_isolated"
+    assert order[-10:-2] == list(NEW_CASES)  # contiguous, right before the SJ3 case
     assert order.index("stream_loss_during_case") < order.index(FLAT)
-    assert dp.FIXTURE_CASES == (*dp.CAPTURE_CASES, *dp.SJ1_CASES, *dp.SJ2_CASES)
+    # Phase 22 plan 22-05: the SJ3 group is appended
+    assert dp.FIXTURE_CASES == (
+        *dp.CAPTURE_CASES,
+        *dp.SJ1_CASES,
+        *dp.SJ2_CASES,
+        *dp.SJ3_CASES,
+    )
     assert not set(dp.SJ2_CASES) & (set(dp.CAPTURE_CASES) | set(dp.SJ1_CASES))
 
 
@@ -1142,7 +1150,8 @@ def _section(text: str, title: str) -> str:
 
 def test_the_runbook_lists_every_case_id_in_run_order_in_the_session_section() -> None:
     session = _section(_runbook(), "## One session: all cases")
-    positions = [session.index(f"`{case_id}`") for case_id in dp.CASE_ORDER[-9:]]
+    # Phase 22 plan 22-05: the last ten ids are the eight SJ2 cases, the SJ3 case and the GTD case
+    positions = [session.index(f"`{case_id}`") for case_id in dp.CASE_ORDER[-10:]]
     assert positions == sorted(positions)
     assert session.count("<OWNER") >= 10
 

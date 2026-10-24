@@ -599,6 +599,9 @@ _MUTATING_CALLS: dict[str, dict[str, Any]] = {
         "position_side": "BOTH",
         "good_till_date_ms": 1791360660000,
     },
+    # Phase 22 plan 22-05: the two symbol-configuration changes
+    "change_margin_type": {"symbol": "BTCUSDT", "margin_type": "ISOLATED"},
+    "change_initial_leverage": {"symbol": "BTCUSDT", "leverage": 5},
 }
 
 

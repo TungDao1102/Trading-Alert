@@ -18,7 +18,7 @@ The tool is `scripts/demo_probe.py` (ten opt-in cases of 261021-sj0, `CAPTURE_CA
 
 You create and approve `.planning/phases/19-execution-plan-binding-price-check/decisions/19-probe-limits.toml` and record the approval in a decision note of your own. The agent did not create or approve it, and the Phase 18 files (`18-probe-limits.toml`, `18-smoke-limits.toml`) are unchanged.
 
-Layout: the Phase 18 keys, the twenty-three new `[optional_cases]` keys (ten of 261021-sj0, five of 261022-sj1 and eight of 261023-sj2), and five new keys that are required exactly when their case is on. Every number is yours: nothing is proposed here, and every placeholder below is written `<OWNER: ...>`, so the loader refuses the file until you replace each one.
+Layout: the Phase 18 keys, the twenty-four new `[optional_cases]` keys (ten of 261021-sj0, five of 261022-sj1, eight of 261023-sj2 and one of Phase 22 plan 22-05), and six new keys that are required exactly when their case is on. Every number is yours: nothing is proposed here, and every placeholder below is written `<OWNER: ...>`, so the loader refuses the file until you replace each one.
 
 ```toml
 [order]
@@ -34,6 +34,8 @@ gtd_lifetime_seconds = <OWNER: whole seconds>
 race_repeats = <OWNER: a whole number, at most 5>
 # only with insufficient_margin (its own quantity; the notional cap does not apply to it):
 insufficient_margin_quantity = "<OWNER: whole quantity on the step grid, large enough to exceed available margin at the account's leverage>"
+# only with symbol_config_change (Phase 22; the leverage the probe asks the exchange for):
+config_target_leverage = <OWNER: a whole number, the leverage you want requested>
 
 [waits]
 case_timeout_seconds = <OWNER: whole seconds>
@@ -67,6 +69,7 @@ stop_reject_after_accept = <OWNER: true or false>
 trigger_cancel_race = <OWNER: true or false>
 recv_window_error = <OWNER: true or false>
 income_history = <OWNER: true or false>
+symbol_config_change = <OWNER: true or false>
 gtd_expiry = <OWNER: true or false>
 ```
 
@@ -76,7 +79,8 @@ What the loader enforces (it names keys, never values, when it refuses):
 - `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds` are positive integers, required exactly when `gtd_expiry` is true and refused otherwise; the wait must be greater than the lifetime. Binance requires `goodTillDate` greater than now plus 600 seconds; the loader does not check that floor, so a lifetime below it is allowed and the exchange answer to it is evidence (A1).
 - `race_repeats` is a positive integer of at most 5 (`RACE_REPEATS_MAX`, a cap on the number of probe orders, not a trading number), required exactly when `cancel_fill_race` or `trigger_cancel_race` is true and refused otherwise.
 - `insufficient_margin_quantity` is a positive plain decimal (a string like the other quantities), required exactly when `insufficient_margin` is true and refused otherwise. There is no default and no proposed number: the text `<OWNER: ...>` is not a decimal, so the loader refuses the file until you replace it. Choose a whole quantity on the step grid that is large enough to exceed the available margin at your account's leverage; the case records the available balance, the leverage and the implied margin it read just before, so you can see whether it was large enough. It must also be inside the LOT_SIZE range (a quantity above the exchange maximum would answer a lot-size error, not -2019, so the case does not send it).
-- A larger `case_timeout_seconds` (your choice) gives the trigger cases and the stream-loss case more time. A key that is absent means the case is off, and a file with none of the twenty-three keys behaves exactly like the Phase 18 file.
+- `config_target_leverage` (Phase 22 plan 22-05) is a positive integer, required exactly when `symbol_config_change` is true and refused otherwise; there is no default. It is the leverage the case asks the exchange for after switching the symbol to ISOLATED.
+- A larger `case_timeout_seconds` (your choice) gives the trigger cases and the stream-loss case more time. A key that is absent means the case is off, and a file with none of the twenty-four keys behaves exactly like the Phase 18 file.
 
 ## Step 1: dry run first (offline)
 
@@ -272,6 +276,13 @@ Sections 16 to 23 were added by quick task 261023-sj2. Each ends with a line "If
 - Consumers: Phase 21 (daily loss and the income types), G2-042/A9 (commission and realized PnL).
 - If it stops: NOT_OBSERVED "no income row in the run window" means nothing was charged or paid in the window (for example when the other cases were off); run it after the order cases in the same session. A read failure shows the exact code.
 
+### 24. symbol_config_change_to_isolated (key `symbol_config_change`; needs `config_target_leverage`; added by Phase 22 plan 22-05)
+
+- This case CHANGES your Demo account: it is the first Phase 22 case that does. On a symbol that is flat (no open order, no algo order, no position) it reads the symbol configuration, asks the exchange for ISOLATED margin, asks for your `config_target_leverage`, then reads the configuration back. Each request is sent once and never repeated. It sends no order. It does not restore the previous configuration: it records it (`previous_margin_type`, `previous_leverage`) and you decide whether to change it back. A hedge-mode account is NOT_OBSERVED. If the symbol is not flat, or the previous configuration cannot be read, nothing is changed and the case is NOT_OBSERVED.
+- Read: `requested_margin_type`, `requested_leverage`, `config_before_margin_type`, `config_before_leverage`, `config_before_max_notional_value`, `previous_margin_type`, `previous_leverage`, `already_at_target`, the answer to each change (`margin_type_answer_accepted`, `margin_type_answer_code`, `margin_type_answer_msg`, or the `_error_code`, `_error_class`, `_error_category`, `_error_message` fields; `leverage_answer_accepted`, `leverage_answer_symbol`, `leverage_answer_leverage`, `leverage_answer_maxNotionalValue` or the error fields), then `config_after_margin_type` (the exchange's own casing), `config_after_leverage`, `config_after_max_notional_value` and `config_after_margin_type_equals_ISOLATED`. An exchange error is evidence, not a failure: the case stays OBSERVED.
+- Consumers: Phase 22 criterion 1 (the leverage and margin guard), the casing of an ISOLATED `marginType` on the Demo host, the code the exchange answers to a no-op change. Anything seen is demo-observed, not mainnet.
+- If it stops: NOT_OBSERVED with the reason text. Run it again when the symbol is flat.
+
 ## One session: all cases
 
 The order of the case ids in one run without `--only` is the `CASE_ORDER` of the tool. The sixteen required Phase 18 cases run first; the cases below run only when their key is true in your file; the one case that waits more than ten minutes is last.
@@ -298,7 +309,8 @@ The order of the case ids in one run without `--only` is the `CASE_ORDER` of the
 20. `trigger_cancel_race` (key `trigger_cancel_race`)
 21. `timestamp_outside_recv_window` (key `recv_window_error`)
 22. `income_history_read` (key `income_history`): reads the income of the whole run window, so it runs after the order cases
-23. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
+23. `symbol_config_change_to_isolated` (key `symbol_config_change`): changes the symbol to ISOLATED and your `config_target_leverage`; does not restore the old configuration
+24. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
 
 A complete probe-limits file with every one of these keys on. Every number is yours: nothing is proposed, every placeholder is written `<OWNER: ...>`, and the loader refuses the file until you replace each one. The three Phase 18 optional cases stay off here (they are your earlier decisions; enabling `market_lot_size_out_of_range` also needs `market_lot_probe_quantity`).
 
@@ -312,6 +324,7 @@ near_trigger_fraction = "<OWNER: strictly between 0 and 1>"
 gtd_lifetime_seconds = <OWNER: whole seconds>
 race_repeats = <OWNER: a whole number, at most 5>
 insufficient_margin_quantity = "<OWNER: whole quantity on the step grid, large enough to exceed available margin at the account's leverage>"
+config_target_leverage = <OWNER: a whole number, the leverage you want requested>
 
 [waits]
 case_timeout_seconds = <OWNER: whole seconds>
@@ -344,6 +357,7 @@ stop_reject_after_accept = true
 trigger_cancel_race = true
 recv_window_error = true
 income_history = true
+symbol_config_change = true
 gtd_expiry = true
 ```
 
