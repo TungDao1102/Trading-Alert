@@ -49,6 +49,7 @@ from src.execution.execution_limits import ExecutionLimits
 from src.ops.health import ALL_CHECK_NAMES
 
 from tests.support import execution_limits as test_limits
+from tests.support.margin_guard_stub import StubMarginGuard
 
 SERVER_NOW = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
 FAKE_KEY = "FAKEKEY0123456789ABCDEF"
@@ -686,6 +687,10 @@ def taps_script() -> list[ScriptedTap | None]:
     ]
 
 
+# Plan 22-15: "use the default scripted passing guard" (None must stay expressible: no guard).
+_DEFAULT_GUARD: Any = object()
+
+
 def run_flow(
     tmp_path: Path,
     *,
@@ -697,6 +702,7 @@ def run_flow(
     execution_limits: ExecutionLimits | None = None,
     committed_limits: bool = False,
     snapshot_live_inputs: dict[str, Any] | None = None,
+    margin_guard: Any = _DEFAULT_GUARD,
 ) -> tuple[int, dict[str, Any], FakeDemoAdapter, FakeApprovalChannel]:
     exchange = adapter if adapter is not None else FakeDemoAdapter()
     # TEST_ONLY limits by default; `committed_limits=True` loads config/execution instead,
@@ -736,6 +742,9 @@ def run_flow(
         token_factory=counter_tokens(),
         execution_limits=limits,
         snapshot_live_inputs=snapshot_live_inputs,
+        # Plan 22-15: composing the live guard is Phase 24, so a placement test injects a scripted
+        # one (a pass). `margin_guard=None` is the real behavior today and aborts the run.
+        margin_guard=StubMarginGuard() if margin_guard is _DEFAULT_GUARD else margin_guard,
     )
     files = sorted(tmp_path.glob("*.json"))
     data: dict[str, Any] = json.loads(files[-1].read_text(encoding="utf-8")) if files else {}
@@ -755,6 +764,7 @@ def make_ctx(
     mode: dr.RunMode = dr.RunMode.DRY_RUN,
     scenario: str = "far",
     execution_limits: ExecutionLimits | None = None,
+    margin_guard: Any = _DEFAULT_GUARD,
 ) -> dr.RunContext:
     recorder = dr.EvidenceRecorder(
         mode=mode,
@@ -788,6 +798,7 @@ def make_ctx(
             if execution_limits is not None
             else test_limits.test_only_execution_limits()
         ),
+        margin_guard=StubMarginGuard() if margin_guard is _DEFAULT_GUARD else margin_guard,
     )
 
 
@@ -1275,8 +1286,10 @@ def test_far_scenario_entry_no_longer_new_leaves_the_position_for_the_operator(
     assert data["outcome"] == "FAILED"
 
 
-# Plan 19-16: TEST_ONLY live inputs that make the plan snapshot COMPLETE. The real rehearsal has no
-# source for margin type, leverage and equity until Phases 21-22, so its snapshot stays INCOMPLETE.
+# Plan 19-16: TEST_ONLY live inputs that make the rehearsal's own PRE-GUARD plan snapshot COMPLETE.
+# Since Phase 22 (plan 22-15) the manager's margin guard supplies the exchange-verified margin type,
+# leverage and equity for the snapshot handed to protection, so this seam only feeds the snapshot
+# the rehearsal records in its own details; the real rehearsal still builds it INCOMPLETE.
 COMPLETE_SNAPSHOT_INPUTS: dict[str, Any] = {
     "margin_type": "ISOLATED",
     "leverage": 3,
@@ -1337,32 +1350,39 @@ def test_fill_scenario_completes_through_the_coordinator_with_a_complete_snapsho
     assert data["attestation_map"]["2"]["status"] == "OBSERVED_ACCEPTANCE_ONLY"
 
 
-def test_fill_scenario_with_the_incomplete_snapshot_is_tp_unavailable_a_known_gap(
+def test_fill_scenario_the_margin_guard_closes_the_incomplete_snapshot_gap(
     tmp_path: Path,
 ) -> None:
-    """With real data the snapshot is INCOMPLETE (margin type, leverage and equity unknown), so
-    the stop is placed and kept and no take profit is placed: recorded as a gap, never a pass."""
+    """Plan 22-15 (D-05, G4-039, amendment A8). The rehearsal's own snapshot is still INCOMPLETE
+    (margin type, leverage and equity unknown before the guard; the TEST SEAM is not used), but
+    the scripted guard's pass supplies the exchange-verified values for the snapshot the manager
+    hands to protection, so the take-profit orders are placed after the stop. Before Phase 22 this
+    run ended in TP_UNAVAILABLE as a known gap; the INCOMPLETE-snapshot refusal itself stays
+    pinned by the protection coordinator tests (tests/test_protection*.py)."""
     adapter = FakeDemoAdapter()
     adapter.fill_on_place = True
-    code, data, _, _ = run_flow(tmp_path, scenario="fill", adapter=adapter, execute=True)
+    guard = StubMarginGuard()
+    code, data, _, _ = run_flow(
+        tmp_path, scenario="fill", adapter=adapter, execute=True, margin_guard=guard
+    )
     assert code == dr.EXIT_OK
+    assert guard.calls == 1
     placed = [kw for name, kw in adapter.kwargs_log if name == "place_algo_protective"]
-    assert [(kw["type"], kw["close_position"]) for kw in placed] == [("STOP_MARKET", True)]
+    assert [(kw["type"], kw["close_position"]) for kw in placed] == [
+        ("STOP_MARKET", True),
+        ("TAKE_PROFIT_MARKET", False),
+        ("TAKE_PROFIT_MARKET", True),
+    ]
     assert "place_market_close" not in adapter.calls
     assert "cancel_algo_order" not in adapter.calls
     assert step(data, "fill_wait")["status"] == "PASSED"
     assert step(data, "protection_stop")["status"] == "PASSED"
-    attach = step(data, "attach_protectives")
-    assert attach["status"] == "NOT_REHEARSED"
-    assert "known gap" in attach["detail"] and "INCOMPLETE" in attach["detail"]
-    assert data["details"]["protection_flow"]["final_state"] == "TP_UNAVAILABLE"
-    assert _to_states(data) == ["AWAITING_FILL", "UNPROTECTED", "PROTECTED", "TP_UNAVAILABLE"]
+    assert step(data, "attach_protectives")["status"] == "PASSED"
+    assert data["details"]["protection_flow"]["final_state"] == "COMPLETE"
+    assert _to_states(data) == ["AWAITING_FILL", "UNPROTECTED", "PROTECTED", "COMPLETE"]
+    # The details record the rehearsal's own PRE-guard snapshot, which the guard does not change.
     assert data["details"]["live_context"]["plan_snapshot_status"] == "INCOMPLETE"
-    alerts = data["details"]["critical_alerts"]
-    assert [a["event"] for a in alerts] == ["TP_UNAVAILABLE"]
-    assert any("close the Demo position" in t for t in data["details"]["operator_instructions"])
-    assert data["outcome"] == "COMPLETE_WITH_GAPS"
-    assert data["attestation_map"]["1"]["status"] == "NOT_OBSERVED"
+    assert data["outcome"] == "COMPLETE"
 
 
 def test_fill_scenario_unfilled_entry_ends_no_fill_after_the_cancel(tmp_path: Path) -> None:
@@ -1757,3 +1777,72 @@ def test_wr01_issue_approval_stores_the_plan_quantity_on_both_roles() -> None:
         issued = dr.issue_approval(ctx, plan, role=role, action=action)
         assert issued.approval.approved_quantity == plan.trade_plan.quantity_after_rounding, role
         assert issued.approval.approved_quantity is not None
+
+
+def test_a_refusing_margin_guard_ends_the_main_run_as_aborted_no_order(tmp_path: Path) -> None:
+    """Plan 22-15: the guard's NO_TRADE reaches the rehearsal like any gate refusal: no order."""
+    from tests.support.margin_guard_stub import refusing_verdict
+
+    guard = StubMarginGuard(verdict=refusing_verdict("INSUFFICIENT_MARGIN"))
+    code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True, margin_guard=guard)
+    assert code == dr.EXIT_ABORTED
+    assert data["outcome"] == "ABORTED_NO_ORDER"
+    assert guard.calls == 1
+    assert "place_entry" not in adapter.calls
+    assert adapter.mutating_calls() == []
+    assert data["exchange_orders"] == []
+    assert "INSUFFICIENT_MARGIN" in step(data, "place_entry")["detail"]
+
+
+async def test_build_live_context_passes_the_injected_margin_guard() -> None:
+    from src.reconcile.safe_mode import SafeModeController
+    from src.risk.types import ConstraintSnapshot
+
+    from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
+
+    guard = StubMarginGuard()
+    adapter = FakeDemoAdapter()
+    ctx = make_ctx(adapter, FakeApprovalChannel(), margin_guard=guard)
+    assert ctx.margin_guard is guard
+    plan = _derive("far")
+    filters = btc_filters()
+    constraints = ConstraintSnapshot(
+        symbol="BTCUSDT",
+        price_tick_size=filters.price_tick_size,
+        quantity_step_size=filters.quantity_step_size,
+        min_quantity=filters.min_quantity,
+        min_notional=filters.min_notional,
+        metadata_observed_at_utc=SERVER_NOW,
+    )
+    live = await dr.build_live_context(
+        ctx,
+        plan,
+        filters,
+        constraints,
+        SERVER_NOW,
+        safe_mode=SafeModeController(adapter=ctx.guarded, journal=ctx.journal),
+        intent_store=InMemoryExecutionIntentStore(),
+    )
+    assert live.margin_guard is guard
+
+
+async def test_an_executed_run_without_a_margin_guard_aborts_before_any_order() -> None:
+    """Plan 22-15 (D-17, T-22-56): composing the live guard is Phase 24; the rehearsal never
+    invents one. Every limit is set here, so the abort is the guard's, not the limits step's."""
+    adapter = FakeDemoAdapter()
+    channel = FakeApprovalChannel(script=approve_script())
+    ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE, scenario="far", margin_guard=None)
+    assert ctx.margin_guard is None
+    with pytest.raises(dr.RehearsalAbort, match="MARGIN_GUARD_NOT_COMPOSED"):
+        await dr.run_rehearsal(ctx)
+    assert ctx.guarded.mutating_attempts == 0
+    assert adapter.mutating_calls() == []
+
+
+def test_the_main_run_without_a_margin_guard_is_aborted_no_order(tmp_path: Path) -> None:
+    code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True, margin_guard=None)
+    assert code == dr.EXIT_ABORTED
+    assert data["outcome"] == "ABORTED_NO_ORDER"
+    assert adapter.mutating_calls() == []
+    assert data["exchange_orders"] == []
+    assert any("MARGIN_GUARD_NOT_COMPOSED" in s["detail"] for s in data["steps"])

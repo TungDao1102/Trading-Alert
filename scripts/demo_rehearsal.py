@@ -146,6 +146,7 @@ from src.execution.manager import (  # noqa: E402
     execute_approved_plan,
     expire_pending_entry,
 )
+from src.execution.margin_guard import MarginGuardPort  # noqa: E402
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id  # noqa: E402
 from src.execution.placement import (  # noqa: E402
     PRICE_ROUND_DOWN,
@@ -222,6 +223,8 @@ OUTCOME_COMPLETE = "COMPLETE"
 OUTCOME_COMPLETE_WITH_GAPS = "COMPLETE_WITH_GAPS"
 OUTCOME_ABORTED = "ABORTED_NO_ORDER"
 OUTCOME_FAILED = "FAILED"
+# Plan 22-15 (D-17): the abort code of a run whose margin guard was not composed (Phase 24).
+MARGIN_GUARD_NOT_COMPOSED = "MARGIN_GUARD_NOT_COMPOSED"
 
 SCENARIOS = ("taps", "far", "fill")
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300
@@ -1273,9 +1276,16 @@ class RunContext:
     # Plan 19-16. The coordinator `build_live_context` built (the fill scenario steps it).
     coordinator: ProtectionCoordinator | None = None
     # Plan 19-16, TEST SEAM only (no CLI flag): margin_type, leverage and equity_used for the
-    # plan snapshot. None is the real behavior: they are unknown until Phases 21-22, the
-    # snapshot stays INCOMPLETE and every TP placement is refused into TP_UNAVAILABLE.
+    # rehearsal's own PRE-GUARD plan snapshot. Since Phase 22 (plan 22-15) the manager's margin
+    # guard supplies the exchange-verified values of the snapshot it hands to protection, so this
+    # seam no longer decides whether the placed entry can have its take-profit orders.
     snapshot_live_inputs: Mapping[str, Any] | None = None
+    # Plan 22-15. The Phase 22 margin guard the manager calls at gate 5f2. None is the real
+    # behavior today: composing the live guard (adapter, account source, configuration guard,
+    # bracket cache, claims reader, owner limits) into a process is Phase 24 (D-17), so a run that
+    # reaches `build_live_context` without one aborts with MARGIN_GUARD_NOT_COMPOSED. A test
+    # injects a scripted guard.
+    margin_guard: MarginGuardPort | None = None
 
 
 def build_context(
@@ -1294,6 +1304,7 @@ def build_context(
     execution_limits: ExecutionLimits | None = None,
     drift_limits: DriftLimits | None = None,
     snapshot_live_inputs: Mapping[str, Any] | None = None,
+    margin_guard: MarginGuardPort | None = None,
 ) -> RunContext:
     journal = RunJournal()
     return RunContext(
@@ -1314,6 +1325,7 @@ def build_context(
         execution_limits=execution_limits,
         drift_limits=drift_limits,
         snapshot_live_inputs=snapshot_live_inputs,
+        margin_guard=margin_guard,
     )
 
 
@@ -1925,6 +1937,13 @@ async def build_live_context(
     unset = limits.unset_keys()
     if unset:
         raise RehearsalAbort(f"{LIMITS_NOT_CONFIGURED}: {', '.join(unset)}")
+    # Plan 22-15 (D-17, T-22-56): the manager requires the margin guard. Composing the live one
+    # is Phase 24, so the rehearsal never invents one: no guard, no placement, nothing is sent.
+    if ctx.margin_guard is None:
+        raise RehearsalAbort(
+            f"{MARGIN_GUARD_NOT_COMPOSED}: the Phase 22 margin guard is not composed into this "
+            "rehearsal (Phase 24); no order was attempted"
+        )
     drift = _resolved_drift_limits(ctx)
     params = plan.parameter_set
     bar_close = await _latest_closed_bar_close(ctx, now)
@@ -2000,6 +2019,7 @@ async def build_live_context(
         # 19-REVIEW CR-01: the manager reads this clock after the mark-price read; the local
         # clock's drift from Binance's is bounded by the drift guard and `margin`.
         clock=ctx.clock,
+        margin_guard=ctx.margin_guard,
     )
 
 
@@ -2951,6 +2971,7 @@ def main(
     scenario_runner: Callable[[RunContext], Awaitable[str]] | None = None,
     execution_limits: ExecutionLimits | None = None,
     snapshot_live_inputs: Mapping[str, Any] | None = None,
+    margin_guard: MarginGuardPort | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -3017,6 +3038,7 @@ def main(
             execution_limits=execution_limits,
             drift_limits=drift_limits,
             snapshot_live_inputs=snapshot_live_inputs,
+            margin_guard=margin_guard,
         )
         run_ctx = ctx
 

@@ -4468,3 +4468,222 @@ def test_live_context_margin_guard_needs_a_callable_evaluate() -> None:
         LivePlacementContext(**{**fields, "margin_guard": None})
     with pytest.raises(TypeError):
         LivePlacementContext(**{**fields, "margin_guard": _NotCallable()})
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 (plan 22-15, Task 2): the DIVERGENCE alert and the MARGIN_CONFIG_CHANGED evidence
+# (amendment A9, Pitfall 9). Both are best effort and never change the outcome.
+# --------------------------------------------------------------------------- #
+
+
+class _DivergenceSink:
+    """`JournalFirstAlertSink.alert(...)` call shape; records each call, can be told to raise."""
+
+    def __init__(self, *, exception: BaseException | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.exception = exception
+
+    def alert(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if self.exception is not None:
+            raise self.exception
+
+
+class _RaisingJournal:
+    """A journal whose `record` always fails (the same database that just failed)."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def record(self, event: Any) -> None:
+        self.attempts += 1
+        raise RuntimeError("journal down 4999.09")
+
+
+def _unverified_verdict() -> Any:
+    from tests.support.margin_guard_stub import refusing_verdict
+
+    return refusing_verdict(
+        "MARGIN_CONFIG_UNVERIFIED",
+        alert_reason="MARGIN_CONFIG_UNVERIFIED",
+        config_changed=True,
+        previous_margin_type="CROSSED",
+        previous_leverage=20,
+    )
+
+
+async def test_an_unverified_configuration_sends_one_divergence_alert_with_a_fixed_code() -> None:
+    from src.ops.alerts import ALERT_EVENTS, OperationalAlert
+
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    sink = _DivergenceSink()
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(
+            case_input,
+            margin_guard=StubMarginGuard(verdict=_unverified_verdict()),
+            alert_sink=sink,
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    assert len(sink.calls) == 1
+    call = sink.calls[0]
+    plan_hash = _plan_hash_of(case_input)
+    assert call == {
+        "event": "DIVERGENCE",
+        "subject": plan_hash,
+        "reason": "MARGIN_CONFIG_UNVERIFIED",
+        "now_utc": _parse_utc(case_input["now_utc"]),
+        "plan_hash": plan_hash,
+        "symbol": case_input["symbol"],
+    }
+    # No amount reaches the sink, and the event is one the OPS-05 matrix already holds.
+    assert not any(isinstance(v, Decimal | float | int) for v in call.values())
+    assert "DIVERGENCE" in ALERT_EVENTS
+    OperationalAlert.create(
+        event=call["event"],
+        subject=call["subject"],
+        reason=call["reason"],
+        occurred_at_utc=call["now_utc"],
+        plan_hash=call["plan_hash"],
+        symbol=call["symbol"],
+    )
+
+
+async def test_no_alert_without_an_alert_reason_without_a_sink_or_with_a_failing_sink() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    case_input = _load_input()
+    # An ordinary refusal carries no alert reason: nothing is sent, on a refusal or on a pass.
+    for verdict in (refusing_verdict("INSUFFICIENT_MARGIN"), None):
+        sink = _DivergenceSink()
+        await _run_plan(
+            FakeExecutionAdapter(),
+            live_context=_build_live_context(
+                case_input, margin_guard=StubMarginGuard(verdict=verdict), alert_sink=sink
+            ),
+        )
+        assert sink.calls == []
+    # No sink: the verdict stands.
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(
+            case_input, margin_guard=StubMarginGuard(verdict=_unverified_verdict())
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    # A sink that raises never changes the outcome.
+    failing = _DivergenceSink(exception=RuntimeError("sink down"))
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(
+            case_input,
+            margin_guard=StubMarginGuard(verdict=_unverified_verdict()),
+            alert_sink=failing,
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    assert len(failing.calls) == 1
+
+
+def _margin_events(journal: FakeJournal) -> list[Any]:
+    return [e for e in journal.events if e.event_type == "MARGIN_CONFIG_CHANGED"]
+
+
+async def test_a_configuration_post_is_journaled_on_a_pass_with_the_previous_and_verified() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    journal = FakeJournal()
+    verdict = passing_verdict(
+        config_changed=True, previous_margin_type="CROSSED", previous_leverage=20
+    )
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        journal=journal,
+        live_context=_build_live_context(case_input, margin_guard=StubMarginGuard(verdict=verdict)),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    (event,) = _margin_events(journal)
+    assert event.entity_type == "TradePlan"
+    assert event.entity_id == _plan_hash_of(case_input)
+    assert event.trade_plan_id == case_input["trade_plan_id"]
+    assert event.occurred_at_utc == _parse_utc(case_input["now_utc"])
+    assert json.loads(event.payload_json) == {
+        "previous_leverage": 20,
+        "previous_margin_type": "CROSSED",
+        "symbol": case_input["symbol"],
+        "trade_plan_id": case_input["trade_plan_id"],
+        "verified_leverage": 5,
+        "verified_margin_type": "ISOLATED",
+    }
+    # Configuration only: the verified equity is not in the evidence.
+    assert "4999" not in event.payload_json
+
+
+async def test_a_configuration_post_is_journaled_even_when_the_plan_is_refused() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    journal = FakeJournal()
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        journal=journal,
+        live_context=_build_live_context(
+            case_input, margin_guard=StubMarginGuard(verdict=_unverified_verdict())
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    (event,) = _margin_events(journal)
+    payload = json.loads(event.payload_json)
+    assert (payload["previous_margin_type"], payload["previous_leverage"]) == ("CROSSED", 20)
+    assert (payload["verified_margin_type"], payload["verified_leverage"]) == (None, None)
+
+
+async def test_no_configuration_event_when_no_post_was_sent() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    journal = FakeJournal()
+    for verdict in (None, refusing_verdict("INSUFFICIENT_MARGIN")):
+        await _run_plan(
+            FakeExecutionAdapter(),
+            journal=journal,
+            live_context=_build_live_context(
+                _load_input(), margin_guard=StubMarginGuard(verdict=verdict)
+            ),
+        )
+    assert _margin_events(journal) == []
+
+
+async def test_a_failing_journal_never_changes_the_outcome_or_the_placement() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    changed = passing_verdict(
+        config_changed=True, previous_margin_type="CROSSED", previous_leverage=20
+    )
+    journal = _RaisingJournal()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        journal=journal,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=StubMarginGuard(verdict=changed)
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert journal.attempts == 1
+    assert "place_entry" in _reads_only(adapter)
+    assert len(registry.entries) == 1
+
+    refused = await _run_plan(
+        FakeExecutionAdapter(),
+        journal=_RaisingJournal(),
+        live_context=_build_live_context(
+            case_input, margin_guard=StubMarginGuard(verdict=_unverified_verdict())
+        ),
+    )
+    assert (refused.is_no_trade, refused.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
