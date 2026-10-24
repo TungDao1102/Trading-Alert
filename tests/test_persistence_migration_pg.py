@@ -21,8 +21,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * Migration 0009 (Phase 20, plan 20-18, Q3, D-21) adds the `validated_lot_filters` table.
   * Migration 0010 (Phase 21, plan 21-09, D-07, D-14) adds the `daily_risk_days` and
     `daily_loss_components` tables.
-  * Migration 0011 (Phase 21, plan 21-12, D-16) adds the `risk_reservations` table; the head test
-    pins 0011.
+  * Migration 0011 (Phase 21, plan 21-12, D-16) adds the `risk_reservations` table.
+  * Migration 0012 (Phase 22, plan 22-08, D-14) adds the three nullable margin columns and their
+    two named CHECKs to `risk_reservations`; the head test pins 0012.
 """
 
 from __future__ import annotations
@@ -108,6 +109,8 @@ REVISION_0010 = "0010_daily_risk_state"
 MIGRATION_0010 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0010_daily_risk_state.py"
 REVISION_0011 = "0011_risk_reservations"
 MIGRATION_0011 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0011_risk_reservations.py"
+REVISION_0012 = "0012_reservation_margin"
+MIGRATION_0012 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0012_reservation_margin.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -475,7 +478,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0011
+    assert alembic_head_revision() == REVISION_0012
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -1052,7 +1055,7 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0011
+        assert version == REVISION_0012
     finally:
         engine.dispose()
 
@@ -1117,7 +1120,7 @@ def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_the
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0011
+        assert version == REVISION_0012
     finally:
         engine.dispose()
 
@@ -1173,7 +1176,7 @@ def test_downgrade_0011_drops_only_the_reservations_table_and_upgrade_restores_i
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0011
+        assert version == REVISION_0012
     finally:
         engine.dispose()
 
@@ -1220,3 +1223,172 @@ def test_risk_reservations_check_constraints_refuse_bad_rows(engine: Engine) -> 
     with expect_db_error(_CHECK_VIOLATION) as info, engine.begin() as conn:
         conn.execute(sql, {**base, "status": "RELEASED"})
     assert info.constraint == "ck_risk_reservations_released_coherent"
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0012: reservation margin (Phase 22, plan 22-08, D-14)
+# --------------------------------------------------------------------------------------
+_MARGIN_COLUMNS = ("required_margin", "margin_entry_price", "margin_leverage")
+_MARGIN_CHECKS = (
+    "ck_risk_reservations_margin_coherent",
+    "ck_risk_reservations_margin_positive",
+)
+_RESERVATION_INSERT = text(
+    "INSERT INTO risk_reservations (trade_plan_id, plan_hash, symbol, position_side, quantity, "
+    "realized_risk, status, requested_at_utc, updated_at_utc, required_margin, "
+    "margin_entry_price, margin_leverage) VALUES (:plan, :h, 'BTCUSDT', 'LONG', 0.01, 4, "
+    "'REQUESTED', :t0, :t0, :margin, :price, :leverage)"
+)
+
+
+def _reservation_columns(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'risk_reservations'"
+            )
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def _reservation_checks(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = 'risk_reservations'::regclass AND contype = 'c'"
+            )
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def test_migration_0012_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0012, ("src", "tests")) == []
+
+
+def test_migration_0012_revises_0011() -> None:
+    text_of_migration = MIGRATION_0012.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0011}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0012}"' in text_of_migration
+
+
+def test_the_margin_columns_are_nullable_and_the_two_checks_exist(engine: Engine) -> None:
+    with engine.connect() as conn:
+        nullable = dict(
+            conn.execute(
+                text(
+                    "SELECT column_name, is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'risk_reservations' "
+                    "AND column_name IN ('required_margin', 'margin_entry_price', "
+                    "'margin_leverage')"
+                )
+            ).all()
+        )
+    assert nullable == dict.fromkeys(_MARGIN_COLUMNS, "YES")
+    assert set(_MARGIN_CHECKS) <= _reservation_checks(engine)
+
+
+def test_downgrade_0012_drops_only_the_margin_columns_and_checks_and_keeps_the_rows(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        columns_at_head = _reservation_columns(engine)
+        checks_at_head = _reservation_checks(engine)
+        assert set(_MARGIN_COLUMNS) <= columns_at_head
+        assert set(_MARGIN_CHECKS) <= checks_at_head
+        insert_and_commit(engine, make_signal(1), make_plan(1, 1))
+        with engine.begin() as conn:
+            conn.execute(
+                _RESERVATION_INSERT,
+                {
+                    "plan": hexid(0x1001),
+                    "h": "d" * 64,
+                    "t0": T0,
+                    "margin": Decimal("160"),
+                    "price": Decimal("80000"),
+                    "leverage": 5,
+                },
+            )
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0011)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
+        assert _reservation_columns(engine) == columns_at_head - set(_MARGIN_COLUMNS)
+        assert _reservation_checks(engine) == checks_at_head - set(_MARGIN_CHECKS)
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            kept = conn.execute(
+                text(
+                    "SELECT trade_plan_id, plan_hash, symbol, position_side, quantity, "
+                    "realized_risk, status FROM risk_reservations"
+                )
+            ).all()
+        assert version == REVISION_0011
+        assert [tuple(row) for row in kept] == [
+            (hexid(0x1001), "d" * 64, "BTCUSDT", "LONG", Decimal("0.01"), Decimal("4"), "REQUESTED")
+        ]
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _reservation_columns(engine) == columns_at_head
+        assert _reservation_checks(engine) == checks_at_head
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            restored = conn.execute(
+                text(
+                    "SELECT required_margin, margin_entry_price, margin_leverage "
+                    "FROM risk_reservations"
+                )
+            ).all()
+        assert version == REVISION_0012
+        # The stored margin was lost by the downgrade: the restored columns are empty (unknown).
+        assert [tuple(row) for row in restored] == [(None, None, None)]
+    finally:
+        engine.dispose()
+
+
+def test_risk_reservations_margin_checks_refuse_bad_rows(engine: Engine) -> None:
+    insert_and_commit(engine, make_signal(1), make_plan(1, 1))
+    base: dict[str, Any] = {
+        "plan": hexid(0x1001),
+        "h": "d" * 64,
+        "t0": T0,
+        "margin": Decimal("160"),
+        "price": Decimal("80000"),
+        "leverage": 5,
+    }
+    cases = {
+        "set margin, NULL leverage": (
+            "ck_risk_reservations_margin_coherent",
+            {"leverage": None},
+        ),
+        "set margin only": (
+            "ck_risk_reservations_margin_coherent",
+            {"price": None, "leverage": None},
+        ),
+        "NULL margin, set price": (
+            "ck_risk_reservations_margin_coherent",
+            {"margin": None},
+        ),
+        "negative margin": ("ck_risk_reservations_margin_positive", {"margin": Decimal("-1")}),
+        "zero margin": ("ck_risk_reservations_margin_positive", {"margin": Decimal("0")}),
+        "zero price": ("ck_risk_reservations_margin_positive", {"price": Decimal("0")}),
+        "leverage 0": ("ck_risk_reservations_margin_positive", {"leverage": 0}),
+    }
+    for label, (constraint, override) in cases.items():
+        with expect_db_error(_CHECK_VIOLATION) as info, engine.begin() as conn:
+            conn.execute(_RESERVATION_INSERT, {**base, **override})
+        assert info.constraint == constraint, (label, info.constraint)
+    # The legacy form (all three NULL) is accepted.
+    with engine.begin() as conn:
+        conn.execute(_RESERVATION_INSERT, {**base, "margin": None, "price": None, "leverage": None})
