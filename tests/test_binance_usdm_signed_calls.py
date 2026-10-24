@@ -212,6 +212,7 @@ def _payloads(kwargs: dict[str, Any]) -> dict[str, Any]:
                 ],
             )
         ],
+        "change_margin_type": SimpleNamespace(code=200, msg="success"),
         "account_trade_list": [],
         "get_income_history": [],
         "kline_candlestick_data": [],
@@ -630,6 +631,10 @@ SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
         lambda a: a.leverage_brackets_snapshot(symbol="BTCUSDT"),
         "notional_and_leverage_brackets",
     ),
+    "change_margin_type": (
+        lambda a: a.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED"),
+        "change_margin_type",
+    ),
     "user_trades_in_window": (
         lambda a: a.user_trades_in_window(
             symbol="BTCUSDT",
@@ -693,13 +698,14 @@ SIGNATURE_SNAPSHOTS: dict[str, tuple[tuple[str, str], ...]] = {
     "account_config_snapshot": (("self", _P),),
     "symbol_config_snapshot": (("self", _P), ("symbol", _K)),
     "leverage_brackets_snapshot": (("self", _P), ("symbol", _K)),
+    "change_margin_type": (("self", _P), ("symbol", _K), ("margin_type", _K)),
     "user_trades_in_window": (("self", _P), ("symbol", _K), ("start_utc", _K), ("end_utc", _K)),
     "income_in_window": (("self", _P), ("income_type", _K), ("start_utc", _K), ("end_utc", _K)),
 }
 
 
 def test_the_signed_set_is_the_eighteen_methods() -> None:
-    assert len(SIGNED) == 18
+    assert len(SIGNED) == 19
     assert set(SIGNED) == set(SIGNATURE_SNAPSHOTS)
 
 

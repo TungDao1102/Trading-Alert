@@ -1840,6 +1840,37 @@ class BinanceUsdmAdapter:
             brackets=tuple(_row_to_leverage_bracket(item) for item in raw_brackets),
         )
 
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> None:
+        """Change the margin type of one symbol (POST /fapi/v1/marginType, plan 22-06).
+
+        TRADE, IP weight 1, through the official SDK `rest_api.change_margin_type(symbol,
+        margin_type, recv_window)` and `_sdk_call`. This call MUTATES the account
+        configuration, so the call kind is PLACEMENT: it is never retried and never slept on
+        (`CallKind` has no separate configuration kind, 22-RESEARCH Open Question 5), it
+        uses the shared REST gate and the signed-call policy recv window, and the original
+        exception propagates unchanged. Requesting the type the symbol already has is an
+        exchange ERROR (-4046), a change with open orders or a position is -4047 / -4048: the
+        caller must not read a failure as "not ISOLATED" and decides only by a
+        `symbol_config_snapshot` read. The answer body is not trusted and is not read; nothing
+        about it is logged. `margin_type` must be exactly "ISOLATED" or "CROSSED" and is
+        converted with the SDK enum; `symbol` must be a non-empty text. The adapter holds no
+        target: what to send is the guard's decision (D-01).
+        """
+        if not isinstance(symbol, str) or symbol == "":
+            raise ValueError("symbol must be non-empty text")
+        if not isinstance(margin_type, str) or margin_type not in ("ISOLATED", "CROSSED"):
+            raise ValueError("margin_type must be ISOLATED or CROSSED")
+        from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+            ChangeMarginTypeMarginTypeEnum,
+        )
+
+        await self._sdk_call(
+            CallKind.PLACEMENT,
+            self._sdk.rest_api.change_margin_type,
+            symbol=symbol,
+            margin_type=ChangeMarginTypeMarginTypeEnum(margin_type),
+        )
+
     async def user_trades_in_window(
         self, *, symbol: str, start_utc: datetime, end_utc: datetime
     ) -> tuple[UserTradeRow, ...]:

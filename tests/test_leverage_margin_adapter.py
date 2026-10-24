@@ -460,3 +460,86 @@ async def test_a_successful_leverage_brackets_read_logs_no_bracket_value() -> No
     text = json.dumps(events, default=str)
     for digits in ("0.004", "46300", "20000000", "125"):
         assert digits not in text
+
+
+# ------------------------------------------------------------------ change_margin_type (22-06)
+
+CHANGE_MARGIN = "change_margin_type"
+CHANGE_LEVERAGE = "change_initial_leverage"
+# Answer bodies the adapter must never read: a different code, or nothing at all.
+_ANSWER = SimpleNamespace(code=999, msg="not trusted")
+
+
+async def test_change_margin_type_sends_one_signed_call_with_the_sdk_enum() -> None:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+        ChangeMarginTypeMarginTypeEnum,
+    )
+
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: _ANSWER})
+    result = await adapter.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED")
+    assert result is None
+    assert rest.calls(CHANGE_MARGIN) == 1
+    assert rest.kwargs[CHANGE_MARGIN] == [
+        {
+            "symbol": "BTCUSDT",
+            "margin_type": ChangeMarginTypeMarginTypeEnum.ISOLATED,
+            "recv_window": RECV_WINDOW,
+        }
+    ]
+
+
+async def test_change_margin_type_converts_crossed_to_the_crossed_member() -> None:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+        ChangeMarginTypeMarginTypeEnum,
+    )
+
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: _ANSWER})
+    await adapter.change_margin_type(symbol="ETHUSDT", margin_type="CROSSED")
+    assert rest.kwargs[CHANGE_MARGIN][0]["margin_type"] is ChangeMarginTypeMarginTypeEnum.CROSSED
+
+
+@pytest.mark.parametrize("bad", ["isolated", "", "ISOLATED ", "crossed", "BOTH", None, 1, True])
+async def test_change_margin_type_refuses_a_bad_margin_type_before_any_sdk_call(bad: Any) -> None:
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: _ANSWER})
+    with pytest.raises(ValueError):
+        await adapter.change_margin_type(symbol="BTCUSDT", margin_type=bad)
+    assert rest.calls(CHANGE_MARGIN) == 0
+
+
+@pytest.mark.parametrize("bad", ["", None, 5, b"BTCUSDT"])
+async def test_change_margin_type_refuses_a_bad_symbol_before_any_sdk_call(bad: Any) -> None:
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: _ANSWER})
+    with pytest.raises(ValueError):
+        await adapter.change_margin_type(symbol=bad, margin_type="ISOLATED")
+    assert rest.calls(CHANGE_MARGIN) == 0
+
+
+async def test_change_margin_type_never_reads_the_answer_body() -> None:
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: None})
+    assert await adapter.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED") is None
+    assert rest.calls(CHANGE_MARGIN) == 1
+
+
+async def test_change_margin_type_propagates_the_original_error_after_one_call() -> None:
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: _ANSWER})
+    boom = BadRequestError("No need to change margin type.", -4046)
+    rest.errors[CHANGE_MARGIN] = boom
+    with pytest.raises(BadRequestError) as caught:
+        await adapter.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED")
+    assert caught.value is boom
+    assert rest.calls(CHANGE_MARGIN) == 1
+
+
+async def test_change_margin_type_without_a_policy_fails_closed() -> None:
+    adapter, rest, _ = _adapter({CHANGE_MARGIN: _ANSWER}, policy=False)
+    with pytest.raises(SignedCallPolicyMissing):
+        await adapter.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED")
+    assert rest.calls(CHANGE_MARGIN) == 0
+
+
+async def test_change_margin_type_is_refused_by_a_ban_before_the_sdk() -> None:
+    adapter, rest, gate = _adapter({CHANGE_MARGIN: _ANSWER})
+    gate.record(ExchangeErrorCategory.IP_BANNED, None)
+    with pytest.raises(RateLimitBanActive):
+        await adapter.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED")
+    assert rest.calls(CHANGE_MARGIN) == 0
