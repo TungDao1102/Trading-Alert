@@ -515,22 +515,25 @@ def evaluate_day_state(
 def day_open_action(
     *,
     today: DayRiskState | None,
-    previous_day_present: bool,
+    earlier_day_present: bool,
     exposure: bool | None,
     store_readable: bool,
 ) -> DayOpenAction:
     """What to do about today's persisted day state (D-07, D-08).
 
     D-07: a missing day state is never a fresh day while exposure exists or is unknown
-    (`exposure` None means unknown). D-08: the rollover from a persisted previous day opens
-    the new day from a fresh REST base. The operator acknowledgement path for a missing
-    state with exposure is not built; it is an owner item (research Open Question 5).
+    (`exposure` None means unknown). D-08: the rollover from a persisted earlier day opens
+    the new day from a fresh REST base. `earlier_day_present` is True when ANY stored day lies
+    before today, not only yesterday: after an outage of two or more UTC days an earlier row
+    still proves the store is intact (WR-08); only a store that never held a day blocks. The
+    operator acknowledgement path for a missing state with exposure is not built; it is an
+    owner item (research Open Question 5).
     """
     if not store_readable:
         return DayOpenAction.BLOCKED_STORE_UNREADABLE
     if today is not None:
         return DayOpenAction.USE_STORED
-    if previous_day_present:
+    if earlier_day_present:
         return DayOpenAction.OPEN_FROM_FRESH_BASE
     if exposure is False:
         return DayOpenAction.OPEN_FROM_FRESH_BASE

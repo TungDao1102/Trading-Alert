@@ -473,6 +473,44 @@ async def test_a_missing_state_with_exposure_blocks_and_reads_no_equity(
     assert rig.store.get_day(DAY) is None
 
 
+async def test_a_two_day_gap_with_exposure_opens_from_a_fresh_read() -> None:
+    # WR-08 (reproduced by the reviewer): after an outage of two UTC days neither today nor
+    # yesterday has a row. An earlier persisted day proves the store is intact (D-08), so the
+    # day opens from a fresh in-day read instead of staying blocked for as long as the position.
+    store = InMemoryDayRiskStore()
+    store.open_day(
+        DayRiskState(
+            utc_day=DAY - timedelta(days=2),
+            equity_at_day_start=DEMO_EQUITY,
+            base_observed_at_utc=T0 - timedelta(days=2),
+        )
+    )
+    rig = await build(store=store)
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=True)
+    assert verdict.state is DailyState.NORMAL
+    assert stored_day(rig.store).equity_at_day_start == DEMO_EQUITY
+    assert rig.account.count(INFORMATION) == 1
+
+
+@pytest.mark.parametrize("exposure", [True, None])
+async def test_a_later_day_row_is_not_an_earlier_day(exposure: bool | None) -> None:
+    # Only a row BEFORE today proves an intact store; a row of a later day does not.
+    store = InMemoryDayRiskStore()
+    store.open_day(
+        DayRiskState(
+            utc_day=DAY + timedelta(days=1),
+            equity_at_day_start=DEMO_EQUITY,
+            base_observed_at_utc=T0 + timedelta(days=1),
+        )
+    )
+    rig = await build(store=store)
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=exposure), BLOCKED_DAY_STATE_MISSING
+    )
+    assert rig.account.calls == []
+
+
 async def test_a_missing_state_without_exposure_opens_from_a_fresh_read() -> None:
     rig = await build()
     await rig.service.backfill(now_utc=T0)
@@ -493,7 +531,7 @@ async def test_an_unreadable_day_row_blocks() -> None:
 
 async def test_a_failing_previous_day_check_blocks() -> None:
     rig = await build()
-    rig.store.raise_next("has_day", StoreUnavailable("down"))
+    rig.store.raise_next("has_earlier_day", StoreUnavailable("down"))
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
     )

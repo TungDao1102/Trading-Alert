@@ -75,6 +75,10 @@ class InMemoryDayRiskStore:
         self._enter("has_day")
         return utc_day in self._days
 
+    def has_earlier_day(self, utc_day: date) -> bool:
+        self._enter("has_earlier_day")
+        return any(day < utc_day for day in self._days)
+
     def list_components(self, utc_day: date) -> tuple[LossComponent, ...]:
         self._enter("list_components")
         rows = [row for key, row in self._components.items() if key[0] == utc_day]

@@ -116,6 +116,14 @@ class PgDayRiskStore:
         with self._unit(tx) as session:
             return session.get(DailyRiskDayRow, utc_day, populate_existing=True) is not None
 
+    def has_earlier_day(self, utc_day: date, *, tx: Session | None = None) -> bool:
+        """True when ANY stored day lies before `utc_day` (an intact store, D-08, WR-08)."""
+        with self._unit(tx) as session:
+            found = session.scalars(
+                select(DailyRiskDayRow.utc_day).where(DailyRiskDayRow.utc_day < utc_day).limit(1)
+            ).first()
+            return found is not None
+
     def list_components(
         self, utc_day: date, *, tx: Session | None = None
     ) -> tuple[LossComponent, ...]:

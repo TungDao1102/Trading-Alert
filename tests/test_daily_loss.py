@@ -772,7 +772,7 @@ def test_day_open_action_table(
 ) -> None:
     action = day_open_action(
         today=day_state() if today else None,
-        previous_day_present=previous,
+        earlier_day_present=previous,
         exposure=exposure,
         store_readable=readable,
     )

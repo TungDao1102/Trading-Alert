@@ -12,8 +12,10 @@ Rules this module keeps:
 
 * D-01 / D-08, the day base. A UTC day is opened only from a fresh REST equity read taken
   INSIDE that day, and only when ``day_open_action`` allows it (D-07): a stored row is used as
-  is, a rollover from a stored previous day or an exposure-free first start opens from a fresh
-  read, and a missing state with exposure (or unknown exposure) blocks. A failed or stale base
+  is, a rollover from ANY stored earlier day (not only yesterday: an outage of two or more days
+  leaves a gap, and an earlier row proves the store is intact, WR-08) or an exposure-free first
+  start opens from a fresh read, and a missing state with exposure (or unknown exposure) blocks
+  only on a store that never held a day. A failed or stale base
   read keeps the day blocked (NO_TRADE) until a read succeeds; nothing is written meanwhile.
 * The clock is re-read AFTER ``equity.refresh()`` returns (D-03). ``refresh`` stamps the reading
   at its start, before the first request, so judging it with the caller's earlier ``now_utc``
@@ -58,7 +60,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -109,6 +111,8 @@ class DayRiskStorePort(Protocol):
     def get_day(self, utc_day: date) -> Any: ...
 
     def has_day(self, utc_day: date) -> Any: ...
+
+    def has_earlier_day(self, utc_day: date) -> Any: ...
 
     def open_day(self, state: DayRiskState) -> Any: ...
 
@@ -371,14 +375,12 @@ class LiveDayRiskService:
         day = utc_day_of(now_utc)
         try:
             today = self._store.get_day(day)
-            previous_present = (
-                False if today is not None else bool(self._store.has_day(day - timedelta(days=1)))
-            )
+            earlier_present = False if today is not None else bool(self._store.has_earlier_day(day))
         except Exception as exc:  # noqa: BLE001 - an unreadable store is never a fresh day
             return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
         action = day_open_action(
             today=today,
-            previous_day_present=previous_present,
+            earlier_day_present=earlier_present,
             exposure=exposure,
             store_readable=True,
         )
