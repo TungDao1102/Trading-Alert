@@ -124,13 +124,19 @@ async def test_account_information_snapshot_reads_the_recorded_demo_equity() -> 
         wallet_balance=Decimal("4999.09343961"),
         unrealized_profit=Decimal("0.00000000"),
         margin_balance=Decimal("4999.09343961"),
+        available_balance=Decimal("4999.09343961"),
     )
+    # Phase 22 (plan 22-10): the free-margin figures of the same answer (demo-observed).
+    assert snapshot.available_balance == Decimal("4999.09343961")
+    assert snapshot.total_open_order_initial_margin == Decimal("0.00000000")
     assert rows["USDC"].wallet_balance == Decimal("5000.00000000")
     assert rows["BTC"].wallet_balance == Decimal("0.01000000")
     amounts = [snapshot.total_margin_balance, snapshot.total_wallet_balance]
     amounts += [snapshot.total_unrealized_profit]
+    amounts += [snapshot.available_balance, snapshot.total_open_order_initial_margin]
     for row in snapshot.assets:
         amounts += [row.wallet_balance, row.unrealized_profit, row.margin_balance]
+        amounts += [row.available_balance]
     assert all(isinstance(amount, Decimal) for amount in amounts)
     assert isinstance(snapshot.assets, tuple)
     assert [row.asset for row in snapshot.assets][:2] == ["FDUSD", "U"]  # response order kept
@@ -194,7 +200,14 @@ def _with_asset_field(field: str, value: Any) -> dict[str, Any]:
 
 @pytest.mark.parametrize("bad", BAD_TEXT)
 @pytest.mark.parametrize(
-    "field", ["totalMarginBalance", "totalWalletBalance", "totalUnrealizedProfit"]
+    "field",
+    [
+        "totalMarginBalance",
+        "totalWalletBalance",
+        "totalUnrealizedProfit",
+        "availableBalance",
+        "totalOpenOrderInitialMargin",
+    ],
 )
 async def test_a_bad_total_raises_naming_the_field_only(field: str, bad: Any) -> None:
     payload = _information_payload(_with_total(field, bad))
@@ -206,7 +219,9 @@ async def test_a_bad_total_raises_naming_the_field_only(field: str, bad: Any) ->
 
 
 @pytest.mark.parametrize("bad", BAD_TEXT)
-@pytest.mark.parametrize("field", ["walletBalance", "unrealizedProfit", "marginBalance"])
+@pytest.mark.parametrize(
+    "field", ["walletBalance", "unrealizedProfit", "marginBalance", "availableBalance"]
+)
 async def test_a_bad_asset_amount_raises_naming_the_field_only(field: str, bad: Any) -> None:
     payload = _information_payload(_with_asset_field(field, bad))
     adapter, _, _ = _adapter({"account_information_v3": payload})
@@ -244,6 +259,13 @@ async def test_a_successful_account_information_read_logs_no_balance() -> None:
     text = json.dumps(events, default=str)
     for digits in ("4999", "5000.0", "0.01000000"):
         assert digits not in text
+
+
+async def test_the_free_margin_figures_are_read_in_one_sdk_call() -> None:
+    adapter, rest, _ = _adapter({"account_information_v3": _information_payload()})
+    snapshot = await adapter.account_information_snapshot()
+    assert snapshot.available_balance == Decimal("4999.09343961")
+    assert rest.calls("account_information_v3") == 1
 
 
 # --------------------------------------------------------------------------- v3/balance

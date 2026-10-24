@@ -175,9 +175,15 @@ def _payloads(kwargs: dict[str, Any]) -> dict[str, Any]:
             total_margin_balance="1",
             total_wallet_balance="1",
             total_unrealized_profit="0",
+            available_balance="1",
+            total_open_order_initial_margin="0",
             assets=[
                 SimpleNamespace(
-                    asset="USDT", wallet_balance="1", unrealized_profit="0", margin_balance="1"
+                    asset="USDT",
+                    wallet_balance="1",
+                    unrealized_profit="0",
+                    margin_balance="1",
+                    available_balance="1",
                 )
             ],
         ),

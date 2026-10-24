@@ -11,7 +11,11 @@ it to ``AccountState`` or NO_TRADE with the owner's age bound (``account.max_equ
 * D-02, the fields: ``totalMarginBalance``, ``totalWalletBalance`` and ``totalUnrealizedProfit``
   of GET /fapi/v3/account, the quote-asset row of the same response, the quote-asset ``balance``
   of GET /fapi/v3/balance and ``multiAssetsMargin`` of GET /fapi/v1/accountConfig. The quote
-  asset is a constructor argument. The cross-checks themselves live in ``src.risk.live_equity``.
+  asset is a constructor argument. Phase 22 (plan 22-10): the same three reads also carry
+  ``availableBalance``, ``totalOpenOrderInitialMargin``, the quote row's ``availableBalance`` and
+  ``dualSidePosition`` (same accountConfig read, no second position-mode call) for the margin
+  check, ``check_margin``, under the same stamp and the same age bound. The cross-checks
+  themselves live in ``src.risk.live_equity`` and ``src.risk.margin_check``.
 * Read order of ``refresh``: accountConfig, account, balance. Each is read once and never
   retried, slept on or replaced by an older reading (D-20): any exception (a refused gate, an
   SDK error, a malformed field) leaves no reading and keeps only the exception type name.
@@ -96,6 +100,9 @@ def equity_reading_from_snapshots(
     multi_assets = config.multi_assets_margin
     if not isinstance(multi_assets, bool):
         raise TypeError("multi_assets_margin must be bool")
+    dual_side = config.dual_side_position
+    if not isinstance(dual_side, bool):
+        raise TypeError("dual_side_position must be bool")
     return AccountEquityReading(
         total_margin_balance=_decimal(information.total_margin_balance, "total_margin_balance"),
         total_wallet_balance=_decimal(information.total_wallet_balance, "total_wallet_balance"),
@@ -109,6 +116,16 @@ def equity_reading_from_snapshots(
             None if balance_row is None else _decimal(balance_row.balance, "balance")
         ),
         multi_assets_margin=multi_assets,
+        available_balance=_decimal(information.available_balance, "available_balance"),
+        total_open_order_initial_margin=_decimal(
+            information.total_open_order_initial_margin, "total_open_order_initial_margin"
+        ),
+        quote_asset_available_balance=(
+            None
+            if asset_row is None
+            else _decimal(asset_row.available_balance, "quote_asset_available_balance")
+        ),
+        dual_side_position=dual_side,
         observed_at_utc=observed_at_utc,
     )
 

@@ -506,17 +506,19 @@ class CommissionRates:
 class AccountAssetRow:
     """One row of the `assets` list of `account_information_v3` (plan 21-03).
 
-    All three amounts are Decimal, parsed from the exchange text. The USDT row is the
+    All four amounts are Decimal, parsed from the exchange text. The USDT row is the
     cross-check of the account equity: `margin_balance` equals the account-level
     `total_margin_balance` in single-asset mode (demo-observed, not mainnet). Other
     assets (USDC, BTC on the Demo account) are kept as their own rows; the account totals
-    exclude them.
+    exclude them. `available_balance` (plan 22-10) is the free margin of the asset: the
+    cross-check of the account-level `available_balance`, never an equity.
     """
 
     asset: str
     wallet_balance: Decimal
     unrealized_profit: Decimal
     margin_balance: Decimal
+    available_balance: Decimal
 
 
 @dataclass(frozen=True)
@@ -527,13 +529,17 @@ class AccountInformationSnapshot:
     17.4.0 model; on Demo equal to `total_wallet_balance + total_unrealized_profit` and to
     the USDT row's `margin_balance`, all 4999.09343961, demo-observed, not mainnet). The
     choice and the identity checks belong to the pure resolver of plan 21-04; this value
-    only carries the parsed numbers. `availableBalance` is deliberately NOT read: it is
-    Phase 22's margin check, not an equity. `assets` keeps the response order.
+    only carries the parsed numbers. Since Phase 22 (plan 22-10) the same answer also carries
+    `available_balance` and `total_open_order_initial_margin` (the free-margin figures of the
+    margin check, D-13): they share the equity's stamp and are never used as the equity.
+    `assets` keeps the response order.
     """
 
     total_margin_balance: Decimal
     total_wallet_balance: Decimal
     total_unrealized_profit: Decimal
+    available_balance: Decimal
+    total_open_order_initial_margin: Decimal
     assets: tuple[AccountAssetRow, ...]
 
 
@@ -1680,7 +1686,10 @@ class BinanceUsdmAdapter:
         return CommissionRates(symbol=symbol, maker_rate=maker, taker_rate=taker)
 
     async def account_information_snapshot(self) -> AccountInformationSnapshot:
-        """Read the account equity figures (GET /fapi/v3/account, USER_DATA, plan 21-03).
+        """Read the account equity and free-margin figures (GET /fapi/v3/account, plan 21-03).
+
+        Phase 22 (plan 22-10) reads `availableBalance` and `totalOpenOrderInitialMargin` from the
+        same answer for the margin check; they are never the equity.
 
         Through the official SDK `rest_api.account_information_v3(recv_window)` and the one
         signed helper `_sdk_call` (policy, shared REST gate, never retried; an SDK exception
@@ -1706,6 +1715,10 @@ class BinanceUsdmAdapter:
             ),
             total_unrealized_profit=_require_exchange_decimal(
                 raw.total_unrealized_profit, "totalUnrealizedProfit"
+            ),
+            available_balance=_require_exchange_decimal(raw.available_balance, "availableBalance"),
+            total_open_order_initial_margin=_require_exchange_decimal(
+                raw.total_open_order_initial_margin, "totalOpenOrderInitialMargin"
             ),
             assets=assets,
         )
@@ -2439,6 +2452,7 @@ def _row_to_account_asset(item: Any) -> AccountAssetRow:
         wallet_balance=_require_exchange_decimal(item.wallet_balance, "walletBalance"),
         unrealized_profit=_require_exchange_decimal(item.unrealized_profit, "unrealizedProfit"),
         margin_balance=_require_exchange_decimal(item.margin_balance, "marginBalance"),
+        available_balance=_require_exchange_decimal(item.available_balance, "availableBalance"),
     )
 
 

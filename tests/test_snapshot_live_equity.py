@@ -73,6 +73,10 @@ def _reading(**overrides: Any) -> AccountEquityReading:
         "quote_asset_margin_balance": DEMO_EQUITY,
         "balance_endpoint_wallet": DEMO_EQUITY,
         "multi_assets_margin": False,
+        "available_balance": DEMO_EQUITY,
+        "total_open_order_initial_margin": Decimal("0.00000000"),
+        "quote_asset_available_balance": DEMO_EQUITY,
+        "dual_side_position": False,
         "observed_at_utc": NOW - timedelta(seconds=10),
     }
     kwargs.update(overrides)

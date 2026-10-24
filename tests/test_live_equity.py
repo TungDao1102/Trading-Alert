@@ -46,6 +46,10 @@ def _reading(**overrides: Any) -> AccountEquityReading:
         "quote_asset_margin_balance": DEMO_EQUITY,
         "balance_endpoint_wallet": DEMO_EQUITY,
         "multi_assets_margin": False,
+        "available_balance": DEMO_EQUITY,
+        "total_open_order_initial_margin": Decimal("0.00000000"),
+        "quote_asset_available_balance": DEMO_EQUITY,
+        "dual_side_position": False,
         "observed_at_utc": NOW - timedelta(seconds=10),
     }
     kwargs.update(overrides)
@@ -288,6 +292,9 @@ def test_non_positive_max_age_raises(bad: timedelta) -> None:
         "total_unrealized_profit",
         "quote_asset_margin_balance",
         "balance_endpoint_wallet",
+        "available_balance",
+        "total_open_order_initial_margin",
+        "quote_asset_available_balance",
     ],
 )
 @pytest.mark.parametrize("bad", [1000.5, 1000, True, "1000"])
@@ -310,6 +317,38 @@ def test_naive_observed_at_raises() -> None:
 def test_non_bool_multi_assets_margin_raises_type_error() -> None:
     with pytest.raises(TypeError):
         _reading(multi_assets_margin="false")
+
+
+@pytest.mark.parametrize("bad", [0, 1, "false", None])
+def test_non_bool_dual_side_position_raises_type_error(bad: object) -> None:
+    with pytest.raises(TypeError):
+        _reading(dual_side_position=bad)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["available_balance", "total_open_order_initial_margin", "quote_asset_available_balance"],
+)
+@pytest.mark.parametrize("bad", [Decimal("NaN"), Decimal("Infinity")])
+def test_non_finite_free_margin_figure_raises_value_error(field: str, bad: Decimal) -> None:
+    with pytest.raises(ValueError):
+        _reading(**{field: bad})
+
+
+def test_a_missing_quote_asset_available_balance_is_kept_as_none() -> None:
+    assert _reading(quote_asset_available_balance=None).quote_asset_available_balance is None
+
+
+def test_the_free_margin_figures_do_not_change_the_equity() -> None:
+    """The equity does not depend on availableBalance (Phase 22 prohibition)."""
+    odd = _reading(
+        available_balance=Decimal("1"),
+        total_open_order_initial_margin=Decimal("3"),
+        quote_asset_available_balance=Decimal("2"),
+        dual_side_position=True,
+    )
+    result = _resolve(odd)
+    assert result.equity == DEMO_EQUITY
 
 
 def test_reading_is_frozen() -> None:

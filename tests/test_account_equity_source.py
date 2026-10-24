@@ -128,6 +128,11 @@ async def test_reading_maps_the_quote_asset_rows_only() -> None:
     assert usdt.total_margin_balance == DEMO_EQUITY
     assert usdt.multi_assets_margin is False
     assert usdt.observed_at_utc == stamp
+    # Phase 22 (plan 22-10): the free-margin figures and the mode flag of the same reading.
+    assert usdt.available_balance == DEMO_EQUITY
+    assert usdt.total_open_order_initial_margin == Decimal("0.00000000")
+    assert usdt.quote_asset_available_balance == DEMO_EQUITY
+    assert usdt.dual_side_position is False
     usdc = equity_reading_from_snapshots(
         information=information,
         balances=balances,
@@ -137,6 +142,28 @@ async def test_reading_maps_the_quote_asset_rows_only() -> None:
     )
     assert usdc.quote_asset_margin_balance == Decimal("5000.00000000")
     assert usdc.quote_asset_margin_balance != usdt.quote_asset_margin_balance
+    assert usdc.quote_asset_available_balance == Decimal("5000.00000000")
+    assert usdc.available_balance == DEMO_EQUITY  # the account-level figure, not the row's
+
+
+async def test_the_hedge_flag_comes_from_the_same_account_config_read() -> None:
+    information, balances, _ = await demo_account_snapshots()
+    reading = equity_reading_from_snapshots(
+        information=information,
+        balances=balances,
+        config=AccountConfigSnapshot(multi_assets_margin=False, dual_side_position=True),
+        quote_asset="USDT",
+        observed_at_utc=datetime(2026, 10, 22, 12, 0, 0, tzinfo=UTC),
+    )
+    assert reading.dual_side_position is True
+    with pytest.raises(TypeError, match="dual_side_position"):
+        equity_reading_from_snapshots(
+            information=information,
+            balances=balances,
+            config=AccountConfigSnapshot(multi_assets_margin=False, dual_side_position="no"),  # type: ignore[arg-type]
+            quote_asset="USDT",
+            observed_at_utc=datetime(2026, 10, 22, 12, 0, 0, tzinfo=UTC),
+        )
 
 
 async def test_a_missing_quote_row_maps_to_none_and_the_resolver_refuses() -> None:
@@ -150,6 +177,7 @@ async def test_a_missing_quote_row_maps_to_none_and_the_resolver_refuses() -> No
     )
     assert reading.quote_asset_margin_balance is None
     assert reading.balance_endpoint_wallet is None
+    assert reading.quote_asset_available_balance is None
     clock = VirtualTime()
     source = _source(
         ScriptedAccountReader({CONFIG: [config], INFORMATION: [information], BALANCES: [balances]}),
@@ -181,7 +209,9 @@ async def test_two_quote_rows_or_a_wrong_type_is_a_failed_read() -> None:
         total_margin_balance=1.5,  # type: ignore[arg-type]
         total_wallet_balance=Decimal("1"),
         total_unrealized_profit=Decimal("0"),
-        assets=(AccountAssetRow("USDT", Decimal("1"), Decimal("0"), Decimal("1")),),
+        available_balance=Decimal("1"),
+        total_open_order_initial_margin=Decimal("0"),
+        assets=(AccountAssetRow("USDT", Decimal("1"), Decimal("0"), Decimal("1"), Decimal("1")),),
     )
     source = _source(
         ScriptedAccountReader(

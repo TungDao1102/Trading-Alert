@@ -9,8 +9,9 @@ plus unrealized PnL, and in single-asset mode it is denominated in the quote ass
 17.4.0 response model). On the Demo account the recorded payload shows it equal to
 `totalWalletBalance + totalUnrealizedProfit`, to the `marginBalance` of the quote-asset row of
 the same response, and (as wallet) to the quote-asset row of GET /fapi/v3/balance. That is
-demo-observed, not mainnet. `availableBalance` is deliberately not used here: free margin is
-a Phase 22 concern (margin and leverage), not the sizing base.
+demo-observed, not mainnet. `availableBalance` is never the equity: since Phase 22 (plan 22-10) the
+reading carries it, the open-order margin total and the position mode for the margin check of
+`src.risk.margin_check`, but `check_equity_reading` and `equity_basis` do not look at them.
 
 Fail closed (D-03, D-04). A missing reading, a stale reading (age greater than `max_age`), a
 future-dated reading (negative age), `multiAssetsMargin` true (equity would mix assets; owner
@@ -73,8 +74,13 @@ class AccountEquityReading:
     GET /fapi/v3/account. `quote_asset_margin_balance` is the `marginBalance` of the quote-asset
     row of the same response, None when the row is absent. `balance_endpoint_wallet` is the
     `balance` of the quote-asset row of GET /fapi/v3/balance, None when absent.
-    `multi_assets_margin` comes from GET /fapi/v1/accountConfig. `observed_at_utc` is the
-    injected clock read before the first request.
+    `multi_assets_margin` and `dual_side_position` come from GET /fapi/v1/accountConfig (the
+    same read, no second position-mode call). `available_balance` and
+    `total_open_order_initial_margin` are the account-level free-margin figures of GET
+    /fapi/v3/account (Phase 22, plan 22-10; never the equity); `quote_asset_available_balance`
+    is the `availableBalance` of the quote-asset row of the same response, None when the row is
+    absent. `observed_at_utc` is the injected clock read before the first request and stamps
+    every field.
     """
 
     total_margin_balance: Decimal
@@ -83,6 +89,10 @@ class AccountEquityReading:
     quote_asset_margin_balance: Decimal | None
     balance_endpoint_wallet: Decimal | None
     multi_assets_margin: bool
+    available_balance: Decimal
+    total_open_order_initial_margin: Decimal
+    quote_asset_available_balance: Decimal | None
+    dual_side_position: bool
     observed_at_utc: datetime
 
     def __post_init__(self) -> None:
@@ -96,6 +106,14 @@ class AccountEquityReading:
         if not isinstance(self.multi_assets_margin, bool):
             raise TypeError(
                 f"multi_assets_margin must be bool, got {type(self.multi_assets_margin).__name__}"
+            )
+        _require_amount(self.available_balance, "available_balance")
+        _require_amount(self.total_open_order_initial_margin, "total_open_order_initial_margin")
+        if self.quote_asset_available_balance is not None:
+            _require_amount(self.quote_asset_available_balance, "quote_asset_available_balance")
+        if not isinstance(self.dual_side_position, bool):
+            raise TypeError(
+                f"dual_side_position must be bool, got {type(self.dual_side_position).__name__}"
             )
         _require_utc_aware(self.observed_at_utc, "observed_at_utc")
 
