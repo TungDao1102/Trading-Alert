@@ -137,7 +137,19 @@ Margin rules (D035):
 - the plan is rejected unless the liquidation price lies beyond the SL with a buffer; the buffer is a registry parameter whose value is chosen in Phase 22 (D035 fixes no number);
 - the available-margin check includes other resting entry orders.
 
+Note on the buffer (Phase 22, deviation recorded, owner item O-2). The bullet above keeps its wording: a registry parameter whose value is chosen in Phase 22. The default built in Phase 22 is the owner's execution-limits key `margin.liquidation_buffer_bps` in `config/execution/execution-limits-v1.toml`, in basis points of the entry price, required and `NOT_CONFIGURED`. The reason: a hash-locked registry parameter forces a new parameter set, a new `strategy_version` and regenerated research records (D075, D076) while the backtest has no liquidation model. The registry-parameter wording stays until the owner's DECISIONS row settles the home; no number is set by this note or by any case run on the Demo.
+
 The tool must read current account/symbol constraints before live placement.
+
+Live implementation (Phase 22). This paragraph describes what the code does; no rule of this section changed.
+
+- Order: for an approved plan the placement runs one guard (gate 5f2 of `execute_approved_plan`), after the position-mode check and before the hand-off record and the consume, in a fixed order: account mode (One-way, single-asset margin only), symbol configuration, liquidation, available margin. The first refusal wins and carries one plain code; a refusal consumes nothing, so the approval can be retried.
+- Configuration: the margin type and leverage of the symbol are read from `GET /fapi/v1/symbolConfig`. If they already read ISOLATED and the target (5, the D035 cap) nothing is sent. Otherwise only a flat symbol with no open order, position or algo order is changed (margin type, then leverage, each at most one request, never retried), and only the closing read decides. `isAutoAddMargin` true is refused. The previous configuration is journaled and never restored.
+- Liquidation: the liquidation price is computed from the exchange leverage brackets (the tier of the liquidation notional, never of the entry notional), the verified leverage and the entry fee rate; no bracket, rate or leverage value is hard-coded. It must lie strictly beyond the stop by the buffer. Brackets older than `margin.max_bracket_age_ms`, a set that is malformed, and a notional above the top bracket are refused.
+- Margin: the fresh `availableBalance` must cover the initial margin of the new order (notional divided by the verified leverage), the round-trip taker fees, the open loss of an already marketable limit, the margin of the other approved or placed plans, and a headroom (`margin.headroom_bps`); a shortfall is `INSUFFICIENT_MARGIN`. Whether `availableBalance` already nets a resting order is an evidence-gated constant that stays False until the owner's DECISIONS row (two Demo samples saw the netting; demo-observed, not mainnet), so PLACED entries are counted again, which can only over-refuse.
+- Other plans' margin: nothing in Phase 22 writes `required_margin`; the Phase 24 issuer calls `register_request` with it. Until then every RESERVED or PLACED row reads as an unknown margin, and a plan placed while another claim exists is refused `UNCERTAIN_ACCOUNT_STATE`. That part of the margin rule is proven on fakes and on the PostgreSQL claims reader only.
+- After the first fill, once the stop is confirmed, a watch compares the exchange `liquidationPrice` of the position with the same buffer and with the local price; a danger or an unknown value (None or 0) goes to the existing CLOSE_REQUIRED path. The watch is built and tested but is not active: `ProtectionCoordinator` defaults it to None and Phase 24 composes it (whether a failed check closes or only alerts is owner item O-4).
+- Fail closed and unchanged rules: any unreadable or stale input is NO_TRADE; sizing and quantization (section 11) are unchanged. The backtest has no margin or liquidation model, so these are live-only gates. Nothing in this paragraph is started by a running process before Phase 24, and the Demo cases of 2026-10-24 are single samples (demo-observed, not mainnet): the criteria are not Demo-proven beyond them.
 
 ## 10. Failure behavior
 
@@ -203,6 +215,6 @@ equity_used
 metadata_observed_at_utc
 ```
 
-The value `equity_used` comes from the live equity resolver (section 8, `totalMarginBalance`); the snapshot stays INCOMPLETE and not valid for live until Phase 22 supplies `margin_type` and `leverage`. The snapshot is persisted per plan (DATA_MODEL `trade_plans`) and a plan calculated with stale constraints must be revalidated before approval/execution (F-056, D035, D037).
+The value `equity_used` comes from the live equity resolver (section 8, `totalMarginBalance`); the snapshot stays INCOMPLETE and not valid for live until Phase 22 supplies `margin_type` and `leverage`. Since Phase 22 the margin guard supplies `margin_type`, `leverage` and `equity_used` from the exchange-verified values to the in-memory snapshot handed to the protection coordinator; the persisted write-once row is not changed (Phase 24 builds it). The snapshot is persisted per plan (DATA_MODEL `trade_plans`) and a plan calculated with stale constraints must be revalidated before approval/execution (F-056, D035, D037).
 
 Marker: verify the `market_lot_size` and `percent_price` filter definitions against current Binance docs before implementation.

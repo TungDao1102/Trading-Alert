@@ -179,7 +179,7 @@ ENTRY_WITHOUT_PROTECTIVE
 
 `ENTRY_WITHOUT_PROTECTIVE` means an entry fill exists without a confirmed protective stop. It was a plain-string code before Phase 20 (D-10, D044 item 1); the string value is unchanged. The same string is also a reconciler divergence kind and a SAFE_MODE entry reason (9.4); those copies stay plain strings because they are divergence kinds and SAFE_MODE reasons, not rejection reasons.
 
-`INSUFFICIENT_MARGIN` is reserved: no code emits it yet; it is first emitted by the Phase 22 margin guard.
+`INSUFFICIENT_MARGIN` is emitted by the Phase 22 margin guard (`src/risk/margin_check.py` decides it, `src/execution/margin_guard.py` returns it) when the free margin does not cover the margin the plan needs; the code list above is unchanged. No running process composes the guard before Phase 24.
 
 `STOP_TOO_TIGHT` means the stop distance divided by the sizing entry price is below the registry `min_stop_distance_rate`; `COST_TO_RISK_EXCEEDED` means the round-trip modeled cost divided by `risk_per_unit` is above the registry `max_cost_to_risk`. Both are emitted before quantization (D-07).
 
@@ -225,7 +225,7 @@ Production code also emits the following plain strings as `reason_code` values o
 | `PLAN_INVALIDATED_BEFORE_PLACEMENT` | `src/execution/pre_placement.py` | The Signal carries an invalidation time or the latest closed strategy bar closed beyond the plan's invalidation level before the entry was placed; deliberately distinct from `RejectionReason.INVALIDATED` (planner geometry, D-08, G4-017) and not an alias of it | proposed canonical, promote in Phase 24 |
 | `INVALIDATION_INPUT_UNAVAILABLE` | `src/execution/pre_placement.py` | The closed-bar close needed for the invalidation check was not provided, or the plan's invalidation rule cannot be read, so the plan is refused (fail closed) | proposed canonical, promote in Phase 24 |
 | `VALIDITY_TOO_SHORT` | `src/execution/pre_placement.py` | The remaining validity, measured to the floored `goodTillDate` second, is below the owner minimum or the exchange GTD floor | proposed canonical, promote in Phase 24 |
-| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the fifteen required execution limits (`EXECUTION_LIMIT_KEYS` holds sixteen keys: the seven Phase 19 keys, the seven Phase 20 keys, the alert-only key `reconcile.entry_stale_grace_ms`, which never blocks, and the Phase 21 key `account.max_equity_age_ms`) in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused | proposed canonical, promote in Phase 24 |
+| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the eighteen required execution limits (`EXECUTION_LIMIT_KEYS` holds nineteen keys: the seven Phase 19 keys, the seven Phase 20 keys, the alert-only key `reconcile.entry_stale_grace_ms`, which never blocks, the Phase 21 key `account.max_equity_age_ms` and the three Phase 22 keys `margin.liquidation_buffer_bps`, `margin.max_bracket_age_ms` and `margin.headroom_bps`) in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused | proposed canonical, promote in Phase 24 |
 | `SYMBOL_HAS_POSITION` | `src/execution/pre_placement.py` | The exchange already reports a position on the plan's symbol | proposed canonical, promote in Phase 24 |
 | `SYMBOL_HAS_OPEN_ORDER` | `src/execution/pre_placement.py` | The exchange already reports an open order on the plan's symbol | proposed canonical, promote in Phase 24 |
 | `UNPROTECTED_POSITION_EXISTS` | `src/execution/pre_placement.py` | An account-wide flag says a position without a confirmed stop exists (a protection state that blocks new entries); checked before the same-symbol rules | proposed canonical, promote in Phase 20 |
@@ -247,6 +247,20 @@ Production code also emits the following plain strings as `reason_code` values o
 | `DAILY_LOSS_UNKNOWN` | `src/risk/daily_loss.py` (`BLOCKED_DAILY_LOSS_UNKNOWN`) | A loss source failed, a component is in another asset or conflicts with a stored one, or the funding policy cannot count the day; the loss is unknown, so no entry is allowed (a held latch still answers `DAILY_STOP`) | blocked reason, not a rejection reason |
 | `DAY_THRESHOLDS_INVALID` | `src/risk/daily_loss.py` (`BLOCKED_DAY_THRESHOLDS_INVALID`) | The parameter set lacks a typed daily threshold or its warning is above its stop, so the daily state cannot be derived (a malformed set must not read as NORMAL) | blocked reason, not a rejection reason |
 | `FUNDING_SOURCE_UNVERIFIED` | `src/risk/daily_loss.py` (`FUNDING_LABEL_UNVERIFIED`) | Label on a daily loss counted under `FundingPolicy.TRADES_WITH_UNVERIFIED_FUNDING` (the owner's O-2 answer): zero income rows were counted as zero funding while the FUNDING_FEE source has not been observed | label, not a rejection reason |
+| `LIQUIDATION_TOO_CLOSE` | `src/risk/liquidation.py` | The liquidation price of the plan is not strictly beyond the stop by the owner's buffer (`margin.liquidation_buffer_bps`); nothing is placed | proposed canonical, promote in Phase 24 |
+| `LIQUIDATION_INPUT_UNAVAILABLE` | `src/risk/liquidation.py` | The leverage brackets are missing, malformed, stale or inconsistent, so no liquidation price can be computed; the plan is refused (fail closed) | proposed canonical, promote in Phase 24 |
+| `LEVERAGE_ABOVE_BRACKET` | `src/risk/liquidation.py` | The leverage the plan would need is above the exchange maximum of the bracket that holds its entry notional | proposed canonical, promote in Phase 24 |
+| `NOTIONAL_ABOVE_MAX` | `src/risk/liquidation.py` | The entry notional is above the top bracket of the exchange (or above the symbol's `maxNotionalValue`), so no tier fits | proposed canonical, promote in Phase 24 |
+| `MARGIN_CONFIG_UNVERIFIED` | `src/execution/symbol_config_guard.py` | The symbol configuration could not be read, or the closing read does not show ISOLATED at the target leverage; no entry is placed and a DIVERGENCE alert carries this code as its reason | proposed canonical, promote in Phase 24 |
+| `MARGIN_CONFIG_CHANGE_REFUSED` | `src/execution/symbol_config_guard.py` | The symbol holds a position, an open order or an open algo order and its configuration is not already the target; the guard changes nothing (zero requests) and never cancels or closes to make room | proposed canonical, promote in Phase 24 |
+| `AUTO_ADD_MARGIN_ENABLED` | `src/execution/symbol_config_guard.py` | The symbol reports `isAutoAddMargin` true; an automatic top-up would defeat the liquidation guard, so the plan is refused before any change | proposed canonical, promote in Phase 24 |
+| `MARGIN_MODE_UNSUPPORTED` | `src/execution/margin_guard.py` | The account is in multi-asset margin mode; V1 supports single-asset margin only (a Hedge account keeps `HEDGE_MODE_UNSUPPORTED`) | proposed canonical, promote in Phase 24 |
+| `LIQUIDATION_UNKNOWN_AFTER_FILL` | `src/execution/liquidation_watch.py` | After the fill the exchange `liquidationPrice` is None, zero (the cross-margin sentinel), negative or not finite, or an input needed to judge it is unknown; judged as a failure by the owner's policy (built, not active before Phase 24) | proposed canonical, promote in Phase 24 |
+| `LIQUIDATION_TOO_CLOSE_AFTER_FILL` | `src/execution/liquidation_watch.py` | After the fill the exchange `liquidationPrice` is not strictly beyond the stop by the buffer, measured from the actual fill price; judged as a failure by the owner's policy (built, not active before Phase 24) | proposed canonical, promote in Phase 24 |
+| `LIQUIDATION_PRICE_DIFFERS` | `src/execution/liquidation_watch.py` | The exchange and the locally computed liquidation prices differ at the exchange's own decimal places while the exchange value passes; calibration only, never a refusal, and the DIVERGENCE alert carries this code without any amount | proposed canonical, promote in Phase 24 (calibration reason, never a refusal) |
+| `READING_UNUSABLE` | `src/risk/margin_check.py` (`BLOCKED_READING_UNUSABLE`) | The account reading is missing, stale, future-dated or inconsistent between its two `availableBalance` figures; mapped to `UNCERTAIN_ACCOUNT_STATE` by the margin guard | blocked reason, not a rejection reason |
+| `HEDGE_MODE` | `src/risk/margin_check.py` (`BLOCKED_HEDGE_MODE`) | The account reading says `dualSidePosition` is true; mapped to `HEDGE_MODE_UNSUPPORTED` by the margin guard before anything is changed | blocked reason, not a rejection reason |
+| `MULTI_ASSETS_MODE` | `src/risk/margin_check.py` (`BLOCKED_MULTI_ASSETS_MODE`) | The account reading says multi-asset margin is on; mapped to `MARGIN_MODE_UNSUPPORTED` by the margin guard before anything is changed | blocked reason, not a rejection reason |
 
 ### 9.4 SAFE_MODE entry reasons
 
@@ -576,3 +590,36 @@ A daily loss component is one signed amount of one kind from one source. The sam
 |-------|---------|
 | `TRADES_WITH_UNVERIFIED_FUNDING` | Owner choice O-2, "option A" (2026-10-23): PnL and commission come from the trade sources, FUNDING_FEE rows are added when the income read returns them, zero rows count as zero funding with the label `FUNDING_SOURCE_UNVERIFIED`, and a failed income read makes the loss unknown. Passed by the Phase 24 composition |
 | `REQUIRE_VERIFIED_FUNDING_SOURCE` | The loss is unknown until `FUNDING_SOURCE_VERIFIED` is True; it stays False until a DECISIONS row changes it |
+
+## 15. Margin guard vocabulary (Phase 22)
+
+Words of the leverage, margin and liquidation guard. This section describes the code as built (`src/execution/symbol_config_guard.py`, `src/execution/margin_guard.py`, `src/execution/liquidation_watch.py`, `src/risk/liquidation.py`, `src/risk/margin_check.py`); it adds no rule and no `RejectionReason` member (the new codes are plain strings in 9.3, amendment A3). Nothing here is started by a running process before Phase 24. Demo facts are demo-observed, not mainnet, and are single samples.
+
+### 15.1 LiquidationFailurePolicy
+
+What a failed post-fill liquidation check means. Owner item O-4 is OPEN: both members are built behind a required argument with no default, and the assistant chose neither.
+
+| Value | Meaning |
+|-------|---------|
+| `CLOSE_POSITION` | A failed check sends the plan to CLOSE_REQUIRED (reduce-only MARKET close). The D-12 default that the Phase 24 composition is expected to pass |
+| `ALERT_ONLY` | A failed check is journaled and alerted; the position is not closed |
+
+### 15.2 LiquidationWatchAction
+
+The four answers of one post-fill check (`LiquidationWatch.check`). The watch is built and tested but not active before Phase 24.
+
+| Value | Meaning |
+|-------|---------|
+| `OK` | The exchange value passes the strict buffer predicate and agrees with the local price (or the local price is unavailable) |
+| `OK_DIFFERS` | The exchange value passes but differs from the local price; both exact prices are journaled for calibration only, no amount in an alert |
+| `CLOSE` | The check failed (`LIQUIDATION_TOO_CLOSE_AFTER_FILL` or `LIQUIDATION_UNKNOWN_AFTER_FILL`) under `CLOSE_POSITION` |
+| `ALERT_ONLY_FAILED` | The check failed under `ALERT_ONLY` |
+
+### 15.3 Branch code, journal event and alert reasons
+
+| Name | Kind | Meaning |
+|------|------|---------|
+| `B6_LIQUIDATION_TOO_CLOSE` | protection branch code | The post-fill check failed; the plan enters the existing CLOSE_REQUIRED path with the confirmed stop kept. No new state, edge or order type |
+| `MARGIN_CONFIG_CHANGED` | journal event (`src/execution/manager.py`) | The guard sent at least one configuration request; carries the previous and the verified margin type and leverage. Written best effort: a failing journal never changes the outcome. The previous configuration is never restored |
+| `MARGIN_CONFIG_UNVERIFIED` | alert reason on a `DIVERGENCE` event | The symbol configuration could not be verified (see 9.3) |
+| `LIQUIDATION_PRICE_DIFFERS` | alert reason on a `DIVERGENCE` event | The exchange and local liquidation prices differ (see 9.3); calibration, no amount |
