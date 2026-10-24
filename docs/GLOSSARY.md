@@ -225,7 +225,7 @@ Production code also emits the following plain strings as `reason_code` values o
 | `PLAN_INVALIDATED_BEFORE_PLACEMENT` | `src/execution/pre_placement.py` | The Signal carries an invalidation time or the latest closed strategy bar closed beyond the plan's invalidation level before the entry was placed; deliberately distinct from `RejectionReason.INVALIDATED` (planner geometry, D-08, G4-017) and not an alias of it | proposed canonical, promote in Phase 24 |
 | `INVALIDATION_INPUT_UNAVAILABLE` | `src/execution/pre_placement.py` | The closed-bar close needed for the invalidation check was not provided, or the plan's invalidation rule cannot be read, so the plan is refused (fail closed) | proposed canonical, promote in Phase 24 |
 | `VALIDITY_TOO_SHORT` | `src/execution/pre_placement.py` | The remaining validity, measured to the floored `goodTillDate` second, is below the owner minimum or the exchange GTD floor | proposed canonical, promote in Phase 24 |
-| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the eighteen required execution limits (`EXECUTION_LIMIT_KEYS` holds nineteen keys: the seven Phase 19 keys, the seven Phase 20 keys, the alert-only key `reconcile.entry_stale_grace_ms`, which never blocks, the Phase 21 key `account.max_equity_age_ms` and the three Phase 22 keys `margin.liquidation_buffer_bps`, `margin.max_bracket_age_ms` and `margin.headroom_bps`) in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused | proposed canonical, promote in Phase 24 |
+| `LIMITS_NOT_CONFIGURED` | `src/execution/pre_placement.py` | At least one of the eighteen required execution limits (`EXECUTION_LIMIT_KEYS` holds nineteen keys: the seven Phase 19 keys, the seven Phase 20 keys, the alert-only key `reconcile.entry_stale_grace_ms`, which never blocks, the Phase 21 key `account.max_equity_age_ms` and the three Phase 22 keys `margin.liquidation_buffer_bps`, `margin.max_bracket_age_ms` and `margin.headroom_bps`) in `config/execution/execution-limits-v1.toml` is still `NOT_CONFIGURED`, so every live and Demo placement is refused. The owner set `account.max_equity_age_ms` (D084) and the three `margin.*` keys (D085, 2026-10-24); fourteen required keys stay `NOT_CONFIGURED` | proposed canonical, promote in Phase 24 |
 | `SYMBOL_HAS_POSITION` | `src/execution/pre_placement.py` | The exchange already reports a position on the plan's symbol | proposed canonical, promote in Phase 24 |
 | `SYMBOL_HAS_OPEN_ORDER` | `src/execution/pre_placement.py` | The exchange already reports an open order on the plan's symbol | proposed canonical, promote in Phase 24 |
 | `UNPROTECTED_POSITION_EXISTS` | `src/execution/pre_placement.py` | An account-wide flag says a position without a confirmed stop exists (a protection state that blocks new entries); checked before the same-symbol rules | proposed canonical, promote in Phase 20 |
@@ -597,11 +597,11 @@ Words of the leverage, margin and liquidation guard. This section describes the 
 
 ### 15.1 LiquidationFailurePolicy
 
-What a failed post-fill liquidation check means. Owner item O-4 is OPEN: both members are built behind a required argument with no default, and the assistant chose neither.
+What a failed post-fill liquidation check means. Both members are built behind a required argument with no default. The owner chose `CLOSE_POSITION` on 2026-10-24 (DECISIONS D085, owner item O-4); the Phase 24 composition must pass it, and nothing composes the watch before then.
 
 | Value | Meaning |
 |-------|---------|
-| `CLOSE_POSITION` | A failed check sends the plan to CLOSE_REQUIRED (reduce-only MARKET close). The D-12 default that the Phase 24 composition is expected to pass |
+| `CLOSE_POSITION` | A failed check sends the plan to CLOSE_REQUIRED (reduce-only MARKET close). The owner's choice (D085): the Phase 24 composition must pass it |
 | `ALERT_ONLY` | A failed check is journaled and alerted; the position is not closed |
 
 ### 15.2 LiquidationWatchAction
