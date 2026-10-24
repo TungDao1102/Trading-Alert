@@ -224,7 +224,8 @@ async def test_ok_verdict_journals_once_and_the_plan_is_never_checked_again() ->
     assert rig.safe_mode.entered_reasons == []
 
 
-async def test_ok_differs_journals_both_exact_prices_and_alerts_without_an_amount() -> None:
+async def test_ok_differs_journals_both_exact_prices_and_raises_no_alert() -> None:
+    """WR-05: the recorded Demo position differs by the rounded wallet; that is calibration."""
     watch = ScriptedWatch(
         _verdict(
             LiquidationWatchAction.OK_DIFFERS,
@@ -241,10 +242,10 @@ async def test_ok_differs_journals_both_exact_prices_and_alerts_without_an_amoun
     (note,) = _events(rig, EVENT_LIQUIDATION_PRICE_DIFFERS)
     assert note["exchange_price"] == "64968.85373637"
     assert note["local_price"] == "64968.853735"
-    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
-        ("DIVERGENCE", LIQUIDATION_PRICE_DIFFERS)
-    ]
-    assert not any(ch.isdigit() for ch in rig.alerts.alerts[0].reason)
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_PRICE_DIFFERS]
+    assert note["reason"] == LIQUIDATION_PRICE_DIFFERS
+    assert rig.alerts.alerts == []  # no owner tolerance exists, so a difference never alerts
+    assert rig.safe_mode.entered_reasons == []
     assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
     assert rig.closer.calls == []  # type: ignore[union-attr]
 

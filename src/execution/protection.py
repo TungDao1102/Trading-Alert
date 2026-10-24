@@ -147,7 +147,8 @@ once and asks the watch whether the exchange ``liquidationPrice`` lies beyond th
 owner's buffer. A CLOSE verdict (a danger, or an unknown value such as the cross-margin sentinel
 "0") enters CLOSE_REQUIRED through the existing path with the branch code
 ``B6_LIQUIDATION_TOO_CLOSE``: no new state, edge or order type, the confirmed stop is kept.
-OK_DIFFERS and ALERT_ONLY_FAILED journal and alert (event DIVERGENCE) and change nothing. The check
+ALERT_ONLY_FAILED journals and alerts (event DIVERGENCE) and changes nothing; OK_DIFFERS is
+calibration data and only journals (WR-05: no owner tolerance exists to alert on). The check
 never runs before the stop is confirmed, so the stop placement, the entry-remainder cancel and
 every deadline run first and unchanged; it runs once per plan (also after a restore). Whether a
 failed check closes or only alerts is O-4 and lives in the watch's required policy, not here.
@@ -1740,8 +1741,13 @@ class ProtectionCoordinator:
         if verdict.action is LiquidationWatchAction.OK:
             self._journal_note(tracked, EVENT_LIQUIDATION_CHECKED, payload, now)
         elif verdict.action is LiquidationWatchAction.OK_DIFFERS:
+            # WR-05: calibration data only. The exchange value passed the strict predicate and
+            # decided; the local price omits funding and the exit fee, so a difference at the
+            # exchange's own places is the normal case (the recorded Demo position differs) and a
+            # critical DIVERGENCE alert on it would train the operator to ignore the event type
+            # that also carries real reconciliation divergences. An alert needs a tolerance the
+            # owner sets (no such number exists); until then the journal row is the record.
             self._journal_note(tracked, EVENT_LIQUIDATION_PRICE_DIFFERS, payload, now)
-            self._liquidation_alert(tracked, verdict.reason, now)
         else:
             self._journal_note(tracked, EVENT_LIQUIDATION_FAILED_ALERT_ONLY, payload, now)
             known = (LIQUIDATION_TOO_CLOSE_AFTER_FILL, LIQUIDATION_UNKNOWN_AFTER_FILL)
