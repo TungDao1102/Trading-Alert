@@ -39,9 +39,16 @@ Rules this module keeps:
 * Fail closed. Any store, reader or equity failure gives a blocked verdict (NO_TRADE,
   UNCERTAIN_ACCOUNT_STATE with a blocked reason), never a default loss or a fresh day. Only the
   exception TYPE name is kept (``last_error_type``), never a message.
-* Pitfall 6: a late open of the day (the first read comes after 00:00 UTC) is conservative: the
-  base is the equity of that moment and the backfill counts every fill since 00:00 UTC, so the
-  loss is over-counted at worst; ``base_observed_at_utc`` is stored so the lateness is visible.
+* Pitfall 6 and WR-06: a late open of the day (the first read comes after 00:00 UTC) takes the
+  equity of that moment, but D033 measures the loss against the equity at the START of the day.
+  After a morning loss the moment's equity is the smaller (conservative) base and is kept. After
+  a morning GAIN it would be larger than the day-start equity and would raise every threshold by
+  the gain, so the base is corrected to ``equity now - the day's net result`` (the most favorable
+  amount per fill, ``net_pnl_upper_quote``). That needs the day's loss to be KNOWN when the day
+  is opened: a day is not opened (BLOCKED_DAY_BASE_UNAVAILABLE, no equity read) until a backfill
+  of the current generation has completed for it, and a stream gap or ACCOUNT_UPDATE before the
+  open makes the caller backfill again. ``base_observed_at_utc`` is stored so the lateness is
+  visible.
 * The funding policy is a required constructor argument with no default (O-2 is the owner's,
   recorded by plan 21-01). The quote asset is a constructor argument.
 * Not built here: the operator acknowledgement path for a missing day state with exposure
@@ -402,7 +409,27 @@ class LiveDayRiskService:
             return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE)
         return await self._open_from_fresh_base(day)
 
+    def _known_net_pnl(self, day: date) -> Decimal | None:
+        """The day's net result (favorable-most, positive = gain) or None when it is unknown."""
+        if not self._backfill_is_current(day):
+            return None
+        try:
+            loss = fold_daily_loss(
+                components=tuple(self._store.list_components(day)),
+                utc_day=day,
+                quote_asset=self._quote_asset,
+                trades_complete=True,
+                funding_read_ok=True,
+                funding_policy=self._funding_policy,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unreadable or conflicting loss is unknown
+            self._last_error_type = type(exc).__name__
+            return None
+        return loss.net_pnl_upper_quote
+
     async def _open_from_fresh_base(self, day: date) -> DayRiskState | DayStateVerdict:
+        if not self._backfill_is_current(day):
+            return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)  # WR-06: no net result yet
         try:
             await self._equity.refresh()
             # Re-read AFTER refresh: the reading is stamped at the start of refresh(), so
@@ -414,9 +441,16 @@ class LiveDayRiskService:
                 return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
             if not base_is_inside_day(utc_day=day, observed_at_utc=check.observed_at_utc):
                 return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
+            # WR-06: read AFTER the equity refresh, so a generation bump during it is seen.
+            net_pnl = self._known_net_pnl(day)
+            if net_pnl is None:
+                return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
+            base = check.equity - net_pnl if net_pnl > 0 else check.equity
+            if base <= 0:
+                return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
             state = DayRiskState(
                 utc_day=day,
-                equity_at_day_start=check.equity,
+                equity_at_day_start=base,
                 base_observed_at_utc=check.observed_at_utc,
             )
         except Exception as exc:  # noqa: BLE001 - no usable base, the day stays blocked

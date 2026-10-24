@@ -217,6 +217,11 @@ class DailyLossResult:
 
     `loss_quote` present requires `reason_code == "OK"` and no blocked reason; absent
     requires a non-OK RejectionReason code and a blocked reason.
+
+    `net_pnl_upper_quote` (WR-06) is the day's signed result (positive = gain) taking the MOST
+    FAVORABLE amount per fill where two sources disagree, the opposite of `loss_quote`, which
+    takes the most adverse. A day base derived as "equity now minus the day's net result" is
+    smallest (conservative) with the favorable figure. None when the loss is unknown.
     """
 
     loss_quote: Decimal | None
@@ -224,6 +229,7 @@ class DailyLossResult:
     blocked_reason: str | None
     divergent_keys: tuple[str, ...]
     funding_label: str
+    net_pnl_upper_quote: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.loss_quote is None:
@@ -233,12 +239,16 @@ class DailyLossResult:
                 )
             if self.blocked_reason is None:
                 raise ValueError("an unknown loss needs a blocked_reason")
+            if self.net_pnl_upper_quote is not None:
+                raise ValueError("an unknown loss carries no net result")
         else:
             _require_decimal(self.loss_quote, "loss_quote")
             if self.loss_quote < _ZERO:
                 raise ValueError(f"loss_quote must be >= 0, got {self.loss_quote}")
             if self.reason_code != _OK or self.blocked_reason is not None:
                 raise ValueError("a known loss requires reason_code OK and no blocked_reason")
+            if self.net_pnl_upper_quote is not None:
+                _require_decimal(self.net_pnl_upper_quote, "net_pnl_upper_quote")
         if tuple(sorted(self.divergent_keys)) != self.divergent_keys:
             raise ValueError("divergent_keys must be sorted")
         if self.funding_label not in (FUNDING_LABEL_UNVERIFIED, FUNDING_LABEL_VERIFIED):
@@ -323,11 +333,13 @@ def fold_daily_loss(
 
     divergent: set[str] = set()
     total = _ZERO
+    favorable_total = _ZERO
     for kind, key in sorted(grouped, key=lambda item: (item[0].value, item[1])):
         amounts = grouped[(kind, key)]
         if len({amount.normalize() for amount in amounts}) > 1:
             divergent.add(key)
         total = _add(total, min(amounts))
+        favorable_total = _add(favorable_total, max(amounts))
 
     loss = _sub(_ZERO, total)
     return DailyLossResult(
@@ -336,6 +348,7 @@ def fold_daily_loss(
         blocked_reason=None,
         divergent_keys=tuple(sorted(divergent)),
         funding_label=_funding_label(),
+        net_pnl_upper_quote=favorable_total,
     )
 
 

@@ -229,6 +229,27 @@ def test_most_adverse_for_a_gain_counts_the_smaller_gain() -> None:
     assert result.loss_quote == Decimal("1")
 
 
+def test_the_favorable_net_pnl_takes_the_largest_amount_per_fill() -> None:
+    # WR-06: the loss counts the most adverse amount, the day-start base derivation needs the
+    # most favorable one (a smaller base is the conservative one): 9 - 1 = 8 against -1 - 1 = -2.
+    result = fold(
+        [
+            pnl("9", source=ComponentSource.USER_DATA_EVENT),
+            pnl("-1", source=ComponentSource.REST_USER_TRADES),
+            fee("-1"),
+        ]
+    )
+    assert result.loss_quote == Decimal("2")
+    assert result.net_pnl_upper_quote == Decimal("8")
+
+
+def test_the_favorable_net_pnl_is_signed_and_unknown_with_the_loss() -> None:
+    assert fold([pnl("-4"), fee("-1")]).net_pnl_upper_quote == Decimal("-5")
+    assert fold([pnl("30"), fee("-1"), funding("-2")]).net_pnl_upper_quote == Decimal("27")
+    assert fold([]).net_pnl_upper_quote == Decimal("0")
+    assert fold([pnl("5")], trades_complete=False).net_pnl_upper_quote is None
+
+
 def test_equal_amounts_from_two_sources_count_once_without_divergence() -> None:
     result = fold(
         [
