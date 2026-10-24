@@ -52,6 +52,7 @@ SCANNED_FILES = (
     "src/risk/reservations.py",
     # Phase 22 (D-08): pure live margin modules.
     "src/risk/margin_check.py",
+    "src/risk/liquidation.py",
     # Phase 6 plan 06-03 — pure backtest package (D-05).
     "src/backtest/__init__.py",
     "src/backtest/simulator.py",

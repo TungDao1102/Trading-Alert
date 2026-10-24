@@ -1,0 +1,323 @@
+"""Pure isolated liquidation guard (Phase 22, plan 22-07; D-08, D-09, D-10, criterion 2, F-964).
+
+Question answered: where would the liquidation price of an isolated, one-way position that does
+not exist yet be, and does it lie beyond the stop-loss by the buffer? The answer is a
+`LiquidationVerdict`, never an exception, so a refused plan is a NO_TRADE with a plain code and
+not a crash. The pre-entry guard, the post-fill watch and the tests all call this one module.
+
+Formulas. Symbol `Q` (quantity), `EP` (entry price), `L` (the verified leverage), `m` and `cum`
+(maintenance margin ratio and maintenance amount of one leverage bracket):
+
+    LONG   LP = (EP x (1 - 1/L) - cum/Q) / (1 - m)
+    SHORT  LP = (EP x (1 + 1/L) + cum/Q) / (1 + m)
+
+Source label. The variables, the isolated rule (TMM = UPNL = 0, the wallet is the isolated
+wallet) and the tier-change rule are [CITED: FAQ-liq]. The general formula is an image on that
+page, so the closed form above is a reconstruction from the stated liquidation condition (margin
+balance equals maintenance margin); it reproduces both worked examples of the page to the cent
+(22-RESEARCH 2.5, MEDIUM confidence). Equality with the exchange's own isolated `liquidationPrice`
+has never been observed and is NOT claimed: the owner-run Demo case
+`isolated_position_liquidation_price` settles it.
+
+Tier rule. `m` and `cum` are those of the bracket that contains `Q x LP`, the notional at the
+liquidation price, NOT of the bracket that contains `Q x EP`. The page says the rate and amount
+must be taken "on the level of position notional" and that another level applies when the notional
+implied at the liquidation price lies in it. For a long near a bracket edge the entry tier
+overstates the liquidation price toward the entry, which is the non-conservative direction
+(22-RESEARCH Pitfall 1, golden G3). Every candidate bracket is solved and kept only when its own
+`Q x LP` falls inside its own [floor, cap] (inclusive). At an exact edge two candidates coincide
+when `notional x rate - cum` is continuous there (true of every recorded edge, a property of the
+Demo table and not a rule of this module); if a table were not continuous the conservative one is
+returned, the larger LP for a LONG and the smaller for a SHORT.
+
+Entry-price assumption. The position is taken to fill at `EP` (the limit price is the worst case
+in both directions), the isolated wallet equals the initial margin `Q x EP / L`, the entry fee does
+not reduce it, no funding is paid. These are [ASSUMED]; the page is silent. Fees and funding are
+therefore not in the number: the buffer and the post-fill comparison with the exchange value are
+the real margin of error.
+
+Buffer predicate (D-09, D-10). `buffer = EP x buffer_bps / 10000`. LONG passes only when
+`LP < stop - buffer`; SHORT only when `LP > stop + buffer`. Strict: equality fails. `buffer_bps`
+is the owner's number and has no default.
+
+Exact arithmetic. Every tier test and every comparison uses `fractions.Fraction` built from the
+Decimal inputs, so a notional that lands exactly on a bracket edge selects a tier without rounding
+error. The Decimal returned is the exact value divided at the active context precision; no
+decision depends on that rounding.
+
+Every number is an input. The leverage, the buffer and every bracket value are arguments with no
+default and no constant here; the only numeric literals of this module are 0, 1 and the
+basis-point denominator 10000.
+
+Fail closed. A bracket list that is empty, not contiguous, malformed or stale, a notional above
+the top bracket cap, a leverage above the initial leverage of the entry bracket, a non-positive
+liquidation price or inverted stop geometry is NO_TRADE with its own plain code and never a pass.
+Anything that is not a finite Decimal, or a leverage or buffer that is not a plain positive int,
+raises (a programming error). The four codes are plain strings of this module (amendment A3: the
+`RejectionReason` enum is not touched); GLOSSARY 9.3 lists them.
+
+Purity (Phase 5 D-05): stdlib, Decimal, Fraction and `src.domain.enums` only; no clock, no SDK, no
+adapters, no store, no floats, no quote-asset name.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from decimal import Decimal
+from fractions import Fraction
+from typing import Final
+
+from src.domain.enums import Direction
+
+LIQUIDATION_OK: Final[str] = "OK"
+LIQUIDATION_TOO_CLOSE: Final[str] = "LIQUIDATION_TOO_CLOSE"
+LIQUIDATION_INPUT_UNAVAILABLE: Final[str] = "LIQUIDATION_INPUT_UNAVAILABLE"
+LEVERAGE_ABOVE_BRACKET: Final[str] = "LEVERAGE_ABOVE_BRACKET"
+NOTIONAL_ABOVE_MAX: Final[str] = "NOTIONAL_ABOVE_MAX"
+
+# The buffer is basis points of the entry price.
+BASIS_POINT_DENOMINATOR: Final[int] = 10000
+
+_LONG = Direction.LONG.value
+_SIDES = frozenset({d.value for d in Direction})
+
+
+def _require_amount(value: object, field_name: str) -> Decimal:
+    """Reject non-Decimal (float, int, bool, str) and non-finite amounts."""
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field_name} must be Decimal, got {type(value).__name__}")
+    if not value.is_finite():
+        raise ValueError(f"{field_name} must be finite, got {value}")
+    return value
+
+
+def _require_positive(value: object, field_name: str) -> Decimal:
+    amount = _require_amount(value, field_name)
+    if amount <= 0:
+        raise ValueError(f"{field_name} must be positive, got {amount}")
+    return amount
+
+
+def _require_non_negative(value: object, field_name: str) -> Decimal:
+    amount = _require_amount(value, field_name)
+    if amount < 0:
+        raise ValueError(f"{field_name} must not be negative, got {amount}")
+    return amount
+
+
+def _require_positive_int(value: object, field_name: str) -> int:
+    """A plain int of at least 1: bool, Decimal, float and str are refused."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be int, got {type(value).__name__}")
+    if value < 1:
+        raise ValueError(f"{field_name} must be at least 1, got {value}")
+    return value
+
+
+def _require_side(value: object) -> str:
+    text = value.value if isinstance(value, Direction) else value
+    if not isinstance(text, str) or text not in _SIDES:
+        raise ValueError(f"side must be LONG or SHORT, got {value!r}")
+    return text
+
+
+@dataclass(frozen=True)
+class Bracket:
+    """One leverage bracket as the exchange reports it (every field is an input, never a constant).
+
+    `notional_floor` and `notional_cap` bound the position notional of the bracket,
+    `maint_margin_ratio` is its maintenance margin ratio `m`, `cum` its maintenance amount.
+    """
+
+    bracket: int
+    initial_leverage: int
+    notional_floor: Decimal
+    notional_cap: Decimal
+    maint_margin_ratio: Decimal
+    cum: Decimal
+
+    def __post_init__(self) -> None:
+        _require_positive_int(self.bracket, "bracket")
+        _require_positive_int(self.initial_leverage, "initial_leverage")
+        floor = _require_non_negative(self.notional_floor, "notional_floor")
+        cap = _require_amount(self.notional_cap, "notional_cap")
+        if cap <= floor:
+            raise ValueError(f"notional_cap {cap} must exceed notional_floor {floor}")
+        ratio = _require_non_negative(self.maint_margin_ratio, "maint_margin_ratio")
+        if ratio >= 1:
+            raise ValueError(f"maint_margin_ratio must be below 1, got {ratio}")
+        _require_non_negative(self.cum, "cum")
+
+
+@dataclass(frozen=True)
+class LiquidationVerdict:
+    """Result of the guard. `liquidation_price` is informational (decisions use exact values)."""
+
+    ok: bool
+    reason_code: str
+    liquidation_price: Decimal | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ok, bool):
+            raise TypeError(f"ok must be bool, got {type(self.ok).__name__}")
+        if not isinstance(self.reason_code, str) or not self.reason_code:
+            raise ValueError("reason_code must be a non-empty string")
+        if self.ok != (self.reason_code == LIQUIDATION_OK):
+            raise ValueError(f"ok={self.ok} contradicts reason_code={self.reason_code}")
+        if self.liquidation_price is not None:
+            _require_positive(self.liquidation_price, "liquidation_price")
+        if self.ok and self.liquidation_price is None:
+            raise ValueError("an ok verdict must carry the liquidation price")
+
+
+def _to_decimal(value: Fraction) -> Decimal:
+    """The exact value divided at the active context precision (informational only)."""
+    return Decimal(value.numerator) / Decimal(value.denominator)
+
+
+def _candidate(
+    *, side: str, entry: Fraction, quantity: Fraction, leverage: int, tier: Bracket
+) -> Fraction:
+    """The liquidation price if `tier` were the active bracket (exact)."""
+    ratio = Fraction(tier.maint_margin_ratio)
+    cum = Fraction(tier.cum)
+    inverse = Fraction(1, leverage)
+    if side == _LONG:
+        return (entry * (1 - inverse) - cum / quantity) / (1 - ratio)
+    return (entry * (1 + inverse) + cum / quantity) / (1 + ratio)
+
+
+def _solve(
+    *,
+    side: str,
+    entry_price: Decimal,
+    quantity: Decimal,
+    leverage: int,
+    brackets: Sequence[Bracket],
+) -> tuple[str, Fraction | None]:
+    """The reason code and the exact liquidation price (None unless the reason is OK)."""
+    if not brackets:
+        return LIQUIDATION_INPUT_UNAVAILABLE, None
+    entry = Fraction(entry_price)
+    qty = Fraction(quantity)
+    consistent: list[Fraction] = []
+    for tier in brackets:
+        lp = _candidate(side=side, entry=entry, quantity=qty, leverage=leverage, tier=tier)
+        if Fraction(tier.notional_floor) <= qty * lp <= Fraction(tier.notional_cap):
+            consistent.append(lp)
+    if not consistent:
+        return NOTIONAL_ABOVE_MAX, None
+    best = max(consistent) if side == _LONG else min(consistent)
+    if best <= 0:
+        return LIQUIDATION_INPUT_UNAVAILABLE, None
+    return LIQUIDATION_OK, best
+
+
+def liquidation_price(
+    *,
+    side: object,
+    entry_price: Decimal,
+    quantity: Decimal,
+    leverage: int,
+    brackets: Sequence[Bracket],
+) -> Decimal | None:
+    """Isolated, one-way liquidation price; None = unknown (fail closed).
+
+    No fees, no funding (CITED: FAQ-liq for the variables; the closed form is a reconstruction).
+    """
+    side_text = _require_side(side)
+    _require_positive(entry_price, "entry_price")
+    _require_positive(quantity, "quantity")
+    _require_positive_int(leverage, "leverage")
+    reason, exact = _solve(
+        side=side_text,
+        entry_price=entry_price,
+        quantity=quantity,
+        leverage=leverage,
+        brackets=brackets,
+    )
+    if reason != LIQUIDATION_OK or exact is None:
+        return None
+    return _to_decimal(exact)
+
+
+def _beyond_stop(
+    *,
+    side: str,
+    liquidation: Fraction,
+    stop_price: Decimal,
+    entry_price: Decimal,
+    buffer_bps: int,
+) -> bool:
+    buffer = Fraction(entry_price) * buffer_bps / BASIS_POINT_DENOMINATOR
+    stop = Fraction(stop_price)
+    if side == _LONG:
+        return liquidation < stop - buffer
+    return liquidation > stop + buffer
+
+
+def liquidation_beyond_stop(
+    *,
+    side: object,
+    liquidation_price: Decimal,
+    stop_price: Decimal,
+    entry_price: Decimal,
+    buffer_bps: int,
+) -> bool:
+    """Strict buffer predicate (D-09): LONG `LP < stop - buffer`, SHORT `LP > stop + buffer`.
+
+    `buffer = entry_price x buffer_bps / 10000`; equality is False.
+    """
+    side_text = _require_side(side)
+    _require_positive(liquidation_price, "liquidation_price")
+    _require_positive(stop_price, "stop_price")
+    _require_positive(entry_price, "entry_price")
+    _require_positive_int(buffer_bps, "buffer_bps")
+    return _beyond_stop(
+        side=side_text,
+        liquidation=Fraction(liquidation_price),
+        stop_price=stop_price,
+        entry_price=entry_price,
+        buffer_bps=buffer_bps,
+    )
+
+
+def liquidation_verdict(
+    *,
+    side: object,
+    entry_price: Decimal,
+    quantity: Decimal,
+    leverage: int,
+    brackets: Sequence[Bracket],
+    stop_price: Decimal,
+    buffer_bps: int,
+) -> LiquidationVerdict:
+    """Compose the price and the buffer predicate into one fail-closed verdict."""
+    side_text = _require_side(side)
+    entry = _require_positive(entry_price, "entry_price")
+    _require_positive(quantity, "quantity")
+    _require_positive_int(leverage, "leverage")
+    stop = _require_positive(stop_price, "stop_price")
+    _require_positive_int(buffer_bps, "buffer_bps")
+    inverted = stop >= entry if side_text == _LONG else stop <= entry
+    if inverted:
+        return LiquidationVerdict(False, LIQUIDATION_INPUT_UNAVAILABLE, None)
+    reason, exact = _solve(
+        side=side_text,
+        entry_price=entry_price,
+        quantity=quantity,
+        leverage=leverage,
+        brackets=brackets,
+    )
+    if reason != LIQUIDATION_OK or exact is None:
+        return LiquidationVerdict(False, reason, None)
+    if not _beyond_stop(
+        side=side_text,
+        liquidation=exact,
+        stop_price=stop,
+        entry_price=entry,
+        buffer_bps=buffer_bps,
+    ):
+        return LiquidationVerdict(False, LIQUIDATION_TOO_CLOSE, _to_decimal(exact))
+    return LiquidationVerdict(True, LIQUIDATION_OK, _to_decimal(exact))
