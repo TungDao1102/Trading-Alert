@@ -335,6 +335,15 @@ class LiveDayRiskService:
         folded from the stored components on each call, so a stream fill added after the last
         evaluate counts. This is the callable plan 21-15's ``make_reserving_save_atomic`` takes
         as ``daily_loss_quote``.
+
+        Freshness limit (review WR-05, OWNER-OPEN): "known" has NO age bound. A loss source the
+        stream never reports and that raises no gap (a manual trade in the exchange UI, a symbol
+        outside ``symbols``, a dropped liquidation or ADL frame, a half-open socket) leaves the
+        loss understated until the next ``backfill``. The equity has the owner bound
+        ``account.max_equity_age_ms``; the loss has none because the number is the owner's and is
+        not invented here. Until the owner sets a loss-age key, freshness is delegated to the
+        Phase 20 feed checks (``stale_feed.max_user_data_silence_ms``) and to the caller, which
+        should run ``backfill`` on a schedule and after any stream gap (Phase 24 composition).
         """
         if utc_day not in self._evaluated_days or not self._backfill_is_current(utc_day):
             return None
