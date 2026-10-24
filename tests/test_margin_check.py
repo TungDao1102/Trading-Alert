@@ -459,7 +459,7 @@ def _two_claims(placed_at: datetime) -> list[MarginClaim]:
 @pytest.mark.parametrize(
     "netted, placed_at, expected",
     [
-        (False, BEFORE, "80"),  # unverified: the PLACED claim is counted in addition
+        (False, BEFORE, "80"),  # netting off (the state before D085): the PLACED claim counts
         (True, BEFORE, "50"),  # the exchange already shows it in availableBalance
         (True, AFTER, "80"),  # placed after the reading: the exchange has not shown it yet
         (False, AFTER, "80"),
@@ -598,8 +598,23 @@ def test_end_to_end_claims_to_verdict() -> None:
 # --- the netting constant ---------------------------------------------------------------------
 
 
-def test_netting_constant_is_false_until_the_owner_run_case() -> None:
-    assert AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is False
+def test_netting_constant_is_true_since_the_owner_decision_d085() -> None:
+    # The owner Demo run of 2026-10-24 (two samples, demo-observed, not mainnet) showed that
+    # availableBalance nets a resting order; the owner flipped the constant (DECISIONS D085).
+    assert AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is True
+    # With it, a PLACED claim placed at or before the reading is not counted a second time, and a
+    # PLACED claim placed AFTER the reading still counts (the reading cannot show it yet).
+    reserved = _claim(plan="P2", margin=Decimal("50"))
+    early = _claim(plan="P3", status=ReservationStatus.PLACED, placed_at=T - timedelta(seconds=1))
+    at_reading = _claim(plan="P4", status=ReservationStatus.PLACED, placed_at=T)
+    late = _claim(plan="P5", status=ReservationStatus.PLACED, placed_at=T + timedelta(seconds=1))
+    total = other_claims_margin(
+        claims=[reserved, early, at_reading, late],
+        exclude_trade_plan_id="P1",
+        reading_observed_at_utc=T,
+        resting_orders_netted=AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED,
+    )
+    assert total == Decimal("100")  # the RESERVED claim and the late PLACED claim only
 
 
 def test_resting_orders_netted_is_a_required_keyword() -> None:
@@ -608,7 +623,7 @@ def test_resting_orders_netted_is_a_required_keyword() -> None:
     assert params["resting_orders_netted"].default is inspect.Parameter.empty
 
 
-def test_netting_constant_is_a_final_false_literal_in_source() -> None:
+def test_netting_constant_is_a_final_true_literal_in_source() -> None:
     tree = ast.parse(MODULE.read_text(encoding="utf-8"))
     values = [
         node.value
@@ -620,7 +635,7 @@ def test_netting_constant_is_a_final_false_literal_in_source() -> None:
     ]
     assert len(values) == 1
     assert isinstance(values[0], ast.Constant)
-    assert values[0].value is False
+    assert values[0].value is True
 
 
 # --- check_available_margin (plan 22-10; D-07, D-13, criterion 4, F-965, F-020) -----------------

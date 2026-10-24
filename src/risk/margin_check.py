@@ -271,12 +271,15 @@ def margin_verdict(
 # --- claims on margin and the two seams ---------------------------------------------------------
 
 # Amendment A1. The API reference does not say whether `availableBalance` already nets the
-# initial margin of resting orders; the support-center article says it does; no recorded payload
-# shows it. The owner-run Demo case `available_balance_with_resting_order` (plan 22-09) settles
-# it. While this is False every PLACED claim is counted in addition to `availableBalance`
-# (conservative: it may refuse a plan it could have admitted, never admit one it should refuse).
-# It changes only with an owner DECISIONS row after that case, never by a code edit alone.
-AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED: Final[bool] = False
+# initial margin of resting orders; the support-center article says it does. The owner-run Demo
+# case `available_balance_with_resting_order` (plan 22-09, 22-DEMO-RESULTS.md R-4 and R-5, two
+# samples, CROSSED and ISOLATED, demo-observed, not mainnet) showed it does, and the owner flipped
+# this to True on 2026-10-24 (DECISIONS D085, O-3). With True a PLACED claim whose `placed_at_utc`
+# is at or before the reading is not counted again (the exchange already nets it); a PLACED claim
+# placed AFTER the reading still counts, and a RESERVED claim always counts. A mainnet sample at the
+# Phase 26 canary re-checks it; a wrong True can only let the exchange reject with -2019 at
+# placement. It changes only with an owner DECISIONS row, never by a code edit alone.
+AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED: Final[bool] = True
 
 
 def free_margin_basis(
@@ -343,7 +346,8 @@ def other_claims_margin(
 
     Pitfall 5: a PLACED entry must be subtracted in exactly one place, by the exchange inside
     `availableBalance` or by this sum. Counting it in both over-refuses, in neither over-admits.
-    While the netting is unverified the sum counts it, which can only over-refuse.
+    With the netting flag False (the state before D085) the sum counts it, which can only
+    over-refuse.
     """
     _require_utc_aware(reading_observed_at_utc, "reading_observed_at_utc")
     if not isinstance(resting_orders_netted, bool):

@@ -211,8 +211,15 @@ def claim(
     plan_id: str,
     margin: str | None,
     status: ReservationStatus = ReservationStatus.RESERVED,
+    *,
+    placed_after_reading: bool = False,
 ) -> MarginClaim:
-    placed = START - timedelta(minutes=1) if status is ReservationStatus.PLACED else None
+    """A stored claim; a PLACED one is placed a minute BEFORE the reading unless told otherwise."""
+    placed = None
+    if status is ReservationStatus.PLACED:
+        placed = (
+            START + timedelta(minutes=1) if placed_after_reading else START - timedelta(minutes=1)
+        )
     return MarginClaim(
         trade_plan_id=plan_id,
         status=status,
@@ -395,11 +402,13 @@ def _scenarios() -> list[Scenario]:
             claims_called=1,
         ),
         Scenario(
-            "placed claim counted while the netting is unverified",
+            "placed claim placed after the reading still counts (netting verified, D085)",
             "INSUFFICIENT_MARGIN",
             lambda: build_rig(
                 config_sdk=isolated_sdk(),
-                claims=[claim("OTHER", "4900", ReservationStatus.PLACED)],
+                claims=[
+                    claim("OTHER", "4900", ReservationStatus.PLACED, placed_after_reading=True)
+                ],
             ),
             claims_called=1,
         ),
@@ -710,9 +719,11 @@ async def test_a_claims_port_that_returns_an_awaitable_is_accepted() -> None:
 async def test_the_netting_constant_is_the_switch_and_the_guard_passes_the_module_constant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert margin_check.AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is False
-    assert margin_guard_module.AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is False  # type: ignore[attr-defined]
+    # True since DECISIONS D085 (2026-10-24, owner Demo run: availableBalance nets a resting order).
+    assert margin_check.AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is True
+    assert margin_guard_module.AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is True  # type: ignore[attr-defined]
     placed = claim("OTHER", "4900", ReservationStatus.PLACED)
+    late = claim("OTHER", "4900", ReservationStatus.PLACED, placed_after_reading=True)
     # Pure function: the same PLACED claim, placed before the reading, counts with False only.
     assert other_claims_margin(
         claims=[placed],
@@ -726,13 +737,21 @@ async def test_the_netting_constant_is_the_switch_and_the_guard_passes_the_modul
         reading_observed_at_utc=START,
         resting_orders_netted=True,
     ) == Decimal(0)
-    # Guard: refused while the module constant is False ...
-    blocked = await build_rig(config_sdk=isolated_sdk(), claims=[placed]).guard.evaluate(request())
-    assert blocked.reason_code == INSUFFICIENT
-    # ... and admitted when the module constant the guard passes is switched (test-only patch).
-    monkeypatch.setattr(margin_guard_module, "AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED", True)
+    # Guard with the real constant (True): the claim placed at or before the reading is not counted
+    # twice, so the plan is admitted; a claim placed AFTER the reading still counts and is refused.
     admitted = await build_rig(config_sdk=isolated_sdk(), claims=[placed]).guard.evaluate(request())
     assert admitted.is_no_trade is False
+    still_counted = await build_rig(config_sdk=isolated_sdk(), claims=[late]).guard.evaluate(
+        request()
+    )
+    assert still_counted.reason_code == INSUFFICIENT
+    # The switch is the module constant the guard passes: patched to False (test-only), the same
+    # early PLACED claim counts again and the plan is refused.
+    monkeypatch.setattr(
+        margin_guard_module, "AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED", False
+    )
+    blocked = await build_rig(config_sdk=isolated_sdk(), claims=[placed]).guard.evaluate(request())
+    assert blocked.reason_code == INSUFFICIENT
 
 
 # ---- every port failure is NO_TRADE with a class name only

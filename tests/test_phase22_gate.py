@@ -9,9 +9,12 @@ This file asserts, against the real tree and without any network or live evidenc
   the four execution modules read no wall clock and import no adapter, store, SDK or database
   client (`PHASE22_PURE_MODULES`, `PHASE22_EXECUTION_MODULES`);
 - `TARGET_LEVERAGE` is 5 and `TARGET_MARGIN_TYPE` is `ISOLATED` (D035);
-  `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED` is False; the three margin limit keys are
-  `NOT_CONFIGURED` in value and provenance, required and listed by `unset_keys()` (owner items
-  O-2 and O-3); `LiquidationFailurePolicy` has exactly CLOSE_POSITION and ALERT_ONLY (O-4);
+  `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED` is True since the owner's answer of
+  2026-10-24 (DECISIONS D085; two Demo samples, to be re-checked on mainnet at the Phase 26
+  canary); the three margin limit keys hold the owner's numbers 300, 60000 and 1000 with the
+  provenance `DECISION`, are required and no longer listed by `unset_keys()` (O-2 and O-3, D085);
+  `LiquidationFailurePolicy` has exactly CLOSE_POSITION and ALERT_ONLY (O-4: the owner chose
+  CLOSE_POSITION, recorded for the Phase 24 composition);
 - the `RejectionReason` enum still has 21 members (amendment A3) and no Phase 22 plain code is
   one of them; every plain code is a module-level string of its module and has its row in
   GLOSSARY 9.3; the migration head is `0012_reservation_margin`; the two configuration calls are on
@@ -30,8 +33,12 @@ This file asserts, against the real tree and without any network or live evidenc
 A failure message names the missing path, symbol or test. Nothing here changes behavior and nothing
 here claims an owner item solved, a criterion Demo-proven or a requirement complete: the owner's
 Demo run of 2026-10-24 gave single samples only (`22-DEMO-RESULTS.md`, demo-observed, not mainnet),
-EXEC-01 and EXEC-02 stay Pending, and the owner items O-1 to O-4 (`22-OWNER-DECISIONS.md`) stay
-OPEN.
+EXEC-01 and EXEC-02 stay Pending, criteria 1 to 3 stay NOT Demo-proven through the guard, no
+Phase 19 OWNER-GAPS item (O-02 to O-05) is closed, and the owner items O-1 to O-4
+(`22-OWNER-DECISIONS.md`) are DECIDED by the owner's answer of 2026-10-24 (DECISIONS D085):
+setting the margin keys does not open the live path (fourteen required keys stay
+`NOT_CONFIGURED`, `LIVE_ORDERS_DISABLED` stays) and the Telegram control for leverage and margin
+type that the owner asked for is a requirement that is NOT built.
 
 Evidence label: executed structural tests. Nothing here touches Binance, Telegram or a database;
 the Alembic head is read from the script directory and needs no connection.
@@ -195,13 +202,25 @@ def test_invariant_2_the_target_is_the_d035_cap_and_isolated() -> None:
     assert symbol_config_guard.TARGET_MARGIN_TYPE == "ISOLATED", "D035 fixes ISOLATED margin"
 
 
-def test_invariant_3_the_netting_constant_is_false() -> None:
+def test_invariant_3_the_netting_constant_is_true_since_d085() -> None:
     from src.risk import margin_check
 
-    assert margin_check.AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is False, (
-        "the Demo showed availableBalance netting a resting order on two samples, but only an "
-        "owner DECISIONS row may flip this constant (O-3)"
+    assert margin_check.AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED is True, (
+        "the owner flipped this constant on 2026-10-24 (DECISIONS D085) on two Demo samples; "
+        "only an owner DECISIONS row may change it again"
     )
+    decisions = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
+    rows = [line for line in decisions.splitlines() if line.startswith("| D085 |")]
+    assert len(rows) == 1, "DECISIONS must carry exactly one D085 row"
+    for needle in (
+        "2026-10-24, owner answer",
+        "AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED",
+        "CLOSE_POSITION",
+        "NOT designed and NOT built",
+        "SymbolConfigGuard",
+        "fourteen required keys stay `NOT_CONFIGURED`",
+    ):
+        assert needle in rows[0], f"D085 does not mention {needle!r}"
 
 
 def test_invariant_4_the_failure_policy_has_exactly_the_two_owner_choices() -> None:
@@ -214,7 +233,7 @@ def test_invariant_4_the_failure_policy_has_exactly_the_two_owner_choices() -> N
 
 
 # --------------------------------------------------------------------------- #
-# The three margin limits stay NOT_CONFIGURED: the owner's numbers (O-2, O-3).
+# The three margin limits hold the owner's numbers since 2026-10-24 (O-2, O-3, DECISIONS D085).
 # --------------------------------------------------------------------------- #
 
 EXECUTION_LIMITS_FILE = ROOT / "config" / "execution" / "execution-limits-v1.toml"
@@ -223,9 +242,14 @@ MARGIN_LIMIT_KEYS: tuple[str, ...] = (
     "margin.max_bracket_age_ms",
     "margin.headroom_bps",
 )
+MARGIN_LIMIT_DECIDED: dict[str, int] = {
+    "margin.liquidation_buffer_bps": 300,
+    "margin.max_bracket_age_ms": 60000,
+    "margin.headroom_bps": 1000,
+}
 
 
-def test_invariant_5_the_margin_limits_are_required_and_not_configured() -> None:
+def test_invariant_5_the_margin_limits_are_required_and_hold_the_owner_numbers() -> None:
     from src.execution.execution_limits import (
         ALERT_ONLY_LIMIT_KEYS,
         NOT_CONFIGURED_WORD,
@@ -237,10 +261,13 @@ def test_invariant_5_the_margin_limits_are_required_and_not_configured() -> None
     unset = limits.unset_keys()
     for dotted in MARGIN_LIMIT_KEYS:
         section, key = dotted.split(".")
-        assert document[section][key] == NOT_CONFIGURED_WORD, f"{dotted} has a number"
-        assert document["provenance"][section][key] == NOT_CONFIGURED_WORD, f"{dotted} provenance"
+        assert document[section][key] == MARGIN_LIMIT_DECIDED[dotted], f"{dotted} (D085)"
+        assert document["provenance"][section][key] == "DECISION", f"{dotted} provenance"
         assert dotted not in ALERT_ONLY_LIMIT_KEYS, f"{dotted} must be required, not alert-only"
-        assert dotted in unset, f"{dotted} is not listed as unset"
+        assert dotted not in unset, f"{dotted} is still listed as unset"
+    # Setting them does not open the live path: other required keys stay NOT_CONFIGURED.
+    assert len(unset) == 14, "fourteen required keys stay NOT_CONFIGURED (D085)"
+    assert NOT_CONFIGURED_WORD in EXECUTION_LIMITS_FILE.read_text(encoding="utf-8")
 
 
 def test_invariant_5b_the_phase_21_key_keeps_the_state_recorded_in_the_file() -> None:
@@ -546,7 +573,10 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
         ),
         ("tests/test_margin_check.py", "test_one_unit_short_of_equality_fails"),
         ("tests/test_margin_check.py", "test_end_to_end_claims_to_verdict"),
-        ("tests/test_margin_check.py", "test_netting_constant_is_false_until_the_owner_run_case"),
+        (
+            "tests/test_margin_check.py",
+            "test_netting_constant_is_true_since_the_owner_decision_d085",
+        ),
         # The account judgement (criterion 4: one-way, single-asset only).
         ("tests/test_margin_check.py", "test_a_fresh_recorded_reading_is_ok"),
         (
@@ -761,18 +791,30 @@ def test_invariant_16_the_owner_decisions_and_the_deferred_register_name_o1_to_o
     assert problems == [], f"owner records incomplete: {problems}"
 
 
-def test_invariant_17_the_owner_items_are_open_and_no_register_claims_otherwise() -> None:
+def test_invariant_17_the_owner_items_are_decided_and_no_register_overclaims() -> None:
     if not PHASE_DIR.is_dir():
         pytest.skip(".planning/phases/22-* is not in this checkout (filtered)")
     decisions = (PHASE_DIR / "22-OWNER-DECISIONS.md").read_text(encoding="utf-8")
     for item in OWNER_ITEMS:
         section = re.search(rf"^## {item}\b.*?(?=^## |\Z)", decisions, re.DOTALL | re.MULTILINE)
         assert section is not None, f"22-OWNER-DECISIONS.md has no section {item}"
-        assert "Status: OPEN" in section.group(0), f"{item} is not recorded as OPEN"
+        assert "Status: DECIDED" in section.group(0), f"{item} is not recorded as DECIDED"
+        assert "D085" in section.group(0), f"{item} does not cite DECISIONS D085"
+    assert "đòn bẩy x5, isolated, có thể config thông qua telegram" in decisions
     deferred = (PHASE_DIR / "22-DEFERRED.md").read_text(encoding="utf-8")
     assert "liquidation_watch" in deferred and "NOT active" in deferred
     assert "required_margin" in deferred and "register_request" in deferred
     assert "NOT Demo-proven" in deferred
+    # The Telegram control is a new owner requirement that is recorded and NOT built.
+    assert "set the leverage and the margin type from Telegram" in deferred
+    assert "NOT designed and NOT built" in deferred
+    assert "future phase (Phase 24 composition or a new phase)" in deferred
+    assert "SymbolConfigGuard" in deferred and "two-step confirm" in deferred
+    # No claim that a Phase 19 OWNER-GAPS item (O-02 to O-05) is solved or closed by this answer.
+    for text in (decisions, deferred):
+        lowered = text.lower()
+        for claim in ("o-02 is closed", "o-03 is closed", "o-04 is closed", "o-05 is closed"):
+            assert claim not in lowered, claim
 
 
 def test_invariant_18_the_demo_evidence_plan_names_every_sj3_case_and_the_unproven_label() -> None:

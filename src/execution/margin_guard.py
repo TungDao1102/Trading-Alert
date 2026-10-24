@@ -48,11 +48,13 @@ the plan is refused.
 
 What is deliberately not here. The guard changes nothing in the sizing or the quantization
 (RISK-01): it judges the already-sized quantity at the already-snapped limit price. The netting
-constant ``AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED`` of plan 22-04 (False until an owner
-DECISIONS row) is passed through to the claims sum. The liquidation buffer, the bracket age and the
-headroom are the owner's REQUIRED numbers (O-2, O-3): construction refuses with
-``ExecutionLimitsNotConfigured`` while any is unset and nothing here chooses one. The module holds
-no bracket value, no rate and no leverage default (the target comes from the configuration guard).
+constant ``AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED`` of plan 22-04 (True since DECISIONS
+D085, 2026-10-24; it was False until that owner row) is passed through to the claims sum. The
+liquidation buffer, the bracket age and the headroom are the owner's REQUIRED numbers (O-2, O-3;
+set by DECISIONS D085, 300 bps, 60000 ms and 1000 bps, in the execution-limits file): construction
+refuses with ``ExecutionLimitsNotConfigured`` while any is unset and nothing here chooses one. The
+module holds no bracket value, no rate and no leverage default (the target comes from the
+configuration guard).
 Backtest parity (D-15): the backtest has no margin or liquidation model, so these are live-only
 gates like the Phase 21 equity age.
 
