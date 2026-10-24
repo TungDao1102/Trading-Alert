@@ -646,6 +646,15 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
             "test_a_legacy_form_request_reads_as_an_unknown_margin_never_zero",
         ),
         ("tests/test_risk_reservation_margin_pg.py", "test_a_released_plan_is_no_longer_a_claim"),
+        # 22-REVIEW WR-07: the claim amount is derived from the row, never trusted as stored.
+        (
+            "tests/test_risk_reservations.py",
+            "test_a_request_whose_required_margin_is_not_quantity_x_price_over_leverage_is_refused",
+        ),
+        (
+            "tests/test_risk_reservation_margin_pg.py",
+            "test_a_stored_margin_that_differs_from_the_derived_one_reads_as_an_unknown_claim",
+        ),
     ),
     "EXEC-01": (
         # The configuration guard (criterion 1).
@@ -855,3 +864,28 @@ def test_invariant_20_the_fixture_readme_keeps_the_provenance_labels() -> None:
     text = (ROOT / "tests" / "fixtures" / "phase22" / "README.md").read_text(encoding="utf-8")
     assert "RECORDED_DEMO" in text
     assert "demo-observed, not mainnet" in text
+
+
+def test_invariant_21_the_claim_amount_is_derived_and_the_placed_instant_is_the_ack() -> None:
+    """22-REVIEW WR-06 and WR-07, pinned in code and not only in prose.
+
+    The amount of a margin claim is `quantity x margin_entry_price / margin_leverage` by the one
+    definition `margin_for_reservation`: the request refuses any other value and the claims reader
+    derives the figure from the row. `placed_at_utc` is the instant the exchange ACKNOWLEDGED the
+    entry, read after the POST answer: the netting rule of `other_claims_margin` compares it with
+    the stamp of the account reading, which is taken before the reading's first request.
+    """
+    from src.persistence.risk_reservations import PgRiskReservationStore
+    from src.risk import reservations
+    from src.risk.margin_check import MarginClaim
+
+    assert "margin_for_reservation" in reservations.__all__
+    reader = (ROOT / "src" / "persistence" / "risk_reservations.py").read_text(encoding="utf-8")
+    assert "margin_for_reservation(" in reader
+    mark_placed_doc = PgRiskReservationStore.mark_placed.__doc__ or ""
+    assert "AFTER the exchange ACKNOWLEDGED" in mark_placed_doc
+    assert "never before the POST" in mark_placed_doc
+    assert "ACKNOWLEDGED" in (MarginClaim.__doc__ or "")
+    # The stamp of the reading is taken before its first request (account_equity.refresh).
+    equity = (ROOT / "src" / "execution" / "account_equity.py").read_text(encoding="utf-8")
+    assert "stamped with the injected clock BEFORE the first request" in equity

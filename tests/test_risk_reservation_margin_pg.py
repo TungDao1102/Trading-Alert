@@ -26,7 +26,12 @@ from src.persistence.risk_reservations import PgRiskReservationStore
 from src.persistence.uow import OperationalDatabase
 from src.risk.daily_loss import DayRiskState
 from src.risk.margin_check import MarginClaim
-from src.risk.reservations import ReleaseReason, ReservationRequest, ReservationStatus
+from src.risk.reservations import (
+    ReleaseReason,
+    ReservationRequest,
+    ReservationStatus,
+    margin_for_reservation,
+)
 
 from tests.support.pg_rows import (
     hexid,
@@ -195,7 +200,9 @@ def test_the_claims_are_sorted_by_symbol_side_and_plan_id(
     # BTCUSDT (P2) sorts before ETHUSDT (P1) although P1 was registered first.
     # Risk 1 + 1 = 2 <= cluster cap 6, two positions <= 2.
     open_today(db)
-    store.register_request(request(plan_id=P1, symbol="ETHUSDT", **MARGIN_30), now_utc=NOW)
+    store.register_request(
+        request(plan_id=P1, symbol="ETHUSDT", quantity="0.1", **MARGIN_30), now_utc=NOW
+    )
     store.register_request(
         request(plan_id=P2, plan_hash=HASH_2, symbol="BTCUSDT", **MARGIN_160), now_utc=NOW
     )
@@ -220,9 +227,11 @@ def test_registering_the_same_trio_again_is_a_no_op(store: PgRiskReservationStor
 @pytest.mark.parametrize(
     "changed",
     [
-        {"required_margin": D("161")},
-        {"margin_entry_price": D("80001")},
-        {"margin_leverage": 4},
+        # Each change keeps required_margin = quantity x price / leverage (0.01 x ...), because a
+        # request with another amount is refused at construction (22-REVIEW WR-07).
+        {"margin_entry_price": D("80001"), "required_margin": D("160.002")},
+        {"margin_leverage": 4, "required_margin": D("200")},
+        {"margin_leverage": 4, "margin_entry_price": D("80001"), "required_margin": D("200.0025")},
     ],
 )
 def test_the_same_plan_with_another_margin_is_a_row_conflict(
@@ -232,6 +241,41 @@ def test_the_same_plan_with_another_margin_is_a_row_conflict(
 
     with pytest.raises(RowConflict):
         store.register_request(request(**{**MARGIN_160, **changed}), now_utc=NOW)
+
+
+def test_a_request_with_an_understated_margin_is_refused_before_anything_is_written(
+    store: PgRiskReservationStore,
+) -> None:
+    with pytest.raises(ValueError, match="required_margin must equal"):
+        request(**{**MARGIN_160, "required_margin": D("0.000001")})
+
+    assert store.get(P1) is None
+
+
+def test_a_stored_margin_that_differs_from_the_derived_one_reads_as_an_unknown_claim(
+    db: OperationalDatabase, store: PgRiskReservationStore
+) -> None:
+    """WR-07: the reader derives quantity x price / leverage and does not trust the column."""
+    from sqlalchemy import update
+    from src.db.models import RiskReservationRow
+
+    open_today(db)
+    store.register_request(request(**MARGIN_160), now_utc=NOW)
+    reserve(db, store, decided())
+    assert store.list_margin_claims() == (
+        MarginClaim(P1, ReservationStatus.RESERVED, D("160"), None),
+    )
+
+    with db.transaction() as session:
+        session.execute(
+            update(RiskReservationRow)
+            .where(RiskReservationRow.trade_plan_id == P1)
+            .values(required_margin=D("0.000001"))
+        )
+
+    (claim,) = store.list_margin_claims()
+    assert claim.required_margin is None  # unknown, never the understated figure
+    assert claim.status is ReservationStatus.RESERVED
 
 
 def test_a_margin_on_a_stored_legacy_row_is_a_row_conflict(
@@ -252,15 +296,20 @@ def test_dropping_the_margin_of_a_stored_row_is_a_row_conflict(
         store.register_request(request(), now_utc=NOW)
 
 
-@pytest.mark.parametrize("field", ["required_margin", "margin_entry_price"])
 def test_an_amount_with_more_than_eighteen_fractional_digits_writes_nothing(
-    store: PgRiskReservationStore, field: str
+    store: PgRiskReservationStore,
 ) -> None:
-    too_fine = D("160." + "0" * 18 + "1")  # 19 fractional digits, the last one is 1
+    # required_margin is always rounded UP to 18 digits by margin_for_reservation, so only the
+    # entry price can carry a digit the NUMERIC(38, 18) column would round.
+    too_fine = D("80000." + "0" * 18 + "1")  # 19 fractional digits, the last one is 1
     assert too_fine.as_tuple().exponent == -19
+    required = margin_for_reservation(quantity=D("0.01"), price=too_fine, leverage=5)
 
     with pytest.raises(PrecisionError):
-        store.register_request(request(**{**MARGIN_160, field: too_fine}), now_utc=NOW)
+        store.register_request(
+            request(required_margin=required, margin_entry_price=too_fine, margin_leverage=5),
+            now_utc=NOW,
+        )
 
     assert store.get(P1) is None
 

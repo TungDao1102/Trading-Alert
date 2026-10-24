@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
+from fractions import Fraction
 from types import MappingProxyType
 from typing import Any
 
@@ -109,6 +110,38 @@ RELEASE_SOURCE_STATUSES: Mapping[ReleaseReason, frozenset[ReservationStatus]] = 
 )
 
 
+# The scale of the NUMERIC(38, 18) columns the reservation amounts are stored in.
+_STORAGE_SCALE = 18
+
+
+def margin_for_reservation(*, quantity: Decimal, price: Decimal, leverage: int) -> Decimal:
+    """The initial margin a reservation claims: quantity x price / leverage (22-REVIEW WR-07).
+
+    Exact rational arithmetic, rounded UP at the 18th fractional digit (the storage scale), so a
+    stored claim can only be exact or larger than the true figure, never smaller. This is the ONE
+    definition of `required_margin`: `ReservationRequest` refuses any other value and the claims
+    reader of `src.persistence.risk_reservations` derives the figure from the row instead of
+    trusting the stored amount. The margin guard's own sum for the candidate
+    (`src.risk.margin_check.required_initial_margin`) is the same formula without the storage
+    rounding.
+    """
+    if (
+        isinstance(quantity, bool)
+        or not isinstance(quantity, Decimal)
+        or isinstance(price, bool)
+        or not isinstance(price, Decimal)
+    ):
+        raise TypeError("quantity and price must be Decimal")
+    if isinstance(leverage, bool) or not isinstance(leverage, int) or leverage < 1:
+        raise ValueError("leverage must be an int of at least 1")
+    if not quantity.is_finite() or not price.is_finite() or quantity <= 0 or price <= 0:
+        raise ValueError("quantity and price must be positive and finite")
+    exact = Fraction(quantity) * Fraction(price) / leverage
+    scaled = exact * 10**_STORAGE_SCALE
+    ceiling = -((-scaled.numerator) // scaled.denominator)
+    return Decimal(ceiling).scaleb(-_STORAGE_SCALE)
+
+
 def _require_non_empty(value: object, name: str) -> None:
     if not isinstance(value, str) or value == "":
         raise ValueError(f"{name} must be a non-empty string")
@@ -173,6 +206,13 @@ class ReservationRequest:
             raise TypeError(f"margin_leverage must be int, got {type(leverage).__name__}")
         if leverage < 1:
             raise ValueError(f"margin_leverage must be >= 1, got {leverage}")
+        # WR-07: the claim is tied to the plan, not free text. A smaller stored amount would
+        # understate the claim and the placement-time sum would over-admit.
+        assert self.margin_entry_price is not None
+        if self.required_margin != margin_for_reservation(
+            quantity=self.quantity, price=self.margin_entry_price, leverage=leverage
+        ):
+            raise ValueError("required_margin must equal quantity x margin_entry_price / leverage")
 
 
 @dataclass(frozen=True)
@@ -323,6 +363,7 @@ __all__ = [
     "ReleaseReason",
     "ReservationRequest",
     "ReservationStatus",
+    "margin_for_reservation",
     "open_positions_from_reservations",
     "reservation_verdict",
 ]

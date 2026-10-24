@@ -75,6 +75,7 @@ from src.risk.reservations import (
     ReleaseReason,
     ReservationRequest,
     ReservationStatus,
+    margin_for_reservation,
     reservation_verdict,
 )
 
@@ -180,11 +181,32 @@ def _counted_rows(session: Session) -> tuple[CountedReservation, ...]:
 _MARGIN_CLAIM_STATUSES = (_S.RESERVED, _S.PLACED)
 
 
+def _claim_margin(row: RiskReservationRow) -> Decimal | None:
+    """The margin of a row's claim, derived from the row and cross-checked (22-REVIEW WR-07).
+
+    A row without a trio is a legacy row: UNKNOWN (None), never zero. With a trio the figure is
+    `margin_for_reservation(quantity, margin_entry_price, margin_leverage)`; a stored
+    `required_margin` that differs from it (an understatement would over-admit, anything else is
+    corrupt) makes the claim UNKNOWN too, so the placement-time sum fails closed instead of
+    trusting a number the guard cannot cross-check.
+    """
+    stored = row.required_margin
+    price = row.margin_entry_price
+    leverage = row.margin_leverage
+    if stored is None or price is None or leverage is None:
+        return None
+    try:
+        derived = margin_for_reservation(quantity=row.quantity, price=price, leverage=leverage)
+    except (TypeError, ValueError):
+        return None
+    return derived if stored == derived else None
+
+
 def _claim_from_row(row: RiskReservationRow) -> MarginClaim:
     return MarginClaim(
         trade_plan_id=row.trade_plan_id,
         status=ReservationStatus(row.status),
-        required_margin=row.required_margin,
+        required_margin=_claim_margin(row),
         placed_at_utc=row.placed_at_utc,
     )
 
@@ -237,10 +259,13 @@ class PgRiskReservationStore:
     def list_margin_claims(self, *, tx: Session | None = None) -> tuple[MarginClaim, ...]:
         """One margin claim per RESERVED or PLACED row, sorted by (symbol, side, plan id).
 
-        Rebuilt from the table on every call (plan 22-08, D-14). `required_margin` is None for
-        a row without a stored margin (a legacy row): an UNKNOWN claim, never zero, which makes
-        the placement-time sum unknown and the margin check fail closed. `placed_at_utc` comes
-        from the row. REQUESTED, OPEN and RELEASED rows are never claims.
+        Rebuilt from the table on every call (plan 22-08, D-14). `required_margin` is DERIVED
+        from the row (`margin_for_reservation`: quantity x `margin_entry_price` /
+        `margin_leverage`, 22-REVIEW WR-07) and is None for a row without a stored margin (a
+        legacy row) or whose stored amount differs from the derived one: an UNKNOWN claim, never
+        zero, which makes the placement-time sum unknown and the margin check fail closed.
+        `placed_at_utc` comes from the row (the acknowledgement instant, see `mark_placed`).
+        REQUESTED, OPEN and RELEASED rows are never claims.
 
         The authoritative sum is taken by the placement-time guard with a fresh exchange
         reading (amendment A2); the approval transaction is unchanged, because the exchange
@@ -402,7 +427,17 @@ class PgRiskReservationStore:
     def mark_placed(
         self, trade_plan_id: str, *, now_utc: datetime, tx: Session | None = None
     ) -> ReservationRecord:
-        """RESERVED -> PLACED; a repeat is a no-op, any other status is a `RowConflict`."""
+        """RESERVED -> PLACED; a repeat is a no-op, any other status is a `RowConflict`.
+
+        THE INSTANT (22-REVIEW WR-06). `now_utc` becomes `placed_at_utc` and MUST be read from the
+        process clock AFTER the exchange ACKNOWLEDGED the entry (the POST answer, or the probe by
+        client order id that found it) and never before the POST is sent. The placement-time sum
+        (`src.risk.margin_check.other_claims_margin`) treats a PLACED claim as already netted by
+        the exchange's `availableBalance` when `placed_at_utc` is not after the stamp of the
+        account reading, and that stamp is taken BEFORE the reading's first request from the same
+        clock. A `placed_at_utc` stamped before the POST could precede the stamp of a reading that
+        was served before the order existed, and the claim would then count in neither place.
+        """
         return self._advance(
             trade_plan_id,
             now_utc=now_utc,

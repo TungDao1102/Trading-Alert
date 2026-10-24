@@ -495,6 +495,91 @@ def test_a_request_with_the_whole_margin_trio_keeps_it() -> None:
     assert request.margin_leverage == 5
 
 
+def test_margin_for_reservation_is_quantity_times_price_over_leverage() -> None:
+    from src.risk.reservations import margin_for_reservation
+
+    def margin(quantity: str, price: str, leverage: int) -> Decimal:
+        return margin_for_reservation(
+            quantity=Decimal(quantity), price=Decimal(price), leverage=leverage
+        )
+
+    assert margin("0.01", "80000", 5) == Decimal("160")
+    assert margin("0.1", "3000", 10) == Decimal("30")
+    assert margin("2.415", "102", 5) == Decimal("49.266")
+    assert margin("1", "1", 1) == Decimal("1")
+    # A quotient that is not a finite decimal is rounded UP at the 18th digit: never understated.
+    third = margin("1", "1", 3)
+    assert third == Decimal("0.333333333333333334")
+    assert third > Decimal(1) / Decimal(3)
+    assert margin("0.01", "80000", 3) == Decimal("266.666666666666666667")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"quantity": 0.01},
+        {"price": 80000},
+        {"quantity": Decimal("0")},
+        {"price": Decimal("-1")},
+        {"quantity": Decimal("NaN")},
+        {"price": Decimal("Infinity")},
+        {"leverage": 0},
+        {"leverage": True},
+        {"leverage": 5.0},
+    ],
+)
+def test_margin_for_reservation_refuses_malformed_inputs(bad: dict[str, Any]) -> None:
+    from src.risk.reservations import margin_for_reservation
+
+    fields: dict[str, Any] = {"quantity": Decimal("0.01"), "price": Decimal("80000"), "leverage": 5}
+    fields.update(bad)
+    with pytest.raises((TypeError, ValueError)):
+        margin_for_reservation(**fields)
+
+
+@pytest.mark.parametrize(
+    "required",
+    [
+        Decimal("0.000001"),  # a stored understatement would over-admit (22-REVIEW WR-07)
+        Decimal("159.999999999999999999"),
+        Decimal("160.000000000000000001"),
+        Decimal("800"),  # the notional, not the margin
+    ],
+)
+def test_a_request_whose_required_margin_is_not_quantity_x_price_over_leverage_is_refused(
+    required: Decimal,
+) -> None:
+    with pytest.raises(ValueError, match="required_margin must equal"):
+        ReservationRequest(
+            **_margin_fields(
+                required_margin=required,
+                margin_entry_price=Decimal("80000"),
+                margin_leverage=5,
+            )
+        )
+
+
+def test_a_request_with_a_leverage_that_does_not_divide_evenly_carries_the_rounded_up_margin() -> (
+    None
+):
+    request = ReservationRequest(
+        **_margin_fields(
+            required_margin=Decimal("266.666666666666666667"),
+            margin_entry_price=Decimal("80000"),
+            margin_leverage=3,
+        )
+    )
+    assert request.required_margin == Decimal("266.666666666666666667")
+    with pytest.raises(ValueError, match="required_margin must equal"):
+        ReservationRequest(
+            **_margin_fields(
+                required_margin=Decimal("266.666666666666666666"),  # rounded down: understated
+                margin_entry_price=Decimal("80000"),
+                margin_leverage=3,
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "partial",
     [
