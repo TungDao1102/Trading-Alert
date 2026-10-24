@@ -457,9 +457,12 @@ def write_probe_limits(
     extra_waits = ""
     if "cancel_fill_race" in optional or "trigger_cancel_race" in optional:
         extra_order += f"race_repeats = {TEST_ONLY_RACE_REPEATS}\n"
-    if "insufficient_margin" in optional:
+    if "insufficient_margin" in optional or "margin_insufficient_target" in optional:
         extra_order += f'insufficient_margin_quantity = "{TEST_ONLY_MARGIN_QUANTITY}"\n'
-    if "symbol_config_change" in optional:
+    if any(
+        key in optional
+        for key in ("symbol_config_change", "margin_insufficient_target", "isolated_liquidation")
+    ):
         extra_order += f"config_target_leverage = {TEST_ONLY_CONFIG_LEVERAGE}\n"
 
     if "gtd_expiry" in optional:

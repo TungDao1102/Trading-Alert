@@ -10,12 +10,14 @@ are not Demo evidence (D-19).
 
 from __future__ import annotations
 
+import ast
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 from scripts import demo_probe as dp
+from src.ops.operator_evidence import load_demo_order_limits
 
 from tests.probe_fakes import (
     TEST_ONLY_CONFIG_LEVERAGE,
@@ -31,6 +33,21 @@ CONFIG = "symbol_config_change_to_isolated"
 CONFIG_KEY = "symbol_config_change"
 BALANCE = "available_balance_with_resting_order"
 BALANCE_KEY = "available_balance_resting"
+MARGIN_TYPE = "margin_type_change_with_resting_order"
+LEVERAGE_MAX = "leverage_above_bracket_maximum"
+MARGIN_TARGET = "margin_insufficient_at_target_leverage"
+LIQUIDATION = "isolated_position_liquidation_price"
+SJ3_IDS = (CONFIG, MARGIN_TYPE, LEVERAGE_MAX, MARGIN_TARGET, BALANCE, LIQUIDATION)
+SJ3_KEYS = {
+    CONFIG: CONFIG_KEY,
+    MARGIN_TYPE: "margin_type_resting_order",
+    LEVERAGE_MAX: "leverage_above_max",
+    MARGIN_TARGET: "margin_insufficient_target",
+    BALANCE: BALANCE_KEY,
+    LIQUIDATION: "isolated_liquidation",
+}
+CONFIG_MUTATIONS = ("change_margin_type", "change_initial_leverage")
+MUTATIONS = ("new_limit_order", "new_market_order", "cancel_order", *CONFIG_MUTATIONS)
 CHANGE_OPERATIONS = ("change_margin_type", "change_initial_leverage")
 SEQUENCE_OPERATIONS = ("symbol_config", *CHANGE_OPERATIONS)
 ORDER_PREFIXES = ("new_", "cancel_")
@@ -59,7 +76,7 @@ def errors(document: dict[str, Any]) -> list[str]:
 
 
 def test_the_case_is_registered_with_its_own_key_and_handler() -> None:
-    assert dp.SJ3_CASES[0] == CONFIG
+    assert dp.SJ3_CASES == SJ3_IDS  # the plan's order, all after SJ2 and before the GTD case
     assert dp.OPTIONAL_CASES[CONFIG_KEY] == CONFIG
     assert dp.CASE_HANDLERS[CONFIG] is dp.case_symbol_config_change_to_isolated
     assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
@@ -476,3 +493,635 @@ def test_the_probe_limits_writer_needs_no_extra_owner_number_for_the_balance_key
     text = write_probe_limits(tmp_path, optional=(BALANCE_KEY,)).read_text(encoding="utf-8")
     assert f"{BALANCE_KEY} = true" in text
     assert "config_target_leverage" not in text and "insufficient_margin_quantity" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Plan 22-09, task 2: the registry of all six cases and the dry run.
+# --------------------------------------------------------------------------- #
+
+
+def test_all_six_cases_have_their_own_key_handler_and_fixture_listing() -> None:
+    assert list(SJ3_KEYS.values()) == [key for key in dp.OPTIONAL_CASES if key in SJ3_KEYS.values()]
+    for case_id, key in SJ3_KEYS.items():
+        assert dp.OPTIONAL_CASES[key] == case_id
+        assert case_id in dp.CASE_HANDLERS and case_id in dp.FIXTURE_CASES
+        assert dp.CASE_ORDER.count(case_id) == 1
+    assert dp.CASE_ORDER[-1] == "gtd_entry_expiry_status"
+    assert set(dp.CASE_HANDLERS) == set(dp.CASE_ORDER)
+
+
+async def test_a_dry_run_ends_every_sj3_case_not_rehearsed_with_no_error(tmp_path: Path) -> None:
+    config = make_config(tmp_path, case_ids=tuple(dp.OPTIONAL_CASES.values()), execute=False)
+    recorder = dp.ProbeRecorder()
+    await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
+    document = recorder.document(config)
+    assert not errors(document)
+    for case_id in SJ3_IDS:
+        record = case(document, case_id)
+        assert record["status"] == dp.NOT_REHEARSED, case_id
+        assert record["observations"] == [], case_id  # the canned answers are dropped
+
+
+def test_the_probe_never_computes_a_liquidation_price_or_imports_the_risk_modules() -> None:
+    source = Path(dp.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported = {
+        node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    } | {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert not [name for name in imported if name.startswith(("src.risk", "src.core"))]
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    assert "liquidation_price" not in called  # the exchange's figure is recorded, never computed
+    start = source.index("def _record_liquidation_inputs")
+    handler = source[start : source.index("def _account_figure", start)]
+    assert "float(" not in handler and "Decimal(" not in handler  # records text, computes nothing
+
+
+# --------------------------------------------------------------------------- #
+# margin_type_change_with_resting_order (D-04 evidence, key margin_type_resting_order).
+# --------------------------------------------------------------------------- #
+
+
+def margin_type_calls(port: FakeProbePort) -> list[str]:
+    return [name for name in case_calls(port) if name in MUTATIONS or name == "symbol_config"]
+
+
+async def test_a_refused_margin_type_change_is_the_evidence_and_is_sent_once(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "change_margin_type",
+        error_observation(
+            "change_margin_type",
+            code=-4047,
+            category="REJECTED_DEFINITIVE",
+            message="FAKE Margin type cannot be changed if there exists open orders.",
+        ),
+    )
+    document, _ = await run_cases(tmp_path, port, MARGIN_TYPE)
+    record = case(document, MARGIN_TYPE)
+    assert record["status"] == dp.OBSERVED
+    assert margin_type_calls(port) == [
+        "symbol_config",
+        "new_limit_order",
+        "change_margin_type",
+        "cancel_order",
+        "symbol_config",
+    ]
+    assert sent(port, "change_margin_type") == [{"symbol": "BTCUSDT", "margin_type": "ISOLATED"}]
+    assert len(sent(port, "new_limit_order")) == 1 and len(sent(port, "cancel_order")) == 1
+    details = record["details"]
+    assert details["previous_margin_type"] == "CROSSED"
+    assert details["requested_margin_type"] == "ISOLATED"
+    assert details["order_accepted"] == "true" and details["cancel_accepted"] == "true"
+    assert details["change_accepted"] == "false"
+    assert "-4047" in details["change_error_code"]
+    assert details["change_error_class"] == "BAD_REQUEST"
+    assert "restore_accepted" not in details  # nothing was changed: nothing to undo
+    assert details["config_before_margin_type"] == "CROSSED"
+    assert details["config_after_margin_type"] == "CROSSED"
+    assert port.config_margin_type == "CROSSED"
+    assert sent(port, "change_initial_leverage") == []  # the leverage is never touched
+    order = sent(port, "new_limit_order")[0]
+    assert order["quantity"] == APPROVED and order["side"] == "BUY"
+
+
+async def test_an_accepted_margin_type_change_is_reversed_once_and_recorded(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()  # the fake accepts a change by default: the "surprise" branch
+    document, _ = await run_cases(tmp_path, port, MARGIN_TYPE)
+    record = case(document, MARGIN_TYPE)
+    assert record["status"] == dp.OBSERVED
+    assert [call["margin_type"] for call in sent(port, "change_margin_type")] == [
+        "ISOLATED",
+        "CROSSED",
+    ]
+    details = record["details"]
+    assert details["change_accepted"] == "true" and details["restore_accepted"] == "true"
+    assert details["config_after_margin_type"] == "ISOLATED"  # as read before the undo
+    assert details["config_restored_margin_type"] == "CROSSED"
+    assert port.config_margin_type == "CROSSED"
+    assert sent(port, "change_initial_leverage") == []
+
+
+async def test_an_isolated_symbol_is_asked_for_the_opposite_type_whatever_the_casing(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "symbol_config",
+        ok_observation("symbol_config", {"0.marginType": "isolated", "0.leverage": "5"}),
+    )
+    document, _ = await run_cases(tmp_path, port, MARGIN_TYPE)
+    assert case(document, MARGIN_TYPE)["status"] == dp.OBSERVED
+    requested = [call["margin_type"] for call in sent(port, "change_margin_type")]
+    assert requested[0] == "CROSSED"  # the opposite of ISOLATED
+    assert requested[1:] == ["ISOLATED"]  # the undo of the accepted change, the original type
+
+
+async def test_a_margin_type_change_is_never_sent_without_a_resting_order(tmp_path: Path) -> None:
+    rejected = FakeProbePort()
+    rejected.script(
+        "new_limit_order",
+        error_observation("new_limit_order", code=-2019, category="REJECTED_DEFINITIVE"),
+    )
+    document, _ = await run_cases(tmp_path, rejected, MARGIN_TYPE)
+    record = case(document, MARGIN_TYPE)
+    assert record["status"] == dp.NOT_OBSERVED and "no margin-type change" in record["reason"]
+    assert sent(rejected, "change_margin_type") == []
+    filled = FakeProbePort()
+    filled.script(
+        "new_limit_order",
+        ok_observation("new_limit_order", {"client_order_id": "x", "status": "FILLED"}),
+    )
+    other = sub(tmp_path, "filled")
+    document2, _ = await run_cases(other, filled, MARGIN_TYPE)
+    assert case(document2, MARGIN_TYPE)["status"] == dp.NOT_OBSERVED
+    assert sent(filled, "change_margin_type") == []
+
+
+async def test_an_unreadable_or_unknown_margin_type_sends_nothing(tmp_path: Path) -> None:
+    unreadable = FakeProbePort()
+    unreadable.script(
+        "symbol_config",
+        error_observation("symbol_config", code=-1000, category="UNKNOWN_EXCHANGE_ERROR"),
+    )
+    document, _ = await run_cases(tmp_path, unreadable, MARGIN_TYPE)
+    assert case(document, MARGIN_TYPE)["status"] == dp.NOT_OBSERVED
+    assert [n for n in case_calls(unreadable) if n in MUTATIONS] == []
+    weird = FakeProbePort()
+    weird.script("symbol_config", ok_observation("symbol_config", {"0.marginType": "PORTFOLIO"}))
+    document2, _ = await run_cases(sub(tmp_path, "weird"), weird, MARGIN_TYPE)
+    assert case(document2, MARGIN_TYPE)["status"] == dp.NOT_OBSERVED
+    assert [n for n in case_calls(weird) if n in MUTATIONS] == []
+
+
+NOT_FLAT_ANSWERS = [
+    ("open_orders", {"count": "1", "row_0_client_order_id": "foreign-order"}),
+    ("open_algo_orders", {"count": "1", "row_0_client_algo_id": "foreign-algo"}),
+    (
+        "positions",
+        {
+            "count": "1",
+            "row_0_symbol": "BTCUSDT",
+            "row_0_position_side": "BOTH",
+            "row_0_position_amt": "0.001",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("case_id", [MARGIN_TYPE, LEVERAGE_MAX, MARGIN_TARGET, LIQUIDATION])
+@pytest.mark.parametrize(("operation", "summary"), NOT_FLAT_ANSWERS)
+async def test_the_other_sj3_cases_send_nothing_on_a_symbol_that_is_not_flat(
+    tmp_path: Path, case_id: str, operation: str, summary: dict[str, str]
+) -> None:
+    port = FakeProbePort()
+    port.config_margin_type, port.config_leverage = "ISOLATED", str(TEST_ONLY_CONFIG_LEVERAGE)
+    port.script_call(operation, 1, ok_observation(operation, summary))
+    document, _ = await run_cases(tmp_path, port, case_id)
+    record = case(document, case_id)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert record["reason"].startswith(dp.REASON_NOT_FLAT_CASE.split("{")[0])
+    assert [name for name in case_calls(port) if name in MUTATIONS] == []
+
+
+@pytest.mark.parametrize("case_id", [MARGIN_TYPE, LEVERAGE_MAX, MARGIN_TARGET, LIQUIDATION])
+async def test_the_other_sj3_cases_on_a_hedge_account_send_nothing(
+    tmp_path: Path, case_id: str
+) -> None:
+    port = FakeProbePort(dual_side=True)
+    document, _ = await run_cases(tmp_path, port, case_id)
+    assert case(document, case_id)["status"] == dp.NOT_OBSERVED
+    assert [name for name in port.names() if name in MUTATIONS[:2] + CONFIG_MUTATIONS] == []
+
+
+async def test_the_margin_type_case_dry_run_plans_the_order_the_change_and_the_cancel(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path, case_ids=(MARGIN_TYPE,), execute=False)
+    recorder = dp.ProbeRecorder()
+    await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
+    planned = [
+        item["operation"]
+        for item in case(recorder.document(config), MARGIN_TYPE)["planned_requests"]
+    ]
+    assert planned[:3] == ["new_limit_order", "change_margin_type", "cancel_order"]
+
+
+async def test_the_margin_type_case_refuses_an_order_above_the_notional_cap(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, MARGIN_TYPE, cap="1")
+    record = case(document, MARGIN_TYPE)
+    assert record["status"] == dp.ERROR and "order bound" in record["reason"]
+    assert [name for name in case_calls(port) if name in MUTATIONS] == []
+
+
+# --------------------------------------------------------------------------- #
+# leverage_above_bracket_maximum (assumption A6, key leverage_above_max).
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_refused_leverage_above_the_maximum_is_the_evidence_and_is_sent_once(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "change_initial_leverage",
+        error_observation(
+            "change_initial_leverage",
+            code=-4028,
+            category="REJECTED_DEFINITIVE",
+            message="FAKE Leverage 126 is not valid",
+        ),
+    )
+    document, _ = await run_cases(tmp_path, port, LEVERAGE_MAX)
+    record = case(document, LEVERAGE_MAX)
+    assert record["status"] == dp.OBSERVED
+    assert sent(port, "change_initial_leverage") == [{"symbol": "BTCUSDT", "leverage": 126}]
+    assert sent(port, "change_margin_type") == []
+    assert sent(port, "new_limit_order") == [] and sent(port, "new_market_order") == []
+    details = record["details"]
+    assert details["bracket_one_initial_leverage"] == "125"  # read from the answer, not assumed
+    assert details["previous_leverage"] == "20" and details["requested_leverage"] == "126"
+    assert details["change_accepted"] == "false" and "-4028" in details["change_error_code"]
+    assert "restore_accepted" not in details
+    assert details["config_after_leverage"] == "20"
+    assert port.config_leverage == "20"
+
+
+async def test_an_accepted_leverage_above_the_maximum_is_reversed_once_and_recorded(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()  # the fake accepts any leverage: the "surprise" branch
+    document, _ = await run_cases(tmp_path, port, LEVERAGE_MAX)
+    record = case(document, LEVERAGE_MAX)
+    assert record["status"] == dp.OBSERVED
+    assert [call["leverage"] for call in sent(port, "change_initial_leverage")] == [126, 20]
+    details = record["details"]
+    assert details["change_accepted"] == "true" and details["restore_accepted"] == "true"
+    assert details["config_after_change_leverage"] == "126"
+    assert details["config_after_leverage"] == "20"
+    assert port.config_leverage == "20"
+
+
+async def test_the_maximum_is_the_initial_leverage_of_bracket_one_wherever_it_sits(
+    tmp_path: Path,
+) -> None:
+    port = FakeProbePort()
+    port.script(
+        "leverage_brackets",
+        ok_observation(
+            "leverage_brackets",
+            {
+                "0.symbol": "BTCUSDT",
+                "0.brackets.0.bracket": "2",
+                "0.brackets.0.initialLeverage": "50",
+                "0.brackets.1.bracket": "1",
+                "0.brackets.1.initialLeverage": "75",
+            },
+        ),
+    )
+    await run_cases(tmp_path, port, LEVERAGE_MAX)
+    assert sent(port, "change_initial_leverage")[0]["leverage"] == 76
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        {},
+        {"0.brackets.0.bracket": "1"},
+        {"0.brackets.0.bracket": "1", "0.brackets.0.initialLeverage": "abc"},
+        {"0.brackets.0.bracket": "1", "0.brackets.0.initialLeverage": "12.5"},
+        {"0.brackets.0.bracket": "2", "0.brackets.0.initialLeverage": "50"},
+    ],
+)
+async def test_an_unreadable_maximum_sends_nothing(tmp_path: Path, summary: dict[str, str]) -> None:
+    port = FakeProbePort()
+    port.script("leverage_brackets", ok_observation("leverage_brackets", summary))
+    document, _ = await run_cases(tmp_path, port, LEVERAGE_MAX)
+    record = case(document, LEVERAGE_MAX)
+    assert record["status"] == dp.NOT_OBSERVED and "maximum leverage" in record["reason"]
+    assert sent(port, "change_initial_leverage") == []
+
+
+async def test_an_unreadable_current_leverage_sends_nothing(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "symbol_config",
+        error_observation("symbol_config", code=-1000, category="UNKNOWN_EXCHANGE_ERROR"),
+    )
+    document, _ = await run_cases(tmp_path, port, LEVERAGE_MAX)
+    assert case(document, LEVERAGE_MAX)["status"] == dp.NOT_OBSERVED
+    assert sent(port, "change_initial_leverage") == []
+
+
+async def test_the_leverage_case_dry_run_plans_the_change_to_one_above_the_maximum(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path, case_ids=(LEVERAGE_MAX,), execute=False)
+    recorder = dp.ProbeRecorder()
+    await dp.run_probe(config, dp.build_dry_run_rig(config), recorder)
+    record = case(recorder.document(config), LEVERAGE_MAX)
+    planned = [
+        item
+        for item in record["planned_requests"]
+        if item["operation"] == "change_initial_leverage"
+    ]
+    # the first request is the case's own; the second is its undo (sent only if accepted)
+    assert planned[0]["kwargs"]["leverage"] == 126 and planned[0]["mutating"] is True
+    assert planned[1]["kwargs"]["leverage"] == 20
+
+
+# --------------------------------------------------------------------------- #
+# margin_insufficient_at_target_leverage (criterion 3 shape, key margin_insufficient_target).
+# --------------------------------------------------------------------------- #
+
+MARGIN_QUANTITY = Decimal("5")  # TEST_ONLY_MARGIN_QUANTITY
+
+
+def isolated_port() -> FakeProbePort:
+    port = FakeProbePort()
+    port.config_margin_type = "ISOLATED"
+    port.config_leverage = str(TEST_ONLY_CONFIG_LEVERAGE)
+    return port
+
+
+async def test_the_shortfall_order_is_the_owners_own_quantity_once_and_nothing_is_changed(
+    tmp_path: Path,
+) -> None:
+    port = isolated_port()
+    document, _ = await run_cases(tmp_path, port, MARGIN_TARGET)
+    record = case(document, MARGIN_TARGET)
+    assert record["status"] == dp.NOT_OBSERVED  # the fake accepts: the quantity did not exceed
+    assert record["reason"] == dp.REASON_MARGIN_ACCEPTED
+    orders = sent(port, "new_limit_order")
+    assert len(orders) == 1 and orders[0]["quantity"] == MARGIN_QUANTITY
+    assert orders[0]["side"] == "BUY" and orders[0]["reduce_only"] is None
+    assert len(sent(port, "cancel_order")) == 1
+    assert [name for name in port.names() if name in CONFIG_MUTATIONS] == []
+    details = record["details"]
+    assert details["target_config_target_leverage"] == str(TEST_ONLY_CONFIG_LEVERAGE)
+    assert Decimal(details["target_leverage"]) == TEST_ONLY_CONFIG_LEVERAGE
+    price = orders[0]["price"]
+    assert Decimal(details["target_implied_notional"]) == MARGIN_QUANTITY * price
+    assert Decimal(details["target_implied_initial_margin"]) == (
+        MARGIN_QUANTITY * price / TEST_ONLY_CONFIG_LEVERAGE
+    )
+    assert details["target_available_balance_before"] == "5000.00000000"
+    assert details["target_available_balance_after"] == "5000.00000000"
+    assert details["target_order_accepted"] == "true"
+    assert not any(key == "far_price" for key in details)  # its own prefix, not the neighbour's
+
+
+async def test_a_refused_shortfall_order_is_the_evidence(tmp_path: Path) -> None:
+    port = isolated_port()
+    port.script(
+        "new_limit_order",
+        error_observation(
+            "new_limit_order",
+            code=-2019,
+            category="REJECTED_DEFINITIVE",
+            message="FAKE Margin is insufficient.",
+        ),
+    )
+    document, _ = await run_cases(tmp_path, port, MARGIN_TARGET)
+    record = case(document, MARGIN_TARGET)
+    assert record["status"] == dp.OBSERVED
+    assert "-2019" in record["details"]["target_order_error_code"]
+    assert len(sent(port, "new_limit_order")) == 1 and sent(port, "cancel_order") == []
+
+
+@pytest.mark.parametrize(
+    ("margin_type", "leverage"),
+    [("CROSSED", "5"), ("ISOLATED", "20"), ("CROSSED", "20")],
+)
+async def test_a_symbol_that_is_not_isolated_at_the_target_is_not_changed_here(
+    tmp_path: Path, margin_type: str, leverage: str
+) -> None:
+    port = FakeProbePort()
+    port.config_margin_type, port.config_leverage = margin_type, leverage
+    document, _ = await run_cases(tmp_path, port, MARGIN_TARGET)
+    record = case(document, MARGIN_TARGET)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert "symbol_config_change_to_isolated first" in record["reason"]
+    assert [name for name in port.names() if name in (*CONFIG_MUTATIONS, "new_limit_order")] == []
+    assert record["details"]["target_config_margin_type"] == margin_type
+
+
+async def test_the_lowercase_isolated_spelling_counts_as_isolated(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    port.script(
+        "symbol_config",
+        ok_observation(
+            "symbol_config",
+            {"0.marginType": "isolated", "0.leverage": str(TEST_ONLY_CONFIG_LEVERAGE)},
+        ),
+    )
+    document, _ = await run_cases(tmp_path, port, MARGIN_TARGET)
+    assert len(sent(port, "new_limit_order")) == 1
+    assert case(document, MARGIN_TARGET)["reason"] == dp.REASON_MARGIN_ACCEPTED
+
+
+async def test_the_neighbour_case_keeps_its_details_and_its_own_key(tmp_path: Path) -> None:
+    port = FakeProbePort()
+    document, _ = await run_cases(tmp_path, port, "insufficient_margin_order")
+    details = case(document, "insufficient_margin_order")["details"]
+    assert "far_price" in details and "order_accepted" in details
+    assert not any(key.startswith("target_") for key in details)
+
+
+def test_the_shortfall_flow_refuses_a_quantity_when_neither_margin_key_is_on(
+    tmp_path: Path,
+) -> None:
+    limits = load_demo_order_limits(
+        write_probe_limits(tmp_path, optional=("available_balance_resting",)), kind="probe"
+    )
+    refusal = dp.margin_order_refusal(
+        limits,
+        quantity=MARGIN_QUANTITY,
+        price=Decimal("48000"),
+        ceiling_price=Decimal("48000"),
+        step=Decimal("0.001"),
+        flag="margin_insufficient_target",
+    )
+    assert refusal is not None and "margin_insufficient_target is not enabled" in refusal
+    other = dp.margin_order_refusal(
+        limits,
+        quantity=MARGIN_QUANTITY,
+        price=Decimal("48000"),
+        ceiling_price=Decimal("48000"),
+        step=Decimal("0.001"),
+        flag="reduce_only_flat",
+    )
+    assert other is not None and "may send" in other
+
+
+# --------------------------------------------------------------------------- #
+# isolated_position_liquidation_price (assumption A3, key isolated_liquidation).
+# --------------------------------------------------------------------------- #
+
+FAKE_LIQUIDATION_ROW = {
+    "entry_price": "60000.10",
+    "mark_price": "60000.00",
+    "liquidation_price": "48200.55",
+    "break_even_price": "60030.00",
+    "unrealized_profit": "-0.0002",
+    "notional": "120.0002",
+    "margin_asset": "USDT",
+}
+FAKE_ACCOUNT_POSITION = {
+    "isolatedMargin": "24.00",
+    "isolatedWallet": "24.01",
+    "maintMargin": "0.48",
+    "initialMargin": "24.00",
+    "positionInitialMargin": "24.00",
+}
+
+
+def position_port() -> FakeProbePort:
+    port = isolated_port()
+    port.position_extras = dict(FAKE_LIQUIDATION_ROW)
+    port.account_position_figures = dict(FAKE_ACCOUNT_POSITION)
+    return port
+
+
+async def test_the_inputs_of_the_formula_are_recorded_as_read_and_nothing_is_computed(
+    tmp_path: Path,
+) -> None:
+    port = position_port()
+    document, code = await run_cases(tmp_path, port, LIQUIDATION)
+    record = case(document, LIQUIDATION)
+    assert code == dp.EXIT_OK and record["status"] == dp.OBSERVED
+    entries = sent(port, "new_limit_order")
+    assert len(entries) == 1 and entries[0]["quantity"] == APPROVED  # ONE entry, the approved size
+    assert entries[0]["price"] * entries[0]["quantity"] <= Decimal("150")
+    assert [name for name in port.names() if name in CONFIG_MUTATIONS] == []
+    reads = [
+        name
+        for name in case_calls(port)
+        if name in ("positions", "leverage_brackets", "symbol_config", "account_information")
+    ]
+    assert reads[-4:] == ["positions", "leverage_brackets", "symbol_config", "account_information"]
+    details = record["details"]
+    assert details["position_liquidation_price"] == "48200.55"  # the exchange's text, untouched
+    assert details["position_entry_price"] == "60000.10"
+    assert details["position_position_amt"] == "0.002"
+    assert details["position_mark_price"] == "60000.00"
+    assert details["position_notional"] == "120.0002"
+    assert details["position_margin_asset"] == "USDT"
+    assert details["account_position_isolatedMargin"] == "24.00"
+    assert details["account_position_isolatedWallet"] == "24.01"
+    assert details["account_position_maintMargin"] == "0.48"
+    assert details["bracket_0.brackets.0.initialLeverage"] == "125"
+    assert details["config_at_position_margin_type"] == "ISOLATED"
+    assert details["config_at_position_leverage"] == str(TEST_ONLY_CONFIG_LEVERAGE)
+    assert details["quote_asset"] == "USDT"
+    assert not any("verdict" in key or "difference" in key for key in details)
+    assert any("nothing is computed" in note for note in record["notes"])
+
+
+async def test_a_missing_account_figure_is_not_observed_text_and_the_case_stays_observed(
+    tmp_path: Path,
+) -> None:
+    port = isolated_port()
+    port.position_extras = dict(FAKE_LIQUIDATION_ROW)  # no positions.0.* in the account answer
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION)
+    record = case(document, LIQUIDATION)
+    assert record["status"] == dp.OBSERVED
+    assert record["details"]["account_position_isolatedMargin"].startswith("NOT_OBSERVED")
+    assert record["details"]["account_position_maintMargin"].startswith("NOT_OBSERVED")
+
+
+async def test_an_answer_without_a_liquidation_price_is_not_observed_but_the_rest_is_kept(
+    tmp_path: Path,
+) -> None:
+    port = isolated_port()
+    port.position_extras = {"entry_price": "60000.10", "mark_price": "60000.00"}
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION)
+    record = case(document, LIQUIDATION)
+    assert record["status"] == dp.NOT_OBSERVED and "liquidationPrice" in record["reason"]
+    assert record["details"]["position_liquidation_price"].startswith("NOT_OBSERVED")
+    assert record["details"]["position_entry_price"] == "60000.10"
+
+
+async def test_a_bracket_read_error_is_recorded_and_does_not_hide_the_price(
+    tmp_path: Path,
+) -> None:
+    port = position_port()
+    port.script(
+        "leverage_brackets",
+        error_observation("leverage_brackets", code=-1000, category="UNKNOWN_EXCHANGE_ERROR"),
+    )
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION)
+    record = case(document, LIQUIDATION)
+    assert record["status"] == dp.OBSERVED
+    assert record["details"]["brackets_accepted"] == "false"
+    assert record["details"]["position_liquidation_price"] == "48200.55"
+
+
+@pytest.mark.parametrize(("margin_type", "leverage"), [("CROSSED", "20"), ("ISOLATED", "20")])
+async def test_a_symbol_not_isolated_at_the_target_opens_no_position(
+    tmp_path: Path, margin_type: str, leverage: str
+) -> None:
+    port = FakeProbePort()
+    port.config_margin_type, port.config_leverage = margin_type, leverage
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION)
+    record = case(document, LIQUIDATION)
+    assert record["status"] == dp.NOT_OBSERVED
+    assert "symbol_config_change_to_isolated first" in record["reason"]
+    assert [name for name in port.names() if name in MUTATIONS[:3] + CONFIG_MUTATIONS] == []
+
+
+async def test_a_rejected_entry_ends_the_case_without_the_reads(tmp_path: Path) -> None:
+    port = position_port()
+    port.script(
+        "new_limit_order",
+        error_observation("new_limit_order", code=-2019, category="REJECTED_DEFINITIVE"),
+    )
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION)
+    record = case(document, LIQUIDATION)
+    assert record["status"] == dp.NOT_OBSERVED and "entry rejected" in record["reason"]
+    assert len(sent(port, "new_limit_order")) == 1  # never re-sent
+    assert "leverage_brackets" not in case_calls(port)
+
+
+async def test_the_liquidation_case_refuses_an_entry_above_the_notional_cap(
+    tmp_path: Path,
+) -> None:
+    port = position_port()
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION, cap="1")
+    record = case(document, LIQUIDATION)
+    assert record["status"] == dp.ERROR and "order bound" in record["reason"]
+    assert sent(port, "new_limit_order") == []
+
+
+async def test_the_runner_cleanup_closes_the_position_the_liquidation_case_opened(
+    tmp_path: Path,
+) -> None:
+    port = position_port()
+    await run_cases(tmp_path, port, LIQUIDATION)
+    closes = sent(port, "new_market_order")
+    assert len(closes) == 1 and closes[0]["reduce_only"] is True and closes[0]["side"] == "SELL"
+    assert closes[0]["quantity"] == APPROVED
+    assert port.positions_rows == []
+
+
+async def test_an_executed_run_with_fixtures_writes_the_new_cases_answers(tmp_path: Path) -> None:
+    port = position_port()
+    document, _ = await run_cases(tmp_path, port, LIQUIDATION, fixtures=True)
+    assert case(document, LIQUIDATION)["status"] == dp.OBSERVED
+    names = sorted(path.name for path in (tmp_path / "fixtures").iterdir())
+    assert any("leverage_brackets" in name for name in names)
+    assert any("account_information" in name for name in names)
+    assert any("positions" in name for name in names)

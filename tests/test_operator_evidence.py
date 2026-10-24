@@ -469,7 +469,14 @@ SJ2_KEYS = (
 
 
 # Phase 22 plans 22-05 and 22-09: the owner-run symbol-configuration keys, before gtd_expiry.
-SJ3_KEYS = ("symbol_config_change", "available_balance_resting")
+SJ3_KEYS = (
+    "symbol_config_change",
+    "margin_type_resting_order",
+    "leverage_above_max",
+    "margin_insufficient_target",
+    "available_balance_resting",
+    "isolated_liquidation",
+)
 
 
 def test_the_evidence_case_keys_are_the_ten_the_five_and_the_eight_in_script_order() -> None:
@@ -980,3 +987,136 @@ def test_the_smoke_kind_refuses_the_leverage_key_and_the_config_flag(tmp_path: P
 def test_the_phase18_file_has_no_config_target_leverage() -> None:
     limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
     assert limits.config_target_leverage is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-09: the five other SJ3 keys and the two widened conditional rules.
+# --------------------------------------------------------------------------- #
+
+MARGIN_CASES = ("insufficient_margin", "margin_insufficient_target")
+CONFIG_CASES = ("symbol_config_change", "margin_insufficient_target", "isolated_liquidation")
+PLAIN_SJ3_KEYS = ("margin_type_resting_order", "leverage_above_max", "available_balance_resting")
+
+
+def test_the_sj3_keys_are_the_six_in_script_order_right_before_the_long_case() -> None:
+    keys = oe.EVIDENCE_CASE_KEYS
+    assert keys[-1 - len(SJ3_KEYS) : -1] == SJ3_KEYS
+    assert keys[-1] == "gtd_expiry"
+    assert SJ3_KEYS[0] == "symbol_config_change"  # plan 22-05's key keeps its place
+
+
+@pytest.mark.parametrize("key", PLAIN_SJ3_KEYS)
+def test_a_plain_sj3_key_enables_only_its_case_and_needs_no_owner_number(
+    tmp_path: Path, key: str
+) -> None:
+    limits = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "true"))), kind="probe"
+    )
+    assert [k for k in limits.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS] == [key]
+    assert limits.insufficient_margin_quantity is None
+    assert limits.config_target_leverage is None
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "false")), "off.toml"), kind="probe"
+    )
+    assert not [k for k in off.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS]
+
+
+def _flagged(*keys: str, order_lines: str = "") -> str:
+    text = _with_new_keys(*((key, "true") for key in keys))
+    return text.replace('symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{order_lines}', 1)
+
+
+def test_the_margin_shortfall_case_needs_both_owner_numbers(tmp_path: Path) -> None:
+    both = _flagged(
+        "margin_insufficient_target", order_lines=MARGIN_QUANTITY_LINE + CONFIG_LEVERAGE_LINE
+    )
+    limits = oe.load_demo_order_limits(_write(tmp_path, both), kind="probe")
+    assert limits.insufficient_margin_quantity == Decimal("5")
+    assert limits.config_target_leverage == 5
+    for name, lines, named in (
+        ("no-qty.toml", CONFIG_LEVERAGE_LINE, "order.insufficient_margin_quantity (missing key"),
+        ("no-lev.toml", MARGIN_QUANTITY_LINE, "order.config_target_leverage (missing key"),
+    ):
+        with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+            oe.load_demo_order_limits(
+                _write(tmp_path, _flagged("margin_insufficient_target", order_lines=lines), name),
+                kind="probe",
+            )
+        assert named in str(info.value)
+
+
+def test_the_isolated_liquidation_case_needs_the_leverage_but_not_the_margin_quantity(
+    tmp_path: Path,
+) -> None:
+    ok = _flagged("isolated_liquidation", order_lines=CONFIG_LEVERAGE_LINE)
+    limits = oe.load_demo_order_limits(_write(tmp_path, ok), kind="probe")
+    assert limits.config_target_leverage == 5 and limits.insufficient_margin_quantity is None
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _flagged("isolated_liquidation"), "no-lev.toml"), kind="probe"
+        )
+    assert "order.config_target_leverage (missing key" in str(info.value)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info2:
+        oe.load_demo_order_limits(
+            _write(
+                tmp_path,
+                _flagged(
+                    "isolated_liquidation", order_lines=CONFIG_LEVERAGE_LINE + MARGIN_QUANTITY_LINE
+                ),
+                "qty.toml",
+            ),
+            kind="probe",
+        )
+    assert "order.insufficient_margin_quantity (only allowed when" in str(info2.value)
+
+
+def test_the_margin_quantity_rule_names_both_flags_and_each_flag_serves_it(tmp_path: Path) -> None:
+    for flag in MARGIN_CASES:
+        lines = MARGIN_QUANTITY_LINE + (CONFIG_LEVERAGE_LINE if flag in CONFIG_CASES else "")
+        limits = oe.load_demo_order_limits(
+            _write(tmp_path, _flagged(flag, order_lines=lines), f"{flag}.toml"), kind="probe"
+        )
+        assert limits.insufficient_margin_quantity == Decimal("5")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(
+                tmp_path,
+                _flagged("available_balance_resting", order_lines=MARGIN_QUANTITY_LINE),
+                "x.toml",
+            ),
+            kind="probe",
+        )
+    message = str(info.value)
+    assert (
+        "optional_cases.insufficient_margin or optional_cases.margin_insufficient_target" in message
+    )
+    assert "order.insufficient_margin_quantity (only allowed when" in message
+
+
+def test_the_config_leverage_rule_names_the_three_flags_and_each_flag_serves_it(
+    tmp_path: Path,
+) -> None:
+    for flag in CONFIG_CASES:
+        lines = CONFIG_LEVERAGE_LINE + (MARGIN_QUANTITY_LINE if flag in MARGIN_CASES else "")
+        limits = oe.load_demo_order_limits(
+            _write(tmp_path, _flagged(flag, order_lines=lines), f"{flag}.toml"), kind="probe"
+        )
+        assert limits.config_target_leverage == 5
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(
+                tmp_path, _flagged("leverage_above_max", order_lines=CONFIG_LEVERAGE_LINE), "y.toml"
+            ),
+            kind="probe",
+        )
+    message = str(info.value)
+    for flag in CONFIG_CASES:
+        assert f"optional_cases.{flag}" in message
+    assert "order.config_target_leverage (only allowed when" in message
+
+
+def test_the_smoke_kind_refuses_every_sj3_key(tmp_path: Path) -> None:
+    for key in SJ3_KEYS:
+        text = TEST_ONLY_SMOKE_LIMITS + f"\n[optional_cases]\n{key} = true\n"
+        with pytest.raises(oe.DemoOrderLimitsRefused):
+            oe.load_demo_order_limits(_write(tmp_path, text, f"{key}.toml"), kind="smoke")

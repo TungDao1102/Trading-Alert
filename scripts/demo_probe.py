@@ -61,6 +61,18 @@ the previous configuration; it records it so the owner can. Both changes are mut
 operations (``change_margin_type``, ``change_initial_leverage``): a dry run plans them and sends
 nothing. No agent runs this case; the owner does.
 
+Phase 22 plan 22-09 adds the other five SJ3 cases, each with its own flag in the owner's file:
+``margin_type_change_with_resting_order`` (one far resting BUY, then one margin-type change
+request), ``leverage_above_bracket_maximum`` (one request of the bracket-1 maximum plus one),
+``margin_insufficient_at_target_leverage`` (the ``insufficient_margin_order`` flow on a symbol that
+already reads ISOLATED at ``config_target_leverage``; the owner's ``insufficient_margin_quantity``,
+bound by ``margin_order_refusal`` with its own flag), ``available_balance_with_resting_order``
+(account figures before and after one far resting BUY; assumption A1) and
+``isolated_position_liquidation_price`` (one entry of the approved quantity, then the exchange's
+liquidationPrice with every input of the local formula; assumption A3; nothing is computed here).
+A configuration change the exchange accepted by surprise is undone once, by the case that made it,
+and recorded; no case restores anything else. Every result is demo-observed, not mainnet (D-19).
+
 Safety posture (read before running anything):
 
 * Dry run is the default. Without ``--execute`` every registered handler runs against
@@ -327,10 +339,14 @@ OPTIONAL_CASES: Mapping[str, str] = MappingProxyType(
         "trigger_cancel_race": "trigger_cancel_race",
         "recv_window_error": "timestamp_outside_recv_window",
         "income_history": "income_history_read",
-        # Phase 22 plan 22-05: the owner-run symbol-configuration cases (SJ3_CASES), before the
-        # gtd case; plan 22-09 appends five more.
+        # Phase 22 plans 22-05 and 22-09: the six owner-run symbol-configuration and margin
+        # cases (SJ3_CASES), before the gtd case.
         "symbol_config_change": "symbol_config_change_to_isolated",
+        "margin_type_resting_order": "margin_type_change_with_resting_order",
+        "leverage_above_max": "leverage_above_bracket_maximum",
+        "margin_insufficient_target": "margin_insufficient_at_target_leverage",
         "available_balance_resting": "available_balance_with_resting_order",
+        "isolated_liquidation": "isolated_position_liquidation_price",
         "gtd_expiry": "gtd_entry_expiry_status",
     }
 )
@@ -369,10 +385,14 @@ SJ2_CASES: tuple[str, ...] = (
     "income_history_read",
 )
 # Phase 22 (D-18): the owner-run symbol-configuration cases, in CASE_ORDER order (before
-# gtd_entry_expiry_status). Plan 22-05 adds the first; plan 22-09 appends five.
+# gtd_entry_expiry_status). Plan 22-05 added the first; plan 22-09 appended five.
 SJ3_CASES: tuple[str, ...] = (
     "symbol_config_change_to_isolated",
+    "margin_type_change_with_resting_order",
+    "leverage_above_bracket_maximum",
+    "margin_insufficient_at_target_leverage",
     "available_balance_with_resting_order",
+    "isolated_position_liquidation_price",
 )
 # The cases whose REST answers are also written as fixture files in an executed run.
 FIXTURE_CASES: tuple[str, ...] = (*CAPTURE_CASES, *SJ1_CASES, *SJ2_CASES, *SJ3_CASES)
@@ -1328,6 +1348,10 @@ def order_bound_refusal(
     return None
 
 
+# The owner keys of the two cases that may send the owner's own insufficient_margin_quantity.
+MARGIN_ORDER_FLAGS: tuple[str, ...] = ("insufficient_margin", "margin_insufficient_target")
+
+
 def margin_order_refusal(
     limits: DemoOrderLimits,
     *,
@@ -1335,8 +1359,12 @@ def margin_order_refusal(
     price: Decimal,
     ceiling_price: Decimal,
     step: Decimal | None,
+    flag: str = "insufficient_margin",
 ) -> str | None:
     """Why the `insufficient_margin_order` order may not be sent, or None (quick task sj2).
+
+    Plan 22-09: `flag` is the owner key of the case that sends it, `insufficient_margin` or
+    `margin_insufficient_target` (the second case sends the same kind of order, bound the same way).
 
     This is NOT `order_bound_refusal`: the owner's `max_notional_quote` and approved `quantity`
     are deliberately not applied to this one order, which has to be larger than the available
@@ -1346,8 +1374,10 @@ def margin_order_refusal(
     `far_price_fraction` band), so the order can only rest.
     """
     approved = limits.insufficient_margin_quantity
-    if limits.optional_cases.get("insufficient_margin") is not True or approved is None:
-        return "insufficient_margin is not enabled with an owner insufficient_margin_quantity"
+    if flag not in MARGIN_ORDER_FLAGS:
+        return f"{flag} is not a case that may send the owner's insufficient_margin_quantity"
+    if limits.optional_cases.get(flag) is not True or approved is None:
+        return f"{flag} is not enabled with an owner insufficient_margin_quantity"
     if quantity != approved:
         return "the quantity is not the owner's insufficient_margin_quantity"
     if not approved.is_finite() or approved <= 0:
@@ -1847,7 +1877,13 @@ class _WriteCase:
         return answer, client_id
 
     async def margin_limit(
-        self, label: str, *, client_id: str, price: Decimal, ceiling_price: Decimal
+        self,
+        label: str,
+        *,
+        client_id: str,
+        price: Decimal,
+        ceiling_price: Decimal,
+        flag: str = "insufficient_margin",
     ) -> ProbeObservation:
         """The ONE order that is not held to the approved quantity and `max_notional_quote`.
 
@@ -1861,7 +1897,12 @@ class _WriteCase:
         """
         quantity = self.limits.insufficient_margin_quantity
         refusal = margin_order_refusal(
-            self.limits, quantity=quantity, price=price, ceiling_price=ceiling_price, step=self.step
+            self.limits,
+            quantity=quantity,
+            price=price,
+            ceiling_price=ceiling_price,
+            step=self.step,
+            flag=flag,
         )
         if refusal is not None or quantity is None:
             raise OrderBoundRefused(refusal or "insufficient_margin_quantity is not set")
@@ -4137,6 +4178,10 @@ REASON_STALE_CLOCK_NOT_HONOURED = (
     "the SDK did not ask the stale clock (clock_calls is 0): the request carried the real "
     "timestamp, so no conclusion about the recvWindow can be drawn"
 )
+REASON_NOT_AT_TARGET = (
+    "the symbol does not read ISOLATED at the owner's config_target_leverage {leverage}: run "
+    "symbol_config_change_to_isolated first (nothing was changed here and nothing was sent)"
+)
 REASON_MARGIN_ACCEPTED = (
     "the order was accepted (it rests): the quantity did not exceed the available margin, so "
     "-2019 was not observed; the margin figures before and after are recorded"
@@ -4319,19 +4364,32 @@ def _leverage_of(answer: ProbeObservation) -> Decimal | None:
 
 
 def _record_margin_figures(
-    case: _WriteCase, answer: ProbeObservation, suffix: str
+    case: _WriteCase, answer: ProbeObservation, suffix: str, prefix: str = ""
 ) -> Decimal | None:
     """The account margin figures of one ``account_information`` read; returns the available."""
     available: Decimal | None = None
     for wire, name in _MARGIN_FIGURES:
         text = answer.summary.get(wire) if answer.ok else None
-        case.detail(f"{name}_{suffix}", text if text is not None else "NOT_OBSERVED: not answered")
+        case.detail(
+            f"{prefix}{name}_{suffix}", text if text is not None else "NOT_OBSERVED: not answered"
+        )
         if wire == "availableBalance" and text is not None:
             available = _decimal_or_none(text)
     return available
 
 
-async def _insufficient_margin_order(case: _WriteCase) -> CaseResult:
+async def _insufficient_margin_order(
+    case: _WriteCase,
+    *,
+    flag: str = "insufficient_margin",
+    prefix: str = "",
+    require_target: bool = False,
+) -> CaseResult:
+    # Phase 22 plan 22-09: `margin_insufficient_at_target_leverage` runs this same flow under
+    # its own owner key (`flag`), its own detail prefix and one more rule (`require_target`: the
+    # symbol must already read ISOLATED at the owner's config_target_leverage, else nothing is
+    # sent and nothing is changed). The order and its bound are the same ones, so the pin that
+    # only this function reaches `margin_limit` stays true.
     # The -2019 case. It does NOT use the max_notional_quote check or the approved quantity of
     # the other cases (check_bounds / order_bound_refusal): the order has to be larger than the
     # margin allows. Its own bound is `margin_order_refusal` (inside `margin_limit`): the owner's
@@ -4346,8 +4404,8 @@ async def _insufficient_margin_order(case: _WriteCase) -> CaseResult:
     if state is not None:
         return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
     price = market.far_below(case.fraction)
-    case.detail("far_price", format(price, "f"))
-    case.detail("insufficient_margin_quantity", format(quantity, "f"))
+    case.detail(f"{prefix}far_price", format(price, "f"))
+    case.detail(f"{prefix}insufficient_margin_quantity", format(quantity, "f"))
     if price >= market.mark:
         return case.not_observed("the far price is not below the mark: the order could fill")
     if quantity < market.min_quantity:
@@ -4365,42 +4423,55 @@ async def _insufficient_margin_order(case: _WriteCase) -> CaseResult:
         return case.not_observed(
             f"the quantity is not on the step grid {format(market.step, 'f')}: nothing was sent"
         )
-    before = await case.ask("account_information_before", case.port.account_information())
+    before = await case.ask(f"{prefix}account_information_before", case.port.account_information())
     configuration = await case.ask(
-        "symbol_config_read", case.port.symbol_config(symbol=case.symbol)
+        f"{prefix}symbol_config_read", case.port.symbol_config(symbol=case.symbol)
     )
-    available_before = _record_margin_figures(case, before, "before")
+    available_before = _record_margin_figures(case, before, "before", prefix)
     leverage = _leverage_of(configuration) if configuration.ok else None
-    case.detail("leverage", format(leverage, "f") if leverage is not None else "NOT_OBSERVED")
+    case.detail(
+        f"{prefix}leverage", format(leverage, "f") if leverage is not None else "NOT_OBSERVED"
+    )
+    if require_target:
+        target = case.config_target_leverage
+        case.detail(f"{prefix}config_target_leverage", str(target))
+        if not _is_isolated_at(_reading_of(configuration), target):
+            reading = _reading_of(configuration)
+            case.detail(f"{prefix}config_margin_type", reading.margin_type or "NOT_OBSERVED")
+            case.detail(f"{prefix}config_leverage", reading.leverage or "NOT_OBSERVED")
+            return case.not_observed(REASON_NOT_AT_TARGET.format(leverage=target))
     notional = quantity * price
-    case.detail("implied_notional", format(notional, "f"))
+    case.detail(f"{prefix}implied_notional", format(notional, "f"))
     if leverage is not None:
         margin = notional / leverage
-        case.detail("implied_initial_margin", format(margin, "f"))
+        case.detail(f"{prefix}implied_initial_margin", format(margin, "f"))
         if available_before is not None:
-            case.detail("implied_margin_exceeds_available", _flag_text(margin > available_before))
+            case.detail(
+                f"{prefix}implied_margin_exceeds_available", _flag_text(margin > available_before)
+            )
     client_id = case.client_id("ism")
-    case.detail("client_order_id", client_id)
+    case.detail(f"{prefix}client_order_id", client_id)
     placed = await case.margin_limit(
-        "margin_limit",
+        f"{prefix}margin_limit",
         client_id=client_id,
         price=price,
         ceiling_price=market.far_below(case.fraction),
+        flag=flag,
     )
-    _record_order_answer(case, placed)
+    _record_order_answer(case, placed, f"{prefix}order_")
     if placed.ok:
-        canceled = await case.cancel("margin_cancel", client_id)
-        case.detail("cancel_accepted", _flag_text(canceled.ok))
+        canceled = await case.cancel(f"{prefix}margin_cancel", client_id)
+        case.detail(f"{prefix}cancel_accepted", _flag_text(canceled.ok))
         final = await case.ask(
-            "margin_final_query",
+            f"{prefix}margin_final_query",
             case.port.query_order(symbol=case.symbol, client_order_id=client_id),
         )
         if final.ok:
-            case.detail("final_status", final.summary.get("status", "unreadable"))
-    after = await case.ask("account_information_after", case.port.account_information())
-    _record_margin_figures(case, after, "after")
-    held = await case.held_quantity("position_read_after")
-    case.detail("position_after", format(held, "f"))
+            case.detail(f"{prefix}final_status", final.summary.get("status", "unreadable"))
+    after = await case.ask(f"{prefix}account_information_after", case.port.account_information())
+    _record_margin_figures(case, after, "after", prefix)
+    held = await case.held_quantity(f"{prefix}position_read_after")
+    case.detail(f"{prefix}position_after", format(held, "f"))
     if held != 0:
         case.notes.append(
             "a position exists after the margin order (it should not fill): the runner cleanup "
@@ -4461,6 +4532,11 @@ async def _read_symbol_config(case: _WriteCase, label: str, prefix: str) -> _Con
     """Read the symbol configuration once, record it as read, parse marginType and leverage."""
     answer = await case.ask(label, case.port.symbol_config(symbol=case.symbol))
     _record_config_read(case, answer, prefix)
+    return _reading_of(answer)
+
+
+def _reading_of(answer: ProbeObservation) -> _ConfigReading:
+    """The marginType and leverage texts of a symbol-configuration answer (None if refused)."""
     if not answer.ok:
         return _ConfigReading(answer, None, None)
     return _ConfigReading(
@@ -4527,6 +4603,284 @@ async def _symbol_config_change_to_isolated(case: _WriteCase) -> CaseResult:
         f"(marginType={previous_margin}, leverage={previous_leverage}) was NOT restored: "
         "the owner decides"
     )
+    return case.observed()
+
+
+def _margin_type_request(text: str | None) -> str | None:
+    """The request value (ISOLATED or CROSSED) for the exchange's own marginType text, or None."""
+    if text is None:
+        return None
+    upper = text.upper()
+    if upper == "ISOLATED":
+        return "ISOLATED"
+    if upper in ("CROSSED", "CROSS"):
+        return "CROSSED"
+    return None
+
+
+def _whole_leverage(text: str | None) -> int | None:
+    """A leverage text as a whole number of at least 1, or None."""
+    value = _decimal_or_none(text) if text is not None else None
+    if value is None or value < 1 or value != value.to_integral_value():
+        return None
+    return int(value)
+
+
+def _bracket_one_leverage(answer: ProbeObservation) -> int | None:
+    """``initialLeverage`` of bracket 1 in a flattened leverageBracket answer, or None."""
+    if not answer.ok:
+        return None
+    for key, value in answer.summary.items():
+        parts = key.split(".")
+        if len(parts) < 3 or parts[-1] != "bracket" or parts[-3] != "brackets":
+            continue
+        if _decimal_or_none(value) != 1:
+            continue
+        leverage = _whole_leverage(answer.summary.get(".".join([*parts[:-1], "initialLeverage"])))
+        if leverage is not None:
+            return leverage
+    return None
+
+
+async def _margin_type_change_with_resting_order(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, D-04 evidence): the exchange's answer to a margin-type change while an order
+    # rests (the guard relies on -4047 / -4048; the case does not assume them). One far resting
+    # BUY LIMIT inside the owner caps, then ONE change request to the OPPOSITE margin type. The
+    # answer is the evidence. An accepted change is undone once (this case's own change only).
+    # Never touches the leverage. Observed on Demo only, never mainnet (D-19).
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    price = market.far_below(case.fraction)
+    case.detail("far_price", format(price, "f"))
+    if price >= market.mark:
+        return case.not_observed("the far price is not below the mark: the order could fill")
+    case.check_bounds([(case.quantity, price)])  # refused here, before anything is sent
+    before = await _read_symbol_config(case, "config_before_read", "config_before_")
+    original = _margin_type_request(before.margin_type) if before.answer.ok else None
+    if original is None:
+        return case.not_observed(
+            "the current margin type could not be read as ISOLATED or CROSSED "
+            f"({_class_code(before.answer)}): nothing was sent"
+        )
+    requested = "CROSSED" if original == "ISOLATED" else "ISOLATED"
+    case.detail("previous_margin_type", before.margin_type or "NOT_OBSERVED")
+    case.detail("requested_margin_type", requested)
+    client_id = case.client_id("mtr")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit("resting_limit", client_id=client_id, side=SIDE_BUY, price=price)
+    _record_order_answer(case, placed)
+    if not placed.ok:
+        return case.not_observed(
+            "the resting order was not accepted: no margin-type change was sent"
+        )
+    if placed.summary.get("status") in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIALLY_FILLED):
+        return case.not_observed(
+            "the order did not rest (it filled): no margin-type change was sent; the runner "
+            "cleanup flattens the position"
+        )
+    changed = await case.ask(
+        "margin_type_change",
+        case.port.change_margin_type(symbol=case.symbol, margin_type=requested),
+    )
+    _record_config_change(case, changed, "change_")
+    canceled = await case.cancel("resting_cancel", client_id)
+    case.detail("cancel_accepted", _flag_text(canceled.ok))
+    await _read_symbol_config(case, "config_after_read", "config_after_")
+    if changed.ok:
+        # An accepted change is a surprise: undo THIS case's own change once, record it.
+        restored = await case.ask(
+            "margin_type_restore",
+            case.port.change_margin_type(symbol=case.symbol, margin_type=original),
+        )
+        _record_config_change(case, restored, "restore_")
+        case.detail("restore_accepted", _flag_text(restored.ok))
+        await _read_symbol_config(case, "config_restored_read", "config_restored_")
+    return case.observed()
+
+
+async def _leverage_above_bracket_maximum(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, assumption A6): the code the exchange answers to a leverage one above the
+    # maximum of bracket 1 (-4028 or -4209, unobserved). The maximum is read from the exchange's
+    # own bracket answer, never assumed. One request; an accepted change is undone once.
+    # Observed on Demo only, never mainnet (D-19).
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    brackets = await case.ask(
+        "leverage_brackets_read", case.port.leverage_brackets(symbol=case.symbol)
+    )
+    maximum = _bracket_one_leverage(brackets)
+    case.detail(
+        "bracket_one_initial_leverage",
+        str(maximum) if maximum is not None else "NOT_OBSERVED: not readable",
+    )
+    before = await _read_symbol_config(case, "config_before_read", "config_before_")
+    current = _whole_leverage(before.leverage) if before.answer.ok else None
+    case.detail("previous_leverage", str(current) if current is not None else "NOT_OBSERVED")
+    if maximum is None:
+        return case.not_observed(
+            "the maximum leverage (initialLeverage of bracket 1) could not be read from the "
+            f"bracket answer ({_class_code(brackets)}): nothing was sent"
+        )
+    if current is None:
+        return case.not_observed(
+            "the current leverage could not be read, so it could not be restored: nothing was sent"
+        )
+    requested = maximum + 1
+    case.detail("requested_leverage", str(requested))
+    changed = await case.ask(
+        "leverage_change",
+        case.port.change_initial_leverage(symbol=case.symbol, leverage=requested),
+    )
+    _record_config_change(case, changed, "change_")
+    if changed.ok:
+        await _read_symbol_config(case, "config_after_change_read", "config_after_change_")
+        # An accepted change is a surprise: undo THIS case's own change once, record it.
+        restored = await case.ask(
+            "leverage_restore",
+            case.port.change_initial_leverage(symbol=case.symbol, leverage=current),
+        )
+        _record_config_change(case, restored, "restore_")
+        case.detail("restore_accepted", _flag_text(restored.ok))
+    await _read_symbol_config(case, "config_after_read", "config_after_")
+    return case.observed()
+
+
+async def _margin_insufficient_at_target_leverage(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, criterion 3 shape): the flow of `insufficient_margin_order` on a symbol
+    # that already reads ISOLATED at the owner's config_target_leverage. Nothing is changed here;
+    # the order, its bound (the owner's own insufficient_margin_quantity) and the margin figures
+    # are those of the neighbour, under this case's own key and detail prefix.
+    return await _insufficient_margin_order(
+        case, flag="margin_insufficient_target", prefix="target_", require_target=True
+    )
+
+
+# The position-row fields the positions answer carries (names as the probe summary writes them).
+_LIQUIDATION_ROW_FIELDS: tuple[str, ...] = (
+    "position_side",
+    "position_amt",
+    "entry_price",
+    "mark_price",
+    "liquidation_price",
+    "break_even_price",
+    "unrealized_profit",
+    "notional",
+    "margin_asset",
+)
+# The account-answer position figures the local formula could need (wire names).
+_ACCOUNT_POSITION_FIGURES: tuple[str, ...] = (
+    "isolatedMargin",
+    "isolatedWallet",
+    "maintMargin",
+    "initialMargin",
+    "positionInitialMargin",
+    "openOrderInitialMargin",
+    "notional",
+    "positionAmt",
+    "unrealizedProfit",
+    "leverage",
+)
+_ACCOUNT_TOTAL_FIGURES: tuple[tuple[str, str], ...] = (
+    ("totalMaintMargin", "total_maint_margin"),
+    ("totalInitialMargin", "total_initial_margin"),
+    ("totalPositionInitialMargin", "total_position_initial_margin"),
+    ("totalOpenOrderInitialMargin", "total_open_order_initial_margin"),
+    ("totalMarginBalance", "total_margin_balance"),
+    ("availableBalance", "available_balance"),
+)
+_QUOTE_ROW_FIGURES: tuple[str, ...] = (
+    "walletBalance",
+    "marginBalance",
+    "maintMargin",
+    "positionInitialMargin",
+    "openOrderInitialMargin",
+    "availableBalance",
+)
+
+
+def _account_position_index(answer: ProbeObservation, symbol: str) -> str | None:
+    """The list position of the symbol's row in ``positions.<i>.*`` of an account answer."""
+    for key, value in answer.summary.items():
+        parts = key.split(".")
+        if len(parts) == 3 and parts[0] == "positions" and parts[2] == "symbol" and value == symbol:
+            return parts[1]
+    return None
+
+
+def _record_liquidation_inputs(
+    case: _WriteCase, positions: ProbeObservation, account: ProbeObservation
+) -> bool:
+    """Record every input of the local formula as read; False if the row has no liquidationPrice."""
+    for name in _LIQUIDATION_ROW_FIELDS:
+        text = positions.summary.get(f"row_0_{name}")
+        case.detail(f"position_{name}", text if text is not None else "NOT_OBSERVED: absent")
+    if not account.ok:
+        _record_order_answer(case, account, "account_")
+        return positions.summary.get("row_0_liquidation_price") is not None
+    for wire, name in _ACCOUNT_TOTAL_FIGURES:
+        text = account.summary.get(wire)
+        case.detail(f"account_{name}", text if text is not None else "NOT_OBSERVED: absent")
+    index = _account_position_index(account, case.symbol)
+    for wire in _ACCOUNT_POSITION_FIGURES:
+        text = account.summary.get(f"positions.{index}.{wire}") if index is not None else None
+        case.detail(
+            f"account_position_{wire}", text if text is not None else "NOT_OBSERVED: absent"
+        )
+    asset, _ = _quote_asset_figure(account, case.symbol, "asset")
+    case.detail("quote_asset", asset if asset is not None else "NOT_OBSERVED: no matching row")
+    for wire in _QUOTE_ROW_FIGURES:
+        _, text = _quote_asset_figure(account, case.symbol, wire)
+        case.detail(f"quote_row_{wire}", text if text is not None else "NOT_OBSERVED: absent")
+    return positions.summary.get("row_0_liquidation_price") is not None
+
+
+async def _isolated_position_liquidation_price(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, assumption A3): the exchange's own liquidation price for an isolated
+    # position, with every input of the local formula, in one run (the only way to obtain the
+    # missing isolated golden). The symbol must already read ISOLATED at the owner's
+    # config_target_leverage and be flat; ONE marketable entry of the approved quantity opens the
+    # position; the runner cleanup closes it with one reduce-only MARKET order. The probe computes
+    # nothing and imports no risk module: the comparison is offline, by the owner. Observed on
+    # Demo only, never mainnet (D-19).
+    leverage = case.config_target_leverage
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    configured = await _read_symbol_config(case, "config_before_read", "config_before_")
+    if not _is_isolated_at(configured, leverage):
+        return case.not_observed(REASON_NOT_AT_TARGET.format(leverage=leverage))
+    case.detail("config_target_leverage", str(leverage))
+    case.check_bounds([(case.quantity, market.marketable_buy())])
+    refused, _entry = await _open_position(case, market, "ilq")
+    if refused is not None:
+        return refused
+    positions = await case.ask("positions_read", case.port.positions(symbol=case.symbol))
+    brackets = await case.ask(
+        "leverage_brackets_read", case.port.leverage_brackets(symbol=case.symbol)
+    )
+    if brackets.ok:
+        for key, value in brackets.summary.items():
+            case.detail(f"bracket_{key}", value)
+    else:
+        _record_order_answer(case, brackets, "brackets_")
+    await _read_symbol_config(case, "config_at_position_read", "config_at_position_")
+    account = await case.ask("account_information_read", case.port.account_information())
+    rows = _position_rows(positions)
+    if not rows:
+        return case.not_observed("the position row was not readable after the entry")
+    has_price = _record_liquidation_inputs(case, positions, account)
+    case.notes.append(
+        "nothing is computed here: compare liquidationPrice with src/risk/liquidation.py offline "
+        "from the recorded inputs (demo-observed, not mainnet)"
+    )
+    if not has_price:
+        return case.not_observed(
+            "the positions answer carries no liquidationPrice; every other figure is recorded"
+        )
     return case.observed()
 
 
@@ -4968,6 +5322,46 @@ async def case_available_balance_with_resting_order(context: CaseContext) -> Cas
     )
 
 
+async def case_margin_type_change_with_resting_order(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, D-04): a margin-type change while ONE far order rests."""
+    return await run_write_case(
+        context,
+        _margin_type_change_with_resting_order,
+        case_id="margin_type_change_with_resting_order",
+        reduce_only=True,
+    )
+
+
+async def case_leverage_above_bracket_maximum(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, A6): a leverage one above the maximum of bracket 1."""
+    return await run_write_case(
+        context,
+        _leverage_above_bracket_maximum,
+        case_id="leverage_above_bracket_maximum",
+        reduce_only=True,
+    )
+
+
+async def case_margin_insufficient_at_target_leverage(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22): the owner's own insufficient_margin_quantity at the target."""
+    return await run_write_case(
+        context,
+        _margin_insufficient_at_target_leverage,
+        case_id="margin_insufficient_at_target_leverage",
+        reduce_only=True,
+    )
+
+
+async def case_isolated_position_liquidation_price(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, A3): the exchange's liquidation price of an isolated position."""
+    return await run_write_case(
+        context,
+        _isolated_position_liquidation_price,
+        case_id="isolated_position_liquidation_price",
+        reduce_only=True,
+    )
+
+
 async def case_exchange_info_read_for_close(context: CaseContext) -> CaseResult:
     """Owner opt-in (A10, Q3): the live exchangeInfo filters and the read time; no order."""
     return await run_write_case(
@@ -5155,7 +5549,11 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "timestamp_outside_recv_window": case_timestamp_outside_recv_window,
     "income_history_read": case_income_history_read,
     "symbol_config_change_to_isolated": case_symbol_config_change_to_isolated,
+    "margin_type_change_with_resting_order": case_margin_type_change_with_resting_order,
+    "leverage_above_bracket_maximum": case_leverage_above_bracket_maximum,
+    "margin_insufficient_at_target_leverage": case_margin_insufficient_at_target_leverage,
     "available_balance_with_resting_order": case_available_balance_with_resting_order,
+    "isolated_position_liquidation_price": case_isolated_position_liquidation_price,
     "gtd_entry_expiry_status": case_gtd_entry_expiry_status,
 }
 

@@ -24,7 +24,11 @@ change it.
   key `race_repeats` (required exactly with `cancel_fill_race`, at most `RACE_REPEATS_MAX`);
   quick task 261023-sj2 adds eight more cases, lets `race_repeats` and `near_trigger_fraction`
   serve the new race and stop cases too, and adds the key `insufficient_margin_quantity`
-  (required exactly with `insufficient_margin`); the Phase 18 file loads unchanged.
+  (required exactly with `insufficient_margin`); the Phase 18 file loads unchanged. Phase 22
+  plans 22-05 and 22-09 add six owner-run SJ3 cases: `insufficient_margin_quantity` is then
+  required exactly when `insufficient_margin` OR `margin_insufficient_target` is enabled, and
+  `config_target_leverage` exactly when `symbol_config_change`, `margin_insufficient_target` or
+  `isolated_liquidation` is enabled.
 * `sha256_lf`: the sha256 of a text file with CRLF normalized to LF.
 
 Standard library and `src.ops.redaction` only: no SDK, no adapter, no network.
@@ -213,9 +217,14 @@ EVIDENCE_CASE_KEYS: tuple[str, ...] = (
     "trigger_cancel_race",
     "recv_window_error",
     "income_history",
-    # Phase 22 plan 22-05: owner-run symbol-configuration cases (SJ3_CASES), before gtd_expiry.
+    # Phase 22 plans 22-05 and 22-09: owner-run symbol-configuration and margin cases
+    # (SJ3_CASES), in the script's order, before gtd_expiry.
     "symbol_config_change",
+    "margin_type_resting_order",
+    "leverage_above_max",
+    "margin_insufficient_target",
     "available_balance_resting",
+    "isolated_liquidation",
     "gtd_expiry",
 )
 _NEAR_TRIGGER_FRACTION = "near_trigger_fraction"
@@ -233,13 +242,21 @@ _RACE_REPEATS = "race_repeats"
 # `insufficient_margin` (quick task 261023-sj2) sends ONE order that is deliberately larger than
 # the account's margin allows. It has its OWN owner quantity: no default, and no relation to the
 # `quantity` / `max_notional_quote` cap that every other case obeys.
-_MARGIN_CASE = "insufficient_margin"
+# Phase 22 plan 22-09: `margin_insufficient_target` sends the same kind of order under the same
+# owner quantity, so the key is required exactly when EITHER of the two cases is enabled.
+_MARGIN_CASES: tuple[str, ...] = ("insufficient_margin", "margin_insufficient_target")
 _MARGIN_QUANTITY = "insufficient_margin_quantity"
 # Phase 22 plan 22-05: the SJ3 cases that CHANGE the symbol configuration (margin type, leverage).
 # `order.config_target_leverage` is the owner's leverage for them: required exactly when one is
 # enabled, no default (D-02 keeps the guard's own constant in the guard module; the probe asks for
-# what the owner wrote). Plan 22-09 extends this tuple with its configuration-changing cases.
-_CONFIG_CASES: tuple[str, ...] = ("symbol_config_change",)
+# what the owner wrote). Plan 22-09 added the two SJ3 cases that need it as well: the margin
+# shortfall at the target leverage and the isolated liquidation inputs (both require the symbol to
+# read ISOLATED at that leverage; only the first case changes it).
+_CONFIG_CASES: tuple[str, ...] = (
+    "symbol_config_change",
+    "margin_insufficient_target",
+    "isolated_liquidation",
+)
 _CONFIG_LEVERAGE = "config_target_leverage"
 # The most place-and-cancel pairs the owner may ask of `cancel_fill_race`: a tool cap on the
 # number of probe orders (each repeat may open and close a position), not a trading number.
@@ -291,11 +308,13 @@ class DemoOrderLimits:
     checked: the exchange's answer to a shorter lifetime is itself evidence. `race_repeats`
     (quick task 261022-sj1) is set exactly when `cancel_fill_race` or `trigger_cancel_race` is
     enabled: a positive integer of at most `RACE_REPEATS_MAX`. `insufficient_margin_quantity`
-    (quick task 261023-sj2) is set exactly when `insufficient_margin` is enabled: a positive
-    plain decimal the OWNER chose to exceed the available margin; it is the one quantity the
-    probe may send above the cap, and only for that one case. `config_target_leverage`
-    (Phase 22 plan 22-05) is set exactly when a configuration-changing SJ3 case is enabled
-    (`symbol_config_change`): the leverage the owner asks the probe to request, a positive int.
+    (quick task 261023-sj2) is set exactly when `insufficient_margin` or (Phase 22 plan 22-09)
+    `margin_insufficient_target` is enabled: a positive plain decimal the OWNER chose to exceed
+    the available margin; it is the one quantity the probe may send above the cap, and only for
+    those two cases. `config_target_leverage` (Phase 22 plans 22-05 and 22-09) is set exactly
+    when `symbol_config_change`, `margin_insufficient_target` or `isolated_liquidation` is
+    enabled: the leverage the owner asks the probe to request or expects the symbol to read, a
+    positive int.
     """
 
     kind: str
@@ -448,10 +467,10 @@ def _race_repeats(
 def _margin_quantity(
     order: Mapping[str, Any], enabled: Mapping[str, bool], problems: list[str]
 ) -> Decimal | None:
-    """`order.insufficient_margin_quantity`: required exactly when `insufficient_margin` is on."""
+    """`order.insufficient_margin_quantity`: required exactly when a margin case is on."""
     dotted = f"order.{_MARGIN_QUANTITY}"
-    case = f"optional_cases.{_MARGIN_CASE}"
-    if enabled.get(_MARGIN_CASE) is not True:
+    case = " or ".join(f"optional_cases.{name}" for name in _MARGIN_CASES)
+    if not any(enabled.get(name) is True for name in _MARGIN_CASES):
         if _MARGIN_QUANTITY in order:
             problems.append(f"{dotted} (only allowed when {case} is true)")
         return None

@@ -70,7 +70,11 @@ trigger_cancel_race = <OWNER: true or false>
 recv_window_error = <OWNER: true or false>
 income_history = <OWNER: true or false>
 symbol_config_change = <OWNER: true or false>
+margin_type_resting_order = <OWNER: true or false>
+leverage_above_max = <OWNER: true or false>
+margin_insufficient_target = <OWNER: true or false>
 available_balance_resting = <OWNER: true or false>
+isolated_liquidation = <OWNER: true or false>
 gtd_expiry = <OWNER: true or false>
 ```
 
@@ -311,8 +315,12 @@ The order of the case ids in one run without `--only` is the `CASE_ORDER` of the
 21. `timestamp_outside_recv_window` (key `recv_window_error`)
 22. `income_history_read` (key `income_history`): reads the income of the whole run window, so it runs after the order cases
 23. `symbol_config_change_to_isolated` (key `symbol_config_change`): changes the symbol to ISOLATED and your `config_target_leverage`; does not restore the old configuration
-24. `available_balance_with_resting_order` (key `available_balance_resting`): reads the account figures before and after ONE far resting order; draws no conclusion
-25. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
+24. `margin_type_change_with_resting_order` (key `margin_type_resting_order`): ONE far resting BUY, then ONE margin-type change request to the opposite type; undoes its own change only if the exchange accepted it
+25. `leverage_above_bracket_maximum` (key `leverage_above_max`): ONE leverage request of the bracket-1 maximum plus one; undoes its own change only if the exchange accepted it
+26. `margin_insufficient_at_target_leverage` (key `margin_insufficient_target`): needs `insufficient_margin_quantity` and `config_target_leverage`; the section 19 flow on a symbol that already reads ISOLATED at your leverage; changes nothing
+27. `available_balance_with_resting_order` (key `available_balance_resting`): the account figures before and after ONE far resting order; draws no conclusion
+28. `isolated_position_liquidation_price` (key `isolated_liquidation`): needs `config_target_leverage`; ONE entry of the approved quantity on a symbol that reads ISOLATED at your leverage, then the exchange's liquidation price with every input of the local formula; the runner cleanup closes the position
+29. `gtd_entry_expiry_status` (key `gtd_expiry`): waits more than 10 minutes, always last
 
 A complete probe-limits file with every one of these keys on. Every number is yours: nothing is proposed, every placeholder is written `<OWNER: ...>`, and the loader refuses the file until you replace each one. The three Phase 18 optional cases stay off here (they are your earlier decisions; enabling `market_lot_size_out_of_range` also needs `market_lot_probe_quantity`).
 
@@ -360,7 +368,11 @@ trigger_cancel_race = true
 recv_window_error = true
 income_history = true
 symbol_config_change = true
+margin_type_resting_order = true
+leverage_above_max = true
+margin_insufficient_target = true
 available_balance_resting = true
+isolated_liquidation = true
 gtd_expiry = true
 ```
 
