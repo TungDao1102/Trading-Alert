@@ -1,7 +1,7 @@
 """Symbol configuration guard (Phase 22, plan 22-11; D-01, D-02, D-03, D-05, D-06, criterion 1).
 
 Nothing in the system had ever read or set the configuration of a symbol: the Demo account
-showed BTCUSDT as CROSSED x20 from the account defaults (2026-10-04, demo-observed, not
+showed the BTC perpetual as CROSSED x20 from the account defaults (2026-10-04, demo-observed, not
 mainnet). ``SymbolConfigGuard.ensure`` sets ISOLATED margin and the target leverage on one
 symbol and VERIFIES it from the exchange before it reports success. The system never relies on
 the account default.
@@ -95,20 +95,39 @@ class ConfigGuardResult:
     error_types: tuple[str, ...] = ()
 
 
-def _matches(snapshot: Any, target_leverage: int) -> bool:
-    """True when the snapshot shows ISOLATED, the target leverage and no auto top-up.
+@dataclass(frozen=True)
+class _View:
+    """The checked fields of one snapshot; a field of the wrong type reads as None."""
 
-    Exact comparison: the margin type must be the str "ISOLATED", the leverage an int (not a
-    bool) equal to the target and ``is_auto_add_margin`` the bool False.
+    margin_type: str | None
+    leverage: int | None
+    max_notional_value: Decimal | None
+    auto_add: object
+
+
+def _view(snapshot: Any) -> _View:
+    margin_type = getattr(snapshot, "margin_type", None)
+    leverage = getattr(snapshot, "leverage", None)
+    max_notional = getattr(snapshot, "max_notional_value", None)
+    return _View(
+        margin_type=margin_type if isinstance(margin_type, str) else None,
+        leverage=leverage if type(leverage) is int else None,
+        max_notional_value=max_notional if isinstance(max_notional, Decimal) else None,
+        auto_add=getattr(snapshot, "is_auto_add_margin", None),
+    )
+
+
+def _matches(view: _View, target_leverage: int) -> bool:
+    """True when the view shows ISOLATED, the target leverage and no auto top-up.
+
+    Exact comparison (the one decision shared by the first read, the verification and the
+    idempotence): the margin type is the str "ISOLATED", the leverage an int (never a bool)
+    equal to the target and ``is_auto_add_margin`` the bool False.
     """
-    margin_type = snapshot.margin_type
-    leverage = snapshot.leverage
     return (
-        isinstance(margin_type, str)
-        and margin_type == TARGET_MARGIN_TYPE
-        and type(leverage) is int
-        and leverage == target_leverage
-        and snapshot.is_auto_add_margin is False
+        view.margin_type == TARGET_MARGIN_TYPE
+        and view.leverage == target_leverage
+        and view.auto_add is False
     )
 
 
@@ -124,45 +143,149 @@ class SymbolConfigGuard:
         self._target_leverage = target_leverage
 
     async def ensure(self, *, symbol: str, symbol_is_flat: bool) -> ConfigGuardResult:
-        """Make ``symbol`` ISOLATED at the target leverage (verified by a read), or refuse."""
-        first = await self._adapter.symbol_config_snapshot(symbol=symbol)
-        previous_margin_type = first.margin_type
-        previous_leverage = first.leverage
-        if _matches(first, self._target_leverage):
-            return ConfigGuardResult(
-                ok=True,
-                reason_code=_OK,
-                alert_reason=None,
-                margin_type=first.margin_type,
-                leverage=first.leverage,
-                max_notional_value=first.max_notional_value,
-                changed=False,
-                previous_margin_type=previous_margin_type,
-                previous_leverage=previous_leverage,
-                posts_sent=0,
-            )
+        """Make ``symbol`` ISOLATED at the target leverage (verified by a read), or refuse.
+
+        ``symbol_is_flat`` is the caller's fact: no position, no open order and no open algo
+        order on the symbol. The guard changes nothing on a symbol that is not flat. Never
+        raises for an exchange or gate failure (they are NO_TRADE results); a ``BaseException``
+        such as a cancellation propagates.
+        """
+        if not isinstance(symbol, str) or symbol == "":
+            raise ValueError("symbol must be non-empty text")
+        if not isinstance(symbol_is_flat, bool):
+            raise TypeError("symbol_is_flat must be a bool")
+        target = self._target_leverage
+        errors: list[str] = []
+
+        try:
+            first = _view(await self._adapter.symbol_config_snapshot(symbol=symbol))
+        except Exception as exc:  # noqa: BLE001 - an unreadable configuration is NO_TRADE
+            return _unverified(errors=[type(exc).__name__], posts_sent=0, first=None, last=None)
+
+        if first.auto_add is True:
+            return _refusal(AUTO_ADD_MARGIN_ENABLED, first=first, last=first, posts_sent=0)
+        if first.auto_add is not False or first.margin_type is None or first.leverage is None:
+            # A field of the wrong type is an unreadable configuration: nothing is sent.
+            return _unverified(errors=errors, posts_sent=0, first=first, last=first)
+        if _matches(first, target):
+            return _result_ok(first=first, last=first, posts_sent=0)
+        if not symbol_is_flat:
+            return _refusal(MARGIN_CONFIG_CHANGE_REFUSED, first=first, last=first, posts_sent=0)
+
         posts_sent = 0
+        margin_failed = False
         if first.margin_type != TARGET_MARGIN_TYPE:
-            await self._adapter.change_margin_type(symbol=symbol, margin_type=TARGET_MARGIN_TYPE)
             posts_sent += 1
-        if first.leverage != self._target_leverage:
-            await self._adapter.change_initial_leverage(
-                symbol=symbol, leverage=self._target_leverage
+            try:
+                await self._adapter.change_margin_type(
+                    symbol=symbol, margin_type=TARGET_MARGIN_TYPE
+                )
+            except Exception as exc:  # noqa: BLE001 - the answer of a POST never decides (D-03)
+                errors.append(type(exc).__name__)
+                margin_failed = True
+        if first.leverage != target and not margin_failed:
+            posts_sent += 1
+            try:
+                await self._adapter.change_initial_leverage(symbol=symbol, leverage=target)
+            except Exception as exc:  # noqa: BLE001 - the answer of a POST never decides (D-03)
+                errors.append(type(exc).__name__)
+
+        try:
+            last = _view(await self._adapter.symbol_config_snapshot(symbol=symbol))
+        except Exception as exc:  # noqa: BLE001 - an unverifiable change is NO_TRADE
+            errors.append(type(exc).__name__)
+            return _unverified(errors=errors, posts_sent=posts_sent, first=first, last=None)
+
+        if last.auto_add is True:
+            return _refusal(
+                AUTO_ADD_MARGIN_ENABLED,
+                first=first,
+                last=last,
+                posts_sent=posts_sent,
+                errors=errors,
             )
-            posts_sent += 1
-        last = await self._adapter.symbol_config_snapshot(symbol=symbol)
-        return ConfigGuardResult(
-            ok=_matches(last, self._target_leverage),
-            reason_code=_OK,
-            alert_reason=None,
-            margin_type=last.margin_type,
-            leverage=last.leverage,
-            max_notional_value=last.max_notional_value,
-            changed=(last.margin_type, last.leverage) != (previous_margin_type, previous_leverage),
-            previous_margin_type=previous_margin_type,
-            previous_leverage=previous_leverage,
-            posts_sent=posts_sent,
-        )
+        if _matches(last, target):
+            return _result_ok(first=first, last=last, posts_sent=posts_sent, errors=errors)
+        return _unverified(errors=errors, posts_sent=posts_sent, first=first, last=last)
+
+
+def _build(
+    *,
+    ok: bool,
+    reason_code: str,
+    alert_reason: str | None,
+    first: _View | None,
+    last: _View | None,
+    posts_sent: int,
+    errors: list[str],
+) -> ConfigGuardResult:
+    return ConfigGuardResult(
+        ok=ok,
+        reason_code=reason_code,
+        alert_reason=alert_reason,
+        margin_type=None if last is None else last.margin_type,
+        leverage=None if last is None else last.leverage,
+        max_notional_value=None if last is None else last.max_notional_value,
+        changed=(
+            ok
+            and first is not None
+            and last is not None
+            and (last.margin_type, last.leverage) != (first.margin_type, first.leverage)
+        ),
+        previous_margin_type=None if first is None else first.margin_type,
+        previous_leverage=None if first is None else first.leverage,
+        posts_sent=posts_sent,
+        error_types=tuple(errors),
+    )
+
+
+def _result_ok(
+    *, first: _View, last: _View, posts_sent: int, errors: list[str] | None = None
+) -> ConfigGuardResult:
+    return _build(
+        ok=True,
+        reason_code=_OK,
+        alert_reason=None,
+        first=first,
+        last=last,
+        posts_sent=posts_sent,
+        errors=errors or [],
+    )
+
+
+def _refusal(
+    reason_code: str,
+    *,
+    first: _View,
+    last: _View,
+    posts_sent: int,
+    errors: list[str] | None = None,
+) -> ConfigGuardResult:
+    """A plain NO_TRADE refusal: a normal outcome, so no alert reason (D-03)."""
+    return _build(
+        ok=False,
+        reason_code=reason_code,
+        alert_reason=None,
+        first=first,
+        last=last,
+        posts_sent=posts_sent,
+        errors=errors or [],
+    )
+
+
+def _unverified(
+    *, errors: list[str], posts_sent: int, first: _View | None, last: _View | None
+) -> ConfigGuardResult:
+    """The exchange did not show the target after the allowed calls: NO_TRADE plus an alert."""
+    return _build(
+        ok=False,
+        reason_code=MARGIN_CONFIG_UNVERIFIED,
+        alert_reason=MARGIN_CONFIG_UNVERIFIED,
+        first=first,
+        last=last,
+        posts_sent=posts_sent,
+        errors=errors,
+    )
 
 
 __all__ = [
