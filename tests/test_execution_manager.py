@@ -3588,8 +3588,9 @@ async def test_mark_age_a_fresh_mark_stamped_after_now_utc_places() -> None:
 
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
-    # The clock was read once, after the three gate 5e reads (the mark read among them).
-    assert calls_seen_by_clock == [len(PRE_PLACEMENT_READS)]
+    # The clock was read after the gate 5e reads (the mark read among them) and, since 22-REVIEW
+    # WR-02, once more after the position mode and the guard (gate 5f3), never before the reads.
+    assert calls_seen_by_clock == [len(PRE_PLACEMENT_READS), len(PRE_PLACEMENT_READS) + 1]
     assert _reads_only(adapter)[: len(PRE_PLACEMENT_READS)] == PRE_PLACEMENT_READS
 
 
@@ -3716,7 +3717,7 @@ async def test_last_age_is_measured_at_the_post_read_clock_with_its_own_bound() 
     )
 
 
-async def test_the_clock_is_read_once_after_both_price_reads() -> None:
+async def test_the_clock_is_read_after_both_price_reads_and_again_after_the_guard() -> None:
     case_input = _load_input()
     now = _parse_utc(case_input["now_utc"])
     adapter = FakeExecutionAdapter()
@@ -3734,7 +3735,8 @@ async def test_the_clock_is_read_once_after_both_price_reads() -> None:
     )
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
-    assert calls_seen_by_clock == [PRE_PLACEMENT_READS]
+    # The second reading is gate 5f3 (22-REVIEW WR-02): after the position mode, before the consume.
+    assert calls_seen_by_clock == [PRE_PLACEMENT_READS, [*PRE_PLACEMENT_READS, "get_position_mode"]]
 
 
 async def test_risk04_a_position_on_the_symbol_is_refused() -> None:
@@ -4687,3 +4689,171 @@ async def test_a_failing_journal_never_changes_the_outcome_or_the_placement() ->
         ),
     )
     assert (refused.is_no_trade, refused.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+
+
+# --- 22-REVIEW WR-02: the guard takes time, the clock-dependent gates are judged again ---------
+
+
+class _ClockShiftingGuard:
+    """A passing guard whose REST calls take time: the shared clock moves while it runs."""
+
+    def __init__(self, clock_value: dict[str, datetime], shift: timedelta) -> None:
+        from tests.support.margin_guard_stub import StubMarginGuard
+
+        self._inner = StubMarginGuard()
+        self._clock_value = clock_value
+        self._shift = shift
+
+    @property
+    def calls(self) -> int:
+        return self._inner.calls
+
+    async def evaluate(self, request: Any) -> Any:
+        verdict = await self._inner.evaluate(request)
+        self._clock_value["now"] += self._shift
+        return verdict
+
+
+def _shifting_context(case_input: dict[str, Any], shift: timedelta) -> tuple[Any, Any]:
+    clock_value = {"now": _post_read_instant(case_input)}
+    guard = _ClockShiftingGuard(clock_value, shift)
+    context = _build_live_context(case_input, margin_guard=guard, clock=lambda: clock_value["now"])
+    return context, guard
+
+
+async def test_a_mark_price_that_ages_during_the_guard_is_refused_before_the_consume() -> None:
+    case_input = _load_input()
+    max_age_ms = _build_live_context(case_input).execution_limits.max_mark_price_age_ms
+    assert max_age_ms is not None
+    context, guard = _shifting_context(case_input, timedelta(milliseconds=max_age_ms + 1))
+    store = InMemoryExecutionIntentStore()
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, live_context=context, intent_store=store)
+
+    assert guard.calls == 1
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARK_PRICE_UNAVAILABLE")
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None  # nothing consumed
+
+
+async def test_the_remaining_validity_is_measured_after_the_guard() -> None:
+    case_input = _load_input()
+    minimum = _build_live_context(case_input).execution_limits.min_remaining_validity_seconds
+    assert minimum is not None
+    start = _post_read_instant(case_input)
+    remaining = _parse_utc(case_input["expiry_utc"]) - start
+    assert remaining.total_seconds() > minimum  # valid before the guard: gate 5e passes
+    # The guard's latency leaves one second less than the owner's minimum.
+    shift = remaining - timedelta(seconds=minimum - 1)
+    context, guard = _shifting_context(case_input, shift)
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, live_context=context)
+
+    assert guard.calls == 1
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "VALIDITY_TOO_SHORT")
+    assert "place_entry" not in _reads_only(adapter)
+
+
+async def test_a_guard_that_takes_no_time_still_places_with_the_recheck_in_place() -> None:
+    case_input = _load_input()
+    context, guard = _shifting_context(case_input, timedelta(0))
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, live_context=context)
+
+    assert guard.calls == 1
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert "place_entry" in _reads_only(adapter)
+
+
+# --- 22-REVIEW WR-02: one placement per symbol at a time in this process ------------------------
+
+
+class _GatedGuard:
+    """A passing guard that waits for a release, so a placement stays in flight."""
+
+    def __init__(self) -> None:
+        import asyncio
+
+        from tests.support.margin_guard_stub import StubMarginGuard
+
+        self._inner = StubMarginGuard()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def evaluate(self, request: Any) -> Any:
+        self.calls += 1
+        self.entered.set()
+        await self.release.wait()
+        return await self._inner.evaluate(request)
+
+
+async def test_a_second_approval_of_the_symbol_is_refused_while_the_first_is_in_flight() -> None:
+    import asyncio
+    import dataclasses
+
+    from src.execution import manager as manager_module
+
+    case_input = _load_input()
+    guard = _GatedGuard()
+    adapter = FakeExecutionAdapter()
+    first = asyncio.create_task(
+        _run_plan(adapter, live_context=_build_live_context(case_input, margin_guard=guard))
+    )
+    await asyncio.wait_for(guard.entered.wait(), timeout=5)
+    assert len(manager_module._PLACEMENTS_IN_FLIGHT) == 1  # type: ignore[attr-defined]
+
+    other = dataclasses.replace(_build_approval(case_input), approval_id="APPROVAL-OTHER")
+    second = await _run_plan(
+        adapter,
+        approval=other,
+        live_context=_build_live_context(case_input, margin_guard=_GatedGuard()),
+    )
+
+    assert (second.is_no_trade, second.reason_code) == (True, "SYMBOL_HAS_OPEN_ORDER")
+    assert guard.calls == 1  # the second approval never reached the guard or the exchange
+    guard.release.set()
+    outcome = await asyncio.wait_for(first, timeout=5)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
+
+
+async def test_a_replay_of_the_same_approval_is_not_refused_by_the_symbol_slot() -> None:
+    import asyncio
+
+    from src.execution import manager as manager_module
+
+    case_input = _load_input()
+    guard = _GatedGuard()
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    context = _build_live_context(case_input, margin_guard=guard)
+    first = asyncio.create_task(_run_plan(adapter, live_context=context, intent_store=store))
+    await asyncio.wait_for(guard.entered.wait(), timeout=5)
+    second = asyncio.create_task(_run_plan(adapter, live_context=context, intent_store=store))
+    for _ in range(50):
+        if guard.calls == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert guard.calls == 2  # the replay went through to the guard: the slot did not refuse it
+    guard.release.set()
+    outcomes = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+    assert all(o.reason_code != "SYMBOL_HAS_OPEN_ORDER" for o in outcomes)
+    assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
+
+
+async def test_the_symbol_slot_is_freed_when_the_placement_raises() -> None:
+    from src.execution import manager as manager_module
+
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    guard = StubMarginGuard(exception=KeyboardInterrupt())
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(KeyboardInterrupt):
+        await _run_plan(adapter, live_context=_build_live_context(case_input, margin_guard=guard))
+    assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
