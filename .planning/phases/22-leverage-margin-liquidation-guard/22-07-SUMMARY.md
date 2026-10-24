@@ -92,3 +92,12 @@ None. The module has no I/O, endpoint, file access or schema surface.
 ## Evidence label
 
 Executed unit tests with recorded Demo bracket inputs (demo-observed, not mainnet) [DESIGN]. The formula is a reconstruction; criterion 2 is not Demo-proven until the owner runs `isolated_position_liquidation_price` (plan 22-09).
+
+## Amendment 2026-10-24
+
+Driven by the owner's Demo run `demo-probe-EVIDENCE-20261024T043134Z.json` (case `isolated_position_liquidation_price`, Demo-observed, not mainnet). The recorded BTC perpetual LONG (entry 80845.8, quantity 0.0014, leverage 5, tier 1) has an exchange `liquidationPrice` of 64968.85373637 and an `isolatedWallet` of 22.59155035, which is the initial margin minus the entry fee (0.0004 x Q x EP). The module as first written ignored the fee and gave 64936.3855, about 32 on the non-conservative side for a long.
+
+- `liquidation_price` and `liquidation_verdict` take a REQUIRED keyword-only `entry_fee_rate: Decimal` (no default, finite, >= 0, 0 allowed; bool, int, float, str and None raise). The wallet is `Q x EP / L - entry_fee_rate x Q x EP` in `Fraction`s; a wallet of zero or less is `None` / `LIQUIDATION_INPUT_UNAVAILABLE`. The rate is never a constant in `src/risk`.
+- `liquidation_beyond_stop` is NOT changed: it receives a liquidation price and uses no fee, so a fee argument there would be unused.
+- Goldens G1 to G5 pass `entry_fee_rate=Decimal("0")` and their numbers are unchanged. New golden G6 is the Demo record: with the fee the module gives 64968.853735, 1.4e-6 from the exchange value (the exchange rounds the wallet to eight decimals; with the recorded rounded wallet the closed form gives 64968.85373637 exactly). The test asserts within 1e-5 and that the no-fee value differs by more than 30.
+- The statement "equality with the exchange value has never been observed" is replaced in the module docstring by the observation above. It is one record, one tier, Demo only: not a proof for other tiers, for a short, or for mainnet. Callers: plan 22-13 and plan 22-14 carry a `plan_check_addenda` block saying they must pass the fee rate.
