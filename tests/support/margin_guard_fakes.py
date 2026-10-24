@@ -334,10 +334,12 @@ class ScriptedConfigGuard:
         *,
         events: list[str] | None = None,
         exception: BaseException | None = None,
+        target_leverage: int = TARGET_LEVERAGE,
     ) -> None:
         self._result = result
         self._events = events if events is not None else []
         self._exception = exception
+        self.target_leverage = target_leverage
         self.calls: list[tuple[str, bool]] = []
 
     async def ensure(self, *, symbol: str, symbol_is_flat: bool) -> Any:

@@ -8,16 +8,19 @@ the FIRST refusal wins, each with its own plain reason code (amendment A7):
    reading is ``UNCERTAIN_ACCOUNT_STATE``, a hedge account is ``HEDGE_MODE_UNSUPPORTED`` and a
    multi-asset account is ``MARGIN_MODE_UNSUPPORTED``. Nothing is mutated on an account the system
    does not support or cannot read (criterion 4, T-22-48).
-1. The SYMBOL CONFIGURATION second: ISOLATED margin and the target leverage are set and VERIFIED by
-   a read (plan 22-11, criterion 1). It is second because the leverage every later number needs is
-   the one the exchange confirmed, not the one the system asked for.
-2. The LIQUIDATION check third (criterion 2): exchange brackets from the bounded-age cache, the
-   notional within the symbol's ``maxNotionalValue``, and the strict buffer beyond the stop, all at
-   the verified leverage and with the entry fee of the request (``fee_rate_entry``, Demo-observed to
-   reduce the isolated wallet, plan 22-07 amendment of 2026-10-24).
-3. The AVAILABLE MARGIN last (criterion 3): the fresh ``availableBalance`` must cover the initial
-   margin at the verified leverage, the fees, the open loss of an already marketable limit, the
+1. The LIQUIDATION check second (criterion 2): exchange brackets from the bounded-age cache and the
+   strict buffer beyond the stop, at the TARGET leverage and with the entry fee of the request
+   (``fee_rate_entry``, Demo-observed to reduce the isolated wallet, plan 22-07 amendment of
+   2026-10-24).
+2. The AVAILABLE MARGIN third (criterion 3): the fresh ``availableBalance`` must cover the initial
+   margin at the target leverage, the fees, the open loss of an already marketable limit, the
    margin of the other claims and the owner's headroom.
+3. The SYMBOL CONFIGURATION LAST (WR-01, review of 2026-10-24): ISOLATED margin and the target
+   leverage are set and VERIFIED by a read (plan 22-11, criterion 1). It is the only step that
+   changes the owner's account, so a plan the pure checks above refuse sends NOTHING. The verified
+   leverage must equal the target the checks were judged at (and never exceed the D035 cap); the
+   notional within the symbol's ``maxNotionalValue``, which depends on the leverage the exchange now
+   holds, is the one comparison that has to wait for the verified configuration.
 
 Fail closed. Any exception from any port (account refresh, configuration guard, bracket cache,
 claims reader) is NO_TRADE ``UNCERTAIN_ACCOUNT_STATE`` and only a verdict with a plain code is ever
@@ -28,8 +31,9 @@ that is stale or future-dated and a malformed answer of a port are refused the s
 Freshness contract (D-03, Pitfall 6). The account is refreshed once at the start; ``now`` is read
 from the injected clock AFTER the refresh and the reading is judged; the reading is judged AGAIN
 with a clock read taken after the last await (the bracket read and the claims read take time),
-immediately before the margin check, so the figure that decides is never older than the owner's
-bound. The bracket reading is re-checked against the owner's bracket bound as well.
+immediately before the margin check, and a THIRD time after the configuration step (its reads and
+POSTs take time), so the figure that passes is never older than the owner's bound. The bracket
+reading is re-checked against the owner's bracket bound at the same two moments.
 
 Reason codes are plain strings or existing enum values; ``RejectionReason`` is not changed
 (amendment A3): ``UNCERTAIN_ACCOUNT_STATE`` and ``INSUFFICIENT_MARGIN`` from the enum,
@@ -77,7 +81,11 @@ from src.domain.enums import Direction, RejectionReason
 from src.execution.bracket_cache import BracketReading
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.pre_placement import HEDGE_MODE_UNSUPPORTED
-from src.execution.symbol_config_guard import TARGET_MARGIN_TYPE, ConfigGuardResult
+from src.execution.symbol_config_guard import (
+    TARGET_LEVERAGE,
+    TARGET_MARGIN_TYPE,
+    ConfigGuardResult,
+)
 from src.risk.liquidation import (
     LIQUIDATION_INPUT_UNAVAILABLE,
     NOTIONAL_ABOVE_MAX,
@@ -235,7 +243,15 @@ class ClaimsPort(Protocol):
 
 
 class ConfigGuardPort(Protocol):
-    """The symbol configuration guard of plan 22-11."""
+    """The symbol configuration guard of plan 22-11.
+
+    ``target_leverage`` is the leverage ``ensure`` sets and verifies (a plain int, never above the
+    D035 cap). The guard judges liquidation and margin AT that leverage before any POST is sent
+    (WR-01), so it must be known without calling ``ensure``.
+    """
+
+    @property
+    def target_leverage(self) -> int: ...
 
     async def ensure(self, *, symbol: str, symbol_is_flat: bool) -> ConfigGuardResult: ...
 
@@ -254,7 +270,7 @@ def _is_plain_int(value: object) -> bool:
 
 
 class MarginGuard:
-    """Account mode, configuration, liquidation, margin: one fixed order, first refusal wins."""
+    """Account mode, liquidation, margin, configuration: one fixed order, first refusal wins."""
 
     def __init__(
         self,
@@ -301,6 +317,12 @@ class MarginGuard:
                 if not callable(getattr(port, name, None)):
                     raise TypeError(f"port must offer {name}")
         assert buffer_bps is not None and age_ms is not None and headroom_bps is not None
+        target = getattr(config_guard, "target_leverage", None)
+        if type(target) is not int:
+            raise TypeError("config_guard must offer an int target_leverage")
+        if target < 1 or target > TARGET_LEVERAGE:
+            raise ValueError("target_leverage must be between 1 and the D035 cap")
+        self._target_leverage: int = target
         self._config_guard = config_guard
         self._brackets = brackets
         self._account = account
@@ -325,7 +347,83 @@ class MarginGuard:
         if mode_code is not None:
             return _refusal(mode_code)
 
-        # 1. Symbol configuration: set and verified, or refused.
+        target = self._target_leverage
+
+        # 1. Liquidation at the TARGET leverage, BEFORE any configuration POST (WR-01): a plan the
+        #    pure checks refuse must not have changed the owner's account first. The verified
+        #    leverage has to equal the target (checked after the POSTs), so these numbers are the
+        #    ones that decide.
+        try:
+            reading = await self._brackets.get(symbol=request.symbol)
+        except Exception:  # noqa: BLE001 - a failing bracket source is NO_TRADE, class name only
+            return _refusal(_UNCERTAIN)
+        if reading is None:
+            return _refusal(LIQUIDATION_INPUT_UNAVAILABLE)
+        try:
+            usable = (
+                isinstance(reading, BracketReading)
+                and reading.symbol == request.symbol
+                and len(reading.brackets) > 0
+                and brackets_are_fresh(
+                    observed_at_utc=reading.observed_at_utc,
+                    now_utc=self._clock(),
+                    max_age=self._bracket_max_age,
+                )
+            )
+            if not usable:
+                return _refusal(LIQUIDATION_INPUT_UNAVAILABLE)
+            liquidation = liquidation_verdict(
+                side=request.side,
+                entry_price=request.limit_price,
+                quantity=request.quantity,
+                leverage=target,
+                brackets=reading.brackets,
+                stop_price=request.stop_price,
+                buffer_bps=self._buffer_bps,
+                entry_fee_rate=request.fee_rate_entry,
+            )
+        except Exception:  # noqa: BLE001 - an unjudgeable liquidation is NO_TRADE
+            return _refusal(_UNCERTAIN)
+        if not liquidation.ok:
+            return _refusal(liquidation.reason_code)
+
+        # 2. Available margin at the TARGET leverage, also before any POST: the claims, a clock
+        #    read after the last await, the reading re-judged.
+        try:
+            claims = await self._claims_snapshot()
+            second = self._account.check_margin(now_utc=self._clock())
+        except Exception:  # noqa: BLE001 - unreadable claims or reading is NO_TRADE
+            return _refusal(_UNCERTAIN)
+        again = _account_refusal(second)
+        if again is not None:
+            return _refusal(again)
+        if second.available is None or second.equity is None or second.observed_at_utc is None:
+            return _refusal(_UNCERTAIN)
+        try:
+            others = other_claims_margin(
+                claims=claims,
+                exclude_trade_plan_id=request.trade_plan_id,
+                reading_observed_at_utc=second.observed_at_utc,
+                resting_orders_netted=AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED,
+            )
+            margin = margin_verdict(
+                available_balance=second.available,
+                quantity=request.quantity,
+                limit_price=request.limit_price,
+                mark_price=request.mark_price,
+                side=request.side,
+                leverage=target,
+                fee_rate_entry=request.fee_rate_entry,
+                fee_rate_exit=request.fee_rate_exit,
+                others_margin=others,
+                headroom_bps=self._headroom_bps,
+            )
+        except Exception:  # noqa: BLE001 - an unjudgeable margin is NO_TRADE
+            return _refusal(_UNCERTAIN)
+        if not margin.ok:
+            return _refusal(margin.reason_code)
+
+        # 3. Symbol configuration: set and verified, or refused. The ONLY step that mutates.
         try:
             cfg = await self._config_guard.ensure(
                 symbol=request.symbol, symbol_is_flat=request.symbol_is_flat
@@ -340,82 +438,34 @@ class MarginGuard:
                 return _refusal(_UNCERTAIN, cfg=cfg)
             alert = cfg.alert_reason if isinstance(cfg.alert_reason, str) else None
             return _refusal(code, alert=alert, cfg=cfg)
-        verified = _verified_configuration(cfg)
-        if verified is None:
+        max_notional = _verified_max_notional(cfg, target)
+        if max_notional is None:
             return _refusal(_UNCERTAIN, cfg=cfg)
-        leverage, max_notional = verified
 
-        # 2. Liquidation: notional within the symbol maximum, then the buffer beyond the stop.
+        # 4. What only the verified configuration can show: the notional within the symbol's
+        #    maxNotionalValue (it depends on the leverage the exchange now holds).
+        if request.limit_price * request.quantity > max_notional:
+            return _refusal(NOTIONAL_ABOVE_MAX, cfg=cfg)
+
+        # 5. The POSTs and the reads took time: judge the reading and the brackets once more with
+        #    a clock read taken after the last await, so the figure that passes is never older
+        #    than the owner's bounds (Pitfall 6).
         try:
-            reading = await self._brackets.get(symbol=request.symbol)
-        except Exception:  # noqa: BLE001 - a failing bracket source is NO_TRADE, class name only
+            final = self._account.check_margin(now_utc=self._clock())
+            brackets_fresh = brackets_are_fresh(
+                observed_at_utc=reading.observed_at_utc,
+                now_utc=self._clock(),
+                max_age=self._bracket_max_age,
+            )
+        except Exception:  # noqa: BLE001 - an unjudgeable reading is NO_TRADE
             return _refusal(_UNCERTAIN, cfg=cfg)
-        if reading is None:
+        last = _account_refusal(final)
+        if last is not None:
+            return _refusal(last, cfg=cfg)
+        if final.equity is None or final.observed_at_utc is None:
+            return _refusal(_UNCERTAIN, cfg=cfg)
+        if not brackets_fresh:
             return _refusal(LIQUIDATION_INPUT_UNAVAILABLE, cfg=cfg)
-        try:
-            usable = (
-                isinstance(reading, BracketReading)
-                and reading.symbol == request.symbol
-                and len(reading.brackets) > 0
-                and brackets_are_fresh(
-                    observed_at_utc=reading.observed_at_utc,
-                    now_utc=self._clock(),
-                    max_age=self._bracket_max_age,
-                )
-            )
-            if not usable:
-                return _refusal(LIQUIDATION_INPUT_UNAVAILABLE, cfg=cfg)
-            if request.limit_price * request.quantity > max_notional:
-                return _refusal(NOTIONAL_ABOVE_MAX, cfg=cfg)
-            liquidation = liquidation_verdict(
-                side=request.side,
-                entry_price=request.limit_price,
-                quantity=request.quantity,
-                leverage=leverage,
-                brackets=reading.brackets,
-                stop_price=request.stop_price,
-                buffer_bps=self._buffer_bps,
-                entry_fee_rate=request.fee_rate_entry,
-            )
-        except Exception:  # noqa: BLE001 - an unjudgeable liquidation is NO_TRADE
-            return _refusal(_UNCERTAIN, cfg=cfg)
-        if not liquidation.ok:
-            return _refusal(liquidation.reason_code, cfg=cfg)
-
-        # 3. Available margin: the claims, a clock read after the last await, the reading re-judged.
-        try:
-            claims = await self._claims_snapshot()
-            second = self._account.check_margin(now_utc=self._clock())
-        except Exception:  # noqa: BLE001 - unreadable claims or reading is NO_TRADE
-            return _refusal(_UNCERTAIN, cfg=cfg)
-        again = _account_refusal(second)
-        if again is not None:
-            return _refusal(again, cfg=cfg)
-        if second.available is None or second.equity is None or second.observed_at_utc is None:
-            return _refusal(_UNCERTAIN, cfg=cfg)
-        try:
-            others = other_claims_margin(
-                claims=claims,
-                exclude_trade_plan_id=request.trade_plan_id,
-                reading_observed_at_utc=second.observed_at_utc,
-                resting_orders_netted=AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED,
-            )
-            margin = margin_verdict(
-                available_balance=second.available,
-                quantity=request.quantity,
-                limit_price=request.limit_price,
-                mark_price=request.mark_price,
-                side=request.side,
-                leverage=leverage,
-                fee_rate_entry=request.fee_rate_entry,
-                fee_rate_exit=request.fee_rate_exit,
-                others_margin=others,
-                headroom_bps=self._headroom_bps,
-            )
-        except Exception:  # noqa: BLE001 - an unjudgeable margin is NO_TRADE
-            return _refusal(_UNCERTAIN, cfg=cfg)
-        if not margin.ok:
-            return _refusal(margin.reason_code, cfg=cfg)
 
         sent, previous_type, previous_leverage = _evidence(cfg, always=True)
         return MarginGuardVerdict(
@@ -423,8 +473,8 @@ class MarginGuard:
             reason_code=_OK,
             alert_reason=None,
             margin_type=str(cfg.margin_type),
-            leverage=leverage,
-            equity_used=second.equity,
+            leverage=target,
+            equity_used=final.equity,
             config_changed=sent,
             previous_margin_type=previous_type,
             previous_leverage=previous_leverage,
@@ -453,17 +503,24 @@ def _account_refusal(check: object) -> str | None:
     return _UNCERTAIN
 
 
-def _verified_configuration(cfg: ConfigGuardResult) -> tuple[int, Decimal] | None:
-    """The verified leverage and ``maxNotionalValue``, or None when the result is not usable."""
+def _verified_max_notional(cfg: ConfigGuardResult, target: int) -> Decimal | None:
+    """The verified ``maxNotionalValue``, or None when the result is not usable.
+
+    The result must show ISOLATED and EXACTLY the target leverage the pure checks were judged at
+    (WR-01), and that leverage must not exceed the D035 cap whatever port produced it (WR-09): the
+    cap is enforced here as well as inside ``SymbolConfigGuard``.
+    """
     leverage = cfg.leverage
     max_notional = cfg.max_notional_value
     if cfg.margin_type != TARGET_MARGIN_TYPE:
         return None
-    if type(leverage) is not int or leverage < 1:
+    if type(leverage) is not int or leverage < 1 or leverage > TARGET_LEVERAGE:
+        return None
+    if leverage != target:
         return None
     if not isinstance(max_notional, Decimal) or not max_notional.is_finite() or max_notional <= 0:
         return None
-    return leverage, max_notional
+    return max_notional
 
 
 def _evidence(cfg: ConfigGuardResult, *, always: bool) -> tuple[bool, str | None, int | None]:

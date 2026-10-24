@@ -95,11 +95,11 @@ TRACER_CALLS = [
     ACCOUNT_CONFIG_READ,
     ACCOUNT_INFORMATION_READ,
     ACCOUNT_BALANCE_READ,
+    BRACKET_READ,
     CONFIG_READ,
     MARGIN_POST,
     LEVERAGE_POST,
     CONFIG_READ,
-    BRACKET_READ,
 ]
 ACCOUNT_READS = [ACCOUNT_CONFIG_READ, ACCOUNT_INFORMATION_READ, ACCOUNT_BALANCE_READ]
 CONFIG_CALLS = (CONFIG_READ, MARGIN_POST, LEVERAGE_POST)
@@ -124,8 +124,9 @@ async def test_recorded_crossed_x20_account_flows_through_every_check_to_one_pas
     assert verdict.previous_margin_type == "CROSSED"
     assert verdict.previous_leverage == 20
     assert verdict.alert_reason is None
-    # The three account reads, the symbolConfig read, the two POSTs, the verification read, then
-    # the bracket read: the fixed order of the guard.
+    # The three account reads, the bracket read (both pure checks are judged on those), then the
+    # symbolConfig read, the two POSTs and the verification read: the fixed order of the guard.
+    # The configuration step is LAST so a refused plan sends nothing (WR-01).
     assert rig.rest.calls == TRACER_CALLS
     assert rig.rest.config_sdk.margin_type == "ISOLATED"
     assert rig.rest.config_sdk.leverage == 5
@@ -176,22 +177,27 @@ async def test_the_account_is_judged_after_the_refresh_and_again_after_the_last_
     )
     verdict = await guard.evaluate(request())
     assert verdict.is_no_trade is False
-    assert len(account.check_times) == 2
+    # first judgement (account mode), second (before the margin verdict), third (after the
+    # configuration step: its reads and POSTs take time too).
+    assert len(account.check_times) == 3
     assert account.check_times[0] == START
     assert account.check_times[1] == START + jump
+    assert account.check_times[2] == START + jump
 
 
 async def test_a_reading_that_ages_during_the_bracket_and_configuration_reads_is_refused() -> None:
     # Every SDK call takes 2 s of virtual time: the 8 calls of the tracer take 16 s, more than
-    # the 9137 ms equity bound, although each judgement taken earlier was still fresh (Pitfall 6).
-    # The bracket read alone takes 2 s, inside the bracket bound (4141 ms).
+    # the 9137 ms equity bound, although each judgement taken earlier (at 6 s and 8 s, before the
+    # configuration step) was still fresh (Pitfall 6). The third judgement, taken after the
+    # configuration step, is the one that refuses. The bracket read alone takes 2 s, inside the
+    # bracket bound (4141 ms).
     rig = build_rig(advance_per_call=timedelta(seconds=2))
     verdict = await rig.guard.evaluate(request())
     assert verdict.is_no_trade is True
     assert verdict.reason_code == UNCERTAIN
     assert verdict.equity_used is None
     assert rig.rest.calls == TRACER_CALLS
-    # The mutation happened before the refusal: the evidence rides on the refusal.
+    # The mutation happened before this late refusal: the evidence rides on the refusal.
     assert verdict.config_changed is True
     assert verdict.previous_margin_type == "CROSSED"
     assert verdict.previous_leverage == 20
@@ -320,105 +326,125 @@ def _scenarios() -> list[Scenario]:
             lambda: build_rig(account=account_payloads(config_edit=_multi_assets)),
             untouched=account_untouched,
         ),
+        # The pure checks (liquidation, margin) run BEFORE the configuration step (WR-01): a
+        # refusal there never reads or POSTs the symbol configuration (``config_untouched``).
         Scenario(
             "non-flat symbol with a mismatch",
             "MARGIN_CONFIG_CHANGE_REFUSED",
             build_rig,
             edits={"symbol_is_flat": False},
-            untouched=(*NO_POSTS, BRACKET_READ),
+            untouched=NO_POSTS,
+            claims_called=1,
         ),
         Scenario(
             "configuration cannot be verified",
             "MARGIN_CONFIG_UNVERIFIED",
             lambda: build_rig(config_sdk=_unchangeable()),
             alert="MARGIN_CONFIG_UNVERIFIED",
-            untouched=(BRACKET_READ,),
+            claims_called=1,
         ),
         Scenario(
             "configuration read fails",
             "MARGIN_CONFIG_UNVERIFIED",
             lambda: _with(build_rig(), _failing(CONFIG_READ)),
             alert="MARGIN_CONFIG_UNVERIFIED",
-            untouched=(*NO_POSTS, BRACKET_READ),
+            untouched=NO_POSTS,
+            claims_called=1,
         ),
         Scenario(
             "auto add margin on",
             "AUTO_ADD_MARGIN_ENABLED",
             lambda: build_rig(config_sdk=isolated_sdk(auto_add=True)),
-            untouched=(*NO_POSTS, BRACKET_READ),
+            untouched=NO_POSTS,
+            claims_called=1,
         ),
         Scenario(
             "no bracket reading",
             "LIQUIDATION_INPUT_UNAVAILABLE",
-            lambda: _with(build_rig(config_sdk=isolated_sdk()), _failing(BRACKET_READ)),
+            lambda: _with(build_rig(), _failing(BRACKET_READ)),
+            untouched=CONFIG_CALLS,
         ),
         Scenario(
             "notional above the symbol maximum",
             "NOTIONAL_ABOVE_MAX",
-            lambda: build_rig(config_sdk=isolated_sdk("20000000")),
-            edits={"quantity": Decimal("250.0000125")},
+            lambda: build_rig(config_sdk=isolated_sdk("20000000"), account=_rich_account()),
+            edits={"quantity": Decimal("250.0000125"), "stop_price": Decimal("70000")},
+            claims_called=1,
         ),
         Scenario(
             "leverage above the bracket",
             "LEVERAGE_ABOVE_BRACKET",
-            lambda: build_rig(config_sdk=isolated_sdk("300000000")),
+            build_rig,
             edits={"quantity": Decimal("1500")},
+            untouched=CONFIG_CALLS,
         ),
         Scenario(
             "liquidation too close (long)",
             "LIQUIDATION_TOO_CLOSE",
-            lambda: build_rig(config_sdk=isolated_sdk()),
+            build_rig,
             edits={"stop_price": Decimal("65000")},
+            untouched=CONFIG_CALLS,
         ),
         Scenario(
             "liquidation too close (short)",
             "LIQUIDATION_TOO_CLOSE",
-            lambda: build_rig(config_sdk=isolated_sdk()),
+            build_rig,
             edits={"side": "SHORT", "stop_price": Decimal("95000")},
+            untouched=CONFIG_CALLS,
         ),
         Scenario(
             "inverted stop geometry",
             "LIQUIDATION_INPUT_UNAVAILABLE",
-            lambda: build_rig(config_sdk=isolated_sdk()),
+            build_rig,
             edits={"stop_price": Decimal("81000")},
+            untouched=CONFIG_CALLS,
         ),
         Scenario(
             "insufficient margin",
             "INSUFFICIENT_MARGIN",
-            lambda: build_rig(config_sdk=isolated_sdk()),
+            build_rig,
             edits={"quantity": Decimal("10")},
+            untouched=CONFIG_CALLS,
             claims_called=1,
         ),
         Scenario(
             "claim with an unknown margin",
             UNCERTAIN,
-            lambda: build_rig(config_sdk=isolated_sdk(), claims=[claim("OTHER", None)]),
+            lambda: build_rig(claims=[claim("OTHER", None)]),
+            untouched=CONFIG_CALLS,
             claims_called=1,
         ),
         Scenario(
             "reserved claim exhausts the free margin",
             "INSUFFICIENT_MARGIN",
-            lambda: build_rig(config_sdk=isolated_sdk(), claims=[claim("OTHER", "5000")]),
+            lambda: build_rig(claims=[claim("OTHER", "5000")]),
+            untouched=CONFIG_CALLS,
             claims_called=1,
         ),
         Scenario(
             "placed claim placed after the reading still counts (netting verified, D085)",
             "INSUFFICIENT_MARGIN",
             lambda: build_rig(
-                config_sdk=isolated_sdk(),
                 claims=[
                     claim("OTHER", "4900", ReservationStatus.PLACED, placed_after_reading=True)
                 ],
             ),
+            untouched=CONFIG_CALLS,
             claims_called=1,
         ),
         Scenario(
             "claims port raises",
             UNCERTAIN,
-            lambda: build_rig(config_sdk=isolated_sdk(), claims_exception=RuntimeError(SECRET)),
+            lambda: build_rig(claims_exception=RuntimeError(SECRET)),
+            untouched=CONFIG_CALLS,
             claims_called=1,
         ),
     ]
+
+
+def _rich_account() -> dict[str, Any]:
+    """The recorded account with an availableBalance far above any margin of these tests."""
+    return account_payloads(information_edit=set_available_balance("50000000"))
 
 
 def _with(rig: GuardRig, apply: Callable[[GuardRig], None]) -> GuardRig:
@@ -478,8 +504,14 @@ async def test_a_refusal_without_a_post_carries_no_configuration_evidence() -> N
 
 
 async def test_a_refusal_after_a_post_carries_the_evidence_to_the_end_of_the_chain() -> None:
-    verdict = await build_rig().guard.evaluate(request(quantity=Decimal("10")))
-    assert verdict.reason_code == INSUFFICIENT
+    # The symbol's maxNotionalValue AT x5 (500) is below the 800 notional of the plan: only the
+    # verified configuration can show it, so the POSTs were sent before this refusal.
+    sdk = StatefulConfigSdk(max_notional_by_leverage={5: "500"})
+    rig = build_rig(config_sdk=sdk)
+    verdict = await rig.guard.evaluate(request())
+    assert verdict.reason_code == NOTIONAL_ABOVE_MAX
+    assert rig.rest.count(MARGIN_POST) == 1
+    assert rig.rest.count(LEVERAGE_POST) == 1
     assert verdict.config_changed is True
     assert verdict.previous_margin_type == "CROSSED"
     assert verdict.previous_leverage == 20
@@ -567,22 +599,32 @@ def _scripted_guard(
     ("layer", "code", "expected_events"),
     [
         (0, "HEDGE_MODE_UNSUPPORTED", ["refresh", "check_margin"]),
-        (1, "MARGIN_CONFIG_CHANGE_REFUSED", ["refresh", "check_margin", "config"]),
-        (2, "LIQUIDATION_TOO_CLOSE", ["refresh", "check_margin", "config", "brackets"]),
+        (1, "LIQUIDATION_TOO_CLOSE", ["refresh", "check_margin", "brackets"]),
+        (
+            2,
+            "INSUFFICIENT_MARGIN",
+            ["refresh", "check_margin", "brackets", "claims", "check_margin"],
+        ),
         (
             3,
-            "INSUFFICIENT_MARGIN",
-            ["refresh", "check_margin", "config", "brackets", "claims", "check_margin"],
+            "MARGIN_CONFIG_CHANGE_REFUSED",
+            ["refresh", "check_margin", "brackets", "claims", "check_margin", "config"],
         ),
     ],
 )
 async def test_the_first_refusal_in_the_fixed_order_wins(
     layer: int, code: str, expected_events: list[str]
 ) -> None:
-    """Hedge account, wrong configuration, close stop and no margin: one problem is reported."""
+    """Hedge account, close stop, no margin and a refused configuration: one problem is reported.
+
+    The configuration step is LAST (WR-01): the two pure checks come first and a refusal there
+    never reaches the configuration port.
+    """
     events: list[str] = []
     account = ScriptedAccount(
-        refused_check(BLOCKED_HEDGE_MODE) if layer == 0 else usable_check(available="10"),
+        refused_check(BLOCKED_HEDGE_MODE)
+        if layer == 0
+        else usable_check(available="10" if layer < 3 else "4999.09343961"),
         events=events,
     )
     config = ScriptedConfigGuard(
@@ -593,22 +635,20 @@ async def test_the_first_refusal_in_the_fixed_order_wins(
             margin_type=None,
             leverage=None,
             max_notional_value=None,
-        )
-        if layer <= 1
-        else config_result(),
+        ),
         events=events,
     )
     guard, ports = _scripted_guard(events, account=account, config=config)
-    # layer 2 and 3 share the close stop (65000): the liquidation check refuses first at layer 2
-    stop = Decimal("65000") if layer == 2 else Decimal("66000")
+    # layer 1 has the close stop (65000) and no margin; layer 2 has no margin only
+    stop = Decimal("65000") if layer == 1 else Decimal("66000")
     verdict = await guard.evaluate(request(stop_price=stop))
     assert verdict.reason_code == code
     assert events == expected_events
-    if layer < 3:
-        assert ports["claims"].calls == 0
     if layer < 2:
-        assert ports["brackets"].calls == []
+        assert ports["claims"].calls == 0
     if layer < 1:
+        assert ports["brackets"].calls == []
+    if layer < 3:
         assert config.calls == []
 
 
@@ -662,21 +702,33 @@ async def test_the_short_mirror_passes_and_fails_on_the_other_side_of_the_stop()
 
 
 async def test_a_notional_equal_to_the_symbol_maximum_is_not_above_it() -> None:
-    # 250 x 80000 = 20000000 = the recorded maxNotionalValue. The notional check passes (equal
-    # passes); the liquidation of this much larger position is then too close to the stop.
-    rig = build_rig(config_sdk=isolated_sdk("20000000"))
-    verdict = await rig.guard.evaluate(request(quantity=Decimal("250")))
-    assert verdict.reason_code == LIQUIDATION_TOO_CLOSE
+    # 250 x 80000 = 20000000 = the recorded maxNotionalValue: equal passes. With the stop at 70000
+    # the liquidation (65483.9) is beyond the buffer, and the owner-sized account covers the margin.
+    rig = build_rig(config_sdk=isolated_sdk("20000000"), account=_rich_account())
+    verdict = await rig.guard.evaluate(
+        request(quantity=Decimal("250"), stop_price=Decimal("70000"))
+    )
+    assert verdict.is_no_trade is False
+    # One unit of quantity-notional above the maximum is refused.
+    above = await build_rig(
+        config_sdk=isolated_sdk("20000000"), account=_rich_account()
+    ).guard.evaluate(request(quantity=Decimal("250.0000125"), stop_price=Decimal("70000")))
+    assert above.reason_code == NOTIONAL_ABOVE_MAX
+    # The 250 x 80000 plan with the 66000 stop is refused by the liquidation check (pure, first).
+    close = await build_rig(config_sdk=isolated_sdk("20000000")).guard.evaluate(
+        request(quantity=Decimal("250"))
+    )
+    assert close.reason_code == LIQUIDATION_TOO_CLOSE
 
 
-async def test_the_leverage_used_after_the_configuration_is_the_verified_one() -> None:
-    # The scripted configuration reports leverage 2 verified: the initial margin uses 2, not 5.
+async def test_the_leverage_used_for_the_checks_is_the_target_the_port_reports() -> None:
+    # The port's target leverage is 2 (and it verifies 2): the initial margin uses 2, not 5.
     # Available 100 covers 160/5 + costs, but not 160 x 5 / 2 = 400 + costs.
     events: list[str] = []
     guard, _ = _scripted_guard(
         events,
         account=ScriptedAccount(usable_check(available="100"), events=events),
-        config=ScriptedConfigGuard(config_result(leverage=2), events=events),
+        config=ScriptedConfigGuard(config_result(leverage=2), events=events, target_leverage=2),
     )
     verdict = await guard.evaluate(request())
     assert verdict.reason_code == INSUFFICIENT
@@ -685,6 +737,121 @@ async def test_the_leverage_used_after_the_configuration_is_the_verified_one() -
         events2, account=ScriptedAccount(usable_check(available="200"), events=events2)
     )
     assert (await guard5.evaluate(request())).is_no_trade is False
+
+
+# ---- WR-01: the pure checks run before any configuration POST
+
+
+def _pure_refusals() -> list[tuple[str, str, dict[str, Any], Callable[[GuardRig], None] | None]]:
+    return [
+        ("liquidation too close", LIQUIDATION_TOO_CLOSE, {"stop_price": Decimal("65000")}, None),
+        ("leverage above the bracket", LEVERAGE_ABOVE_BRACKET, {"quantity": Decimal("1500")}, None),
+        ("inverted stop", LIQUIDATION_INPUT_UNAVAILABLE, {"stop_price": Decimal("81000")}, None),
+        ("insufficient margin", INSUFFICIENT, {"quantity": Decimal("10")}, None),
+        ("no bracket reading", LIQUIDATION_INPUT_UNAVAILABLE, {}, _failing(BRACKET_READ)),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("edits", "code", "break_rig"),
+    [pytest.param(e, c, b, id=name) for name, c, e, b in _pure_refusals()],
+)
+async def test_a_plan_refused_by_a_pure_check_leaves_the_recorded_account_untouched(
+    edits: dict[str, Any], code: str, break_rig: Callable[[GuardRig], None] | None
+) -> None:
+    """WR-01: the recorded CROSSED x20 symbol stays CROSSED x20; no configuration call is made."""
+    rig = build_rig()
+    if break_rig is not None:
+        break_rig(rig)
+    verdict = await rig.guard.evaluate(request(**edits))
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == code
+    for name in CONFIG_CALLS:
+        assert rig.rest.count(name) == 0, name
+    assert (rig.rest.config_sdk.margin_type, rig.rest.config_sdk.leverage) == ("CROSSED", 20)
+    assert verdict.config_changed is False
+    assert verdict.previous_margin_type is None
+    assert verdict.previous_leverage is None
+
+
+async def test_a_repeated_refused_attempt_never_posts_while_the_plan_stays_unplaceable() -> None:
+    # An approve tap repeated on a plan the guard cannot pass used to repeat the account mutation.
+    rig = build_rig()
+    for _ in range(3):
+        verdict = await rig.guard.evaluate(request(stop_price=Decimal("65000")))
+        assert verdict.reason_code == LIQUIDATION_TOO_CLOSE
+    assert rig.rest.count(CONFIG_READ) == 0
+    assert rig.rest.count(MARGIN_POST) == 0
+    assert rig.rest.count(LEVERAGE_POST) == 0
+
+
+async def test_a_passing_plan_sends_each_post_once_and_the_verification_read_decides() -> None:
+    rig = build_rig()
+    verdict = await rig.guard.evaluate(request())
+    assert verdict.is_no_trade is False
+    assert rig.rest.count(MARGIN_POST) == 1
+    assert rig.rest.count(LEVERAGE_POST) == 1
+    assert rig.rest.count(CONFIG_READ) == 2  # the first read and the verification read
+    # The POSTs come after the bracket read: the pure checks were judged first.
+    assert rig.rest.calls.index(BRACKET_READ) < rig.rest.calls.index(MARGIN_POST)
+
+
+async def test_the_guard_judges_the_pure_checks_at_the_target_of_its_configuration_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    seen: list[dict[str, Any]] = []
+    real = margin_guard_module.liquidation_verdict  # type: ignore[attr-defined]
+
+    def spy(**kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    guard, _ = _scripted_guard(
+        events,
+        config=ScriptedConfigGuard(config_result(leverage=3), events=events, target_leverage=3),
+    )
+    monkeypatch.setattr(margin_guard_module, "liquidation_verdict", spy)
+    verdict = await guard.evaluate(request())
+    assert verdict.is_no_trade is False
+    assert verdict.leverage == 3
+    (call,) = seen
+    assert call["leverage"] == 3
+    # the order: liquidation and margin judged BEFORE the configuration port is reached
+    assert events.index("brackets") < events.index("claims") < events.index("config")
+
+
+# ---- WR-09: the D035 cap holds in the guard whatever port reports the leverage
+
+
+@pytest.mark.parametrize("bad", [6, 50])
+def test_construction_refuses_a_target_leverage_above_the_d035_cap(bad: int) -> None:
+    with pytest.raises(ValueError):
+        _scripted_guard(
+            [], config=ScriptedConfigGuard(config_result(leverage=bad), target_leverage=bad)
+        )
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_construction_refuses_a_target_leverage_below_one(bad: int) -> None:
+    with pytest.raises(ValueError):
+        _scripted_guard([], config=ScriptedConfigGuard(config_result(), target_leverage=bad))
+
+
+@pytest.mark.parametrize("bad", [None, True, 5.0, "5"])
+def test_construction_refuses_a_target_leverage_that_is_not_a_plain_int(bad: Any) -> None:
+    with pytest.raises(TypeError):
+        _scripted_guard([], config=ScriptedConfigGuard(config_result(), target_leverage=bad))
+
+
+async def test_a_port_that_verifies_fifty_x_is_refused_even_if_it_reports_a_5x_target() -> None:
+    events: list[str] = []
+    guard, _ = _scripted_guard(
+        events, config=ScriptedConfigGuard(config_result(leverage=50), events=events)
+    )
+    verdict = await guard.evaluate(request())
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == UNCERTAIN
 
 
 # ---- margin specifics
@@ -803,18 +970,39 @@ async def test_any_port_exception_is_uncertain_account_state_without_its_text(
 
 
 async def test_a_configuration_exception_carries_no_evidence_and_a_later_one_keeps_it() -> None:
+    # A failure BEFORE the configuration step (the claims read) sent nothing: no evidence.
     events: list[str] = []
     sent = config_result(posts_sent=2, previous_margin_type="CROSSED", previous_leverage=20)
-    guard, _ = _scripted_guard(
+    guard, ports = _scripted_guard(
         events,
         config=ScriptedConfigGuard(sent, events=events),
         claims=ScriptedClaims(events=events, exception=_Boom(SECRET)),
     )
-    verdict = await guard.evaluate(request())
-    assert verdict.reason_code == UNCERTAIN
-    assert verdict.config_changed is True
-    assert verdict.previous_margin_type == "CROSSED"
-    assert verdict.previous_leverage == 20
+    early = await guard.evaluate(request())
+    assert early.reason_code == UNCERTAIN
+    assert early.config_changed is False
+    assert early.previous_margin_type is None
+    assert ports["config"].calls == []
+    # A failure AFTER it (the third reading judgement) keeps the evidence of the POSTs.
+    events2: list[str] = []
+    calls = {"n": 0}
+
+    def third_raises() -> None:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise _Boom(SECRET)
+
+    guard2, _ = _scripted_guard(
+        events2,
+        account=ScriptedAccount(usable_check(), events=events2, on_check=third_raises),
+        config=ScriptedConfigGuard(sent, events=events2),
+    )
+    late = await guard2.evaluate(request())
+    assert late.reason_code == UNCERTAIN
+    assert late.config_changed is True
+    assert late.previous_margin_type == "CROSSED"
+    assert late.previous_leverage == 20
+    assert SECRET not in repr(late)
 
 
 @pytest.mark.parametrize(
@@ -827,6 +1015,8 @@ async def test_a_configuration_exception_carries_no_evidence_and_a_later_one_kee
         config_result(leverage=0),
         config_result(max_notional_value=None),
         config_result(max_notional_value=Decimal("0")),
+        config_result(leverage=6),  # above the D035 cap (WR-09)
+        config_result(leverage=2),  # not the target the checks were judged at (WR-01)
     ],
     ids=[
         "not a result",
@@ -836,6 +1026,8 @@ async def test_a_configuration_exception_carries_no_evidence_and_a_later_one_kee
         "zero leverage",
         "no max",
         "max 0",
+        "above the cap",
+        "not the target",
     ],
 )
 async def test_a_malformed_or_unusable_configuration_answer_is_uncertain(bad_config: Any) -> None:
@@ -843,8 +1035,8 @@ async def test_a_malformed_or_unusable_configuration_answer_is_uncertain(bad_con
     guard, ports = _scripted_guard(events, config=ScriptedConfigGuard(bad_config, events=events))
     verdict = await guard.evaluate(request())
     assert verdict.reason_code == UNCERTAIN
-    assert ports["brackets"].calls == []
-    assert ports["claims"].calls == 0
+    assert verdict.is_no_trade is True
+    assert ports["config"].calls == [(SYMBOL, True)]  # the pure checks passed first
 
 
 @pytest.mark.parametrize("bad_code", ["", "OK", None, 5])
