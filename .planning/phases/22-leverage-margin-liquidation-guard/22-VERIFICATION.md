@@ -206,3 +206,22 @@ No blocking gaps. Phase 22 achieved its goal as a tested library plus one wired 
 
 _Verified: 2026-10-24_
 _Verifier: Claude (gsd-verifier)_
+
+
+## Addendum as of D085 and the review fixes (22-REVIEW-FIX.md, 2026-10-25)
+
+This file was written before the owner's answer of 2026-10-24 (DECISIONS D085, D086) and before the
+review fixes. Where it contradicts the repository, the repository wins:
+
+- The three `margin.*` keys are NOT `NOT_CONFIGURED` any more: `config/execution/execution-limits-v1.toml`
+  holds 300 (`margin.liquidation_buffer_bps`), 60000 (`margin.max_bracket_age_ms`) and 1000
+  (`margin.headroom_bps`) with the provenance `DECISION`. The lines "56 to 59 and 89 to 92" and the
+  O-1 to O-3 human-verification rows above describe the state before D085.
+- `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED` is `True` (D085), not `False`.
+- O-4 is decided: `CLOSE_POSITION`. The policy is a required argument of `LiquidationWatch.__init__`
+  and the coordinator takes the watch (`liquidation_watch=`); D085's wording "to
+  `ProtectionCoordinator`" means the watch that the coordinator is given. DECISIONS D085 is
+  canonical and is corrected at its next touch, not here.
+- The order of `MarginGuard.evaluate` is now: account mode, liquidation, available margin, then the
+  symbol configuration (the only step that POSTs); see 22-REVIEW-FIX.md WR-01. Truth 1 above
+  ("configuration second") describes the earlier order.
