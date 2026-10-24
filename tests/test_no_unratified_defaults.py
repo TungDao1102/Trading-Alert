@@ -210,11 +210,23 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # 7 "<section>_<key>" field names = 30 + 7 + 6 + 7 = 50 guarded names, plus the alert-only key
     # of plan 20-28 (key text `entry_stale_grace_ms` and field `reconcile_entry_stale_grace_ms`),
     # plus Phase 21 (plan 21-02): key text `max_equity_age_ms` and field
-    # `account_max_equity_age_ms` (52 -> 54).
-    assert len(GUARDED_NAMES) == 54
+    # `account_max_equity_age_ms` (52 -> 54), plus Phase 22 (plan 22-02): the three margin key texts
+    # `liquidation_buffer_bps`, `max_bracket_age_ms`, `headroom_bps` and their three field names
+    # `margin_<key>` (54 -> 60; derived from the code, no text collides with an earlier name).
+    assert len(GUARDED_NAMES) == 60
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
     # Plan 21-02 (D-03): the equity-age bound has no numeric default under either spelling.
     assert {"max_equity_age_ms", "account_max_equity_age_ms"} <= GUARDED_NAMES
+    # Plan 22-02 (D-10, D-11, D-13): the buffer, the bracket age and the headroom have no numeric
+    # default under either spelling (OWNER-OPEN O-2, O-3).
+    assert {
+        "liquidation_buffer_bps",
+        "max_bracket_age_ms",
+        "headroom_bps",
+        "margin_liquidation_buffer_bps",
+        "margin_max_bracket_age_ms",
+        "margin_headroom_bps",
+    } <= GUARDED_NAMES
     # Plan 20-01: the key texts AND the "<section>_<key>" field names of the Phase 20 keys are
     # guarded, so a numeric default cannot hide behind either spelling.
     assert {
@@ -290,6 +302,12 @@ _FORBIDDEN_FORMS = {
     "phase 20 stale feed field keyword": "build(stale_feed_max_user_data_silence_ms=9000)\n",
     "phase 20 probe count default": "def f(reconcile_entry_unknown_probe_count=3):\n    pass\n",
     "phase 20 alerts constant": "ALERTS_DEDUPE_WINDOW_MS = 60000\n",
+    "phase 22 buffer key text assignment": "liquidation_buffer_bps = 50\n",
+    "phase 22 buffer field name assignment": "margin_liquidation_buffer_bps = 50\n",
+    "phase 22 bracket age key text default": "def f(max_bracket_age_ms=60000):\n    pass\n",
+    "phase 22 bracket age field keyword": "build(margin_max_bracket_age_ms=60000)\n",
+    "phase 22 headroom key text constant": "HEADROOM_BPS = 100\n",
+    "phase 22 headroom field name assignment": "margin_headroom_bps = 100\n",
     "positional execution limits argument": "ExecutionLimits(1, 2, 3, 4)\n",
     "positional limits argument": "StreamLimits(1800, 3)\n",
     "positional limits argument through a module": "limits_mod.RateLimitPolicy(10, 20, 30)\n",
