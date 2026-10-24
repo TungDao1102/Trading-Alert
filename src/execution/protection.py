@@ -208,6 +208,7 @@ from src.execution.intent_store import ExecutionIntentStore
 from src.execution.liquidation_watch import (
     LIQUIDATION_TOO_CLOSE_AFTER_FILL,
     LIQUIDATION_UNKNOWN_AFTER_FILL,
+    LiquidationFailurePolicy,
     LiquidationWatchAction,
     LiquidationWatchInput,
     LiquidationWatchPort,
@@ -1659,8 +1660,10 @@ class ProtectionCoordinator:
         read in the PROTECTED step, which also attaches the take-profits, or after a restore). An
         unreadable position read is journaled and the plan stays unchecked (the next step tries
         again); a flat read marks it checked without a call; a watch that raises, a position row
-        the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed).
-        The check places and cancels nothing; the stop is never touched.
+        the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed),
+        unless the watch's policy is explicitly ``ALERT_ONLY`` (owner item O-4, WR-04): then it is
+        journaled and alerted as an unknown value, like the watch's own unknown verdict. The check
+        places and cancels nothing; the stop is never touched.
         """
         watch = self._liquidation_watch
         if watch is None or tracked.liquidation_checked:
@@ -1711,12 +1714,16 @@ class ProtectionCoordinator:
             if not isinstance(verdict, LiquidationWatchVerdict):
                 raise TypeError("verdict")
         except Exception as exc:  # noqa: BLE001 - an unjudgeable position is closed (fail closed)
+            now = self._now()
             self._journal_note(
-                tracked,
-                EVENT_LIQUIDATION_CHECK_ERROR,
-                {"error_type": type(exc).__name__},
-                self._now(),
+                tracked, EVENT_LIQUIDATION_CHECK_ERROR, {"error_type": type(exc).__name__}, now
             )
+            # WR-04: the owner's policy (O-4) governs the error paths as it governs an unknown
+            # exchange value. Only an EXPLICIT ALERT_ONLY alerts instead of closing; a watch that
+            # exposes no readable policy keeps the fail-closed close.
+            if getattr(watch, "policy", None) is LiquidationFailurePolicy.ALERT_ONLY:
+                self._liquidation_alert(tracked, LIQUIDATION_UNKNOWN_AFTER_FILL, now)
+                return False
             await self._enter_close_required(tracked, BRANCH_B6_LIQUIDATION_TOO_CLOSE)
             return True
         now = self._now()

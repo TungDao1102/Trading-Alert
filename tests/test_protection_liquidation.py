@@ -294,6 +294,75 @@ async def test_a_verdict_of_the_wrong_type_is_a_close() -> None:
     assert _events(rig, EVENT_LIQUIDATION_CHECK_ERROR)[0]["error_type"] == "TypeError"
 
 
+@dataclass
+class PolicyWatch(ScriptedWatch):
+    """A scripted watch that also exposes the owner's policy (O-4), as the real watch does."""
+
+    policy: LiquidationFailurePolicy = LiquidationFailurePolicy.CLOSE_POSITION
+
+
+def _put_row_field(fake: BinanceSemanticsFakeAdapter, **changes: Any) -> None:
+    original = fake.snapshot_positions
+
+    async def edited(**kwargs: Any) -> Any:
+        rows = await original(**kwargs)
+        return [replace(row, **changes) for row in rows]
+
+    fake.snapshot_positions = edited  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("case", ["raises", "wrong type", "bad row"])
+async def test_alert_only_policy_alerts_instead_of_closing_on_the_error_paths(case: str) -> None:
+    """WR-04: ALERT_ONLY is the owner's policy for every unknown, including the error paths."""
+    if case == "raises":
+        watch: Any = PolicyWatch(
+            error=RuntimeError("secret detail"), policy=LiquidationFailurePolicy.ALERT_ONLY
+        )
+    elif case == "wrong type":
+        watch = PolicyWatch("OK", policy=LiquidationFailurePolicy.ALERT_ONLY)
+    else:
+        watch = _real_watch(LiquidationFailurePolicy.ALERT_ONLY)
+    rig = await _rig_with_price(watch)
+    if case == "bad row":
+        _put_row_field(rig.fake, entry_price=None)
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert not _entered_b6(rig)
+    assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
+    assert rig.closer.calls == []  # type: ignore[union-attr]
+    assert "CLOSE_REQUIRED" not in rig.safe_mode.entered_reasons
+    (note,) = _events(rig, EVENT_LIQUIDATION_CHECK_ERROR)
+    assert "secret detail" not in json.dumps(note)
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("DIVERGENCE", LIQUIDATION_UNKNOWN_AFTER_FILL)
+    ]
+    # Once per plan: a later step neither asks again nor alerts again.
+    await rig.clock.advance(1)
+    await rig.coordinator.step()
+    assert len(rig.alerts.alerts) == 1
+
+
+@pytest.mark.parametrize("case", ["raises", "wrong type", "bad row"])
+async def test_close_position_policy_still_closes_on_the_error_paths(case: str) -> None:
+    if case == "raises":
+        watch: Any = PolicyWatch(error=RuntimeError("x"))
+    elif case == "wrong type":
+        watch = PolicyWatch("OK")
+    else:
+        watch = _real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    rig = await _rig_with_price(watch)
+    if case == "bad row":
+        _put_row_field(rig.fake, entry_price=None)
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+
+    assert _entered_b6(rig)
+    assert len(rig.closer.calls) == 1  # type: ignore[union-attr]
+
+
 @pytest.mark.parametrize("value", [None, D("0"), D("0.00000000")])
 async def test_the_real_watch_closes_on_the_cross_margin_sentinel_through_the_hook(
     value: Decimal | None,

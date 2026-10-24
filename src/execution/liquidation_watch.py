@@ -177,7 +177,12 @@ class EntryFeeRateSource(Protocol):
 
 
 class LiquidationWatchPort(Protocol):
-    """What the protection coordinator calls, once per plan."""
+    """What the protection coordinator calls, once per plan.
+
+    A port MAY expose ``policy`` (a ``LiquidationFailurePolicy``): the coordinator reads it, with
+    ``getattr``, only on its own error paths, where only an explicit ``ALERT_ONLY`` softens a close
+    into an alert (WR-04). A port without a policy keeps the fail-closed close.
+    """
 
     async def check(self, inputs: LiquidationWatchInput) -> LiquidationWatchVerdict: ...
 
