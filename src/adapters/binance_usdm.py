@@ -559,6 +559,25 @@ class AccountConfigSnapshot:
     dual_side_position: bool
 
 
+@dataclass(frozen=True)
+class SymbolConfigSnapshot:
+    """Result of `symbol_config_snapshot` (GET /fapi/v1/symbolConfig, weight 5, plan 22-01).
+
+    The only read that returns the margin type, the leverage, `isAutoAddMargin` and
+    `maxNotionalValue` of one symbol (the `positionRisk` answer of the current API has no
+    leverage field, 22-RESEARCH 2.3). `margin_type` is kept as the exchange text: the CROSSED
+    casing is demo-observed, not mainnet; the ISOLATED casing is ASSUMED until the owner-run
+    case records it (22-RESEARCH A5, D-18). Choosing a target and comparing it with this
+    snapshot belong to the guard of plan 22-11, not to the adapter.
+    """
+
+    symbol: str
+    margin_type: str
+    leverage: int
+    is_auto_add_margin: bool
+    max_notional_value: Decimal
+
+
 # The exchange window rule for userTrades (SDK 17.4.0 docstring): startTime to endTime may not
 # be longer than seven days.
 _MAX_WINDOW = timedelta(days=7)
@@ -1703,6 +1722,48 @@ class BinanceUsdmAdapter:
         return AccountConfigSnapshot(
             multi_assets_margin=raw.multi_assets_margin,
             dual_side_position=raw.dual_side_position,
+        )
+
+    async def symbol_config_snapshot(self, *, symbol: str) -> SymbolConfigSnapshot:
+        """Read the margin type and leverage of one symbol (GET /fapi/v1/symbolConfig, plan 22-01).
+
+        USER_DATA, IP weight 5, through the official SDK `rest_api.symbol_configuration(symbol,
+        recv_window)` and `_sdk_call` (policy, shared REST gate, never retried). Exactly one row
+        for the requested symbol is required; an empty answer, two rows or a row for another
+        symbol raises. `marginType` must be non-empty text, `leverage` an int (not a bool) of at
+        least 1, `isAutoAddMargin` a real bool and `maxNotionalValue` a finite decimal text: a
+        dropped or renamed field must not read as a default. Every `ValueError` names the field
+        only, never the value, and nothing about the response is logged. The adapter takes no
+        clock.
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.symbol_configuration, symbol=symbol
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError("symbol config response empty: refusing to fabricate")
+        rows = raw if isinstance(raw, list) else [raw]
+        if len(rows) != 1:
+            raise ValueError("symbol config answer must hold exactly one row for the symbol")
+        row = rows[0]
+        if row.symbol != symbol:
+            raise ValueError("symbol config row is for another symbol: refusing to use it")
+        margin_type = row.margin_type
+        if not isinstance(margin_type, str) or margin_type.strip() == "":
+            raise ValueError("marginType missing or not text: refusing to fabricate")
+        leverage = row.leverage
+        if isinstance(leverage, bool) or not isinstance(leverage, int) or leverage < 1:
+            raise ValueError("leverage missing or not a positive int: refusing to fabricate")
+        if not isinstance(row.is_auto_add_margin, bool):
+            raise ValueError("isAutoAddMargin missing or not a bool")
+        return SymbolConfigSnapshot(
+            symbol=symbol,
+            margin_type=margin_type,
+            leverage=leverage,
+            is_auto_add_margin=row.is_auto_add_margin,
+            max_notional_value=_require_exchange_decimal(
+                row.max_notional_value, "maxNotionalValue"
+            ),
         )
 
     async def user_trades_in_window(
