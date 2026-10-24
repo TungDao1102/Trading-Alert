@@ -11,6 +11,7 @@ are not Demo evidence (D-19).
 from __future__ import annotations
 
 import ast
+import re
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -1125,3 +1126,112 @@ async def test_an_executed_run_with_fixtures_writes_the_new_cases_answers(tmp_pa
     assert any("leverage_brackets" in name for name in names)
     assert any("account_information" in name for name in names)
     assert any("positions" in name for name in names)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 22-09, task 3: the owner's runbook names every case, key and recorded detail.
+# --------------------------------------------------------------------------- #
+
+RUNBOOK = Path(dp.__file__).resolve().parents[1] / ".planning" / "DEMO-EVIDENCE-PLAN.md"
+
+
+def runbook() -> str:
+    return RUNBOOK.read_text(encoding="utf-8")
+
+
+def runbook_section(title: str) -> str:
+    text = runbook()
+    start = text.index(title)
+    match = re.search(r"\n## ", text[start + len(title) :])
+    return text[start : start + len(title) + match.start()] if match else text[start:]
+
+
+def case_body(text: str, number: int, case_id: str) -> str:
+    """The text of the numbered runbook section of one case, up to the next heading."""
+    start = text.index(f"### {number}. {case_id}")
+    ends = [text.find(marker, start + 1) for marker in ("\n### ", "\n## ")]
+    return text[start : min(end for end in ends if end != -1)]
+
+
+def test_the_runbook_names_every_sj3_case_key_and_the_leverage_rule() -> None:
+    text = runbook()
+    for case_id, key in SJ3_KEYS.items():
+        assert f"`{case_id}`" in text and f"`{key}`" in text, case_id
+    assert "config_target_leverage" in text and "not Demo-proven" in text
+    assert "AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED" in text
+
+
+def test_sections_24_to_29_are_one_per_case_in_order_with_the_same_parts() -> None:
+    text = runbook()
+    headings = re.findall(r"^### (2[4-9])\. (\w+) \(key `(\w+)`", text, flags=re.M)
+    assert [(number, case_id, key) for number, case_id, key in headings] == [
+        (str(24 + index), case_id, SJ3_KEYS[case_id]) for index, case_id in enumerate(SJ3_IDS)
+    ]
+    for number, case_id, _ in headings[1:]:  # section 24 was written by plan 22-05
+        body = case_body(text, int(number), case_id)
+        for part in ("- Read", "- Consumers:", "- If it stops:"):
+            assert part in body, (case_id, part)
+        assert "demo-observed" in body or "Demo-observed" in body or "Phase 22" in body
+
+
+def test_the_step_0_rules_and_the_session_list_carry_the_phase_22_keys() -> None:
+    step0 = runbook_section("## Step 0: your limits file")
+    for key in SJ3_KEYS.values():
+        assert f"{key} = <OWNER: true or false>" in step0, key
+    assert "insufficient_margin` or `margin_insufficient_target` is true" in step0
+    assert "`symbol_config_change`, `margin_insufficient_target` or `isolated_liquidation`" in step0
+    session = runbook_section("## One session: all cases")
+    positions = [session.index(f"`{case_id}`") for case_id in (*SJ3_IDS, "gtd_entry_expiry_status")]
+    assert positions == sorted(positions)
+    assert re.search(r"^29\. `gtd_entry_expiry_status`", session, flags=re.M)
+    for case_id in SJ3_IDS[1:]:
+        assert re.search(rf"^\d+\. `{case_id}`", session, flags=re.M), case_id
+
+
+def test_the_consumers_table_and_the_evidence_map_name_the_phase_22_readers() -> None:
+    consumers = runbook_section("## Consumers table")
+    for case_id in SJ3_IDS:
+        assert f"| {case_id} |" in consumers, case_id
+    for reader in ("22-11", "22-13", "22-14", "O-1", "O-2", "A1", "A3", "A6"):
+        assert reader in consumers, reader
+    evidence_map = runbook_section("## Phase 22 evidence map")
+    for case_id in SJ3_IDS:
+        assert f"| {case_id} |" in evidence_map, case_id
+    assert "NOT Demo-proven" in evidence_map and "criterion 1" in evidence_map
+    assert "O-1 to O-4" in evidence_map and "demo-observed, not mainnet" in evidence_map
+    for forbidden in ("http://", "https://", "BINANCE_"):
+        assert forbidden not in runbook(), forbidden
+
+
+async def test_the_runbook_read_lists_name_details_the_cases_really_record(
+    tmp_path: Path,
+) -> None:
+    # The names the sections promise are run on the fakes: each must be a recorded detail.
+    promised = {
+        BALANCE: (far_resting_port, ("available_balance_delta", "open_order_margin_delta")),
+        MARGIN_TYPE: (
+            FakeProbePort,
+            ("previous_margin_type", "change_accepted", "restore_accepted"),
+        ),
+        LEVERAGE_MAX: (
+            FakeProbePort,
+            ("bracket_one_initial_leverage", "requested_leverage", "restore_accepted"),
+        ),
+        MARGIN_TARGET: (isolated_port, ("target_implied_initial_margin", "target_order_accepted")),
+        LIQUIDATION: (
+            position_port,
+            (
+                "position_liquidation_price",
+                "account_position_isolatedMargin",
+                "config_at_position_leverage",
+            ),
+        ),
+    }
+    text = runbook()
+    for case_id, (make_port, names) in promised.items():
+        document, _ = await run_cases(sub(tmp_path, case_id), make_port(), case_id)
+        details = case(document, case_id)["details"]
+        body = case_body(text, 24 + SJ3_IDS.index(case_id), case_id)
+        for name in names:
+            assert name in body, (case_id, name)
+            assert name in details, (case_id, name)
