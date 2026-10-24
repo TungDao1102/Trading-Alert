@@ -1,0 +1,13 @@
+{
+  "case_id": "leverage_above_bracket_maximum",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

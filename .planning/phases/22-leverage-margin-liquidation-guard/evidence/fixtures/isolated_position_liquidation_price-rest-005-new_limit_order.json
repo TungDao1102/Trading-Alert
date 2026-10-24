@@ -1,0 +1,29 @@
+{
+  "case_id": "isolated_position_liquidation_price",
+  "index": 5,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "new_limit_order",
+    "summary": {
+      "client_order_id": "dprobe-ilq-20261024T043134Z-3",
+      "close_position": "false",
+      "executed_qty": "0.0000",
+      "good_till_date": "0",
+      "order_id": "28649112198",
+      "orig_qty": "0.0014",
+      "orig_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "82877.60",
+      "reduce_only": "false",
+      "side": "BUY",
+      "status": "NEW",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "LIMIT",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

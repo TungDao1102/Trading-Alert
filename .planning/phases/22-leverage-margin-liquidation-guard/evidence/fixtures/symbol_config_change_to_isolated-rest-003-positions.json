@@ -1,0 +1,13 @@
+{
+  "case_id": "symbol_config_change_to_isolated",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

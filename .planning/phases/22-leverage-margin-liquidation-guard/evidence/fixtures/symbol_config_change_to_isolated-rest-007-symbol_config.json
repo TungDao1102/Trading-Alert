@@ -1,0 +1,17 @@
+{
+  "case_id": "symbol_config_change_to_isolated",
+  "index": 7,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "symbol_config",
+    "summary": {
+      "0.isAutoAddMargin": "false",
+      "0.leverage": "5",
+      "0.marginType": "ISOLATED",
+      "0.maxNotionalValue": "100000000",
+      "0.symbol": "BTCUSDT"
+    }
+  }
+}

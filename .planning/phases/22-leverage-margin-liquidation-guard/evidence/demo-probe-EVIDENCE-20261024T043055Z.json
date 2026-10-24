@@ -1,0 +1,620 @@
+{
+  "acceptance": {
+    "account_state": {
+      "proof_class": "REAL_DEMO",
+      "reason": "account state recorded before and after",
+      "result": "PASS"
+    },
+    "available_balance_with_resting_order": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "below_min_notional_reduce_only_leg": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cancel_algo_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cancel_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cleanup": {
+      "proof_class": "REAL_DEMO",
+      "reason": "zero open orders, zero open algo orders, flat position",
+      "result": "PASS"
+    },
+    "closeposition_stop_flat": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "duplicate_client_algo_id": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "entry_never_fills_protective_orphan": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "evidence": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the evidence passes check_probe_evidence",
+      "result": "PASS"
+    },
+    "full_fill_protective_quantity": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "get_algo_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "get_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_algo": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_normal": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_filled": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "isolated_position_liquidation_price": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "label_and_d055": {
+      "proof_class": "REAL_DEMO",
+      "reason": "labelled demo-observed, not mainnet; D055 stays OPEN",
+      "result": "PASS"
+    },
+    "leverage_above_bracket_maximum": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "margin_insufficient_at_target_leverage": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "margin_type_change_with_resting_order": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "overall": {
+      "proof_class": "REAL_DEMO",
+      "reason": "failing: ['available_balance_with_resting_order', 'below_min_notional_reduce_only_leg', 'cancel_algo_order_not_found', 'cancel_order_not_found', 'closeposition_stop_flat', 'duplicate_client_algo_id', 'entry_never_fills_protective_orphan', 'full_fill_protective_quantity', 'get_algo_order_not_found', 'get_order_not_found', 'id_reuse_after_canceled_algo', 'id_reuse_after_canceled_normal', 'id_reuse_after_filled', 'isolated_position_liquidation_price', 'leverage_above_bracket_maximum', 'margin_insufficient_at_target_leverage', 'margin_type_change_with_resting_order', 'partial_fill', 'preplaced_stop_reduce_only_flat', 'rejected_protective_variants', 'triggered_market_exit_lifecycle']",
+      "result": "FAIL"
+    },
+    "partial_fill": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "preplaced_stop_reduce_only_flat": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "proof_class": {
+      "proof_class": "REAL_DEMO",
+      "reason": "executed on Demo",
+      "result": "PASS"
+    },
+    "rejected_protective_variants": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "symbol_config_change_to_isolated": {
+      "proof_class": "REAL_DEMO",
+      "reason": "OBSERVED: 7 exchange answer(s) recorded",
+      "result": "PASS"
+    },
+    "triggered_market_exit_lifecycle": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    }
+  },
+  "account_after": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "3",
+        "row_0_asset": "BTC",
+        "row_0_available_balance": "0.01000000",
+        "row_0_balance": "0.01000000",
+        "row_1_asset": "USDT",
+        "row_1_available_balance": "4998.22020068",
+        "row_1_balance": "4998.22020068",
+        "row_2_asset": "USDC",
+        "row_2_available_balance": "5000.00000000",
+        "row_2_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "account_before": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "3",
+        "row_0_asset": "BTC",
+        "row_0_available_balance": "0.01000000",
+        "row_0_balance": "0.01000000",
+        "row_1_asset": "USDT",
+        "row_1_available_balance": "4998.22020068",
+        "row_1_balance": "4998.22020068",
+        "row_2_asset": "USDC",
+        "row_2_available_balance": "5000.00000000",
+        "row_2_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "ban": null,
+  "case_order": [
+    "symbol_config_change_to_isolated"
+  ],
+  "cases": [
+    {
+      "case_id": "symbol_config_change_to_isolated",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "already_at_target": "false",
+        "config_after_accepted": "true",
+        "config_after_leverage": "5",
+        "config_after_margin_type": "ISOLATED",
+        "config_after_margin_type_equals_ISOLATED": "true",
+        "config_after_max_notional_value": "100000000",
+        "config_after_read": "accepted",
+        "config_before_accepted": "true",
+        "config_before_leverage": "20",
+        "config_before_margin_type": "CROSSED",
+        "config_before_max_notional_value": "20000000",
+        "config_before_read": "accepted",
+        "leverage_answer_accepted": "true",
+        "leverage_answer_leverage": "5",
+        "leverage_answer_maxNotionalValue": "100000000",
+        "leverage_answer_symbol": "BTCUSDT",
+        "leverage_change": "accepted",
+        "margin_type_answer_accepted": "true",
+        "margin_type_answer_code": "200",
+        "margin_type_answer_msg": "success",
+        "margin_type_change": "accepted",
+        "precheck_state": "open_orders=0 open_algo_orders=0 positions=0 readable=true",
+        "previous_leverage": "20",
+        "previous_margin_type": "CROSSED",
+        "requested_leverage": "5",
+        "requested_margin_type": "ISOLATED"
+      },
+      "finished_utc": "2026-10-24T04:30:58.772819+00:00",
+      "frames": {
+        "events": [
+          {
+            "after_gap": "false",
+            "connection_epoch": "1",
+            "event_type": "AccountUpdateEvent",
+            "reason": "MARGIN_TYPE_CHANGE",
+            "received_at_utc": "2026-10-24T04:30:58.619729+00:00"
+          },
+          {
+            "after_gap": "false",
+            "connection_epoch": "1",
+            "event_type": "AccountConfigUpdateEvent",
+            "received_at_utc": "2026-10-24T04:30:58.694479+00:00",
+            "symbol": "BTCUSDT"
+          }
+        ],
+        "fixtures": [
+          "symbol_config_change_to_isolated-001-ACCOUNT_UPDATE.json",
+          "symbol_config_change_to_isolated-002-ACCOUNT_CONFIG_UPDATE.json"
+        ],
+        "status": "OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [
+        "the previous configuration (marginType=CROSSED, leverage=20) was NOT restored: the owner decides"
+      ],
+      "observations": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "open_orders",
+          "summary": {
+            "count": "0"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "open_algo_orders",
+          "summary": {
+            "count": "0"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "positions",
+          "summary": {
+            "count": "0"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "symbol_config",
+          "summary": {
+            "0.isAutoAddMargin": "false",
+            "0.leverage": "20",
+            "0.marginType": "CROSSED",
+            "0.maxNotionalValue": "20000000",
+            "0.symbol": "BTCUSDT"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "change_margin_type",
+          "summary": {
+            "code": "200",
+            "msg": "success"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "change_initial_leverage",
+          "summary": {
+            "leverage": "5",
+            "maxNotionalValue": "100000000",
+            "symbol": "BTCUSDT"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "symbol_config",
+          "summary": {
+            "0.isAutoAddMargin": "false",
+            "0.leverage": "5",
+            "0.marginType": "ISOLATED",
+            "0.maxNotionalValue": "100000000",
+            "0.symbol": "BTCUSDT"
+          }
+        }
+      ],
+      "planned_requests": [],
+      "reason": null,
+      "rest_fixtures": [
+        "symbol_config_change_to_isolated-rest-001-open_orders.json",
+        "symbol_config_change_to_isolated-rest-002-open_algo_orders.json",
+        "symbol_config_change_to_isolated-rest-003-positions.json",
+        "symbol_config_change_to_isolated-rest-004-symbol_config.json",
+        "symbol_config_change_to_isolated-rest-005-change_margin_type.json",
+        "symbol_config_change_to_isolated-rest-006-change_initial_leverage.json",
+        "symbol_config_change_to_isolated-rest-007-symbol_config.json"
+      ],
+      "started_utc": "2026-10-24T04:30:58.201300+00:00",
+      "status": "OBSERVED"
+    }
+  ],
+  "cleanup": {
+    "final": {
+      "actions": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_open_orders",
+          "summary": {
+            "code": "200",
+            "msg": "The operation of cancel all open order is done."
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_algo_open_orders",
+          "summary": {
+            "code": "200",
+            "msg": "The operation of cancel all open order is done."
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "positions",
+          "summary": {
+            "count": "0"
+          }
+        }
+      ],
+      "notes": [],
+      "remaining": {
+        "open_algo_orders": 0,
+        "open_orders": 0,
+        "positions": [],
+        "readable": true
+      },
+      "status": "FLAT",
+      "waited_seconds": 0
+    }
+  },
+  "d055": {
+    "parameters": "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "statement": "D055 stays OPEN: this tool records facts and stops",
+    "status": "OPEN: the probe records facts and stops; D055 is decided by the user, never by this tool"
+  },
+  "environment": "DEMO",
+  "failures": [],
+  "finished_utc": "2026-10-24T04:31:00.400255+00:00",
+  "fixtures": [
+    "symbol_config_change_to_isolated-001-ACCOUNT_UPDATE.json",
+    "symbol_config_change_to_isolated-002-ACCOUNT_CONFIG_UPDATE.json",
+    "symbol_config_change_to_isolated-rest-001-open_orders.json",
+    "symbol_config_change_to_isolated-rest-002-open_algo_orders.json",
+    "symbol_config_change_to_isolated-rest-003-positions.json",
+    "symbol_config_change_to_isolated-rest-004-symbol_config.json",
+    "symbol_config_change_to_isolated-rest-005-change_margin_type.json",
+    "symbol_config_change_to_isolated-rest-006-change_initial_leverage.json",
+    "symbol_config_change_to_isolated-rest-007-symbol_config.json"
+  ],
+  "label": "demo-observed, not mainnet",
+  "live_port_calls": 31,
+  "market": {
+    "mark_price": {
+      "error": null,
+      "ok": true,
+      "operation": "mark_price",
+      "summary": {
+        "close": "80853.33635870",
+        "close_time_utc": "2026-10-24T04:30:59.999000+00:00",
+        "count": "1",
+        "interval": "1m",
+        "open_time_utc": "2026-10-24T04:30:00+00:00",
+        "symbol": "BTCUSDT"
+      }
+    },
+    "status": "READ",
+    "symbol_filters": {
+      "error": null,
+      "ok": true,
+      "operation": "symbol_filters",
+      "summary": {
+        "found": "true",
+        "market_lot_max_quantity": "120",
+        "market_lot_min_quantity": "0.0001",
+        "market_lot_step_size": "0.0001",
+        "max_quantity": "1000",
+        "min_notional": "50",
+        "min_quantity": "0.0001",
+        "percent_price_multiplier_decimals": "4",
+        "percent_price_multiplier_down": "0.9500",
+        "percent_price_multiplier_up": "1.0500",
+        "status": "TRADING",
+        "step_size": "0.0001",
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10"
+      }
+    }
+  },
+  "mode": "execute",
+  "notes": [
+    "D055 stays OPEN: this tool records facts and stops",
+    "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "The account's listenKey is a singleton: no other process may run on the same account during the probe (research P7)."
+  ],
+  "outcome": "COMPLETE",
+  "proof_class": "REAL_DEMO",
+  "schema": "demo-probe-evidence/schema-1",
+  "sdk_version": "17.4.0",
+  "settings": {
+    "case_timeout_seconds": 90,
+    "cleanup_timeout_seconds": 60,
+    "far_price_fraction": "0.96",
+    "gtd_expiry_wait_seconds": null,
+    "gtd_lifetime_seconds": null,
+    "insufficient_margin_quantity": "1",
+    "limits_file": "binance-limits-v1.toml",
+    "limits_file_sha256": "9f522adcd35d56fa5dddbf79b42ab1f8c1d3f770bda7527caaf2cb28f8c43383",
+    "market_lot_probe_quantity": null,
+    "max_notional_quote": "150",
+    "near_trigger_fraction": null,
+    "only": [
+      "symbol_config_change_to_isolated"
+    ],
+    "optional_cases": {
+      "account_capture": false,
+      "algo_query_timing": false,
+      "available_balance_resting": true,
+      "cancel_fill_race": false,
+      "close_position_with_position": false,
+      "commission_realized_pnl": false,
+      "exchange_info_read": false,
+      "explicit_time_in_force": false,
+      "gtd_expiry": false,
+      "gtd_min_lifetime": false,
+      "income_history": false,
+      "insufficient_margin": false,
+      "isolated_liquidation": true,
+      "leverage_above_max": true,
+      "manual_close_open_legs": false,
+      "margin_insufficient_target": true,
+      "margin_type_resting_order": true,
+      "market_lot_size_out_of_range": false,
+      "min_notional_entry": false,
+      "partial_fill_attempt": false,
+      "recv_window_error": false,
+      "reduce_only_flat": false,
+      "reduce_only_oversize": false,
+      "stop_absent_same_id": false,
+      "stop_reject_after_accept": false,
+      "stop_trigger_after_fill": false,
+      "stream_gap": false,
+      "stream_loss": false,
+      "symbol_config_change": true,
+      "tp1_from_fill": false,
+      "trigger_cancel_race": false,
+      "triggered_bracket": false
+    },
+    "probe_limits_file": "22-probe-limits-sj3.toml",
+    "probe_limits_file_sha256": "b668ce4b977deda3eba44435f8edd7fa872ecc061b1771f48f64723ca52f261f",
+    "quantity": "0.0014",
+    "race_repeats": null
+  },
+  "started_utc": "2026-10-24T04:30:55.664666+00:00",
+  "stream": {
+    "status": "STARTED",
+    "stop": "stopped"
+  },
+  "symbol": "BTCUSDT"
+}

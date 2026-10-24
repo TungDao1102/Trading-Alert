@@ -1,0 +1,14 @@
+{
+  "case_id": "symbol_config_change_to_isolated",
+  "index": 5,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "change_margin_type",
+    "summary": {
+      "code": "200",
+      "msg": "success"
+    }
+  }
+}

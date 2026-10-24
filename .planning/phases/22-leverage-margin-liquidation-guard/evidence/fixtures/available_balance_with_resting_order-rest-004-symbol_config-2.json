@@ -1,0 +1,17 @@
+{
+  "case_id": "available_balance_with_resting_order",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "symbol_config",
+    "summary": {
+      "0.isAutoAddMargin": "false",
+      "0.leverage": "5",
+      "0.marginType": "ISOLATED",
+      "0.maxNotionalValue": "100000000",
+      "0.symbol": "BTCUSDT"
+    }
+  }
+}

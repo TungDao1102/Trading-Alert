@@ -1,0 +1,23 @@
+{
+  "case_id": "isolated_position_liquidation_price",
+  "index": 7,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "1",
+      "row_0_break_even_price": "80878.13832",
+      "row_0_entry_price": "80845.8",
+      "row_0_liquidation_price": "64968.85373637",
+      "row_0_margin_asset": "USDT",
+      "row_0_mark_price": "80856.41630435",
+      "row_0_notional": "113.19898282",
+      "row_0_position_amt": "0.0014",
+      "row_0_position_side": "BOTH",
+      "row_0_symbol": "BTCUSDT",
+      "row_0_unrealized_profit": "0.01486282"
+    }
+  }
+}
