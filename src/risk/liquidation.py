@@ -64,6 +64,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 from fractions import Fraction
 from typing import Final
@@ -112,6 +113,17 @@ def _require_positive_int(value: object, field_name: str) -> int:
         raise TypeError(f"{field_name} must be int, got {type(value).__name__}")
     if value < 1:
         raise ValueError(f"{field_name} must be at least 1, got {value}")
+    return value
+
+
+def _require_utc_aware(value: object, field_name: str) -> datetime:
+    """Reject non-datetime, naive and non-UTC values."""
+    if not isinstance(value, datetime):
+        raise TypeError(f"{field_name} must be datetime, got {type(value).__name__}")
+    if value.tzinfo is None:
+        raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
     return value
 
 
@@ -188,6 +200,28 @@ def _candidate(
     return (entry * (1 + inverse) + cum / quantity) / (1 + ratio)
 
 
+def _shape_is_usable(brackets: Sequence[Bracket]) -> bool:
+    """True when the list is non-empty, sorted by bracket number and contiguous from zero.
+
+    Contiguous means the first floor is zero and every floor equals the previous cap. A list that
+    fails this (empty, unsorted, duplicate number, gap or overlap) is bracket data the guard must
+    not use. A non-`Bracket` element is a programming error.
+    """
+    if not brackets:
+        return False
+    for item in brackets:
+        if not isinstance(item, Bracket):
+            raise TypeError(f"brackets must hold Bracket objects, got {type(item).__name__}")
+    if brackets[0].notional_floor != 0:
+        return False
+    for previous, current in zip(brackets, brackets[1:], strict=False):
+        if current.bracket <= previous.bracket:
+            return False
+        if current.notional_floor != previous.notional_cap:
+            return False
+    return True
+
+
 def _solve(
     *,
     side: str,
@@ -197,16 +231,34 @@ def _solve(
     brackets: Sequence[Bracket],
 ) -> tuple[str, Fraction | None]:
     """The reason code and the exact liquidation price (None unless the reason is OK)."""
-    if not brackets:
+    if not _shape_is_usable(brackets):
         return LIQUIDATION_INPUT_UNAVAILABLE, None
     entry = Fraction(entry_price)
     qty = Fraction(quantity)
-    consistent: list[Fraction] = []
-    for tier in brackets:
-        lp = _candidate(side=side, entry=entry, quantity=qty, leverage=leverage, tier=tier)
-        if Fraction(tier.notional_floor) <= qty * lp <= Fraction(tier.notional_cap):
-            consistent.append(lp)
+    entry_notional = entry * qty
+    if entry_notional > Fraction(brackets[-1].notional_cap):
+        return NOTIONAL_ABOVE_MAX, None
+    # The bracket(s) containing the entry notional (two at an exact edge: the smaller maximum
+    # leverage binds, fail closed).
+    allowed = min(
+        t.initial_leverage
+        for t in brackets
+        if Fraction(t.notional_floor) <= entry_notional <= Fraction(t.notional_cap)
+    )
+    if leverage > allowed:
+        return LEVERAGE_ABOVE_BRACKET, None
+    candidates = [
+        (t, _candidate(side=side, entry=entry, quantity=qty, leverage=leverage, tier=t))
+        for t in brackets
+    ]
+    consistent = [
+        lp
+        for t, lp in candidates
+        if Fraction(t.notional_floor) <= qty * lp <= Fraction(t.notional_cap)
+    ]
     if not consistent:
+        if all(lp <= 0 for _, lp in candidates):
+            return LIQUIDATION_INPUT_UNAVAILABLE, None
         return NOTIONAL_ABOVE_MAX, None
     best = max(consistent) if side == _LONG else min(consistent)
     if best <= 0:
@@ -321,3 +373,24 @@ def liquidation_verdict(
     ):
         return LiquidationVerdict(False, LIQUIDATION_TOO_CLOSE, _to_decimal(exact))
     return LiquidationVerdict(True, LIQUIDATION_OK, _to_decimal(exact))
+
+
+def brackets_are_fresh(*, observed_at_utc: datetime, now_utc: datetime, max_age: timedelta) -> bool:
+    """The project's stale rule for the bracket table (D-11).
+
+    Age greater than `max_age`, or negative (an observation from the future), is stale; an age
+    exactly equal to `max_age` passes. The caller supplies both instants and the limit: this module
+    reads no clock.
+
+    Raises:
+        TypeError: an instant is not a datetime, or `max_age` is not a timedelta.
+        ValueError: an instant is naive or non-UTC, or `max_age` is not positive.
+    """
+    observed = _require_utc_aware(observed_at_utc, "observed_at_utc")
+    now = _require_utc_aware(now_utc, "now_utc")
+    if not isinstance(max_age, timedelta):
+        raise TypeError(f"max_age must be timedelta, got {type(max_age).__name__}")
+    if max_age <= timedelta(0):
+        raise ValueError(f"max_age must be positive, got {max_age}")
+    age = now - observed
+    return timedelta(0) <= age <= max_age
