@@ -5,19 +5,33 @@ not exist yet be, and does it lie beyond the stop-loss by the buffer? The answer
 `LiquidationVerdict`, never an exception, so a refused plan is a NO_TRADE with a plain code and
 not a crash. The pre-entry guard, the post-fill watch and the tests all call this one module.
 
-Formulas. Symbol `Q` (quantity), `EP` (entry price), `L` (the verified leverage), `m` and `cum`
-(maintenance margin ratio and maintenance amount of one leverage bracket):
+Formulas. Symbol `Q` (quantity), `EP` (entry price), `L` (the verified leverage), `f` (the entry
+fee rate, a caller input), `m` and `cum` (maintenance margin ratio and maintenance amount of one
+leverage bracket). The isolated wallet is `WB = Q x EP / L - f x Q x EP`, and `w = WB / (Q x EP)
+= 1/L - f`:
 
-    LONG   LP = (EP x (1 - 1/L) - cum/Q) / (1 - m)
-    SHORT  LP = (EP x (1 + 1/L) + cum/Q) / (1 + m)
+    LONG   LP = (EP x (1 - w) - cum/Q) / (1 - m)
+    SHORT  LP = (EP x (1 + w) + cum/Q) / (1 + m)
+
+With `f = 0` these are the formulas of plan 22-07 as first written (`w = 1/L`).
 
 Source label. The variables, the isolated rule (TMM = UPNL = 0, the wallet is the isolated
 wallet) and the tier-change rule are [CITED: FAQ-liq]. The general formula is an image on that
 page, so the closed form above is a reconstruction from the stated liquidation condition (margin
 balance equals maintenance margin); it reproduces both worked examples of the page to the cent
-(22-RESEARCH 2.5, MEDIUM confidence). Equality with the exchange's own isolated `liquidationPrice`
-has never been observed and is NOT claimed: the owner-run Demo case
-`isolated_position_liquidation_price` settles it.
+(22-RESEARCH 2.5, MEDIUM confidence).
+
+Demo observation (amendment 2026-10-24). The owner-run Demo case
+`isolated_position_liquidation_price` (evidence file `demo-probe-EVIDENCE-20261024T043134Z.json`,
+Demo-observed, NOT mainnet) recorded, for a BTC perpetual LONG with entry 80845.8, quantity 0.0014,
+leverage 5 and tier 1 (m 0.004, cum 0), a `liquidationPrice` of 64968.85373637 and an
+`isolatedWallet` of 22.59155035. That wallet is the initial margin 22.636824 minus the entry fee
+(0.0004 x Q x EP = 0.04527365), so the entry fee DOES reduce the isolated wallet on Demo. With the
+fee the closed form gives 64968.853735 (about 1.4e-6 away: the exchange rounds the wallet to eight
+decimals); without it 64936.3855, about 32 on the non-conservative side for a long (for a short the
+omitted fee likewise moves the price toward the entry). The fee rate is therefore a REQUIRED input
+(`entry_fee_rate`, 0 allowed): the Demo taker rate was observed, no rate is a constant here. One
+Demo record at one tier is not a proof for every tier or for mainnet.
 
 Tier rule. `m` and `cum` are those of the bracket that contains `Q x LP`, the notional at the
 liquidation price, NOT of the bracket that contains `Q x EP`. The page says the rate and amount
@@ -31,10 +45,11 @@ Demo table and not a rule of this module); if a table were not continuous the co
 returned, the larger LP for a LONG and the smaller for a SHORT.
 
 Entry-price assumption. The position is taken to fill at `EP` (the limit price is the worst case
-in both directions), the isolated wallet equals the initial margin `Q x EP / L`, the entry fee does
-not reduce it, no funding is paid. These are [ASSUMED]; the page is silent. Fees and funding are
-therefore not in the number: the buffer and the post-fill comparison with the exchange value are
-the real margin of error.
+in both directions), the isolated wallet is the initial margin `Q x EP / L` less the entry fee
+`f x Q x EP` (Demo-observed, see above), no funding is paid and no exit fee is reserved. The
+funding and exit-fee parts are [ASSUMED]; the page is silent. They are therefore not in the number:
+the buffer and the post-fill comparison with the exchange value are the real margin of error. A
+wallet of zero or less (a fee rate of at least `1/L`) is NO_TRADE (LIQUIDATION_INPUT_UNAVAILABLE).
 
 Buffer predicate (D-09, D-10). `buffer = EP x buffer_bps / 10000`. LONG passes only when
 `LP < stop - buffer`; SHORT only when `LP > stop + buffer`. Strict: equality fails. `buffer_bps`
@@ -45,16 +60,17 @@ Decimal inputs, so a notional that lands exactly on a bracket edge selects a tie
 error. The Decimal returned is the exact value divided at the active context precision; no
 decision depends on that rounding.
 
-Every number is an input. The leverage, the buffer and every bracket value are arguments with no
-default and no constant here; the only numeric literals of this module are 0, 1 and the
-basis-point denominator 10000.
+Every number is an input. The leverage, the buffer, the entry fee rate and every bracket value are
+arguments with no default and no constant here; the only numeric literals of this module are 0, 1
+and the basis-point denominator 10000.
 
 Fail closed. A bracket list that is empty, not contiguous, malformed or stale, a notional above
 the top bracket cap, a leverage above the initial leverage of the entry bracket, a non-positive
 liquidation price or inverted stop geometry is NO_TRADE with its own plain code and never a pass.
-Anything that is not a finite Decimal, or a leverage or buffer that is not a plain positive int,
-raises (a programming error). The four codes are plain strings of this module (amendment A3: the
-`RejectionReason` enum is not touched); GLOSSARY 9.3 lists them.
+Anything that is not a finite Decimal (a fee rate must also be non-negative), or a leverage or
+buffer that is not a plain positive int, raises (a programming error). The four codes are plain
+strings of this module (amendment A3: the `RejectionReason` enum is not touched); GLOSSARY 9.3
+lists them.
 
 Purity (Phase 5 D-05): stdlib, Decimal, Fraction and `src.domain.enums` only; no clock, no SDK, no
 adapters, no store, no floats, no quote-asset name.
@@ -189,15 +205,17 @@ def _to_decimal(value: Fraction) -> Decimal:
 
 
 def _candidate(
-    *, side: str, entry: Fraction, quantity: Fraction, leverage: int, tier: Bracket
+    *, side: str, entry: Fraction, quantity: Fraction, wallet_share: Fraction, tier: Bracket
 ) -> Fraction:
-    """The liquidation price if `tier` were the active bracket (exact)."""
+    """The liquidation price if `tier` were the active bracket (exact).
+
+    `wallet_share` is the isolated wallet over the entry notional, `1/L - f`.
+    """
     ratio = Fraction(tier.maint_margin_ratio)
     cum = Fraction(tier.cum)
-    inverse = Fraction(1, leverage)
     if side == _LONG:
-        return (entry * (1 - inverse) - cum / quantity) / (1 - ratio)
-    return (entry * (1 + inverse) + cum / quantity) / (1 + ratio)
+        return (entry * (1 - wallet_share) - cum / quantity) / (1 - ratio)
+    return (entry * (1 + wallet_share) + cum / quantity) / (1 + ratio)
 
 
 def _shape_is_usable(brackets: Sequence[Bracket]) -> bool:
@@ -229,6 +247,7 @@ def _solve(
     quantity: Decimal,
     leverage: int,
     brackets: Sequence[Bracket],
+    entry_fee_rate: Decimal,
 ) -> tuple[str, Fraction | None]:
     """The reason code and the exact liquidation price (None unless the reason is OK)."""
     if not _shape_is_usable(brackets):
@@ -247,8 +266,15 @@ def _solve(
     )
     if leverage > allowed:
         return LEVERAGE_ABOVE_BRACKET, None
+    # Isolated wallet over the entry notional: (Q x EP / L - f x Q x EP) / (Q x EP) = 1/L - f.
+    wallet_share = Fraction(1, leverage) - Fraction(entry_fee_rate)
+    if wallet_share <= 0:
+        return LIQUIDATION_INPUT_UNAVAILABLE, None
     candidates = [
-        (t, _candidate(side=side, entry=entry, quantity=qty, leverage=leverage, tier=t))
+        (
+            t,
+            _candidate(side=side, entry=entry, quantity=qty, wallet_share=wallet_share, tier=t),
+        )
         for t in brackets
     ]
     consistent = [
@@ -273,21 +299,25 @@ def liquidation_price(
     quantity: Decimal,
     leverage: int,
     brackets: Sequence[Bracket],
+    entry_fee_rate: Decimal,
 ) -> Decimal | None:
     """Isolated, one-way liquidation price; None = unknown (fail closed).
 
-    No fees, no funding (CITED: FAQ-liq for the variables; the closed form is a reconstruction).
+    The entry fee `entry_fee_rate x Q x EP` reduces the isolated wallet (Demo-observed); no funding.
+    CITED: FAQ-liq for the variables; the closed form is a reconstruction. The rate is the caller's.
     """
     side_text = _require_side(side)
     _require_positive(entry_price, "entry_price")
     _require_positive(quantity, "quantity")
     _require_positive_int(leverage, "leverage")
+    _require_non_negative(entry_fee_rate, "entry_fee_rate")
     reason, exact = _solve(
         side=side_text,
         entry_price=entry_price,
         quantity=quantity,
         leverage=leverage,
         brackets=brackets,
+        entry_fee_rate=entry_fee_rate,
     )
     if reason != LIQUIDATION_OK or exact is None:
         return None
@@ -344,6 +374,7 @@ def liquidation_verdict(
     brackets: Sequence[Bracket],
     stop_price: Decimal,
     buffer_bps: int,
+    entry_fee_rate: Decimal,
 ) -> LiquidationVerdict:
     """Compose the price and the buffer predicate into one fail-closed verdict."""
     side_text = _require_side(side)
@@ -352,6 +383,7 @@ def liquidation_verdict(
     _require_positive_int(leverage, "leverage")
     stop = _require_positive(stop_price, "stop_price")
     _require_positive_int(buffer_bps, "buffer_bps")
+    _require_non_negative(entry_fee_rate, "entry_fee_rate")
     inverted = stop >= entry if side_text == _LONG else stop <= entry
     if inverted:
         return LiquidationVerdict(False, LIQUIDATION_INPUT_UNAVAILABLE, None)
@@ -361,6 +393,7 @@ def liquidation_verdict(
         quantity=quantity,
         leverage=leverage,
         brackets=brackets,
+        entry_fee_rate=entry_fee_rate,
     )
     if reason != LIQUIDATION_OK or exact is None:
         return LiquidationVerdict(False, reason, None)

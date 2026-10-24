@@ -37,6 +37,7 @@ from tests.support.phase22_fixtures import demo_brackets, load_leverage_brackets
 MODULE = Path(liquidation.__file__)
 DP12 = Decimal("1E-12")
 ENTRY = Decimal("80000")
+NO_FEE = Decimal("0")
 
 G3_ENTRY_TIER = Decimal("64254.606365159129")
 G5_ENTRY_TIER = Decimal("64249.820531227566")
@@ -52,6 +53,7 @@ def _lp(side: str, quantity: str, leverage: int = 5) -> Decimal | None:
         quantity=Decimal(quantity),
         leverage=leverage,
         brackets=demo_brackets(),
+        entry_fee_rate=NO_FEE,
     )
 
 
@@ -126,6 +128,7 @@ def _verdict(side: str = "LONG", stop: str = "66000", **overrides: Any) -> Liqui
         "brackets": demo_brackets(),
         "stop_price": Decimal(stop),
         "buffer_bps": 100,
+        "entry_fee_rate": NO_FEE,
     }
     kwargs.update(overrides)
     return liquidation_verdict(**kwargs)
@@ -188,6 +191,14 @@ def test_the_verdict_decides_on_the_exact_value_not_on_a_rounded_decimal() -> No
         {"side": None},
         {"entry_price": Decimal("NaN")},
         {"entry_price": Decimal("Infinity")},
+        {"entry_fee_rate": Decimal("-0.0001")},
+        {"entry_fee_rate": Decimal("NaN")},
+        {"entry_fee_rate": Decimal("Infinity")},
+        {"entry_fee_rate": True},
+        {"entry_fee_rate": 0},
+        {"entry_fee_rate": 0.0004},
+        {"entry_fee_rate": "0.0004"},
+        {"entry_fee_rate": None},
     ],
 )
 def test_argument_errors_raise(overrides: dict[str, Any]) -> None:
@@ -195,13 +206,15 @@ def test_argument_errors_raise(overrides: dict[str, Any]) -> None:
         _verdict(**overrides)
 
 
-def test_there_is_no_default_for_leverage_buffer_or_brackets() -> None:
+def test_there_is_no_default_for_leverage_buffer_fee_or_brackets() -> None:
     import inspect
 
     for func in (liquidation_price, liquidation_beyond_stop, liquidation_verdict):
         for name, param in inspect.signature(func).parameters.items():
             assert param.kind is inspect.Parameter.KEYWORD_ONLY, name
             assert param.default is inspect.Parameter.empty, name
+    for func in (liquidation_price, liquidation_verdict):
+        assert "entry_fee_rate" in inspect.signature(func).parameters, func.__name__
 
 
 # --- Bracket and verdict construction ------------------------------------------------------------
@@ -343,6 +356,7 @@ def test_malformed_bracket_lists_are_unavailable(case: str) -> None:
         quantity=Decimal("0.01"),
         leverage=5,
         brackets=brackets,
+        entry_fee_rate=NO_FEE,
     )
     assert result is None
 
@@ -392,6 +406,7 @@ def test_no_self_consistent_tier_is_refused_with_the_notional_code() -> None:
         brackets=brackets,
         stop_price=Decimal("900"),
         buffer_bps=100,
+        entry_fee_rate=NO_FEE,
     )
     assert verdict.reason_code == NOTIONAL_ABOVE_MAX
 
@@ -406,6 +421,7 @@ def test_a_non_positive_liquidation_price_is_unavailable() -> None:
         brackets=brackets,
         stop_price=Decimal("90"),
         buffer_bps=100,
+        entry_fee_rate=NO_FEE,
     )
     assert verdict.reason_code == LIQUIDATION_INPUT_UNAVAILABLE
     assert verdict.liquidation_price is None
@@ -416,6 +432,107 @@ def test_inverted_stop_geometry_is_unavailable() -> None:
     assert _verdict("LONG", "81000").reason_code == LIQUIDATION_INPUT_UNAVAILABLE
     assert _verdict("SHORT", "80000").reason_code == LIQUIDATION_INPUT_UNAVAILABLE
     assert _verdict("SHORT", "79000").reason_code == LIQUIDATION_INPUT_UNAVAILABLE
+
+
+# --- golden G6 and the entry fee (amendment 2026-10-24, Demo-observed, not mainnet) ---------------
+
+# Recorded by the owner's Demo run 20261024T043134Z, case isolated_position_liquidation_price:
+# BTCUSDT LONG, entry 80845.8, quantity 0.0014, leverage 5, tier 1 (m 0.004, cum 0).
+G6_ENTRY = Decimal("80845.8")
+G6_QUANTITY = Decimal("0.0014")
+G6_FEE_RATE = Decimal("0.0004")
+G6_EXCHANGE = Decimal("64968.85373637")
+G6_RECORDED_WALLET = Decimal("22.59155035")
+G6_NO_FEE = Decimal("64936.3855")
+
+
+def _g6(entry_fee_rate: Decimal, side: str = "LONG") -> Decimal | None:
+    return liquidation_price(
+        side=side,
+        entry_price=G6_ENTRY,
+        quantity=G6_QUANTITY,
+        leverage=5,
+        brackets=demo_brackets(),
+        entry_fee_rate=entry_fee_rate,
+    )
+
+
+def test_g6_matches_the_recorded_demo_liquidation_price() -> None:
+    result = _g6(G6_FEE_RATE)
+    assert result is not None
+    # The exchange rounds the wallet to eight decimals, which moves the price by 1.4e-6.
+    assert abs(result - G6_EXCHANGE) < Decimal("0.00001")
+
+
+def test_g6_with_the_recorded_rounded_wallet_reproduces_the_price_to_the_last_digit() -> None:
+    # Independent of the module: the wallet the exchange recorded, in exact Fractions.
+    entry, qty, m = Fraction(G6_ENTRY), Fraction(G6_QUANTITY), Fraction(Decimal("0.004"))
+    exact = (entry - Fraction(G6_RECORDED_WALLET) / qty) / (1 - m)
+    assert abs(Decimal(exact.numerator) / Decimal(exact.denominator) - G6_EXCHANGE) < DP12 * 10**4
+    # and the wallet is the initial margin less the entry fee
+    initial = entry * qty / 5
+    fee = Fraction(G6_FEE_RATE) * entry * qty
+    assert initial - fee == Fraction(Decimal("22.59155035")) + Fraction(2, 10**9)
+
+
+def test_g6_without_the_fee_is_about_thirty_on_the_non_conservative_side() -> None:
+    no_fee = _g6(NO_FEE)
+    with_fee = _g6(G6_FEE_RATE)
+    assert no_fee is not None
+    assert with_fee is not None
+    assert abs(no_fee - G6_NO_FEE) < Decimal("0.0001")
+    assert abs(with_fee - no_fee) > Decimal("30")
+    assert no_fee < with_fee  # a long without the fee sits farther from the entry: too optimistic
+
+
+def test_the_entry_fee_raises_the_long_and_lowers_the_short_liquidation_price() -> None:
+    long_none = _g6(NO_FEE, "LONG")
+    long_fee = _g6(G6_FEE_RATE, "LONG")
+    short_none = _g6(NO_FEE, "SHORT")
+    short_fee = _g6(G6_FEE_RATE, "SHORT")
+    assert long_none is not None
+    assert long_fee is not None
+    assert short_none is not None
+    assert short_fee is not None
+    assert long_fee > long_none
+    assert short_fee < short_none
+    # both move toward the entry price
+    assert long_fee < G6_ENTRY < short_fee
+
+
+def test_the_fee_enters_the_verdict_too() -> None:
+    # G1 with a stop whose buffer margin is smaller than the fee effect: the fee flips the verdict.
+    ok = _verdict("LONG", "65057.5")
+    assert ok.ok is True
+    flipped = _verdict("LONG", "65057.5", entry_fee_rate=Decimal("0.0004"))
+    assert flipped.ok is False
+    assert flipped.reason_code == LIQUIDATION_TOO_CLOSE
+    assert flipped.liquidation_price is not None
+    assert ok.liquidation_price is not None
+    assert flipped.liquidation_price > ok.liquidation_price
+
+
+def test_a_fee_that_takes_the_whole_wallet_is_unavailable() -> None:
+    # 1/5 = 0.2: a fee rate of 0.2 or more leaves a wallet of zero or less.
+    for rate in ("0.2", "0.25", "1"):
+        assert _g6(Decimal(rate)) is None
+        verdict = _verdict("LONG", "66000", entry_fee_rate=Decimal(rate))
+        assert verdict.ok is False
+        assert verdict.reason_code == LIQUIDATION_INPUT_UNAVAILABLE
+        assert verdict.liquidation_price is None
+    assert _g6(Decimal("0.19")) is not None
+
+
+@pytest.mark.parametrize("bad", [Decimal("-0.0004"), Decimal("NaN"), Decimal("Infinity")])
+def test_a_negative_or_non_finite_fee_rate_is_refused_by_the_price(bad: Decimal) -> None:
+    with pytest.raises(ValueError):
+        _g6(bad)
+
+
+@pytest.mark.parametrize("bad", [True, 0, 0.0004, "0.0004", None])
+def test_a_non_decimal_fee_rate_is_refused_by_the_price(bad: Any) -> None:
+    with pytest.raises(TypeError):
+        _g6(bad)
 
 
 # --- bracket age -------------------------------------------------------------------------------
