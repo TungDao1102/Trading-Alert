@@ -647,6 +647,9 @@ def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_a
         "account_config_snapshot",
         "user_trades_in_window",
         "income_in_window",
+        # Phase 22: signed read-only configuration GETs, no order surface.
+        "symbol_config_snapshot",
+        "leverage_brackets_snapshot",
     }
     public_async = {
         name

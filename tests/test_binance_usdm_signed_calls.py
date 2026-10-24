@@ -187,6 +187,31 @@ def _payloads(kwargs: dict[str, Any]) -> dict[str, Any]:
         "futures_account_configuration": SimpleNamespace(
             multi_assets_margin=False, dual_side_position=False
         ),
+        "symbol_configuration": [
+            SimpleNamespace(
+                symbol="BTCUSDT",
+                margin_type="CROSSED",
+                leverage=20,
+                is_auto_add_margin=False,
+                max_notional_value="20000000",
+            )
+        ],
+        "notional_and_leverage_brackets": [
+            SimpleNamespace(
+                symbol="BTCUSDT",
+                notional_coef=None,
+                brackets=[
+                    SimpleNamespace(
+                        bracket=1,
+                        initial_leverage=125,
+                        notional_floor=0,
+                        notional_cap=50000,
+                        maint_margin_ratio=0.004,
+                        cum=0.0,
+                    )
+                ],
+            )
+        ],
         "account_trade_list": [],
         "get_income_history": [],
         "kline_candlestick_data": [],
@@ -553,7 +578,8 @@ def _protective(a: BinanceUsdmAdapter) -> Any:
     )
 
 
-# The sixteen signed methods and the SDK method each calls (plan 21-03 added three, 21-08 two).
+# The eighteen signed methods and the SDK method each calls (plan 21-03 added three, 21-08 two,
+# plan 22-01 the two configuration reads; plan 22-06 takes the registry to twenty).
 SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "snapshot_open_normal_orders": (
         lambda a: a.snapshot_open_normal_orders(symbol="BTCUSDT"),
@@ -595,6 +621,14 @@ SIGNED: dict[str, tuple[Callable[[BinanceUsdmAdapter], Any], str]] = {
     "account_config_snapshot": (
         lambda a: a.account_config_snapshot(),
         "futures_account_configuration",
+    ),
+    "symbol_config_snapshot": (
+        lambda a: a.symbol_config_snapshot(symbol="BTCUSDT"),
+        "symbol_configuration",
+    ),
+    "leverage_brackets_snapshot": (
+        lambda a: a.leverage_brackets_snapshot(symbol="BTCUSDT"),
+        "notional_and_leverage_brackets",
     ),
     "user_trades_in_window": (
         lambda a: a.user_trades_in_window(
@@ -657,13 +691,15 @@ SIGNATURE_SNAPSHOTS: dict[str, tuple[tuple[str, str], ...]] = {
     "account_information_snapshot": (("self", _P),),
     "account_balances_snapshot": (("self", _P),),
     "account_config_snapshot": (("self", _P),),
+    "symbol_config_snapshot": (("self", _P), ("symbol", _K)),
+    "leverage_brackets_snapshot": (("self", _P), ("symbol", _K)),
     "user_trades_in_window": (("self", _P), ("symbol", _K), ("start_utc", _K), ("end_utc", _K)),
     "income_in_window": (("self", _P), ("income_type", _K), ("start_utc", _K), ("end_utc", _K)),
 }
 
 
-def test_the_signed_set_is_the_sixteen_methods() -> None:
-    assert len(SIGNED) == 16
+def test_the_signed_set_is_the_eighteen_methods() -> None:
+    assert len(SIGNED) == 18
     assert set(SIGNED) == set(SIGNATURE_SNAPSHOTS)
 
 
@@ -776,7 +812,7 @@ def test_signed_methods_never_retry_429_or_418(
     assert restriction is not None
     assert restriction.remaining_seconds == wait, case
     end = restriction.until_utc
-    # Every one of the sixteen methods, placements included, is refused without sending.
+    # Every one of the eighteen methods, placements included, is refused without sending.
     for name in SIGNED_NAMES:
         other, _ = SIGNED[name]
         with pytest.raises(refusal):

@@ -58,12 +58,14 @@ re-verification policy):
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
   | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
-  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all sixteen SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all eighteen SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
   | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
   | account_information_snapshot | account_information_v3(recv_window) | plan 21-03: GET /fapi/v3/account; every field Optional[str] in the model, parsed strictly to Decimal (a missing or non-finite field raises, never a zero); `totalMarginBalance` is the equity field (D-02), `availableBalance` is not read.  # noqa: E501
   | account_balances_snapshot   | futures_account_balance_v3(recv_window) | plan 21-03: GET /fapi/v3/balance; reads asset, balance, crossUnPnl only; the account alias attribute is never read (D-21).  # noqa: E501
   | user_trades_in_window       | account_trade_list(symbol, start_time, end_time, from_id, recv_window) | plan 21-08: GET /fapi/v1/userTrades; page 1 sends start_time and end_time, later pages send `from_id` = last trade id + 1 and no time bounds (the endpoint refuses `fromId` with a time bound); trade ids must strictly increase, else ValueError; no `limit` is sent.  # noqa: E501
   | income_in_window            | get_income_history(income_type, start_time, end_time, page, recv_window) | plan 21-08: GET /fapi/v1/income; pages 1, 2, ... until an empty page; the free-text `info` field is never read; the funding source is unverified on Demo (0 rows in the recorded reads).  # noqa: E501
+  | symbol_config_snapshot      | symbol_configuration(symbol, recv_window) | plan 22-01: GET /fapi/v1/symbolConfig (weight 5); `symbol`, `recv_window` Optional; one row for the symbol with `marginType` text, `leverage` StrictInt, `isAutoAddMargin` StrictBool and `maxNotionalValue` text; each parsed strictly (a missing or mistyped field raises, never a default).  # noqa: E501
+  | leverage_brackets_snapshot   | notional_and_leverage_brackets(symbol, recv_window) | plan 22-01: GET /fapi/v1/leverageBracket; the answer is a oneOf wrapper (`actual_instance`: a list of entries or one entry), both unwrapped; `maintMarginRatio` and `cum` are SDK floats, converted with Decimal(repr(value)) (the object shape declares `cum` StrictInt only: SDK quirk); no bracket value is a constant of this project.  # noqa: E501
   | account_config_snapshot     | futures_account_configuration(recv_window) | plan 21-03: GET /fapi/v1/accountConfig; reads multiAssetsMargin and dualSidePosition as strict bools, nothing else (OPS-02 is an owner attestation).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
@@ -1815,8 +1817,9 @@ class BinanceUsdmAdapter:
         response = await self._sdk_call(
             CallKind.QUERY, self._sdk.rest_api.notional_and_leverage_brackets, symbol=symbol
         )
-        raw = response.data()
-        raw = getattr(raw, "actual_instance", raw)
+        # The oneOf wrapper holds the answer in `actual_instance`; a plain list or entry passes.
+        data: Any = response.data()
+        raw: Any = getattr(data, "actual_instance", data)
         if raw is None:
             raise ValueError("leverage bracket response empty: refusing to fabricate")
         entries = raw if isinstance(raw, list) else [raw]
