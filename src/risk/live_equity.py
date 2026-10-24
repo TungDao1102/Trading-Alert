@@ -4,14 +4,17 @@ Live sizing must use the account equity Binance reports, never a caller constant
 `resolve_live_equity` turns one fresh, consistent, single-asset account reading into the
 pure core input `AccountState(equity, risk_rate)` and refuses every other case.
 
-Field choice (D-02). Equity is `totalMarginBalance` of GET /fapi/v3/account: wallet balance
-plus unrealized PnL, and in single-asset mode it is denominated in the quote asset only (SDK
-17.4.0 response model). On the Demo account the recorded payload shows it equal to
-`totalWalletBalance + totalUnrealizedProfit`, to the `marginBalance` of the quote-asset row of
-the same response, and (as wallet) to the quote-asset row of GET /fapi/v3/balance. That is
-demo-observed, not mainnet. `availableBalance` is never the equity: since Phase 22 (plan 22-10) the
-reading carries it, the open-order margin total and the position mode for the margin check of
-`src.risk.margin_check`, but `check_equity_reading` and `equity_basis` do not look at them.
+Field choice (D-02, O-5). The reading carries `totalMarginBalance` of GET /fapi/v3/account:
+wallet balance plus unrealized PnL, and in single-asset mode it is denominated in the quote asset
+only (SDK 17.4.0 response model). The equity USED for sizing is the SMALLER of `totalWalletBalance`
+and `totalMarginBalance` (owner decision of 2026-10-24, DECISIONS D086, O-5): an unrealized profit
+never raises the position size, an unrealized loss lowers it. On the Demo account the recorded
+payload shows the margin balance equal to `totalWalletBalance + totalUnrealizedProfit`, to the
+`marginBalance` of the quote-asset row of the same response, and (as wallet) to the quote-asset
+row of GET /fapi/v3/balance. That is demo-observed, not mainnet. `availableBalance` is never the
+equity: since Phase 22 (plan 22-10) the reading carries it, the open-order margin total and the
+position mode for the margin check of `src.risk.margin_check`, but `check_equity_reading` and
+`equity_basis` do not look at them.
 
 Fail closed (D-03, D-04). A missing reading, a stale reading (age greater than `max_age`), a
 future-dated reading (negative age), `multiAssetsMargin` true (equity would mix assets; owner
@@ -22,8 +25,8 @@ NO_TRADE result with `UNCERTAIN_ACCOUNT_STATE` and no `AccountState`. The identi
 Decimal equality with no tolerance. The freshness rule is the `check_portfolio` predicate:
 age greater than the limit, or negative age, is stale; age exactly equal to the limit passes.
 
-The equity basis lives in `equity_basis` alone, so the owner's O-5 parity choice is a
-one-line change there.
+The equity basis lives in `equity_basis` alone; the owner chose the smaller of the wallet balance
+and the margin balance there (O-5, D086).
 
 The caller supplies `now_utc` and `max_age`; this module reads no clock. The quote asset is a
 parameter of the caller that builds the reading, so no asset name appears here. Paper and
@@ -193,12 +196,15 @@ class LiveEquityResult:
 
 
 def equity_basis(reading: AccountEquityReading) -> Decimal:
-    """The equity used for sizing: `totalMarginBalance` (D-02).
+    """The equity used for sizing: the smaller of `totalWalletBalance` and `totalMarginBalance`.
 
-    The one place the basis is chosen. The owner's O-5 parity decision may replace it with
-    `total_wallet_balance`, or with the smaller of the two; neither alternative is built.
+    The one place the basis is chosen (owner decision O-5 of 2026-10-24, DECISIONS D086). Since
+    the margin balance is the wallet balance plus the unrealized PnL (the reading is refused
+    unless that identity holds), a positive unrealized PnL leaves the wallet balance as the
+    basis, so an open profit never raises the position size, and a negative unrealized PnL lowers
+    it to the margin balance.
     """
-    return reading.total_margin_balance
+    return min(reading.total_wallet_balance, reading.total_margin_balance)
 
 
 def _no_equity() -> EquityCheck:

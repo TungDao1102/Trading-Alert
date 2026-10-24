@@ -4,7 +4,8 @@
 account state, the open positions, the daily loss and the parameter set. This module is the one
 place that assembles them out of the Phase 21 live sources:
 
-* the live equity result (plan 21-04, Binance ``totalMarginBalance``),
+* the live equity result (plan 21-04: the smaller of Binance ``totalWalletBalance`` and
+  ``totalMarginBalance``, D086),
 * the persisted day row and the day verdict (plan 21-05),
 * the counted reservations and the exchange exposures (plan 21-06).
 
@@ -19,8 +20,9 @@ to the gates. An intraday equity change therefore cannot move a threshold.
 
 Parity with the backtest (D-02): for equal inputs the builder gives `check_portfolio` the same
 open positions and thresholds as the backtest ledger. The remaining difference is the equity
-basis: the live equity is the margin balance and includes unrealized PnL, the backtest equity
-is realized-only. That is the owner item O-5; this module does not hide it.
+basis: the live equity is the smaller of the wallet balance and the margin balance (owner item
+O-5, decided 2026-10-24, DECISIONS D086), so an unrealized loss lowers it and an unrealized profit
+does not raise it; the backtest equity is realized-only. This module does not hide the difference.
 
 Fail closed (F-012, D-14): an unknown equity, a missing day row, an unknown day verdict, a day
 mismatch, invalid thresholds or an unexplained exchange position give NO_TRADE

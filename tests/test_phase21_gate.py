@@ -19,10 +19,13 @@ This file asserts, against the real tree and without any network or live evidenc
   or run (`REQUIREMENT_TESTS`); the owner records name O-1 to O-6.
 
 A failure message names the missing path, symbol or test. Nothing here changes behavior and nothing
-here claims an owner item is solved or a requirement complete: the funding-source evidence
-(O-2, the owner chose option A; the pre-canary check stays an open recommendation), multi-asset
-support (O-3), realizedPnl semantics on mainnet (O-4), the equity basis (O-5) and the latch
-against the backtest (O-6) stay with the owner (`21-OWNER-DECISIONS.md`, `21-DEFERRED.md`).
+here claims an owner item is solved or a requirement complete. The owner answered O-3 to O-6 on
+2026-10-24 (DECISIONS D086): multi-asset margin is not supported in V1, the conservative
+realizedPnl default is kept until one small mainnet trade at the Phase 26 canary, the equity basis
+is the smaller of the wallet and the margin balance, and the live latch is kept. The mainnet
+evidence behind them is still NOT collected: `LIVE_NET_PNL_SEMANTICS_VERIFIED` and
+`FUNDING_SOURCE_VERIFIED` stay False (the funding check joined the Phase 26 canary checklist)
+(`21-OWNER-DECISIONS.md`, `21-DEFERRED.md`).
 EXEC-01 and OPS-02 stay Pending; OPS-02 is an owner
 attestation (D-21) and appears below only through its secret-free reads and logs.
 
@@ -193,6 +196,15 @@ def test_invariant_4_both_verification_flags_are_false() -> None:
     )
 
 
+def test_invariant_4b_decisions_d086_records_the_phase_21_answers() -> None:
+    decisions = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
+    rows = [line for line in decisions.splitlines() if line.startswith("| D086 |")]
+    assert len(rows) == 1, "DECISIONS must carry exactly one D086 row"
+    for needle in ("2026-10-24, owner answer", "equity_basis", "SMALLER", "Phase 26 canary"):
+        assert needle in rows[0], f"D086 does not mention {needle!r}"
+    assert "FUNDING_SOURCE_VERIFIED" in rows[0] and "LIVE_NET_PNL_SEMANTICS_VERIFIED" in rows[0]
+
+
 def test_invariant_5_daily_stop_is_an_expiry_trigger() -> None:
     from src.execution.manager import _EXPIRY_TRIGGERS
 
@@ -261,7 +273,10 @@ REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
     "RISK-01": (
         # The live equity resolver.
         ("tests/test_live_equity.py", "test_fresh_demo_shaped_reading_resolves_to_account_state"),
-        ("tests/test_live_equity.py", "test_equity_basis_is_total_margin_balance"),
+        (
+            "tests/test_live_equity.py",
+            "test_equity_basis_is_the_smaller_of_wallet_and_margin_balance",
+        ),
         ("tests/test_live_equity.py", "test_one_millisecond_past_max_age_is_no_trade"),
         ("tests/test_live_equity.py", "test_multi_assets_margin_is_no_trade"),
         # The account equity source, end to end over the recorded Demo payloads.

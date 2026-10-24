@@ -5,7 +5,8 @@ the same open positions and the same absolute thresholds as the backtest ledger,
 portfolio verdicts are identical. Both sides are built from the same literal inputs and only
 the public ledger API is used (`Ledger.start`, `register_exposure`, `open_positions_for_risk`).
 
-The one known difference is the equity basis (owner item O-5), asserted in
+The one known difference is the equity basis (owner item O-5, decided 2026-10-24, DECISIONS
+D086: the smaller of the wallet balance and the margin balance), asserted in
 `test_unrealized_pnl_makes_live_equity_differ_from_the_ledger_equity`.
 
 Evidence label: executed unit tests [DESIGN].
@@ -23,7 +24,7 @@ from src.core.types import AccountState
 from src.domain.enums import DailyState
 from src.execution.live_risk_inputs import build_live_risk_inputs
 from src.risk.daily_loss import DayRiskState, DayStateVerdict
-from src.risk.live_equity import LiveEquityResult
+from src.risk.live_equity import AccountEquityReading, LiveEquityResult, equity_basis
 from src.risk.portfolio import RATE_THRESHOLD_KEYS, check_portfolio
 from src.risk.reservations import CountedReservation, ExchangeExposure, ReservationStatus
 from src.risk.types import OpenPosition, SizedResult
@@ -232,18 +233,46 @@ def test_check_portfolio_gives_the_same_verdict(
     assert from_ledger == from_live == expected
 
 
-def test_unrealized_pnl_makes_live_equity_differ_from_the_ledger_equity() -> None:
-    """O-5: the live equity is the margin balance, the ledger equity is realized-only.
+def _reading_with_unrealized(unrealized: str) -> AccountEquityReading:
+    """A reading with a wallet balance of 1000 and the given unrealized PnL (margin = sum)."""
+    wallet = Decimal("1000")
+    margin = wallet + Decimal(unrealized)
+    return AccountEquityReading(
+        total_margin_balance=margin,
+        total_wallet_balance=wallet,
+        total_unrealized_profit=Decimal(unrealized),
+        quote_asset_margin_balance=margin,
+        balance_endpoint_wallet=wallet,
+        multi_assets_margin=False,
+        available_balance=margin,
+        total_open_order_initial_margin=Decimal("0"),
+        quote_asset_available_balance=margin,
+        dual_side_position=False,
+        observed_at_utc=NOW,
+    )
 
-    With an unrealized profit of 10 the live account equity is 1010 while the ledger (which
-    books realized PnL only) stays at 1000. The gate inputs still agree because the thresholds
-    resolve against the day-start base; only the sizing equity differs. The owner decides the
-    basis (item O-5); this test does not hide the difference.
+
+def test_unrealized_profit_does_not_raise_the_live_equity_above_the_ledger_equity() -> None:
+    """O-5 (D086): the basis is the smaller of wallet and margin balance; a profit adds nothing."""
+    ledger = _ledger(ABC_LEDGER, equity="1000")
+    assert equity_basis(_reading_with_unrealized("10")) == ledger.equity == Decimal("1000")
+
+
+def test_unrealized_pnl_makes_live_equity_differ_from_the_ledger_equity() -> None:
+    """O-5: the live equity is the smaller of wallet and margin balance, the ledger realized-only.
+
+    With an unrealized LOSS of 10 the live account equity is 990 while the ledger (which books
+    realized PnL only) stays at 1000. The gate inputs still agree because the thresholds resolve
+    against the day-start base; only the sizing equity differs, and only downwards (an unrealized
+    profit leaves the live equity at the wallet balance, see the test above).
     """
     ledger = _ledger(ABC_LEDGER, equity="1000")
-    live_positions, live_thresholds = _live(ABC_LIVE, EXPOSURES, equity="1010", base="1000")
+    result_equity = equity_basis(_reading_with_unrealized("-10"))
+    assert result_equity == Decimal("990")
+    live_positions, live_thresholds = _live(
+        ABC_LIVE, EXPOSURES, equity=str(result_equity), base="1000"
+    )
     assert ledger.equity == Decimal("1000")
-    result_equity = Decimal("1010")
     assert result_equity != ledger.equity
     assert (
         live_thresholds["daily_loss_stop_threshold"]

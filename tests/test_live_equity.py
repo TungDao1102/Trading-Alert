@@ -96,7 +96,7 @@ def test_fresh_demo_shaped_reading_resolves_to_account_state() -> None:
     assert result.observed_at_utc == NOW - timedelta(seconds=10)
 
 
-def test_unrealized_loss_is_included_in_equity() -> None:
+def test_unrealized_loss_is_included_in_equity() -> None:  # lowers the equity (D086)
     reading = _reading(
         total_wallet_balance=Decimal("1000"),
         total_unrealized_profit=Decimal("-12.5"),
@@ -117,14 +117,41 @@ def test_age_exactly_max_age_passes() -> None:
     assert result.equity_for_snapshot == DEMO_EQUITY
 
 
-def test_equity_basis_is_total_margin_balance() -> None:
-    reading = _reading(
+def test_equity_basis_is_the_smaller_of_wallet_and_margin_balance() -> None:
+    # O-5, DECISIONS D086 (2026-10-24): an unrealized loss lowers the equity ...
+    loss = _reading(
         total_wallet_balance=Decimal("1000"),
         total_unrealized_profit=Decimal("-12.5"),
         total_margin_balance=Decimal("987.5"),
         quote_asset_margin_balance=Decimal("987.5"),
     )
-    assert equity_basis(reading) == Decimal("987.5")
+    assert equity_basis(loss) == Decimal("987.5")
+    # ... an unrealized profit does not raise it: the wallet balance stays the basis ...
+    profit = _reading(
+        total_wallet_balance=Decimal("1000"),
+        total_unrealized_profit=Decimal("12.5"),
+        total_margin_balance=Decimal("1012.5"),
+        quote_asset_margin_balance=Decimal("1012.5"),
+    )
+    assert equity_basis(profit) == Decimal("1000")
+    # ... and with no open PnL the two are equal.
+    flat = _reading()
+    assert equity_basis(flat) == DEMO_EQUITY
+
+
+def test_a_positive_unrealized_pnl_does_not_raise_the_resolved_equity() -> None:
+    reading = _reading(
+        total_wallet_balance=Decimal("1000"),
+        total_unrealized_profit=Decimal("12.5"),
+        total_margin_balance=Decimal("1012.5"),
+        quote_asset_margin_balance=Decimal("1012.5"),
+        balance_endpoint_wallet=Decimal("1000"),
+    )
+    result = _resolve(reading)
+    assert result.reason_code == "OK"
+    assert result.equity_for_snapshot == Decimal("1000")
+    assert result.account_state is not None
+    assert result.account_state.equity == Decimal("1000")
 
 
 # --------------------------------------------------------------------------- #
