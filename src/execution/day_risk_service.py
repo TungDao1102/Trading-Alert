@@ -12,8 +12,10 @@ Rules this module keeps:
 
 * D-01 / D-08, the day base. A UTC day is opened only from a fresh REST equity read taken
   INSIDE that day, and only when ``day_open_action`` allows it (D-07): a stored row is used as
-  is, a rollover from a stored previous day or an exposure-free first start opens from a fresh
-  read, and a missing state with exposure (or unknown exposure) blocks. A failed or stale base
+  is, a rollover from ANY stored earlier day (not only yesterday: an outage of two or more days
+  leaves a gap, and an earlier row proves the store is intact, WR-08) or an exposure-free first
+  start opens from a fresh read, and a missing state with exposure (or unknown exposure) blocks
+  only on a store that never held a day. A failed or stale base
   read keeps the day blocked (NO_TRADE) until a read succeeds; nothing is written meanwhile.
 * The clock is re-read AFTER ``equity.refresh()`` returns (D-03). ``refresh`` stamps the reading
   at its start, before the first request, so judging it with the caller's earlier ``now_utc``
@@ -22,21 +24,36 @@ Rules this module keeps:
   after the reads finished, can make it stale. ``base_observed_at_utc`` keeps the stamp.
 * D-09, the loss sources and the REST arbiter. ``backfill`` reads ``userTrades`` of every live
   symbol and the ``FUNDING_FEE`` income since 00:00 UTC; the rows become ``REST_USER_TRADES`` /
-  ``REST_INCOME`` components. A fill known to the stream and to REST counts once at the most
-  adverse amount (``fold_daily_loss``). The day loss is known only after a backfill that
-  completed in the CURRENT backfill generation: a failed read leaves it unknown (no retry, no
-  sleep, no default), and the generation is bumped by the stream path of plan 21-16
-  (ACCOUNT_UPDATE, stream gaps, unusable fills), which makes the loss unknown again until the
-  next backfill. ``_backfill_generation`` is that private counter.
-* D-14, the latch. A newly derived DAILY_STOP is persisted (``latch_stop``) BEFORE the verdict is
+  ``REST_INCOME`` components. It also reads the whole-account ``REALIZED_PNL``, ``COMMISSION``
+  and ``INSURANCE_CLEAR`` income (WR-09): a row of a symbol outside the configured ones, an
+  account-level row, or any liquidation clearance fee is a loss the fold cannot see, so the loss
+  stays unknown (``last_error_type`` is ``IncomeOutsideConfiguredSymbols``) instead of being
+  understated. What stays unchecked: income types that are not losses (rebates, transfers) and the
+  equality of the income totals with the folded fills (unverified on mainnet). A fill known to
+  the stream and to REST counts once at the most adverse amount (``fold_daily_loss``). The day
+  loss is known only after a backfill that completed in the CURRENT backfill generation: a
+  failed read leaves it unknown (no retry, no sleep, no default), and the generation is bumped
+  by the stream path of plan 21-16 (ACCOUNT_UPDATE, stream gaps, unusable fills), which makes
+  the loss unknown again until the next backfill. ``_backfill_generation`` is that private counter.
+* D-14, the latch. A newly derived DAILY_STOP is persisted (``latch_stop``) before the verdict is
   returned; a held latch stays DAILY_STOP for the rest of the UTC day, also after a restart and
-  whatever the loss does. A WARNING alert is stamped once per day (``mark_warning_alerted``).
+  whatever the loss does. If the write fails the verdict is still DAILY_STOP (it only reduces
+  risk: the caller cancels resting entries) and the stop is held in process and re-written on
+  the next call (WR-01); a held latch also answers DAILY_STOP when the components cannot be
+  read. A WARNING alert is stamped once per day (``mark_warning_alerted``).
 * Fail closed. Any store, reader or equity failure gives a blocked verdict (NO_TRADE,
   UNCERTAIN_ACCOUNT_STATE with a blocked reason), never a default loss or a fresh day. Only the
   exception TYPE name is kept (``last_error_type``), never a message.
-* Pitfall 6: a late open of the day (the first read comes after 00:00 UTC) is conservative: the
-  base is the equity of that moment and the backfill counts every fill since 00:00 UTC, so the
-  loss is over-counted at worst; ``base_observed_at_utc`` is stored so the lateness is visible.
+* Pitfall 6 and WR-06: a late open of the day (the first read comes after 00:00 UTC) takes the
+  equity of that moment, but D033 measures the loss against the equity at the START of the day.
+  After a morning loss the moment's equity is the smaller (conservative) base and is kept. After
+  a morning GAIN it would be larger than the day-start equity and would raise every threshold by
+  the gain, so the base is corrected to ``equity now - the day's net result`` (the most favorable
+  amount per fill, ``net_pnl_upper_quote``). That needs the day's loss to be KNOWN when the day
+  is opened: a day is not opened (BLOCKED_DAY_BASE_UNAVAILABLE, no equity read) until a backfill
+  of the current generation has completed for it, and a stream gap or ACCOUNT_UPDATE before the
+  open makes the caller backfill again. ``base_observed_at_utc`` is stored so the lateness is
+  visible.
 * The funding policy is a required constructor argument with no default (O-2 is the owner's,
   recorded by plan 21-01). The quote asset is a constructor argument.
 * Not built here: the operator acknowledgement path for a missing day state with exposure
@@ -55,7 +72,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Iterable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -81,6 +98,20 @@ from src.risk.daily_loss import (
 )
 
 FUNDING_INCOME_TYPE = "FUNDING_FEE"
+# WR-09: income types read only to prove the folded fills are the whole story. REALIZED_PNL and
+# COMMISSION rows of a symbol outside ``symbols`` (or with no symbol) are fills the fold never
+# saw; INSURANCE_CLEAR is the liquidation clearance fee, which has no component kind at all.
+# Any such row makes the loss unknown (never an understated number); equality of the income
+# totals with the folded fills is NOT asserted, its semantics are unverified on mainnet.
+REALIZED_PNL_INCOME_TYPE = "REALIZED_PNL"
+COMMISSION_INCOME_TYPE = "COMMISSION"
+INSURANCE_CLEAR_INCOME_TYPE = "INSURANCE_CLEAR"
+CROSS_CHECK_INCOME_TYPES = (
+    REALIZED_PNL_INCOME_TYPE,
+    COMMISSION_INCOME_TYPE,
+    INSURANCE_CLEAR_INCOME_TYPE,
+)
+OUTSIDE_SYMBOLS_ERROR = "IncomeOutsideConfiguredSymbols"
 # Why the stream path makes the loss unknown until the next backfill (plan 21-16): any
 # ACCOUNT_UPDATE (FUNDING_FEE included) and every stream gap. Frames sent during a gap are not
 # replayed (demo-observed, not mainnet), so a loss computed across a gap is never trusted.
@@ -106,6 +137,8 @@ class DayRiskStorePort(Protocol):
     def get_day(self, utc_day: date) -> Any: ...
 
     def has_day(self, utc_day: date) -> Any: ...
+
+    def has_earlier_day(self, utc_day: date) -> Any: ...
 
     def open_day(self, state: DayRiskState) -> Any: ...
 
@@ -245,6 +278,8 @@ class LiveDayRiskService:
         self._last_error_type: str | None = None
         # Days opened by ``evaluate``; ``current_daily_loss_quote`` answers only for these.
         self._evaluated_days: set[date] = set()
+        # Days whose newly derived DAILY_STOP could not be written (WR-01): day -> first stamp.
+        self._unpersisted_stops: dict[date, datetime] = {}
 
     @property
     def last_error_type(self) -> str | None:
@@ -265,6 +300,7 @@ class LiveDayRiskService:
         generation = self._backfill_generation
         try:
             components: list[LossComponent] = []
+            outside = False
             for symbol in self._symbols:
                 trades = await self._reader.user_trades_in_window(
                     symbol=symbol, start_utc=start, end_utc=now_utc
@@ -275,16 +311,36 @@ class LiveDayRiskService:
                 income_type=FUNDING_INCOME_TYPE, start_utc=start, end_utc=now_utc
             )
             components.extend(components_from_income(row) for row in income)
+            for income_type in CROSS_CHECK_INCOME_TYPES:
+                rows = await self._reader.income_in_window(
+                    income_type=income_type, start_utc=start, end_utc=now_utc
+                )
+                outside = outside or any(
+                    self._is_unfolded_loss_row(row, income_type) for row in rows
+                )
             self._store.add_components(tuple(components))
         except Exception as exc:  # noqa: BLE001 - any failed read or write leaves the loss unknown
             self._trades_complete_for = None
             self._funding_read_ok_for = None
             self._last_error_type = type(exc).__name__
             return
+        if outside:
+            self._trades_complete_for = None
+            self._funding_read_ok_for = None
+            self._last_error_type = OUTSIDE_SYMBOLS_ERROR
+            return
         self._last_error_type = None
         if generation == self._backfill_generation:
             self._trades_complete_for = (day, generation)
             self._funding_read_ok_for = (day, generation)
+
+    def _is_unfolded_loss_row(self, row: Any, requested_type: str) -> bool:
+        """True for a cross-check income row the fold of the configured fills cannot account for."""
+        if row.income_type != requested_type:
+            return False
+        if requested_type == INSURANCE_CLEAR_INCOME_TYPE:
+            return True
+        return row.symbol is None or row.symbol not in self._symbols
 
     # ------------------------------------------------------------------ the stream path
 
@@ -326,6 +382,15 @@ class LiveDayRiskService:
         folded from the stored components on each call, so a stream fill added after the last
         evaluate counts. This is the callable plan 21-15's ``make_reserving_save_atomic`` takes
         as ``daily_loss_quote``.
+
+        Freshness limit (review WR-05, OWNER-OPEN): "known" has NO age bound. A loss source the
+        stream never reports and that raises no gap (a manual trade in the exchange UI, a symbol
+        outside ``symbols``, a dropped liquidation or ADL frame, a half-open socket) leaves the
+        loss understated until the next ``backfill``. The equity has the owner bound
+        ``account.max_equity_age_ms``; the loss has none because the number is the owner's and is
+        not invented here. Until the owner sets a loss-age key, freshness is delegated to the
+        Phase 20 feed checks (``stale_feed.max_user_data_silence_ms``) and to the caller, which
+        should run ``backfill`` on a schedule and after any stream gap (Phase 24 composition).
         """
         if utc_day not in self._evaluated_days or not self._backfill_is_current(utc_day):
             return None
@@ -366,14 +431,12 @@ class LiveDayRiskService:
         day = utc_day_of(now_utc)
         try:
             today = self._store.get_day(day)
-            previous_present = (
-                False if today is not None else bool(self._store.has_day(day - timedelta(days=1)))
-            )
+            earlier_present = False if today is not None else bool(self._store.has_earlier_day(day))
         except Exception as exc:  # noqa: BLE001 - an unreadable store is never a fresh day
             return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
         action = day_open_action(
             today=today,
-            previous_day_present=previous_present,
+            earlier_day_present=earlier_present,
             exposure=exposure,
             store_readable=True,
         )
@@ -386,7 +449,27 @@ class LiveDayRiskService:
             return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE)
         return await self._open_from_fresh_base(day)
 
+    def _known_net_pnl(self, day: date) -> Decimal | None:
+        """The day's net result (favorable-most, positive = gain) or None when it is unknown."""
+        if not self._backfill_is_current(day):
+            return None
+        try:
+            loss = fold_daily_loss(
+                components=tuple(self._store.list_components(day)),
+                utc_day=day,
+                quote_asset=self._quote_asset,
+                trades_complete=True,
+                funding_read_ok=True,
+                funding_policy=self._funding_policy,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unreadable or conflicting loss is unknown
+            self._last_error_type = type(exc).__name__
+            return None
+        return loss.net_pnl_upper_quote
+
     async def _open_from_fresh_base(self, day: date) -> DayRiskState | DayStateVerdict:
+        if not self._backfill_is_current(day):
+            return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)  # WR-06: no net result yet
         try:
             await self._equity.refresh()
             # Re-read AFTER refresh: the reading is stamped at the start of refresh(), so
@@ -398,9 +481,16 @@ class LiveDayRiskService:
                 return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
             if not base_is_inside_day(utc_day=day, observed_at_utc=check.observed_at_utc):
                 return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
+            # WR-06: read AFTER the equity refresh, so a generation bump during it is seen.
+            net_pnl = self._known_net_pnl(day)
+            if net_pnl is None:
+                return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
+            base = check.equity - net_pnl if net_pnl > 0 else check.equity
+            if base <= 0:
+                return self._blocked(day, BLOCKED_DAY_BASE_UNAVAILABLE)
             state = DayRiskState(
                 utc_day=day,
-                equity_at_day_start=check.equity,
+                equity_at_day_start=base,
                 base_observed_at_utc=check.observed_at_utc,
             )
         except Exception as exc:  # noqa: BLE001 - no usable base, the day stays blocked
@@ -416,20 +506,32 @@ class LiveDayRiskService:
     # ------------------------------------------------------------------ evaluate
 
     async def evaluate(self, *, now_utc: datetime, exposure: bool | None) -> DayStateVerdict:
-        """The day's verdict: persisted latch first, then thresholds against the day-start base."""
+        """The day's verdict: persisted latch first, then thresholds against the day-start base.
+
+        A held latch answers DAILY_STOP whatever else fails (WR-01): an unreadable components
+        read leaves the loss unknown but keeps the stop, and a stop whose latch write failed
+        still answers DAILY_STOP (risk-reducing: the caller cancels resting entries) and is held
+        in process until the write succeeds.
+        """
         opened = await self.ensure_day(now_utc=now_utc, exposure=exposure)
         if isinstance(opened, DayStateVerdict):
             return opened
         day = opened.utc_day
         self._evaluated_days.add(day)
+        opened = self._apply_unpersisted_stop(opened)
+        latched = opened.stop_latched_at_utc is not None
+        stored_components: tuple[LossComponent, ...] | None
         try:
             stored_components = tuple(self._store.list_components(day))
         except Exception as exc:  # noqa: BLE001 - unreadable components are an unknown loss
-            return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
-        known = self._backfill_is_current(day)
+            if not latched:
+                return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
+            self._last_error_type = type(exc).__name__
+            stored_components = None  # the held latch still answers DAILY_STOP below
+        known = stored_components is not None and self._backfill_is_current(day)
         try:
             loss = fold_daily_loss(
-                components=stored_components,
+                components=stored_components or (),
                 utc_day=day,
                 quote_asset=self._quote_asset,
                 trades_complete=known,
@@ -452,8 +554,11 @@ class LiveDayRiskService:
         if verdict.latch_now:
             try:
                 self._store.latch_stop(utc_day=day, at_utc=now_utc)
-            except Exception as exc:  # noqa: BLE001 - never act on a stop that is not persisted
-                return self._blocked(day, BLOCKED_DAY_STATE_UNREADABLE, exc)
+            except Exception as exc:  # noqa: BLE001 - the stop is kept, the write is retried
+                # WR-01: the verdict stays DAILY_STOP (the caller cancels resting entries, which
+                # only reduces risk) and the stop is held in process until the write succeeds.
+                self._last_error_type = type(exc).__name__
+                self._unpersisted_stops[day] = now_utc
         if DailyState.WARNING in verdict.alerts_due:
             try:
                 self._store.mark_warning_alerted(utc_day=day, at_utc=now_utc)
@@ -463,6 +568,22 @@ class LiveDayRiskService:
                 verdict = dataclasses.replace(verdict, alerts_due=remaining)
         return verdict
 
+    def _apply_unpersisted_stop(self, opened: DayRiskState) -> DayRiskState:
+        """Re-try a latch write that failed earlier; hold the stop in process meanwhile (WR-01)."""
+        stamp = self._unpersisted_stops.get(opened.utc_day)
+        if stamp is None:
+            return opened
+        if opened.stop_latched_at_utc is not None:
+            del self._unpersisted_stops[opened.utc_day]
+            return opened
+        try:
+            self._store.latch_stop(utc_day=opened.utc_day, at_utc=stamp)
+        except Exception as exc:  # noqa: BLE001 - still unpersisted, still a stop
+            self._last_error_type = type(exc).__name__
+        else:
+            del self._unpersisted_stops[opened.utc_day]
+        return dataclasses.replace(opened, stop_latched_at_utc=stamp)
+
     def _backfill_is_current(self, day: date) -> bool:
         """True when both completeness marks belong to ``day`` and the current generation."""
         expected = (day, self._backfill_generation)
@@ -470,8 +591,10 @@ class LiveDayRiskService:
 
 
 __all__ = [
+    "CROSS_CHECK_INCOME_TYPES",
     "FUNDING_INCOME_TYPE",
     "INVALIDATION_REASONS",
+    "OUTSIDE_SYMBOLS_ERROR",
     "DayRiskReadPort",
     "DayRiskStorePort",
     "EquityCheckPort",

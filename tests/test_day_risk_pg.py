@@ -134,6 +134,18 @@ def test_has_day_and_get_day_of_an_absent_day(store: PgDayRiskStore) -> None:
     assert store.get_day(PREVIOUS_DAY) is None
 
 
+def test_has_earlier_day_is_true_for_any_stored_day_before_and_false_otherwise(
+    store: PgDayRiskStore,
+) -> None:
+    # WR-08: a gap of several days still has an earlier row; a later or equal day does not count.
+    assert store.has_earlier_day(DAY) is False
+    gap_day = PREVIOUS_DAY - timedelta(days=3)
+    store.open_day(make_state(utc_day=gap_day, base_at=BASE_AT - timedelta(days=4)))
+    assert store.has_earlier_day(DAY) is True
+    assert store.has_earlier_day(gap_day) is False
+    assert store.has_earlier_day(PREVIOUS_DAY - timedelta(days=4)) is False
+
+
 def test_more_than_18_fractional_digits_raise_precision_error_before_any_write(
     store: PgDayRiskStore, engine: Engine
 ) -> None:
@@ -377,6 +389,7 @@ def test_the_store_has_no_delete_or_purge_method() -> None:
     assert {
         "get_day",
         "has_day",
+        "has_earlier_day",
         "open_day",
         "latch_stop",
         "mark_warning_alerted",

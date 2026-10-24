@@ -1111,6 +1111,23 @@ async def execute_approved_plan(
         )
     if guard_verdict.is_no_trade:
         return ExecutionOutcome(is_no_trade=True, reason_code=guard_verdict.reason_code)
+    # Gate 5f3 (Phase 21 review WR-03; RISK-01): the quantity was sized (gate 4b) from the
+    # caller's `account_state.equity`; the guard just read the live equity (fresh, age-checked,
+    # `equity_basis`). A caller figure larger than the live one (stale, cached or a constant)
+    # sized a bigger quantity than the exchange equity allows and the margin check, which
+    # looks at free margin and not at risk per trade, would not catch it: refuse before the
+    # hand-off record and the consume. A smaller caller figure sized smaller (conservative).
+    sizing_equity = risk_kwargs["account_state"].equity
+    live_equity = guard_verdict.equity_used
+    if (
+        not isinstance(live_equity, Decimal)
+        or not live_equity.is_finite()
+        or not isinstance(sizing_equity, Decimal)
+        or sizing_equity > live_equity
+    ):
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
+        )
 
     # Gate 5f3 (22-REVIEW WR-02): the guard takes several REST calls, so the clock-dependent part
     # of gate 5e is judged AGAIN at an instant read after it: the mark and last price ages

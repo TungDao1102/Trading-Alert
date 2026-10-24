@@ -4322,6 +4322,48 @@ async def test_a_guard_refusal_returns_its_code_and_consumes_nothing() -> None:
     assert len(registry.entries) == 1
 
 
+async def test_gate_5f3_refuses_a_sizing_equity_above_the_live_equity_the_guard_read() -> None:
+    """Phase 21 review WR-03: the quantity was sized from the caller's AccountState (the golden
+    fixture: equity 1000.00, quantity 2.415, within the approved quantity). A live equity read by
+    the guard in the same call that is lower than that figure is NO_TRADE and consumes nothing."""
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    sizing_equity = _build_risk_kwargs(case_input)["account_state"].equity
+    assert sizing_equity == Decimal("1000.00")
+    store = InMemoryExecutionIntentStore()
+    registry = StubProtectionRegistry()
+    guard = StubMarginGuard(verdict=passing_verdict(equity_used=Decimal("999.99999999")))
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=guard
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNCERTAIN_ACCOUNT_STATE")
+    assert guard.calls == 1  # the live equity comes from the guard's own fresh read
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+    assert registry.entries == []
+
+
+@pytest.mark.parametrize("live_equity", ["1000.00", "1000.00000001", "4999.09343961"])
+async def test_gate_5f3_passes_a_sizing_equity_equal_to_or_below_the_live_equity(
+    live_equity: str,
+) -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    guard = StubMarginGuard(verdict=passing_verdict(equity_used=Decimal(live_equity)))
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(case_input, margin_guard=guard),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+
 async def test_a_plain_string_refusal_code_passes_through_unchanged() -> None:
     from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
 

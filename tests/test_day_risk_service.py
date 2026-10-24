@@ -208,6 +208,22 @@ def stored_day(store: InMemoryDayRiskStore, day: date = DAY) -> DayRiskState:
     return state
 
 
+def preopen(rig: Rig, day: date = DAY) -> None:
+    """Store today's day row directly: for tests about what happens AFTER the day is open.
+
+    A day is only opened by the service once a backfill of the day is current (WR-06), so a test
+    that needs an opened day with an unknown loss cannot get there through ``evaluate``.
+    """
+    start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+    rig.store.open_day(
+        DayRiskState(
+            utc_day=day,
+            equity_at_day_start=DEMO_EQUITY,
+            base_observed_at_utc=start + timedelta(minutes=5),
+        )
+    )
+
+
 # ------------------------------------------------------------------------ Task 1: tracer
 
 
@@ -239,6 +255,19 @@ async def test_the_reader_port_gets_the_whole_day_window_for_every_symbol_and_fu
             "income_in_window",
             {"income_type": "FUNDING_FEE", "start_utc": day_start, "end_utc": T0},
         ),
+        # WR-09: the cross-check reads, whole account, for what the folded fills cannot see.
+        (
+            "income_in_window",
+            {"income_type": "REALIZED_PNL", "start_utc": day_start, "end_utc": T0},
+        ),
+        (
+            "income_in_window",
+            {"income_type": "COMMISSION", "start_utc": day_start, "end_utc": T0},
+        ),
+        (
+            "income_in_window",
+            {"income_type": "INSURANCE_CLEAR", "start_utc": day_start, "end_utc": T0},
+        ),
     ]
 
 
@@ -259,8 +288,9 @@ async def test_a_caller_now_older_than_the_reading_stamp_is_not_a_negative_age()
     # The caller's now_utc precedes the clock at the start of refresh(): judged with it the
     # reading would have a negative age (stale). The clock re-read after refresh() is used.
     rig = await build(start=T0 + timedelta(seconds=2))
+    await rig.service.backfill(now_utc=T0)
     verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
-    assert verdict.blocked_reason == BLOCKED_DAILY_LOSS_UNKNOWN  # opened, not yet backfilled
+    assert verdict.state is DailyState.NORMAL
     assert stored_day(rig.store).base_observed_at_utc == T0 + timedelta(seconds=2)
 
 
@@ -311,6 +341,65 @@ def test_components_from_an_income_row() -> None:
     assert components_from_income(account_level).source_key == "ACCOUNT:5"
     with pytest.raises(ValueError):
         components_from_income(dataclasses.replace(funding_row("1"), income_type="COMMISSION"))
+
+
+def income_row(income_type: str, symbol: str | None, *, tran_id: int = 700) -> IncomeRow:
+    """SYNTHETIC income row of any type (no such row was observed on Demo)."""
+    return IncomeRow(
+        symbol=symbol,
+        income_type=income_type,
+        income=Decimal("-3"),
+        asset="USDT",
+        tran_id=tran_id,
+        trade_id="1",
+        time_utc=T0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("income_type", "symbol"),
+    [
+        ("REALIZED_PNL", "DOGEUSDT"),  # a symbol outside the configured universe
+        ("COMMISSION", "DOGEUSDT"),
+        ("REALIZED_PNL", None),  # an account-level row has no symbol to match
+        ("INSURANCE_CLEAR", "BTCUSDT"),  # a liquidation clearance fee is never folded
+    ],
+)
+async def test_a_loss_row_the_fold_cannot_see_makes_the_loss_unknown(
+    income_type: str, symbol: str | None
+) -> None:
+    # WR-09: userTrades covers the configured symbols and income only FUNDING_FEE, so a trade
+    # on another symbol or a liquidation fee would be understated, not unknown.
+    reader = ScriptedDayRiskReader(income_by_type={income_type: (income_row(income_type, symbol),)})
+    rig = await build(reader=reader)
+    preopen(rig)
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.last_error_type == "IncomeOutsideConfiguredSymbols"
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+    assert rig.service.current_daily_loss_quote(DAY) is None
+    # A clean backfill later (the rows are gone from the answer) makes it known again.
+    reader.income_by_type.clear()
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.last_error_type is None
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+
+
+async def test_loss_rows_of_the_configured_symbols_do_not_disturb_the_known_loss() -> None:
+    reader = ScriptedDayRiskReader(
+        trades={"BTCUSDT": (trade("-4", "1"),)},
+        income_by_type={
+            "REALIZED_PNL": (income_row("REALIZED_PNL", "BTCUSDT", tran_id=1),),
+            "COMMISSION": (income_row("COMMISSION", "BTCUSDT", tran_id=2),),
+        },
+    )
+    rig = await build(reader=reader)
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL  # 4 + 1 = 5, warning is 24.99 of the base
+    assert verdict.loss_quote == Decimal("5")
+    assert rig.service.last_error_type is None
 
 
 async def test_a_funding_row_counts_in_the_loss() -> None:
@@ -414,8 +503,11 @@ async def test_rollover_opens_the_new_day_from_a_fresh_in_day_read_without_a_car
 ):
     midnight = datetime(2026, 10, 24, 0, 0, 0, tzinfo=UTC)
     rig = await build(start=midnight, store=await _rollover_store(), equity=Decimal("4800"))
+    # WR-06: the base needs the day's net result, so no backfill yet means no new day.
     unknown = await rig.service.evaluate(now_utc=midnight, exposure=True)
-    assert_blocked(unknown, BLOCKED_DAILY_LOSS_UNKNOWN)  # opened, loss not backfilled yet
+    assert_blocked(unknown, BLOCKED_DAY_BASE_UNAVAILABLE)
+    assert rig.store.get_day(NEXT_DAY) is None
+    assert rig.account.calls == []
     await rig.service.backfill(now_utc=midnight)
     verdict = await rig.service.evaluate(now_utc=midnight, exposure=True)
     assert verdict.state is DailyState.NORMAL
@@ -451,13 +543,13 @@ async def test_a_failing_base_read_blocks_every_evaluate_until_a_read_succeeds()
     rig = await build(start=midnight, store=await _rollover_store(), account=account, clock=clock)
     service = rig.service
     source_calls = account
+    await service.backfill(now_utc=midnight)  # WR-06: a day opens only after its backfill
     for _ in range(2):
         assert_blocked(
             await service.evaluate(now_utc=midnight, exposure=True), BLOCKED_DAY_BASE_UNAVAILABLE
         )
         assert rig.store.get_day(NEXT_DAY) is None
     assert source_calls.count(CONFIG) == 2
-    await service.backfill(now_utc=midnight)
     assert (await service.evaluate(now_utc=midnight, exposure=True)).state is DailyState.NORMAL
     assert stored_day(rig.store, NEXT_DAY).equity_at_day_start == DEMO_EQUITY
 
@@ -470,6 +562,114 @@ async def test_a_missing_state_with_exposure_blocks_and_reads_no_equity(
     verdict = await rig.service.evaluate(now_utc=T0, exposure=exposure)
     assert_blocked(verdict, BLOCKED_DAY_STATE_MISSING)
     assert rig.account.calls == []
+    assert rig.store.get_day(DAY) is None
+
+
+async def test_a_two_day_gap_with_exposure_opens_from_a_fresh_read() -> None:
+    # WR-08 (reproduced by the reviewer): after an outage of two UTC days neither today nor
+    # yesterday has a row. An earlier persisted day proves the store is intact (D-08), so the
+    # day opens from a fresh in-day read instead of staying blocked for as long as the position.
+    store = InMemoryDayRiskStore()
+    store.open_day(
+        DayRiskState(
+            utc_day=DAY - timedelta(days=2),
+            equity_at_day_start=DEMO_EQUITY,
+            base_observed_at_utc=T0 - timedelta(days=2),
+        )
+    )
+    rig = await build(store=store)
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=True)
+    assert verdict.state is DailyState.NORMAL
+    assert stored_day(rig.store).equity_at_day_start == DEMO_EQUITY
+    assert rig.account.count(INFORMATION) == 1
+
+
+@pytest.mark.parametrize("exposure", [True, None])
+async def test_a_later_day_row_is_not_an_earlier_day(exposure: bool | None) -> None:
+    # Only a row BEFORE today proves an intact store; a row of a later day does not.
+    store = InMemoryDayRiskStore()
+    store.open_day(
+        DayRiskState(
+            utc_day=DAY + timedelta(days=1),
+            equity_at_day_start=DEMO_EQUITY,
+            base_observed_at_utc=T0 + timedelta(days=1),
+        )
+    )
+    rig = await build(store=store)
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=exposure), BLOCKED_DAY_STATE_MISSING
+    )
+    assert rig.account.calls == []
+
+
+LATE = datetime(2026, 10, 23, 10, 0, 0, tzinfo=UTC)
+
+
+async def test_a_late_open_after_a_morning_gain_derives_the_day_start_base() -> None:
+    # WR-06: the first read of the day comes at 10:00 after a +100 morning (realized). The
+    # wallet at that moment already holds the gain, so the D033 base (equity at 00:00) is
+    # 4999.09343961 - 100; a base of the moment would raise every threshold by the gain.
+    reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("100", "0"),)})
+    rig = await build(start=LATE, reader=reader)
+    await rig.service.backfill(now_utc=LATE)
+    verdict = await rig.service.evaluate(now_utc=LATE, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    assert stored_day(rig.store).equity_at_day_start == DEMO_EQUITY - Decimal("100")
+
+
+async def test_a_late_open_after_a_morning_loss_keeps_the_conservative_base_of_the_moment() -> None:
+    # The smaller base is the conservative one: a loss day is not corrected upwards.
+    reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-30", "0.5"),)})
+    rig = await build(start=LATE, reader=reader)
+    await rig.service.backfill(now_utc=LATE)
+    verdict = await rig.service.evaluate(now_utc=LATE, exposure=False)
+    assert verdict.state is DailyState.WARNING
+    assert stored_day(rig.store).equity_at_day_start == DEMO_EQUITY
+
+
+async def test_a_morning_gain_uses_the_most_favorable_amount_when_sources_diverge() -> None:
+    reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("40", "0"),)})
+    rig = await build(start=LATE, reader=reader)
+    await rig.service.backfill(now_utc=LATE)
+    # A stream fill of the same trade that reported 60: the loss would use 40, the base 60.
+    stream = dataclasses.replace(
+        components_from_user_trade(trade("60", "0"))[0],
+        source=ComponentSource.USER_DATA_EVENT,
+    )
+    rig.store.add_components((stream,))
+    await rig.service.evaluate(now_utc=LATE, exposure=False)
+    assert stored_day(rig.store).equity_at_day_start == DEMO_EQUITY - Decimal("60")
+
+
+async def test_opening_a_day_without_a_current_backfill_is_blocked_and_reads_no_equity() -> None:
+    # WR-06: the base needs the day's net result; an unknown one means no base (fail closed).
+    rig = await build(start=LATE)
+    verdict = await rig.service.evaluate(now_utc=LATE, exposure=False)
+    assert_blocked(verdict, BLOCKED_DAY_BASE_UNAVAILABLE)
+    assert rig.account.calls == []
+    assert rig.store.get_day(DAY) is None
+    await rig.service.backfill(now_utc=LATE)
+    assert (await rig.service.evaluate(now_utc=LATE, exposure=False)).state is DailyState.NORMAL
+
+
+async def test_a_stream_gap_before_the_open_makes_the_base_unavailable_until_a_backfill() -> None:
+    rig = await build(start=LATE, refreshes=2)
+    await rig.service.backfill(now_utc=LATE)
+    rig.service.invalidate(reason="STREAM_GAP")
+    assert_blocked(
+        await rig.service.evaluate(now_utc=LATE, exposure=False), BLOCKED_DAY_BASE_UNAVAILABLE
+    )
+    assert rig.store.get_day(DAY) is None
+
+
+async def test_a_gain_larger_than_the_equity_cannot_make_a_base() -> None:
+    reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("5000", "0"),)})
+    rig = await build(start=LATE, reader=reader)
+    await rig.service.backfill(now_utc=LATE)
+    assert_blocked(
+        await rig.service.evaluate(now_utc=LATE, exposure=False), BLOCKED_DAY_BASE_UNAVAILABLE
+    )
     assert rig.store.get_day(DAY) is None
 
 
@@ -493,7 +693,7 @@ async def test_an_unreadable_day_row_blocks() -> None:
 
 async def test_a_failing_previous_day_check_blocks() -> None:
     rig = await build()
-    rig.store.raise_next("has_day", StoreUnavailable("down"))
+    rig.store.raise_next("has_earlier_day", StoreUnavailable("down"))
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
     )
@@ -501,6 +701,7 @@ async def test_a_failing_previous_day_check_blocks() -> None:
 
 async def test_a_failing_open_day_write_blocks_and_opens_nothing() -> None:
     rig = await build(refreshes=2)
+    await rig.service.backfill(now_utc=T0)
     rig.store.raise_next("open_day", StoreUnavailable("down"))
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
@@ -511,29 +712,78 @@ async def test_a_failing_open_day_write_blocks_and_opens_nothing() -> None:
 async def test_unreadable_components_block() -> None:
     rig = await build()
     await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
     rig.store.raise_next("list_components", StoreUnavailable("down"))
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
     )
 
 
-async def test_a_failing_latch_write_is_blocked_never_normal_and_the_next_call_latches() -> None:
+async def test_a_failing_latch_write_still_answers_daily_stop_and_the_next_call_latches() -> None:
+    # WR-01: the verdict is risk-reducing (the caller cancels resting entries), so a latch that
+    # cannot be written does not turn it into a state-less NO_TRADE; the next call persists it.
     rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-60", "0"),)}))
     await rig.service.backfill(now_utc=T0)
     rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    first = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert first.state is DailyState.DAILY_STOP
+    assert first.reason_code == RejectionReason.DAILY_STOP_BLOCK.value
+    assert rig.service.last_error_type == "StoreUnavailable"
+    assert stored_day(rig.store).stop_latched_at_utc is None
+    again = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=1), exposure=False)
+    assert again.state is DailyState.DAILY_STOP
+    assert stored_day(rig.store).stop_latched_at_utc == T0  # the first failure time, now stored
+
+
+async def test_an_unpersisted_stop_holds_in_process_when_the_loss_falls() -> None:
+    # WR-01: a stop whose latch write failed must not lapse in the same process when a later
+    # gain lowers the loss below the stop (D-14: sticky for the rest of the UTC day).
+    rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-60", "0"),)}))
+    await rig.service.backfill(now_utc=T0)
+    rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    rig.store.raise_next("latch_stop", StoreUnavailable("down"))
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.DAILY_STOP
+    rig.reader.trades["BTCUSDT"] = (trade("-60", "0"), trade("1000", "0", order_id=2, trade_id=2))
+    later = T0 + timedelta(hours=1)
+    await rig.service.backfill(now_utc=later)
+    held = await rig.service.evaluate(now_utc=later, exposure=True)  # latch write fails again
+    assert held.state is DailyState.DAILY_STOP
+    assert held.loss_quote == Decimal("0")
+    assert stored_day(rig.store).stop_latched_at_utc is None
+    final = await rig.service.evaluate(now_utc=later, exposure=True)  # the store is back
+    assert final.state is DailyState.DAILY_STOP
+    assert stored_day(rig.store).stop_latched_at_utc == T0
+
+
+async def test_a_latched_day_with_unreadable_components_still_answers_daily_stop() -> None:
+    # WR-01 (reproduced by the reviewer): the latch held at 10:00; at 10:05 the components read
+    # fails. The answer must stay DAILY_STOP so the caller retries the entry cancels.
+    rig = await _latched_rig()
+    rig.store.raise_next("list_components", StoreUnavailable("down"))
+    verdict = await rig.service.evaluate(now_utc=T0 + timedelta(minutes=5), exposure=True)
+    assert verdict.state is DailyState.DAILY_STOP
+    assert verdict.reason_code == RejectionReason.DAILY_STOP_BLOCK.value
+    assert verdict.loss_quote is None  # the loss is unknown, the latch answers
+    assert not verdict.latch_now
+    assert rig.service.last_error_type == "StoreUnavailable"
+
+
+async def test_an_unlatched_day_with_unreadable_components_still_blocks() -> None:
+    rig = await build()
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    rig.store.raise_next("list_components", StoreUnavailable("down"))
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAY_STATE_UNREADABLE
     )
-    assert stored_day(rig.store).stop_latched_at_utc is None
-    again = await rig.service.evaluate(now_utc=T0, exposure=False)
-    assert again.state is DailyState.DAILY_STOP
-    assert stored_day(rig.store).stop_latched_at_utc == T0
 
 
 async def test_two_services_opening_the_same_day_keep_the_first_stored_base() -> None:
     store = InMemoryDayRiskStore()
     first = await build(store=store, advance=1, equity=DEMO_EQUITY)
     second = await build(store=store, advance=1, equity=Decimal("4000"))
+    await first.service.backfill(now_utc=T0)
+    await second.service.backfill(now_utc=T0)
     one, two = await asyncio.gather(
         first.service.ensure_day(now_utc=T0, exposure=False),
         second.service.ensure_day(now_utc=T0, exposure=False),
@@ -589,6 +839,7 @@ async def test_a_generation_bump_during_the_reads_keeps_the_loss_unknown() -> No
 
     rig = await build(reader=ScriptedDayRiskReader(on_call=bump))
     holder.append(rig)
+    preopen(rig)
     await rig.service.backfill(now_utc=T0)
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
@@ -621,6 +872,7 @@ async def test_a_backfill_of_another_day_does_not_make_the_new_day_known() -> No
 async def test_a_non_quote_component_makes_the_loss_unknown() -> None:
     reader = ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-1", "0.01", asset="BNB"),)})
     rig = await build(reader=reader)
+    preopen(rig)
     await rig.service.backfill(now_utc=T0)
     assert_blocked(
         await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
@@ -629,6 +881,7 @@ async def test_a_non_quote_component_makes_the_loss_unknown() -> None:
 
 async def test_the_strict_funding_policy_is_unknown_even_after_a_complete_backfill() -> None:
     rig = await build(policy=REQUIRE)
+    preopen(rig)
     await rig.service.backfill(now_utc=T0)
     assert rig.service.last_error_type is None
     assert_blocked(
@@ -651,6 +904,7 @@ async def test_the_recorded_empty_income_answer_keeps_the_loss_known_under_the_l
 
 async def test_the_store_double_keeps_the_rows_idempotent_and_refuses_a_changed_amount() -> None:
     rig = await build(reader=ScriptedDayRiskReader(trades={"BTCUSDT": (trade("-1", "0.01"),)}))
+    preopen(rig)
     await rig.service.backfill(now_utc=T0)
     await rig.service.backfill(now_utc=T0)  # the same keys again: stored once
     assert len(rig.store.list_components(DAY)) == 2

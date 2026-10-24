@@ -75,6 +75,10 @@ class InMemoryDayRiskStore:
         self._enter("has_day")
         return utc_day in self._days
 
+    def has_earlier_day(self, utc_day: date) -> bool:
+        self._enter("has_earlier_day")
+        return any(day < utc_day for day in self._days)
+
     def list_components(self, utc_day: date) -> tuple[LossComponent, ...]:
         self._enter("list_components")
         rows = [row for key, row in self._components.items() if key[0] == utc_day]
@@ -145,10 +149,14 @@ class ScriptedDayRiskReader:
         *,
         trades: dict[str, tuple[Any, ...]] | None = None,
         income: tuple[Any, ...] = (),
+        income_by_type: dict[str, tuple[Any, ...]] | None = None,
         on_call: Callable[[str], None] | None = None,
     ) -> None:
         self.trades: dict[str, tuple[Any, ...]] = dict(trades or {})
+        # ``income`` is the FUNDING_FEE answer; ``income_by_type`` serves any other income type
+        # (REALIZED_PNL, COMMISSION, INSURANCE_CLEAR for the WR-09 cross-check). Unset: no rows.
         self.income: tuple[Any, ...] = income
+        self.income_by_type: dict[str, tuple[Any, ...]] = dict(income_by_type or {})
         self._on_call = on_call
         self._failures: dict[str, BaseException] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -187,7 +195,9 @@ class ScriptedDayRiskReader:
             "income_in_window",
             {"income_type": income_type, "start_utc": start_utc, "end_utc": end_utc},
         )
-        return self.income
+        if income_type == "FUNDING_FEE":
+            return self.income
+        return self.income_by_type.get(income_type, ())
 
 
 TEST_ONLY_PARAMETER_SET: dict[str, Any] = {

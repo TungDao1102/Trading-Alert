@@ -128,6 +128,11 @@ async def test_an_invalidation_during_a_backfill_keeps_the_loss_unknown_after_it
     reader = ScriptedDayRiskReader(on_call=invalidate_on_trades_read)
     rig = await build_day_risk_rig(start=T0, reader=reader)
     holder.append(rig.service)
+    armed[0] = False  # open the day first: a day opens only after a clean backfill (WR-06)
+    await rig.service.backfill(now_utc=T0)
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+    armed[0] = True
+    rig.reader.calls.clear()
     await rig.service.backfill(now_utc=T0)
     assert rig.reader.count("user_trades_in_window") == 1
     assert_unknown(await rig.service.evaluate(now_utc=T0, exposure=False))
