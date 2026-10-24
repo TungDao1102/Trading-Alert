@@ -1846,3 +1846,169 @@ def test_the_main_run_without_a_margin_guard_is_aborted_no_order(tmp_path: Path)
     assert adapter.mutating_calls() == []
     assert data["exchange_orders"] == []
     assert any("MARGIN_GUARD_NOT_COMPOSED" in s["detail"] for s in data["steps"])
+
+
+# --- 22-REVIEW WR-08: a real MarginGuard is built over the GUARDED adapter ---------------------
+
+
+def _real_guard_over(guarded: dr.GuardedAdapter, clock: Any) -> Any:
+    from src.execution.account_equity import LiveEquitySource
+    from src.execution.bracket_cache import BracketCache
+    from src.execution.margin_guard import MarginGuard
+    from src.execution.symbol_config_guard import SymbolConfigGuard
+
+    from tests.support.margin_guard_fakes import QUOTE_ASSET, TARGET_LEVERAGE, ScriptedClaims
+
+    limits = test_limits.test_only_execution_limits()
+    return MarginGuard(
+        config_guard=SymbolConfigGuard(adapter=guarded, target_leverage=TARGET_LEVERAGE),  # type: ignore[arg-type]
+        brackets=BracketCache(adapter=guarded, clock=clock, limits=limits),  # type: ignore[arg-type]
+        account=LiveEquitySource(
+            adapter=guarded,  # type: ignore[arg-type]
+            clock=clock,
+            limits=limits,
+            quote_asset=QUOTE_ASSET,
+        ),
+        claims=ScriptedClaims(),
+        clock=clock,
+        limits=limits,
+    )
+
+
+def _guarded_over_composite(
+    mode: dr.RunMode,
+) -> tuple[Any, dr.GuardedAdapter, list[str], dr.EvidenceRecorder, Any]:
+    """A GuardedAdapter over the real adapter and the recorded composite SDK (all TEST_ONLY)."""
+    from src.adapters.binance_ratelimit_gate import RestRateLimitGate
+    from src.adapters.binance_usdm import BinanceUsdmAdapter
+
+    from tests.support.limits import test_only_signed_call_policy
+    from tests.support.margin_guard_fakes import START, CompositeRest, MovingClock
+
+    clock = MovingClock()
+    rest = CompositeRest(clock=clock)
+    gate = RestRateLimitGate(policy=test_only_signed_call_policy().rate_limit, clock=lambda: START)
+    inner = BinanceUsdmAdapter(
+        sdk_client=SimpleNamespace(rest_api=rest),  # type: ignore[arg-type]
+        rest_gate=gate,
+        signed_call_policy=test_only_signed_call_policy(),
+    )
+    host_checks: list[str] = []
+    recorder = dr.EvidenceRecorder(
+        mode=mode,
+        scenario="far",
+        symbol="BTCUSDT",
+        base_url=dr.DEMO_BASE_URL,
+        environ=environ(),
+        clock=fixed_clock,
+    )
+    guarded = dr.GuardedAdapter(
+        inner,
+        guard=lambda: host_checks.append("host"),
+        mode=mode,
+        clock=fixed_clock,
+        recorder=recorder,
+    )
+    return rest, guarded, host_checks, recorder, clock
+
+
+async def test_a_real_guard_over_the_guarded_adapter_sends_no_post_in_a_dry_run() -> None:
+    from tests.support.margin_guard_fakes import LEVERAGE_POST, MARGIN_POST, request
+
+    rest, guarded, host_checks, recorder, clock = _guarded_over_composite(dr.RunMode.DRY_RUN)
+    verdict = await _real_guard_over(guarded, clock).evaluate(request())
+
+    # Nothing reached the host: both POSTs were only PLANNED, so the verification read still shows
+    # CROSSED x20 and the plan is refused as unverified.
+    assert rest.count(MARGIN_POST) == 0
+    assert rest.count(LEVERAGE_POST) == 0
+    assert guarded.mutating_attempts == 2
+    assert [p["method"] for p in recorder.planned_requests] == [
+        "change_margin_type",
+        "change_initial_leverage",
+    ]
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == "MARGIN_CONFIG_UNVERIFIED"
+    # Every read went through the host guard.
+    assert len(host_checks) == guarded.call_count > 0
+    assert (rest.config_sdk.margin_type, rest.config_sdk.leverage) == ("CROSSED", 20)
+
+
+async def test_a_real_guard_over_the_guarded_adapter_posts_through_the_host_guard() -> None:
+    from tests.support.margin_guard_fakes import LEVERAGE_POST, MARGIN_POST, request
+
+    rest, guarded, host_checks, _, clock = _guarded_over_composite(dr.RunMode.EXECUTE)
+    verdict = await _real_guard_over(guarded, clock).evaluate(request())
+
+    assert verdict.is_no_trade is False
+    assert rest.count(MARGIN_POST) == 1
+    assert rest.count(LEVERAGE_POST) == 1
+    assert guarded.mutating_attempts == 2
+    assert len(host_checks) == guarded.call_count == len(rest.calls)  # no call around the guard
+    assert (rest.config_sdk.margin_type, rest.config_sdk.leverage) == ("ISOLATED", 5)
+
+
+def _build_context_with(adapter: FakeDemoAdapter, **seams: Any) -> dr.RunContext:
+    recorder = dr.EvidenceRecorder(
+        mode=dr.RunMode.DRY_RUN,
+        scenario="far",
+        symbol="BTCUSDT",
+        base_url=dr.DEMO_BASE_URL,
+        environ=environ(),
+        clock=fixed_clock,
+    )
+    guarded = dr.GuardedAdapter(
+        adapter,  # type: ignore[arg-type]
+        guard=lambda: None,
+        mode=dr.RunMode.DRY_RUN,
+        clock=fixed_clock,
+        recorder=recorder,
+    )
+    return dr.build_context(
+        guarded=guarded,
+        recorder=recorder,
+        channel=FakeApprovalChannel(),
+        credentials=dr.load_credentials(environ()),
+        scenario="far",
+        mode=dr.RunMode.DRY_RUN,
+        clock=fixed_clock,
+        sleep=no_sleep,
+        approval_timeout_seconds=300,
+        discovery_timeout_seconds=120,
+        token_factory=counter_tokens(),
+        **seams,
+    )
+
+
+def test_build_context_refuses_a_real_margin_guard_that_was_handed_in_directly() -> None:
+    from tests.support.margin_guard_fakes import build_rig
+
+    with pytest.raises(dr.RehearsalAbort, match="MARGIN_GUARD_NOT_GUARDED"):
+        _build_context_with(FakeDemoAdapter(), margin_guard=build_rig().guard)
+
+
+def test_build_context_builds_the_guard_over_the_guarded_adapter_from_the_factory() -> None:
+    seen: list[Any] = []
+    stub = StubMarginGuard()
+
+    def factory(guarded: dr.GuardedAdapter) -> StubMarginGuard:
+        seen.append(guarded)
+        return stub
+
+    ctx = _build_context_with(FakeDemoAdapter(), margin_guard_factory=factory)
+    assert seen == [ctx.guarded]
+    assert ctx.margin_guard is stub
+
+
+def test_build_context_refuses_both_a_guard_and_a_factory() -> None:
+    with pytest.raises(dr.RehearsalAbort, match="MARGIN_GUARD_NOT_GUARDED"):
+        _build_context_with(
+            FakeDemoAdapter(),
+            margin_guard=StubMarginGuard(),
+            margin_guard_factory=lambda guarded: StubMarginGuard(),
+        )
+
+
+def test_a_scripted_margin_guard_is_still_accepted_directly() -> None:
+    stub = StubMarginGuard()
+    assert _build_context_with(FakeDemoAdapter(), margin_guard=stub).margin_guard is stub
