@@ -580,3 +580,62 @@ async def test_the_constructor_refuses_a_watch_without_a_callable_check(bad: Any
             clock=lambda: datetime(2026, 10, 24, tzinfo=UTC),
             liquidation_watch=bad,
         )
+
+
+# --- Nyquist additions: ALERT_ONLY inside the buffer, restored plan without a leverage ---------
+
+
+async def test_alert_only_with_the_real_watch_alerts_once_inside_the_buffer_and_never_closes() -> (
+    None
+):
+    from tests.support.protection_doubles import complete_constraint_snapshot
+
+    watch = _real_watch(LiquidationFailurePolicy.ALERT_ONLY)
+    # Entry 60000, stop 59000, TEST_ONLY buffer 137 bps = 822: 58900 is inside the buffer.
+    rig = await _rig_with_price(
+        watch,
+        price=D("58900"),
+        plan_constraint_snapshot=complete_constraint_snapshot(leverage=None),
+    )
+    await _to_protected(rig)
+
+    await rig.coordinator.step()
+    await rig.coordinator.step()
+
+    assert [(a.event, a.reason) for a in rig.alerts.alerts if a.event == "DIVERGENCE"] == [
+        ("DIVERGENCE", LIQUIDATION_TOO_CLOSE_AFTER_FILL)
+    ]
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_FAILED_ALERT_ONLY]
+    assert not _entered_b6(rig)
+    assert _state(rig) is not ProtectionState.CLOSE_REQUIRED
+    assert rig.closer.calls == []  # type: ignore[union-attr]
+
+
+async def test_a_plan_restored_through_the_rebuild_path_without_a_leverage_is_not_closed() -> None:
+    """WR-03 end to end: persisted snapshot leverage None, rebuilt, restored, stepped with the
+    real watch; the exchange value is far from the stop, so nothing is closed."""
+    from tests.support.protection_doubles import complete_constraint_snapshot
+    from tests.test_protection_rebuild import _rebuild, _restart
+
+    rig = await make_rig(plan_constraint_snapshot=complete_constraint_snapshot(leverage=None))
+    await _to_protected(rig)
+    _put_liquidation_price(rig.fake, ROW_LIQUIDATION)  # 41000.5, far below the 59000 stop
+
+    restored = _rebuild(rig)
+    assert restored.entry.plan_constraint_snapshot.leverage is None
+    assert restored.state is ProtectionState.PROTECTED
+    restarted = _restart(
+        rig, liquidation_watch=_real_watch(LiquidationFailurePolicy.CLOSE_POSITION)
+    )
+    restarted.restore([restored], now_utc=rig.clock.now())
+
+    await restarted.step()
+
+    protection = restarted.protection_of(TEST_ONLY_PLAN_HASH)
+    assert protection is not None
+    assert protection.state is not ProtectionState.CLOSE_REQUIRED
+    assert not _entered_b6(rig)
+    assert rig.closer.calls == []  # type: ignore[union-attr]
+    notes = _events(rig, EVENT_LIQUIDATION_CHECKED)
+    assert [n["action"] for n in notes] == ["OK"]
+    assert notes[0]["local_price"] == "NONE"

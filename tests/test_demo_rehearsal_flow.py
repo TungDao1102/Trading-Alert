@@ -703,6 +703,7 @@ def run_flow(
     committed_limits: bool = False,
     snapshot_live_inputs: dict[str, Any] | None = None,
     margin_guard: Any = _DEFAULT_GUARD,
+    margin_guard_factory: Any = None,
 ) -> tuple[int, dict[str, Any], FakeDemoAdapter, FakeApprovalChannel]:
     exchange = adapter if adapter is not None else FakeDemoAdapter()
     # TEST_ONLY limits by default; `committed_limits=True` loads config/execution instead,
@@ -744,7 +745,12 @@ def run_flow(
         snapshot_live_inputs=snapshot_live_inputs,
         # Plan 22-15: composing the live guard is Phase 24, so a placement test injects a scripted
         # one (a pass). `margin_guard=None` is the real behavior today and aborts the run.
-        margin_guard=StubMarginGuard() if margin_guard is _DEFAULT_GUARD else margin_guard,
+        margin_guard=(
+            None
+            if margin_guard_factory is not None
+            else (StubMarginGuard() if margin_guard is _DEFAULT_GUARD else margin_guard)
+        ),
+        margin_guard_factory=margin_guard_factory,
     )
     files = sorted(tmp_path.glob("*.json"))
     data: dict[str, Any] = json.loads(files[-1].read_text(encoding="utf-8")) if files else {}
@@ -2007,6 +2013,28 @@ def test_build_context_refuses_both_a_guard_and_a_factory() -> None:
             margin_guard=StubMarginGuard(),
             margin_guard_factory=lambda guarded: StubMarginGuard(),
         )
+
+
+def test_main_in_dry_run_builds_the_guard_once_over_the_guarded_adapter_and_sends_no_post(
+    tmp_path: Path,
+) -> None:
+    """Gap 6: `main()` hands the factory the GuardedAdapter (never the raw one), once, and a DRY_RUN
+    rehearsal sends no mutating request."""
+    seen: list[Any] = []
+    stub = StubMarginGuard()
+
+    def factory(guarded: dr.GuardedAdapter) -> StubMarginGuard:
+        seen.append(guarded)
+        return stub
+
+    code, data, adapter, _ = run_flow(tmp_path, scenario="far", margin_guard_factory=factory)
+
+    assert code == dr.EXIT_OK
+    assert len(seen) == 1
+    assert isinstance(seen[0], dr.GuardedAdapter)
+    assert seen[0] is not adapter
+    assert adapter.mutating_calls() == []
+    assert data["mode"] == "DRY_RUN"
 
 
 def test_a_scripted_margin_guard_is_still_accepted_directly() -> None:

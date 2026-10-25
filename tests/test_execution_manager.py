@@ -4899,3 +4899,29 @@ async def test_the_symbol_slot_is_freed_when_the_placement_raises() -> None:
     with pytest.raises(KeyboardInterrupt):
         await _run_plan(adapter, live_context=_build_live_context(case_input, margin_guard=guard))
     assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# Nyquist addition (Phase 22 gap 5): the flatness input of the margin guard (gate 5e).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("positions", "orders", "expected"),
+    [
+        (None, frozenset(), False),
+        (frozenset(), None, False),
+        (None, None, False),
+        (frozenset({"BTCUSDT"}), frozenset(), False),
+        (frozenset(), frozenset({"BTCUSDT"}), False),
+        (frozenset({"BTCUSDT"}), frozenset({"BTCUSDT"}), False),
+        (frozenset({"ETHUSDT"}), frozenset({"SOLUSDT"}), True),
+        (frozenset(), frozenset(), True),
+    ],
+)
+def test_a_symbol_is_flat_only_when_both_reads_are_usable_and_it_is_in_neither(
+    positions: frozenset[str] | None, orders: frozenset[str] | None, expected: bool
+) -> None:
+    from src.execution.manager import _symbol_is_flat
+
+    assert _symbol_is_flat("BTCUSDT", positions, orders) is expected

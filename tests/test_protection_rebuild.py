@@ -99,7 +99,9 @@ def _rebuild(
     )
 
 
-def _restart(rig: ProtectionRig, *, closer: Any = None) -> ProtectionCoordinator:
+def _restart(
+    rig: ProtectionRig, *, closer: Any = None, liquidation_watch: Any = None
+) -> ProtectionCoordinator:
     """A new coordinator over the same fake exchange, intent store, journal and clock."""
     return ProtectionCoordinator(
         adapter=rig.fake,
@@ -111,6 +113,7 @@ def _restart(rig: ProtectionRig, *, closer: Any = None) -> ProtectionCoordinator
         limits=_test_limits(),
         clock=rig.clock,
         restore_required=True,
+        liquidation_watch=liquidation_watch,
     )
 
 

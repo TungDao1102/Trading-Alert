@@ -383,3 +383,87 @@ def test_a_claim_is_visible_to_another_connection_only_once_it_is_committed(
         )
     finally:
         other_engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Nyquist additions: the stored claims feed the margin check end to end
+# --------------------------------------------------------------------------------------
+# Candidate P2: 0.1 x 3000 / 10 = 30 margin, no fees, no open loss, headroom 100 bps (1 percent).
+# Peer P1 (MARGIN_160) holds 160. need = 30 + 160 = 190; required = 190 x 1.01 = 191.9.
+def _verdict_for_candidate(store: PgRiskReservationStore, available: str) -> Any:
+    from src.risk.margin_check import margin_verdict, other_claims_margin
+
+    others = other_claims_margin(
+        claims=store.list_margin_claims(),
+        exclude_trade_plan_id=P2,
+        reading_observed_at_utc=NOW,
+        resting_orders_netted=True,
+    )
+    return margin_verdict(
+        available_balance=D(available),
+        quantity=D("0.1"),
+        limit_price=D("3000"),
+        mark_price=D("3000"),
+        side="LONG",
+        leverage=10,
+        fee_rate_entry=D("0"),
+        fee_rate_exit=D("0"),
+        others_margin=others,
+        headroom_bps=100,
+    )
+
+
+def test_an_approved_peer_with_a_consistent_margin_reduces_the_headroom_of_the_next_plan(
+    db: OperationalDatabase, store: PgRiskReservationStore
+) -> None:
+    open_today(db)
+    # Without the peer the candidate needs only 30 x 1.01 = 30.3.
+    assert _verdict_for_candidate(store, "100").ok is True
+
+    store.register_request(request(**MARGIN_160), now_utc=NOW)
+    reserve(db, store, decided())
+
+    passes = _verdict_for_candidate(store, "191.9")
+    assert passes.ok is True and passes.required == D("191.9")
+    refused = _verdict_for_candidate(store, "191.8999")
+    assert refused.ok is False
+    assert refused.reason_code == "INSUFFICIENT_MARGIN"
+    assert refused.required == D("191.9")
+    # The same balance that passed with no peer is now refused.
+    assert _verdict_for_candidate(store, "100").reason_code == "INSUFFICIENT_MARGIN"
+
+
+def test_a_peer_with_no_stored_margin_makes_the_next_verdict_uncertain(
+    db: OperationalDatabase, store: PgRiskReservationStore
+) -> None:
+    open_today(db)
+    store.register_request(request(), now_utc=NOW)  # legacy form: no margin trio
+    reserve(db, store, decided())
+
+    verdict = _verdict_for_candidate(store, "1000000")
+
+    assert verdict.ok is False
+    assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
+    assert verdict.required is None
+
+
+def test_a_peer_with_an_inconsistent_stored_margin_makes_the_next_verdict_uncertain(
+    db: OperationalDatabase, store: PgRiskReservationStore
+) -> None:
+    from sqlalchemy import update
+    from src.db.models import RiskReservationRow
+
+    open_today(db)
+    store.register_request(request(**MARGIN_160), now_utc=NOW)
+    reserve(db, store, decided())
+    with db.transaction() as session:
+        session.execute(
+            update(RiskReservationRow)
+            .where(RiskReservationRow.trade_plan_id == P1)
+            .values(required_margin=D("0.000001"))
+        )
+
+    verdict = _verdict_for_candidate(store, "1000000")
+
+    assert verdict.ok is False
+    assert verdict.reason_code == "UNCERTAIN_ACCOUNT_STATE"
