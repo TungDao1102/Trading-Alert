@@ -10,17 +10,34 @@ Sections, one function each so the later plans add theirs without touching this 
 
 - `_alerts_section()` (plan 23-03): the operator alert texts of `src/ops/alert_wording.py`, one
   file per CLOSE_REQUIRED branch code and per worded event, `alerts/<EVENT>[__<REASON>].txt`.
+- `_messages_section()` (plan 23-09): the APPROVE texts of `src/adapters/telegram_notify.py`
+  (`messages/approve_base.txt`, `approve_request_demo.txt`, `approve_request_live.txt`) and the
+  SIMULATE text of `src/paper/notify.py` (`messages/simulate.txt`), built from the plan 23-02
+  LONG fixture (`approve_fields()`, `fixture_money()`).
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
+from src.adapters.telegram_notify import format_approval_request, format_approve
 from src.ops.alert_wording import worded_alert_text
 from src.ops.alerts import OperationalAlert
+from src.risk.cost_rates import FEE_SOURCE_PARAMETER, CostRates
+from src.risk.money_at_stake import (
+    EQUITY_SOURCE_ACCOUNT_LIVE,
+    LEVERAGE_SOURCE_CONSTRAINT_SNAPSHOT,
+    MoneyAtStake,
+    build_money_at_stake,
+    money_canonical_json,
+    parse_money_json,
+)
+from src.risk.types import SizedResult
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = REPO_ROOT / "tests" / "fixtures" / "phase23"
@@ -89,7 +106,94 @@ def _alerts_section() -> dict[str, str]:
     return rendered
 
 
-SECTIONS: tuple[Callable[[], dict[str, str]], ...] = (_alerts_section,)
+# --------------------------------------------------------------------------- #
+# Messages (plan 23-09): the plan 23-02 LONG fixture of tests/test_money_at_stake.py.
+# --------------------------------------------------------------------------- #
+
+_RATES = CostRates(
+    fee_rate_entry=Decimal("0.0005"),
+    entry_slippage_rate=Decimal("0.0002"),
+    fee_rate_exit=Decimal("0.0005"),
+    exit_slippage_rate=Decimal("0.0002"),
+    fee_source=FEE_SOURCE_PARAMETER,
+)
+_FIXTURE_TAKE_PROFITS = [
+    (Decimal("51000"), Decimal("0.5")),
+    (Decimal("52000"), Decimal("0.5")),
+]
+
+
+def fixture_money() -> MoneyAtStake:
+    """The money of the LONG fixture: entry 50100, stop 49500, quantity 0.08, leverage 5."""
+    sized = SizedResult(
+        is_no_trade=False,
+        quantity=Decimal("0.08"),
+        quantity_before_rounding=Decimal("0.0803"),
+        quantity_after_rounding=Decimal("0.08"),
+        quantization_decision="ACCEPTED",
+        realized_risk=Decimal("53.5776"),
+        modeled_costs_per_unit=Decimal("69.72"),
+        sizing_entry_price=Decimal("50100"),
+    )
+    return build_money_at_stake(
+        side="LONG",
+        sized=sized,
+        stop_loss_price=Decimal("49500"),
+        take_profits=_FIXTURE_TAKE_PROFITS,
+        cost_rates=_RATES,
+        leverage=5,
+        leverage_source=LEVERAGE_SOURCE_CONSTRAINT_SNAPSHOT,
+        equity=Decimal("800"),
+        equity_source=EQUITY_SOURCE_ACCOUNT_LIVE,
+        equity_observed_at_utc=FIXED_AT_UTC,
+    )
+
+
+def fixture_money_json() -> str:
+    """The stored form (`approvals.money_json`) of `fixture_money()`."""
+    return money_canonical_json(fixture_money())
+
+
+def approve_fields() -> dict[str, Any]:
+    """The 12 APRV-01 fields and the quantity of the LONG fixture (no money)."""
+    return {
+        "symbol": FIXED_SYMBOL,
+        "direction": "LONG",
+        "setup": "TREND_PULLBACK_LONG",
+        "entry_min": Decimal("50000"),
+        "entry_max": Decimal("50100"),
+        "stop_loss": Decimal("49500"),
+        "take_profits": list(_FIXTURE_TAKE_PROFITS),
+        "rr": Decimal("2.0"),
+        "risk_pct": Decimal("0.005"),
+        "expiry_utc": FIXED_AT_UTC + timedelta(hours=4),
+        "invalidation": "CANDLE_CLOSE < 49500",
+        "exposure_quote": Decimal("0"),
+        "reason_codes": ["SETUP_DETECTED"],
+        "signal_id": "sig-0001",
+        "detected_at_utc": FIXED_AT_UTC,
+        "approved_quantity": Decimal("0.08"),
+    }
+
+
+def _messages_section() -> dict[str, str]:
+    """The APPROVE texts: the plain one and the DEMO and LIVE requests with the money block."""
+    fields = approve_fields()
+    money = parse_money_json(fixture_money_json())
+    return {
+        "messages/approve_base.txt": format_approve(**fields) + "\n",
+        "messages/approve_request_demo.txt": format_approval_request(
+            mode_label="DEMO", money=money, **fields
+        )
+        + "\n",
+        "messages/approve_request_live.txt": format_approval_request(
+            mode_label="LIVE", money=money, **fields
+        )
+        + "\n",
+    }
+
+
+SECTIONS: tuple[Callable[[], dict[str, str]], ...] = (_alerts_section, _messages_section)
 
 
 def render_all() -> dict[str, str]:

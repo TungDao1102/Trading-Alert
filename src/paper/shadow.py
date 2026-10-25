@@ -336,9 +336,10 @@ def format_shadow_alert(
 ) -> str:
     """The SHADOW alert: the 12 APRV-01 fields (via `format_approve`) in the SHADOW envelope.
 
-    `format_approve` still validates and renders the fields fail-closed; its two ISO time lines
-    and its display note are replaced by `render_shadow_message` lines that show the detected
-    and expiry times in UTC and Asia/Ho_Chi_Minh. The alert also shows the plan's
+    `format_approve` still validates and renders the fields fail-closed; its two UTC time lines
+    (`Detected:`, `Expiry:`) are replaced by `render_shadow_message` lines that show the detected
+    and expiry times in UTC and Asia/Ho_Chi_Minh (format_approve has no display note since
+    Phase 23, D-14; the SHADOW text keeps both zones). The alert also shows the plan's
     `quantity_after_rounding` on a `Quantity:` line (D078 item (6)): the value
     `ShadowApprovalBook.issue` stores as `approved_quantity` on both rows. A plan whose
     quantity is not above zero is refused here (ValueError), before anything is stored
@@ -370,11 +371,9 @@ def format_shadow_alert(
         approved_quantity=plan.quantity_after_rounding,
     )
     all_lines = approve_text.split("\n")
-    body_lines = [
-        line for line in all_lines if not line.startswith(("Detected: ", "Expiry: ", "Display: "))
-    ]
-    if len(all_lines) - len(body_lines) != 3:
-        raise RuntimeError("format_approve no longer has the Detected/Expiry/Display lines")
+    body_lines = [line for line in all_lines if not line.startswith(("Detected: ", "Expiry: "))]
+    if len(all_lines) - len(body_lines) != 2:
+        raise RuntimeError("format_approve no longer has the Detected/Expiry lines")
     return render_shadow_message(
         ShadowMessageKind.ALERT,
         mode=mode,

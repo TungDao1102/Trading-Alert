@@ -39,6 +39,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from src.risk.money_at_stake import MONEY_AT_STAKE_MISSING, MoneyAtStake
+
 if TYPE_CHECKING:
     from telegram import InlineKeyboardMarkup
 
@@ -607,7 +609,20 @@ async def finalize_decided_message(
 # --------------------------------------------------------------------------- #
 
 
-def format_approve(
+def format_utc(instant: datetime) -> str:
+    """Show an instant as `YYYY-MM-DD HH:MM:SS UTC` (Phase 23, D-14; owner item O-3 is open).
+
+    The suffix is explicit so no reader has to guess the zone. A naive instant is refused; an
+    aware one in another zone is converted to UTC first.
+    """
+    if not isinstance(instant, datetime):
+        raise TypeError(f"instant must be datetime, got {type(instant).__name__}")
+    if instant.tzinfo is None:
+        raise ValueError("instant must be UTC-aware, got naive datetime")
+    return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+
+
+def _approve_lines(
     *,
     symbol: str,
     direction: str,
@@ -625,37 +640,15 @@ def format_approve(
     signal_id: str,
     detected_at_utc: datetime,
     approved_quantity: Decimal,
-) -> str:
-    """Render the APPROVE notification text with all 12 APRV-01 fields and the quantity.
+    mode_label: str | None = None,
+    money_lines: tuple[str, ...] = (),
+) -> list[str]:
+    """Validate the fields fail-closed and return the APPROVE text as a list of lines.
 
-    Per D-02 + TELEGRAM.md §4: the message carries exactly the 12
-    fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
-    percentage, expiry, invalidation, current exposure, reason codes).
-    All Decimal values are formatted via `str()` preserving full
-    precision (D-12). Timestamps are UTC ISO with the
-    `Asia/Ho_Chi_Minh` display-edge note.
-
-    The text is byte-stable: same inputs produce the same output
-    (D-02 determinism). The format is a multi-line string with one
-    field per line for operator readability. The text starts with
-    "APPROVE " so the operator can identify the message type at a
-    glance.
-
-    The message also carries the approved quantity (D078 item (6)) on a `Quantity:`
-    line directly after the `Entry:` line: the value stored as `approved_quantity` on the
-    approval row, written in fixed-point notation with every digit of the Decimal and
-    never rounded. `approved_quantity` is a required keyword; a value that is not a finite
-    Decimal above zero raises ValueError, so no APPROVE message renders without it.
-
-    The renderer is PTB-free: it does NOT import python-telegram-bot
-    and is safe to call from `src/paper/notify.py` (adapter-boundary
-    isolation). The keyboard builders live in this same module so
-    the Phase-8 wire format is defined in one place.
-
-    Fail-closed validation (WR-11): naive datetimes, empty TP lists,
-    inverted entry bounds, and empty symbol/direction/setup raise
-    ValueError loudly — a malformed APPROVE message must never
-    render with a wrong expiry or an empty TP section.
+    `mode_label` adds a `Mode: <label>` line directly after the first line and `money_lines`
+    are inserted directly after the `Quantity:` line (D-13). Both are empty for
+    `format_approve`, so its text is the 12-field message plus the quantity. Every validation
+    of the original `format_approve` (WR-11) lives here, unchanged.
     """
     if not symbol:
         raise ValueError("symbol must be a non-empty string")
@@ -707,25 +700,251 @@ def format_approve(
             raise TypeError(f"{ts_name} must be datetime, got {type(ts_value).__name__}")
         if ts_value.tzinfo is None:
             raise ValueError(f"{ts_name} must be UTC-aware, got naive datetime")
-    tp_lines = "\n".join(
+    tp_lines = [
         f"  TP{idx + 1}: {price} ({fraction})" for idx, (price, fraction) in enumerate(take_profits)
-    )
+    ]
     reasons = ", ".join(reason_codes) if reason_codes else "(none)"
+    mode_lines = [] if mode_label is None else [f"Mode: {mode_label}"]
+    return [
+        f"APPROVE {symbol} {direction} {setup}",
+        *mode_lines,
+        f"Signal: {signal_id}",
+        f"Detected: {format_utc(detected_at_utc)}",
+        f"Entry: {entry_min}–{entry_max}",
+        f"Quantity: {format(approved_quantity, 'f')}",
+        *money_lines,
+        f"SL: {stop_loss}",
+        "TPs:",
+        *tp_lines,
+        f"R:R: {rr}",
+        f"Risk: {risk_pct}",
+        f"Expiry: {format_utc(expiry_utc)}",
+        f"Invalidation: {invalidation}",
+        f"Exposure: {exposure_quote} quote",
+        f"Reasons: {reasons}",
+    ]
+
+
+def format_approve(
+    *,
+    symbol: str,
+    direction: str,
+    setup: str,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    stop_loss: Decimal,
+    take_profits: list[tuple[Decimal, Decimal]],
+    rr: Decimal,
+    risk_pct: Decimal,
+    expiry_utc: datetime,
+    invalidation: str,
+    exposure_quote: Decimal,
+    reason_codes: list[str],
+    signal_id: str,
+    detected_at_utc: datetime,
+    approved_quantity: Decimal,
+) -> str:
+    """Render the APPROVE notification text with all 12 APRV-01 fields and the quantity.
+
+    Per D-02 + TELEGRAM.md §4: the message carries exactly the 12
+    fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
+    percentage, expiry, invalidation, current exposure, reason codes).
+    All Decimal values are formatted via `str()` preserving full
+    precision (D-12). Since Phase 23 (D-14) the two times are shown as
+    `YYYY-MM-DD HH:MM:SS UTC` with an explicit suffix and the message
+    carries no display-zone note (owner item O-3 is open; docs/DECISIONS.md
+    D025 names Asia/Ho_Chi_Minh as the presentation zone, which this text does
+    not use). The SHADOW alert strips the `Detected:` and `Expiry:` lines and
+    shows its own pairs, so SHADOW text is unchanged.
+
+    The text is byte-stable: same inputs produce the same output
+    (D-02 determinism). The format is a multi-line string with one
+    field per line for operator readability. The text starts with
+    "APPROVE " so the operator can identify the message type at a
+    glance.
+
+    The message also carries the approved quantity (D078 item (6)) on a `Quantity:`
+    line directly after the `Entry:` line: the value stored as `approved_quantity` on the
+    approval row, written in fixed-point notation with every digit of the Decimal and
+    never rounded. `approved_quantity` is a required keyword; a value that is not a finite
+    Decimal above zero raises ValueError, so no APPROVE message renders without it.
+
+    The renderer is PTB-free: it does NOT import python-telegram-bot
+    and is safe to call from `src/paper/notify.py` (adapter-boundary
+    isolation). The keyboard builders live in this same module so
+    the Phase-8 wire format is defined in one place.
+
+    Fail-closed validation (WR-11): naive datetimes, empty TP lists,
+    inverted entry bounds, and empty symbol/direction/setup raise
+    ValueError loudly — a malformed APPROVE message must never
+    render with a wrong expiry or an empty TP section.
+    """
+    return "\n".join(
+        _approve_lines(
+            symbol=symbol,
+            direction=direction,
+            setup=setup,
+            entry_min=entry_min,
+            entry_max=entry_max,
+            stop_loss=stop_loss,
+            take_profits=take_profits,
+            rr=rr,
+            risk_pct=risk_pct,
+            expiry_utc=expiry_utc,
+            invalidation=invalidation,
+            exposure_quote=exposure_quote,
+            reason_codes=reason_codes,
+            signal_id=signal_id,
+            detected_at_utc=detected_at_utc,
+            approved_quantity=approved_quantity,
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Money at stake (Phase 23, D-13, F-015): formatted from the STORED value, never recomputed.
+# --------------------------------------------------------------------------- #
+
+#: The two modes whose APPROVE request carries a `Mode:` line and the money block. SHADOW keeps
+#: its own envelope (`src/paper/shadow.py`).
+REQUEST_MODE_LABELS: tuple[str, ...] = ("DEMO", "LIVE")
+
+
+def _money_or_refuse(money: object) -> MoneyAtStake:
+    if not isinstance(money, MoneyAtStake):
+        raise ValueError(
+            f"{MONEY_AT_STAKE_MISSING}: money must be a MoneyAtStake, got {type(money).__name__}"
+        )
+    return money
+
+
+def render_money_block(money: MoneyAtStake) -> tuple[str, ...]:
+    """The money lines in the D-13 order: notional, margin, SL loss, one profit per TP, equity.
+
+    Every amount is the stored Decimal written with `format(value, "f")`: no multiplication, no
+    rounding, no exponent notation, no cost call. The quote asset is named on every amount and
+    the time is shown through `format_utc`.
+    """
+    stored = _money_or_refuse(money)
+    asset = stored.quote_asset
+    profit_lines = tuple(
+        f"Profit at {leg.label} ({format(leg.fraction, 'f')} of quantity): "
+        f"{format(leg.profit_gross, 'f')} {asset} gross, "
+        f"{format(leg.profit_net, 'f')} {asset} net of modeled costs"
+        for leg in stored.take_profits
+    )
     return (
-        f"APPROVE {symbol} {direction} {setup}\n"
-        f"Signal: {signal_id}\n"
-        f"Detected: {detected_at_utc.astimezone(UTC).isoformat()}\n"
-        f"Entry: {entry_min}–{entry_max}\n"
-        f"Quantity: {format(approved_quantity, 'f')}\n"
-        f"SL: {stop_loss}\n"
-        f"TPs:\n{tp_lines}\n"
-        f"R:R: {rr}\n"
-        f"Risk: {risk_pct}\n"
-        f"Expiry: {expiry_utc.astimezone(UTC).isoformat()}\n"
-        f"Invalidation: {invalidation}\n"
-        f"Exposure: {exposure_quote} quote\n"
-        f"Reasons: {reasons}\n"
-        f"Display: Asia/Ho_Chi_Minh (UTC internally)"
+        f"Notional: {format(stored.notional, 'f')} {asset}",
+        f"Margin: {format(stored.initial_margin, 'f')} {asset} at {stored.leverage}x leverage "
+        f"({stored.leverage_source})",
+        f"Loss at SL: {format(stored.loss_at_stop_gross, 'f')} {asset} gross, "
+        f"{format(stored.loss_at_stop_net, 'f')} {asset} net of modeled costs",
+        *profit_lines,
+        f"Equity used: {format(stored.equity, 'f')} {asset} ({stored.equity_source}, "
+        f"observed {format_utc(stored.equity_observed_at_utc)})",
+    )
+
+
+def require_money_consistent(
+    money: MoneyAtStake,
+    *,
+    direction: str,
+    approved_quantity: Decimal,
+    stop_loss: Decimal,
+    take_profits: list[tuple[Decimal, Decimal]],
+) -> None:
+    """Refuse (ValueError naming the field) a money block that disagrees with the message.
+
+    The money block is stored with the approval; the message fields come from the same plan. A
+    difference means one of them is not the plan the operator would approve (F-015), so the
+    message is never rendered.
+    """
+    stored = _money_or_refuse(money)
+    if stored.side != direction:
+        raise ValueError(f"money.side {stored.side!r} differs from direction {direction!r}")
+    if stored.quantity != approved_quantity:
+        raise ValueError(
+            f"money.quantity {stored.quantity} differs from approved_quantity {approved_quantity}"
+        )
+    if stored.stop_loss_price != stop_loss:
+        raise ValueError(
+            f"money.stop_loss_price {stored.stop_loss_price} differs from stop_loss {stop_loss}"
+        )
+    if len(stored.take_profits) != len(take_profits):
+        raise ValueError(
+            f"money take_profits has {len(stored.take_profits)} legs, "
+            f"the message has {len(take_profits)}"
+        )
+    for index, (leg, (price, fraction)) in enumerate(
+        zip(stored.take_profits, take_profits, strict=True), start=1
+    ):
+        if leg.price != price:
+            raise ValueError(f"money take_profits TP{index} price {leg.price} differs from {price}")
+        if leg.fraction != fraction:
+            raise ValueError(
+                f"money take_profits TP{index} fraction {leg.fraction} differs from {fraction}"
+            )
+
+
+def format_approval_request(
+    *,
+    mode_label: str,
+    symbol: str,
+    direction: str,
+    setup: str,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    stop_loss: Decimal,
+    take_profits: list[tuple[Decimal, Decimal]],
+    rr: Decimal,
+    risk_pct: Decimal,
+    expiry_utc: datetime,
+    invalidation: str,
+    exposure_quote: Decimal,
+    reason_codes: list[str],
+    signal_id: str,
+    detected_at_utc: datetime,
+    approved_quantity: Decimal,
+    money: MoneyAtStake,
+) -> str:
+    """The DEMO or LIVE APPROVE request: the 12 fields, the quantity and the money block.
+
+    The text is `format_approve`'s with `Mode: <label>` after the first line and the money lines
+    (`render_money_block`) directly after `Quantity:` (D-13). `money` is required and must agree
+    with the quantity, stop, take-profit prices and fractions of the message; a missing money
+    block (`MONEY_AT_STAKE_MISSING`), a different mode label or any mismatch raises ValueError,
+    so the request is never sent.
+    """
+    if mode_label not in REQUEST_MODE_LABELS:
+        raise ValueError(f"mode_label must be DEMO or LIVE, got {mode_label!r}")
+    require_money_consistent(
+        money,
+        direction=direction,
+        approved_quantity=approved_quantity,
+        stop_loss=stop_loss,
+        take_profits=take_profits,
+    )
+    return "\n".join(
+        _approve_lines(
+            symbol=symbol,
+            direction=direction,
+            setup=setup,
+            entry_min=entry_min,
+            entry_max=entry_max,
+            stop_loss=stop_loss,
+            take_profits=take_profits,
+            rr=rr,
+            risk_pct=risk_pct,
+            expiry_utc=expiry_utc,
+            invalidation=invalidation,
+            exposure_quote=exposure_quote,
+            reason_codes=reason_codes,
+            signal_id=signal_id,
+            detected_at_utc=detected_at_utc,
+            approved_quantity=approved_quantity,
+            mode_label=mode_label,
+            money_lines=render_money_block(money),
+        )
     )
 
 
@@ -737,6 +956,7 @@ __all__ = [
     "SIM_PREFIX",
     "SKIP_PREFIX",
     "TELEGRAM_CALLBACK_DATA_MAX_BYTES",
+    "REQUEST_MODE_LABELS",
     "TelegramBot",
     "TelegramFailure",
     "TelegramFailureKind",
@@ -750,7 +970,11 @@ __all__ = [
     "classify_telegram_error",
     "edit_text",
     "edit_to_confirm_card",
+    "format_approval_request",
     "format_approve",
+    "format_utc",
     "send_simulate",
+    "render_money_block",
+    "require_money_consistent",
     "send_text",
 ]

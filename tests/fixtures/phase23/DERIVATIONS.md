@@ -85,3 +85,33 @@ exchange. It never says "rejected" (T-23-09).
   refused close is stated as such.
 - Any number, price, quantity, id, secret, mention or URL: the table is static and a test refuses
   the characters used for them.
+
+## Messages (plan 23-09)
+
+Golden texts under `messages/` are produced by `_messages_section()` of
+`scripts/gen_phase23_fixtures.py`, never typed. The inputs are the plan 23-02 LONG fixture
+(`tests/test_money_at_stake.py`): entry 50100 (adverse edge of the entry zone 50000-50100), stop
+49500, take-profits 51000 and 52000 with fractions 0.5 and 0.5, quantity 0.08, leverage 5, equity
+800 USDT read at 2026-10-09 03:00:00 UTC, fee 0.0005 and slippage 0.0002 per side (0.0007 per leg
+and price). The message layer formats the stored values only (`format(value, "f")`); the figures
+below are the independent derivation of what the risk layer stored.
+
+| Line | Derivation from the fixture inputs |
+|---|---|
+| `Notional: 4008.00 USDT` | quantity x entry = 0.08 x 50100 = 4008.00 |
+| `Margin: 801.60 USDT at 5x leverage (...)` | notional / leverage = 4008.00 / 5 = 801.60, truncated toward zero at 18 digits (exact here); the leverage source label is the plan constraint snapshot |
+| `Loss at SL: 48.00 USDT gross, 53.5776 USDT net` | gross = 0.08 x (50100 - 49500) = 48.00; net = the sizing result's `realized_risk` = 0.08 x (600 + (50100 + 49500) x 0.0007) = 0.08 x 669.72 = 53.5776 |
+| `Profit at TP1 (0.5 of quantity): 36.000 gross, 33.1692000 net` | leg 0.08 x 0.5 = 0.040; gross = 0.040 x (51000 - 50100) = 36.000; cost = 0.040 x (50100 + 51000) x 0.0007 = 2.8308000; net = 36.000 - 2.8308000 = 33.1692000 |
+| `Profit at TP2 (0.5 of quantity): 76.000 gross, 73.1412000 net` | leg 0.040; gross = 0.040 x (52000 - 50100) = 76.000; cost = 0.040 x (50100 + 52000) x 0.0007 = 2.8588000; net = 76.000 - 2.8588000 = 73.1412000 |
+| `Equity used: 800 USDT (ACCOUNT_LIVE:..., observed 2026-10-09 03:00:00 UTC)` | the equity reading is an input (800), with its source label and observation time |
+| `Detected:` / `Expiry:` | 2026-10-09 03:00:00 UTC and detected + 4 hours = 2026-10-09 07:00:00 UTC, shown by `format_utc` with the explicit suffix |
+
+Trailing zeros in the figures (`36.000`, `33.1692000`) are the exponent the stored Decimal keeps;
+the renderer writes every digit and never rounds (D-13).
+
+Files: `approve_base.txt` (`format_approve`: no mode line, no money, times in UTC),
+`approve_request_demo.txt` and `approve_request_live.txt` (`format_approval_request`, `Mode:
+DEMO` / `Mode: LIVE`), `simulate.txt` (`format_simulate`, plan 23-09 task 3). None names
+Asia/Ho_Chi_Minh: D-14 shows these messages in UTC with an explicit suffix. docs/DECISIONS.md D025
+names Asia/Ho_Chi_Minh the presentation zone; the conflict is owner item O-3 (open) and D025 is
+not edited here. SHADOW texts keep their UTC + Asia/Ho_Chi_Minh pairs.

@@ -1249,7 +1249,9 @@ def test_request_lines_follow_the_d13_order_with_utc_times() -> None:
     assert lines[3] == "Detected: 2026-10-09 03:00:00 UTC"
     assert "Asia/Ho_Chi_Minh" not in "\n".join(lines)
     assert "Expiry: 2026-10-09 07:00:00 UTC" in lines
-    assert "Margin: 801.60 USDT at 5x leverage (PLAN_CONSTRAINT_SNAPSHOT:verified_leverage)" in lines
+    assert (
+        "Margin: 801.60 USDT at 5x leverage (PLAN_CONSTRAINT_SNAPSHOT:verified_leverage)" in lines
+    )
     assert (
         "Equity used: 800 USDT (ACCOUNT_LIVE:min(totalWalletBalance,totalMarginBalance), "
         "observed 2026-10-09 03:00:00 UTC)" in lines
@@ -1260,6 +1262,7 @@ def test_request_is_accepted_by_the_demo_and_live_fake_bots() -> None:
     import asyncio
 
     from src.adapters.telegram_notify import format_approval_request
+
     from tests.shadow_fakes import FakeBot
 
     for mode in ("DEMO", "LIVE"):
