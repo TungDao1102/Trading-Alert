@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 23
 current_phase_name: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 23-01-PLAN.md
-last_updated: "2026-10-25T14:43:48.928Z"
+stopped_at: Completed 23-02-PLAN.md
+last_updated: "2026-10-25T14:53:13.640Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 23 execution started
-state_head: b7e0fc85a128d7618569925c2ae847e402616181
+state_head: 43b2cf233228f757131462105f6ea7b7e55548df
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 328
-  completed_plans: 313
+  completed_plans: 314
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 23 (Telegram Approval Hardening + Two-Step Confirm + Money Amounts) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 23 execution started
@@ -245,6 +245,7 @@ Progress: [██████░░░░] 61%
 | Phase 20 P01 | 15 min | 3 tasks | 7 files |
 | Phase 20 P02 | 18 min | 3 tasks | 6 files |
 | Phase 23 P01 | approx 1h | 3 tasks | 25 files |
+| Phase 23 P02 | 35min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -576,6 +577,7 @@ Recent decisions affecting current work:
 - [Phase 20]: 20-02: PROTECTION is a seventh TransitionKind (not persisted, no GLOSSARY block until O-01); ProtectionCoordinator._transition is the only place a protection state changes and refuses moves outside the table (journal PROTECTION_TRANSITION_REJECTED, SAFE_MODE PROTECTION_STATE_INVALID). — D-29, T-A, D077. Audit added the edges PROTECTED_ENTRY_OPEN -> FLAT and AWAITING_FILL -> ENTRY_UNRESOLVED (covered by the docstring intent). O-H exception not built (default NO). Phase 20 has no exchange event-time column: no general stale-event detection (deferred to Phase 24).
 - [Phase 23]: 23-01: new Telegram edge refusal codes are plain strings in src/approval/reason_codes.py, not RejectionReason members (enum stays 21; DispatchResult.reason_code is RejectionReason | str | None)
 - [Phase 23]: 23-01: authorized_user_ids is a required keyword-only frozenset[int] on on_callback, build_application, ShadowCoordinator, ShadowWiring and RehearsalSettings; a configured Telegram without TELEGRAM_AUTHORIZED_USER_IDS refuses the paper start
+- [Phase 23]: [23-02] MoneyAtStake computed once in src/risk/money_at_stake.py from the SizedResult (net SL loss = realized_risk read, margin via required_initial_margin truncated at 18 digits, TP legs via per_unit_round_trip_cost); stored form money-at-stake/1 canonical JSON, strict parser
 
 ### Pending Todos
 
@@ -662,6 +664,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-25T14:43:43.610Z
-Stopped at: Completed 23-01-PLAN.md
+Last session: 2026-10-25T14:53:07.683Z
+Stopped at: Completed 23-02-PLAN.md
 Resume file: None
