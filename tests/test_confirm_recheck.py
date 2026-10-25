@@ -110,9 +110,7 @@ def _inputs(side: str = "LONG", **over: Any) -> PrePlacementInputs:
     return PrePlacementInputs(**base)
 
 
-def _confirm(
-    side: str = "LONG", mode: str = ONE_WAY, **over: Any
-) -> ConfirmInputs:
+def _confirm(side: str = "LONG", mode: str = ONE_WAY, **over: Any) -> ConfirmInputs:
     return ConfirmInputs(pre_placement=_inputs(side, **over), position_mode=mode)
 
 
@@ -288,6 +286,6 @@ def test_module_is_pure() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
     for name in imported:
-        assert not name.startswith(
-            ("src.execution.manager", "src.adapters", "src.persistence")
-        ), name
+        assert not name.startswith(("src.execution.manager", "src.adapters", "src.persistence")), (
+            name
+        )
