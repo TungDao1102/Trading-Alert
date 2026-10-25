@@ -56,6 +56,19 @@ def test_one_golden_alert_text_per_wording_entry() -> None:
     assert len(names) == 16  # nine branch codes, the generic one and six events
 
 
+def test_the_four_message_goldens_exist_and_name_no_local_zone() -> None:
+    names = sorted(_on_disk(FIXTURE_ROOT / "messages"))
+
+    assert names == [
+        "approve_base.txt",
+        "approve_request_demo.txt",
+        "approve_request_live.txt",
+        "simulate.txt",
+    ]
+    for text in _on_disk(FIXTURE_ROOT / "messages").values():
+        assert "Asia/Ho_Chi_Minh" not in text
+
+
 def test_every_generated_text_is_lf_and_ends_with_one_newline() -> None:
     for text in _load_generator().render_all().values():
         assert "\r" not in text

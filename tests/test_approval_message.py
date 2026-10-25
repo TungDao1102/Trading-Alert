@@ -21,8 +21,12 @@ The tests cover:
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -87,7 +91,8 @@ def test_format_approve_renders_all_12_aprv01_fields() -> None:
     assert "101.50" in text and "103.00" in text  # 6. TP(s)
     assert "2.0" in text  # 7. R:R
     assert "0.005" in text  # 8. risk percentage
-    assert "2026-09-19T13:00:00+00:00" in text  # 9. expiry
+    # 9. expiry: UTC with an explicit suffix since Phase 23 (D-14), no ISO text, no local zone.
+    assert "Expiry: 2026-09-19 13:00:00 UTC" in text
     assert "CANDLE_CLOSE < 99.50" in text  # 10. invalidation
     assert "50.00" in text  # 11. current exposure
     assert "SETUP_DETECTED" in text  # 12. reason codes
@@ -1167,3 +1172,141 @@ def test_r3b_format_approve_is_byte_stable() -> None:
     from src.adapters.telegram_notify import format_approve
 
     assert format_approve(**_make_payload()) == format_approve(**_make_payload())
+
+
+# --------------------------------------------------------------------------- #
+# Phase 23, plan 23-09 (D-13, D-14, F-015): the money block and UTC times.
+# The expected texts are the generated goldens (scripts/gen_phase23_fixtures.py), never typed.
+# --------------------------------------------------------------------------- #
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MESSAGES = _REPO_ROOT / "tests" / "fixtures" / "phase23" / "messages"
+
+
+def _generator() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "gen_phase23_fixtures_messages", _REPO_ROOT / "scripts" / "gen_phase23_fixtures.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _golden(name: str) -> str:
+    return (_MESSAGES / name).read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+
+
+def _request_kwargs() -> dict[str, Any]:
+    """The fixture request fields with the money parsed back from its stored JSON text."""
+    from src.risk.money_at_stake import parse_money_json
+
+    generator = _generator()
+    fields: dict[str, Any] = generator.approve_fields()
+    return {**fields, "money": parse_money_json(generator.fixture_money_json())}
+
+
+def test_request_demo_equals_the_generated_golden() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    text = format_approval_request(mode_label="DEMO", **_request_kwargs())
+
+    assert text + "\n" == _golden("approve_request_demo.txt")
+
+
+def test_request_live_equals_the_generated_golden() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    text = format_approval_request(mode_label="LIVE", **_request_kwargs())
+
+    assert text + "\n" == _golden("approve_request_live.txt")
+    assert "Mode: LIVE\n" in text
+
+
+def test_request_lines_follow_the_d13_order_with_utc_times() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    lines = format_approval_request(mode_label="DEMO", **_request_kwargs()).split("\n")
+    heads = [line.split(":", 1)[0] for line in lines]
+
+    expected_order = [
+        "Mode",
+        "Signal",
+        "Detected",
+        "Entry",
+        "Quantity",
+        "Notional",
+        "Margin",
+        "Loss at SL",
+        "Profit at TP1 (0.5 of quantity)",
+        "Profit at TP2 (0.5 of quantity)",
+        "Equity used",
+        "SL",
+        "TPs",
+    ]
+    assert heads[0].startswith("APPROVE BTCUSDT LONG")
+    assert heads[1 : 1 + len(expected_order)] == expected_order
+    assert lines[3] == "Detected: 2026-10-09 03:00:00 UTC"
+    assert "Asia/Ho_Chi_Minh" not in "\n".join(lines)
+    assert "Expiry: 2026-10-09 07:00:00 UTC" in lines
+    assert "Margin: 801.60 USDT at 5x leverage (PLAN_CONSTRAINT_SNAPSHOT:verified_leverage)" in lines
+    assert (
+        "Equity used: 800 USDT (ACCOUNT_LIVE:min(totalWalletBalance,totalMarginBalance), "
+        "observed 2026-10-09 03:00:00 UTC)" in lines
+    )
+
+
+def test_request_is_accepted_by_the_demo_and_live_fake_bots() -> None:
+    import asyncio
+
+    from src.adapters.telegram_notify import format_approval_request
+    from tests.shadow_fakes import FakeBot
+
+    for mode in ("DEMO", "LIVE"):
+        bot = FakeBot.for_mode(mode)
+        text = format_approval_request(mode_label=mode, **_request_kwargs())
+        asyncio.run(bot.send_message(chat_id=1, text=text))
+        assert len(bot.sent) == 1
+
+
+def test_format_approve_has_utc_times_and_no_display_note() -> None:
+    from src.adapters.telegram_notify import format_approve
+
+    text = format_approve(**_generator().approve_fields())
+
+    assert text + "\n" == _golden("approve_base.txt")
+    assert "Detected: 2026-10-09 03:00:00 UTC\n" in text
+    assert "Expiry: 2026-10-09 07:00:00 UTC\n" in text
+    assert "Display:" not in text and "Asia/Ho_Chi_Minh" not in text
+
+
+def test_format_utc_has_an_explicit_suffix_and_refuses_a_naive_time() -> None:
+    from datetime import timedelta, timezone
+
+    from src.adapters.telegram_notify import format_utc
+
+    assert format_utc(datetime(2026, 10, 9, 3, 0, 0, tzinfo=UTC)) == "2026-10-09 03:00:00 UTC"
+    plus7 = timezone(timedelta(hours=7))
+    assert format_utc(datetime(2026, 10, 9, 10, 0, 0, tzinfo=plus7)) == "2026-10-09 03:00:00 UTC"
+    with pytest.raises(ValueError, match="UTC-aware"):
+        format_utc(datetime(2026, 10, 9, 3, 0, 0))
+
+
+def test_no_golden_message_names_the_local_zone() -> None:
+    for path in sorted(_MESSAGES.glob("*.txt")):
+        assert "Asia/Ho_Chi_Minh" not in _golden(path.name), path.name
+
+
+def test_the_renderers_do_no_arithmetic() -> None:
+    """D-13: the only operations on amounts are format(value, 'f') and string joins."""
+    import src.adapters.telegram_notify as module
+
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    names = {"render_money_block", "format_approval_request", "require_money_consistent"}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            found.add(node.name)
+            binops = [n for n in ast.walk(node) if isinstance(n, (ast.BinOp, ast.AugAssign))]
+            assert not binops, f"{node.name} does arithmetic at line {binops[0].lineno}"
+    assert found == names
