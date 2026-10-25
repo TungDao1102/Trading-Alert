@@ -104,18 +104,24 @@ reason: Demo returned one COMMISSION row and no FUNDING_FEE row; mainnet proof w
 source: assistant-evidence
 evidence: 21-VERIFICATION.md human_verification; 21-OWNER-DECISIONS.md O-2, O-4
 
-### 15. Owner attestations and still-open owner items (OPS-02, D-21, O-1..O-6)
-expected: The owner confirms no-withdrawal keys and IP allowlist (OPS-02), and any still-open item among O-1..O-6 is decided.
+### 15. Owner attestation of the live keys (OPS-02, D-21)
+expected: The owner confirms that the live API key has no withdrawal permission and an IP allowlist (OPS-02). Phase 21 does not claim it (D-21); it only keeps account identifiers and keys out of logs.
 result: blocked
 blocked_by: prior-phase
-reason: Owner attestation, not observable by the assistant, and it waits for Phase 26 with real keys. The assistant does not answer for the owner.
+reason: Owner attestation about settings in the owner's Binance account, not observable by the assistant; it waits for Phases 24 to 26 when live keys exist. Live placement is disabled now.
 source: assistant-evidence
-evidence: 21-VERIFICATION.md requirements table (OPS-02 pending) and human_verification
+evidence: 21-VERIFICATION.md requirements table (OPS-02 pending) and human_verification; 21-CONTEXT.md D-21
+
+### 16. The six owner questions O-1 to O-6 are decided and applied
+expected: Each open owner question of Phase 21 has a recorded owner answer, and the answer is applied where it changes behaviour.
+result: pass
+source: assistant-evidence
+evidence: 21-OWNER-DECISIONS.md (O-1 DECIDED and APPLIED 2026-10-23, 15000 ms and keep all; O-2 option A; O-3 to O-6 DECIDED 2026-10-24) with DECISIONS D084, D086 and D087; applied in config/execution/execution-limits-v1.toml (account.max_equity_age_ms = 15000, account.max_daily_loss_age_ms = 300000) and in src/risk/live_equity.py (equity_basis = the smaller of wallet and margin balance); covered by the 215 strict PostgreSQL tests and the 959 non-PG tests already listed in tests 1 to 12. Still verified later by the owner at the Phase 26 canary: realizedPnl semantics (O-4) and FUNDING_FEE (O-2 check); these two are listed under test 14.
 
 ## Summary
 
-total: 15
-passed: 12
+total: 16
+passed: 13
 issues: 0
 pending: 0
 skipped: 0
@@ -123,4 +129,4 @@ blocked: 3
 
 ## Gaps
 
-[none yet] No test failed. Open follow-ups, not code defects: re-run tests 9 and 10 when PostgreSQL is reachable; tests 13-15 wait for Phases 24-26 and the owner.
+[none yet] No test failed. Tests 9 and 10 were re-run on PostgreSQL on 2026-10-25 and pass. Open follow-ups, not code defects: tests 13 to 15 wait for Phases 24 to 26 and for the owner's attestation of the live keys (OPS-02, D-21).
