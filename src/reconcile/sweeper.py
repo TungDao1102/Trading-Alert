@@ -207,12 +207,28 @@ class OrphanSweeper:
             # Authoritative position-zero verification (T-8-30):
             # two consecutive zero reads required. A single non-zero
             # read blocks the cancel (transient gap protection).
-            first_read = position_verifier(symbol=symbol)
-            second_read = position_verifier(symbol=symbol)
-            if _is_awaitable(first_read):
-                first_read = await first_read
-            if _is_awaitable(second_read):
-                second_read = await second_read
+            # WR-B5: a verifier may raise on purpose (an unreadable position must never read as
+            # zero). The two reads run one after the other, so nothing is left un-awaited, and a
+            # failure skips this orphan only (class name in the reason, never the text).
+            try:
+                first_read = position_verifier(symbol=symbol)
+                if _is_awaitable(first_read):
+                    first_read = await first_read
+                second_read = position_verifier(symbol=symbol)
+                if _is_awaitable(second_read):
+                    second_read = await second_read
+            except Exception as exc:
+                read_reason = f"position_read_failed: {type(exc).__name__}"
+                skipped.append(
+                    SweepSkip(symbol=symbol, client_algo_id=client_algo_id, reason=read_reason)
+                )
+                self._record_skip_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason_code=read_reason,
+                    now_utc=effective_now,
+                )
+                continue
             if not (_is_zero_like(first_read) and _is_zero_like(second_read)):
                 skip_reason = (
                     f"transient_position_gap: first_read={first_read!r} second_read={second_read!r}"
@@ -264,14 +280,14 @@ class OrphanSweeper:
                 )
                 continue
             if not getattr(probe, "found", False):
-                self._journal.record(
-                    self._build_failure_event(
-                        symbol=symbol,
-                        client_algo_id=client_algo_id,
-                        reason="already_gone_no_cancel_needed",
-                        now_utc=effective_now,
-                        phase="already_gone",
-                    )
+                # WR-B5: the order is already gone whatever happens to this row, so a failing
+                # journal must not end the sweep of the remaining orphans.
+                self._record_failure_best_effort(
+                    symbol=symbol,
+                    client_algo_id=client_algo_id,
+                    reason="already_gone_no_cancel_needed",
+                    now_utc=effective_now,
+                    phase="already_gone",
                 )
                 already_gone.append((symbol, client_algo_id))
                 continue
