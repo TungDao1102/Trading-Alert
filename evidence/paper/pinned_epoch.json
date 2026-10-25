@@ -1,0 +1,8 @@
+{
+  "epoch_id": "ce6c0bbf27f080a6843c62dcedfd336e6d90b918ca08203912035235e9f83eda",
+  "evidence_claim_open": true,
+  "opened_at_utc": "2026-10-25T12:37:43.833841+00:00",
+  "parameter_set_hash": "6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87",
+  "parameter_set_id": "research-run-1-a01",
+  "strategy_id": "trend-pullback"
+}
