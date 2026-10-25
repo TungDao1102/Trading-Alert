@@ -298,6 +298,11 @@ class RecordingSleep:
 
 USER_ID = 777001
 OTHER_USER_ID = 777002
+STRANGER_USER_ID = 777003
+# The test allow-list of `on_callback`. OTHER_USER_ID is a second allowed operator, so the confirm
+# layer's "another user" tests keep their meaning (the confirm stays bound to the approving user).
+# The refusal of an unlisted user is tested with STRANGER_USER_ID (Phase 23, D-02).
+AUTHORIZED_USER_IDS: frozenset[int] = frozenset({USER_ID, OTHER_USER_ID})
 
 
 def make_callback_update(
@@ -309,11 +314,13 @@ def make_callback_update(
     from_user_id: int | None = USER_ID,
     message_id: int | None = 1,
     answer: Any = None,
+    chat_type: str | None = "private",
 ) -> Any:
     """A PTB-shaped update for `on_callback`: a callback query with an awaitable `answer`.
 
     `answer` replaces the default no-op `query.answer` (a test passes a recording or failing
-    coroutine function). `from_user_id=None` models a press without a user.
+    coroutine function). `from_user_id=None` models a press without a user. `chat_type` is the
+    Telegram chat type of `effective_chat` (`"private"`, `"group"`, ...).
     """
 
     async def _answer(*args: Any, **kwargs: Any) -> None:
@@ -326,4 +333,6 @@ def make_callback_update(
         message=SimpleNamespace(chat_id=message_chat_id, message_id=message_id),
         from_user=None if from_user_id is None else SimpleNamespace(id=from_user_id),
     )
-    return SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=chat_id))
+    return SimpleNamespace(
+        callback_query=query, effective_chat=SimpleNamespace(id=chat_id, type=chat_type)
+    )
