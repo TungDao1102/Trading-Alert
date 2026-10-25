@@ -94,7 +94,9 @@ def test_long_plan_money_is_recomputed_independently() -> None:
         D("0.04"),
     )
     assert tp1.profit_gross == D("36.00")
-    assert tp1.profit_net == D("36.00") - D("0.04") * (D("50100") * LEG_RATE + D("51000") * LEG_RATE)
+    assert tp1.profit_net == D("36.00") - D("0.04") * (
+        D("50100") * LEG_RATE + D("51000") * LEG_RATE
+    )
     assert (tp2.label, tp2.price, tp2.fraction, tp2.leg_quantity) == (
         "TP2",
         D("52000"),
@@ -102,7 +104,9 @@ def test_long_plan_money_is_recomputed_independently() -> None:
         D("0.04"),
     )
     assert tp2.profit_gross == D("76.00")
-    assert tp2.profit_net == D("76.00") - D("0.04") * (D("50100") * LEG_RATE + D("52000") * LEG_RATE)
+    assert tp2.profit_net == D("76.00") - D("0.04") * (
+        D("50100") * LEG_RATE + D("52000") * LEG_RATE
+    )
 
     assert money.equity == D("800")
     assert money.equity_source == EQUITY_SOURCE_ACCOUNT_LIVE
@@ -120,9 +124,9 @@ def test_canonical_json_shape_and_round_trip_byte_for_byte() -> None:
     assert doc["schema"] == "money-at-stake/1"
     assert doc["leverage"] == 5 and isinstance(doc["leverage"], int)
     assert doc["notional"] == "4008.00"
-    assert doc["initial_margin"] == "801.6"
+    assert doc["initial_margin"] == "801.60"
     assert doc["equity_observed_at_utc"] == "2026-10-09T03:00:00+00:00"
-    assert doc["take_profits"][0]["leg_quantity"] == "0.04"
+    assert doc["take_profits"][0]["leg_quantity"] == "0.040"
     assert list(doc["take_profits"][0]) == sorted(doc["take_profits"][0])
     for value in doc.values():
         assert not isinstance(value, float)

@@ -53,6 +53,8 @@ SCANNED_FILES = (
     # Phase 22 (D-08): pure live margin modules.
     "src/risk/margin_check.py",
     "src/risk/liquidation.py",
+    # Phase 23 plan 23-02 (D-13): the money block built once from the risk pipeline output.
+    "src/risk/money_at_stake.py",
     # Phase 6 plan 06-03 — pure backtest package (D-05).
     "src/backtest/__init__.py",
     "src/backtest/simulator.py",
