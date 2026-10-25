@@ -84,6 +84,7 @@ _IDENTITY_FIELDS: tuple[str, ...] = (
     "requested_at_utc",
     "request_hash",
     "approved_quantity",
+    "money_json",
 )
 
 
@@ -246,6 +247,7 @@ class PgApprovalStore:
                         result=approval.result.value,
                         status=approval.status.value,
                         acted_at_utc=approval.acted_at_utc,
+                        actor_id=approval.actor_id,
                     )
                 )
         except IntegrityError as exc:

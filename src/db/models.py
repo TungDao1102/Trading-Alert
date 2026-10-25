@@ -365,6 +365,9 @@ class ApprovalRow(Base):
     # Quantity of the plan the request was issued for (Phase 19 review-fix batch 4, D078,
     # migration 0006). Written once with the PENDING row; NULL = not recorded (pre-0006 rows).
     approved_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    # Canonical JSON of the money block the messages show (Phase 23 plan 23-04, D-13, migration
+    # 0013). Written once with the PENDING rows; NULL = not recorded (renderers refuse it).
+    money_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # PostgreSQL-only integrity objects: SQLite `create_all` keeps its pre-0004 DDL
     # (`ddl_if`), PostgreSQL (alembic 0004) enforces everything. Names match the migration.
@@ -418,6 +421,10 @@ class ApprovalRow(Base):
         CheckConstraint(
             "approved_quantity IS NULL OR approved_quantity > 0",
             name="ck_approvals_approved_quantity",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "money_json IS NULL OR (left(money_json, 1) = '{' AND right(money_json, 1) = '}')",
+            name="ck_approvals_money_json",
         ).ddl_if(dialect="postgresql"),
     )
 

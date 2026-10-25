@@ -899,9 +899,7 @@ def test_money_json_is_part_of_the_insert_identity(seeded: Engine, store: PgAppr
     assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
 
 
-def test_a_decision_never_changes_the_stored_money(
-    seeded: Engine, store: PgApprovalStore
-) -> None:
+def test_a_decision_never_changes_the_stored_money(seeded: Engine, store: PgApprovalStore) -> None:
     approval = _pending(1, money_json=MONEY_JSON)
     store.insert_pending(approval)
 
