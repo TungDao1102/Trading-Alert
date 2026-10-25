@@ -26,7 +26,7 @@ from src.ops.alerts import ALERT_EVENTS, OperationalAlert, render_alert_text
 
 from tests.support.ast_guards import forbidden_imports, wall_clock_calls
 
-T0= datetime(2026, 10, 9, 3, 0, 0, tzinfo=UTC)
+T0 = datetime(2026, 10, 9, 3, 0, 0, tzinfo=UTC)
 PREFIXES = ("What happened: ", "Position: ", "System already did: ", "You must: ")
 
 

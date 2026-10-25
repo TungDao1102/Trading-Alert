@@ -35,12 +35,35 @@ FIXED_PLAN_HASH = "a" * 64
 # (file stem, event, reason, subject). The subject is the plan for the producers that know the
 # plan and SYSTEM for the SAFE_MODE observer events (src/ops/alerts.py SafeModeAlertObserver).
 ALERT_CASES: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "CLOSE_REQUIRED__B2_STOP_UNCONFIRMED",
-        "CLOSE_REQUIRED",
-        "B2_STOP_UNCONFIRMED",
-        PLAN_SUBJECT,
+    *(
+        (f"CLOSE_REQUIRED__{code}", "CLOSE_REQUIRED", code, PLAN_SUBJECT)
+        for code in (
+            "B1_ENTRY_NOT_TERMINAL",
+            "B2_STOP_UNCONFIRMED",
+            "B3_BOTH_AMBIGUOUS",
+            "B4_FILL_AFTER_STOP",
+            "B4_STOP_LOST_UNRESOLVED",
+            "B5_STOP_REJECTED",
+            "B6_LIQUIDATION_TOO_CLOSE",
+            "NO_POSITION_ON_STOP_BUT_EXPOSED",
+            "OPERATOR_CLOSE",
+        )
     ),
+    # Any other CLOSE_REQUIRED reason gets the generic wording.
+    ("CLOSE_REQUIRED__GENERIC", "CLOSE_REQUIRED", "UNLISTED_REASON", PLAN_SUBJECT),
+    ("TP_UNAVAILABLE", "TP_UNAVAILABLE", "TP_UNAVAILABLE", PLAN_SUBJECT),
+    # The reason of the closer's alert is the failure code; a pre-send refusal has one fixed code.
+    ("EMERGENCY_CLOSE_FAILED", "EMERGENCY_CLOSE_FAILED", "POSITION_READ_FAILED", PLAN_SUBJECT),
+    ("EMERGENCY_CLOSE_NOT_SENT", "EMERGENCY_CLOSE_NOT_SENT", "PRE_SEND_REFUSED", PLAN_SUBJECT),
+    # The three entry-path events come from the SAFE_MODE observer: subject SYSTEM, reason = event.
+    ("ENTRY_STATE_UNKNOWN", "ENTRY_STATE_UNKNOWN", "ENTRY_STATE_UNKNOWN", SYSTEM_SUBJECT),
+    (
+        "PROTECTION_HANDOFF_FAILED",
+        "PROTECTION_HANDOFF_FAILED",
+        "PROTECTION_HANDOFF_FAILED",
+        SYSTEM_SUBJECT,
+    ),
+    ("DB_FAILURE", "DB_FAILURE", "DB_FAILURE", SYSTEM_SUBJECT),
 )
 
 

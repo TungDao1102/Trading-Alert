@@ -4,5 +4,5 @@ reason: B2_STOP_UNCONFIRMED
 at: 2026-10-09T03:00:00Z
 What happened: A position was filled but its stop was still not confirmed by the exchange after the allowed time, and the entry order is no longer open (B2_STOP_UNCONFIRMED).
 Position: A position may be open without a confirmed stop.
-System already did: The plan moved to CLOSE_REQUIRED, new entries are blocked (SAFE_MODE CLOSE_REQUIRED) and a reduce-only MARKET emergency close was attempted; a close that does not end flat raises EMERGENCY_CLOSE_FAILED. Before this, the stop was queried by id on every step and re-placed only when the exchange proved it absent.
+System already did: The plan moved to CLOSE_REQUIRED, new entries are blocked (SAFE_MODE CLOSE_REQUIRED) and a reduce-only MARKET emergency close was attempted; if that close fails, EMERGENCY_CLOSE_FAILED or EMERGENCY_CLOSE_NOT_SENT follows as its own alert. Before this, the stop was queried by id on every step and re-placed only when the exchange proved it absent.
 You must: Check the exchange position and the journal before any manual action. If the position is still open, close it or protect it yourself.

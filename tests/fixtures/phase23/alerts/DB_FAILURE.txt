@@ -1,0 +1,8 @@
+[HIGH] DB_FAILURE
+subject: SYSTEM
+reason: DB_FAILURE
+at: 2026-10-09T03:00:00Z
+What happened: A database read or write the safety path depends on failed, or the stored day state is missing or unreadable (DB_FAILURE; the reason code is the SAFE_MODE reason, DAY_STATE_MISSING or DAY_STATE_UNREADABLE).
+Position: A position may be open. This message does not say whether it is protected, and the local records may be incomplete.
+System already did: New entries are blocked while the problem lasts. Nothing was cancelled or re-sent because of this message; stops and take profits are not touched.
+You must: Check the database and the journal using the reason code, and check the exchange positions and orders directly until the records are healthy again.
