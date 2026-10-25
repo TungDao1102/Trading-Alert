@@ -30,7 +30,7 @@ from src.persistence.engine import make_sync_engine
 from src.persistence.shadow_stores import PgShadowStores
 from src.persistence.uow import OperationalDatabase
 
-from tests.shadow_fakes import CHAT_ID, FakeBot
+from tests.shadow_fakes import CHAT_ID, USER_ID, FakeBot
 from tests.test_paper_shadow_evidence_export import (
     EXCLUDED_LINE,
     _backtest_part,
@@ -340,6 +340,7 @@ def _live_env(**extra: str) -> dict[str, str]:
     env = {
         "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
         "TELEGRAM_AUTHORIZED_CHAT_ID": str(CHAT_ID),
+        "TELEGRAM_AUTHORIZED_USER_IDS": str(USER_ID),
         "PAPER_RUNTIME_CONFIG": str(CONFIG_FILE),
         "PAPER_STRATEGY_ID": "trend-pullback",
         "PAPER_PARAMETER_SET_ID": "baseline-v5",
@@ -443,6 +444,26 @@ def test_telegram_settings_are_read_only_from_the_allowed_names(
     err = capsys.readouterr().err
     assert code == shadow_rehearsal.EXIT_NOT_CONFIGURED
     assert "TELEGRAM_AUTHORIZED_CHAT_ID" in err
+    assert not out.exists()
+
+
+def test_a_live_run_without_the_user_allow_list_is_refused_naming_the_variable_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Phase 23 (D-02): no allow-list, no live rehearsal; never allow-all."""
+    env = _live_env()
+    del env["TELEGRAM_AUTHORIZED_USER_IDS"]
+    out = tmp_path / "live.json"
+
+    code = shadow_rehearsal.main(
+        ["--live-telegram", "--i-am-the-operator", "--out", str(out)],
+        environ=env,
+        stores=RuntimeStores(),
+        bot=FakeBot(),
+    )
+
+    assert code == shadow_rehearsal.EXIT_NOT_CONFIGURED
+    assert "TELEGRAM_AUTHORIZED_USER_IDS" in capsys.readouterr().err
     assert not out.exists()
 
 

@@ -45,6 +45,7 @@ FAKE_KEY = "FAKEKEY0123456789ABCDEF"
 FAKE_SECRET = "FAKESECRET0123456789GHIJKL"
 FAKE_TOKEN = "123456789:FAKETELEGRAMTOKENFAKETELEGRAMTOKEN12"
 FAKE_CHAT = "424242"
+FAKE_USERS = "777001, 777002"
 
 FIXED_NOW = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
 
@@ -63,6 +64,7 @@ def fake_environ() -> dict[str, str]:
         "BINANCE_DEMO_API_SECRET": FAKE_SECRET,
         "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
         "TELEGRAM_AUTHORIZED_CHAT_ID": FAKE_CHAT,
+        "TELEGRAM_AUTHORIZED_USER_IDS": FAKE_USERS,
     }
 
 
@@ -240,7 +242,7 @@ def run_main(
 # --------------------------------------------------------------------------- #
 
 
-def test_load_credentials_reads_only_the_four_named_env_vars() -> None:
+def test_load_credentials_reads_only_the_five_named_env_vars() -> None:
     env = fake_environ()
     env["UNRELATED_SECRET"] = "must-never-be-read-1234"
     creds = dr.load_credentials(env)
@@ -248,6 +250,7 @@ def test_load_credentials_reads_only_the_four_named_env_vars() -> None:
     assert creds.binance_api_secret == FAKE_SECRET
     assert creds.telegram_bot_token == FAKE_TOKEN
     assert creds.telegram_chat_id == 424242
+    assert creds.telegram_user_ids == frozenset({777001, 777002})
     for rendered in (repr(creds), str(creds)):
         for secret in (FAKE_KEY, FAKE_SECRET, FAKE_TOKEN):
             assert secret not in rendered
@@ -257,6 +260,7 @@ def test_load_credentials_reads_only_the_four_named_env_vars() -> None:
         "BINANCE_DEMO_API_SECRET",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_AUTHORIZED_CHAT_ID",
+        "TELEGRAM_AUTHORIZED_USER_IDS",
     ):
         missing = fake_environ()
         del missing[name]
@@ -273,6 +277,14 @@ def test_load_credentials_reads_only_the_four_named_env_vars() -> None:
     with pytest.raises(dr.CredentialError) as info:
         dr.load_credentials(bad_chat)
     assert "not-an-int" not in str(info.value)
+
+    for bad_users in ("abc", "777001,", "0", "-5", "777001,777001"):
+        bad = fake_environ()
+        bad["TELEGRAM_AUTHORIZED_USER_IDS"] = bad_users
+        with pytest.raises(dr.CredentialError) as info:
+            dr.load_credentials(bad)
+        assert "TELEGRAM_AUTHORIZED_USER_IDS" in str(info.value)
+        assert bad_users not in str(info.value)
 
 
 _FORBIDDEN_ENV_FILE_TOKENS = ("dotenv", "env_file", "pydantic_settings")
@@ -585,6 +597,18 @@ def test_missing_credentials_refuse_before_any_adapter_is_built(tmp_path: Path) 
     code, factory = run_main(["--scenario", "far"], tmp_path, environ=env)
     assert code == dr.EXIT_REFUSED
     assert factory.builds == 0
+
+
+def test_missing_user_allow_list_refuses_before_any_adapter_is_built(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Phase 23 (D-02): no allow-list, no rehearsal; the refusal names the variable only."""
+    env = fake_environ()
+    del env["TELEGRAM_AUTHORIZED_USER_IDS"]
+    code, factory = run_main(["--scenario", "far"], tmp_path, environ=env)
+    assert code == dr.EXIT_REFUSED
+    assert factory.builds == 0
+    assert "TELEGRAM_AUTHORIZED_USER_IDS" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #

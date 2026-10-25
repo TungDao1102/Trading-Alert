@@ -78,6 +78,7 @@ ALLOWED_ENV_NAMES: frozenset[str] = frozenset(
         "POSTGRES_PORT",
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_AUTHORIZED_CHAT_ID",
+        "TELEGRAM_AUTHORIZED_USER_IDS",
         "PAPER_RUNTIME_CONFIG",
         "PAPER_STRATEGY_ID",
         "PAPER_PARAMETER_SET_ID",
@@ -121,6 +122,29 @@ def refuse_trade_capable_env(environ: Mapping[str, str]) -> list[str]:
 def read_env(environ: Mapping[str, str]) -> dict[str, str]:
     """The allowed variables of `environ`, nothing else (an unrelated variable is ignored)."""
     return {name: environ[name] for name in sorted(ALLOWED_ENV_NAMES) if name in environ}
+
+
+_USER_IDS_RULE = "TELEGRAM_AUTHORIZED_USER_IDS (must be comma-separated positive integers)"
+
+
+def parse_authorized_user_ids(text: str) -> frozenset[int]:
+    """The Telegram user allow-list of `TELEGRAM_AUTHORIZED_USER_IDS` (Phase 23, D-02).
+
+    Comma-separated positive integers in plain ASCII digits: surrounding blanks are stripped, an
+    empty item (leading, trailing or doubled comma), a sign, a leading zero, a non-ASCII digit, a
+    decimal point or a duplicate refuses the whole value. The `ValueError` names the variable only,
+    never the input (the list is secret-class configuration).
+    """
+    members: set[int] = set()
+    for raw in text.split(","):
+        item = raw.strip(" \t\r\n")
+        if not item or not item.isascii() or not item.isdigit() or item.startswith("0"):
+            raise ValueError(_USER_IDS_RULE)
+        user_id = int(item)
+        if user_id in members:
+            raise ValueError(_USER_IDS_RULE)
+        members.add(user_id)
+    return frozenset(members)
 
 
 # --------------------------------------------------------------------------- #

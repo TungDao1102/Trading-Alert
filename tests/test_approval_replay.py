@@ -656,6 +656,11 @@ def test_no_synonym_reason_strings_in_src_approval() -> None:
 
     suspicious: list[str] = []
     for py_file in approval_dir.glob("*.py"):
+        # Phase 23 (plan 23-01, orchestrator resolution 7): `reason_codes.py` is the ONE module
+        # that deliberately holds the plain-string edge codes (not RejectionReason members; the
+        # enum stays at 21). Its codes are listed in GLOSSARY 9.3 by plan 23-13.
+        if py_file.name == "reason_codes.py":
+            continue
         text = py_file.read_text(encoding="utf-8")
         for line_num, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()

@@ -16,9 +16,10 @@ Safety posture (read before running anything):
   cancel_normal_order, cancel_algo_order) never reach the underlying adapter.
 * ``--execute`` needs an interactive terminal AND an exactly typed phrase, for example
   ``DEMO FAR BTCUSDT``. Anything else exits 2 before any network call.
-* Credentials come only from four environment variables of the current shell session:
-  BINANCE_DEMO_API_KEY, BINANCE_DEMO_API_SECRET, TELEGRAM_BOT_TOKEN and
-  TELEGRAM_AUTHORIZED_CHAT_ID. No file is read for credentials and no other variable is used.
+* Credentials come only from five environment variables of the current shell session:
+  BINANCE_DEMO_API_KEY, BINANCE_DEMO_API_SECRET, TELEGRAM_BOT_TOKEN,
+  TELEGRAM_AUTHORIZED_CHAT_ID and TELEGRAM_AUTHORIZED_USER_IDS (the comma-separated user
+  allow-list of Phase 23). No file is read for credentials and no other variable is used.
   Set them in the shell session only, never in a file that is committed.
 * Evidence files carry exchange-returned ids only, never a secret, and are scrubbed before
   and re-checked after the write.
@@ -32,7 +33,7 @@ Exit codes::
 
 Operator runbook (the executor agent that built this tool never ran it):
 
-1. Set the four variables in the shell session. Stop any other process that polls the bot.
+1. Set the five variables in the shell session. Stop any other process that polls the bot.
 2. Run the dry run first (the default), then the taps scenario, then far, then fill. Each
    ``--execute`` run asks you to type its phrase.
 3. Read the evidence file under ``.planning/phases/09-live-execution-rollout/``. Dry runs write
@@ -123,6 +124,7 @@ from src.domain.enums import (  # noqa: E402
     KillGateState,
     OrderRole,
     QuantizationDecision,
+    RejectionReason,
     SignalStatus,
     TradePlanStatus,
 )
@@ -185,6 +187,7 @@ from src.ops.health import (  # noqa: E402
     run_health_checks,
 )
 from src.ops.redaction import Redactor  # noqa: E402
+from src.paper.runtime_config import parse_authorized_user_ids  # noqa: E402
 from src.reconcile.safe_mode import SafeModeController  # noqa: E402
 from src.risk.cost_rates import (  # noqa: E402
     FEE_SOURCE_PARAMETER,
@@ -208,6 +211,7 @@ ENV_BINANCE_KEY = "BINANCE_DEMO_API_KEY"
 ENV_BINANCE_SECRET = "BINANCE_DEMO_API_SECRET"  # noqa: S105 - a variable NAME, not a secret
 ENV_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN"  # noqa: S105 - a variable NAME, not a secret
 ENV_TELEGRAM_CHAT = "TELEGRAM_AUTHORIZED_CHAT_ID"
+ENV_TELEGRAM_USERS = "TELEGRAM_AUTHORIZED_USER_IDS"
 
 EVIDENCE_SCHEMA = "demo-rehearsal-evidence/schema-1"
 DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-rollout"
@@ -328,18 +332,19 @@ class RunMode(StrEnum):
 
 
 # --------------------------------------------------------------------------- #
-# Credentials (SR-1): the four named environment variables only.
+# Credentials (SR-1): the five named environment variables only.
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True, repr=False)
 class RehearsalCredentials:
-    """The four credentials. Secret fields never appear in repr, str or logs."""
+    """The five credentials. Secret fields never appear in repr, str or logs."""
 
     binance_api_key: str = field(repr=False)
     binance_api_secret: str = field(repr=False)
     telegram_bot_token: str = field(repr=False)
     telegram_chat_id: int = field(repr=False)
+    telegram_user_ids: frozenset[int] = field(repr=False)
 
     def __repr__(self) -> str:
         return "RehearsalCredentials(<masked>)"
@@ -348,7 +353,7 @@ class RehearsalCredentials:
 
 
 def load_credentials(environ: Mapping[str, str]) -> RehearsalCredentials:
-    """Read exactly the four named variables from ``environ``. Errors name the variable only."""
+    """Read exactly the five named variables from ``environ``. Errors name the variable only."""
 
     def need(name: str) -> str:
         value = environ.get(name)
@@ -366,11 +371,20 @@ def load_credentials(environ: Mapping[str, str]) -> RehearsalCredentials:
         raise CredentialError(
             f"environment variable {ENV_TELEGRAM_CHAT} is not an integer"
         ) from None
+    raw_users = need(ENV_TELEGRAM_USERS)
+    try:
+        user_ids = parse_authorized_user_ids(raw_users)
+    except ValueError:
+        raise CredentialError(
+            f"environment variable {ENV_TELEGRAM_USERS} is not a comma-separated list of "
+            "positive integers"
+        ) from None
     return RehearsalCredentials(
         binance_api_key=key,
         binance_api_secret=secret,
         telegram_bot_token=token,
         telegram_chat_id=chat_id,
+        telegram_user_ids=user_ids,
     )
 
 
@@ -1251,6 +1265,7 @@ class PtbApprovalChannel:
         app: Any = build_application(
             token=self._credentials.telegram_bot_token,
             authorized_chat_id=deps.authorized_chat_id,
+            authorized_user_ids=self._credentials.telegram_user_ids,
             binding_context_resolver=deps.binding_context_resolver,
             dispatch=dispatch,
             reply_text_fn=reply,
@@ -2247,7 +2262,11 @@ async def issue_and_send(
 
 
 def _reason(result: DispatchResult) -> str:
-    return "NONE" if result.reason_code is None else result.reason_code.value
+    code = result.reason_code
+    if code is None:
+        return "NONE"
+    # A RejectionReason member or, since Phase 23, a plain-string code (src/approval/reason_codes).
+    return code.value if isinstance(code, RejectionReason) else code
 
 
 async def run_skip_rehearsal(ctx: RunContext, plan: DerivedPlan) -> None:
@@ -2358,8 +2377,7 @@ async def run_unknown_chat_rehearsal(ctx: RunContext, plan: DerivedPlan) -> bool
     )
     ok = (
         result.ok is False
-        and result.reason_code is not None
-        and result.reason_code.value == "INVALIDATED"
+        and _reason(result) == "INVALIDATED"
         and received_rejected
         and rejected
         and unchanged

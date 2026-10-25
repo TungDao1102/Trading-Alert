@@ -71,6 +71,7 @@ from src.paper.runtime_config import (  # noqa: E402
     ConfigNotRatified,
     RuntimeConfig,
     load_runtime_config,
+    parse_authorized_user_ids,
     read_env,
     refuse_trade_capable_env,
 )
@@ -278,12 +279,13 @@ async def run_dry_rehearsal(
     environ: Mapping[str, str] | None = None,
 ) -> RehearsalResult:
     """The rehearsal over fakes on a virtual clock (proof class FAKE)."""
-    from tests.shadow_fakes import CHAT_ID, FakeBot
+    from tests.shadow_fakes import AUTHORIZED_USER_IDS, CHAT_ID, FakeBot
 
     clock = VirtualClock(DRY_RUN_START)
     settings = RehearsalSettings(
         symbol=DRY_RUN_SYMBOL,
         chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
         initial_equity=Decimal("10000"),
         risk_rate=Decimal("0.005"),
         minute_poll_interval_seconds=2,
@@ -316,6 +318,7 @@ class LiveSetup:
     """The validated inputs of a live run (names of problems only, never values)."""
 
     chat_id: int
+    authorized_user_ids: frozenset[int]
     token: str | None
     database_url: str | None
     config: RuntimeConfig
@@ -335,6 +338,17 @@ def _live_setup(
         problems.append(
             "TELEGRAM_AUTHORIZED_CHAT_ID" + (" (must be an integer)" if raw_chat else "")
         )
+    user_ids: frozenset[int] = frozenset()  # only used when no problem was recorded
+    raw_users = values.get("TELEGRAM_AUTHORIZED_USER_IDS", "")
+    if not raw_users.strip():
+        problems.append("TELEGRAM_AUTHORIZED_USER_IDS (missing)")
+    else:
+        try:
+            user_ids = parse_authorized_user_ids(raw_users)
+        except ValueError:
+            problems.append(
+                "TELEGRAM_AUTHORIZED_USER_IDS (must be comma-separated positive integers)"
+            )
     token = values.get("TELEGRAM_BOT_TOKEN") or None
     if need_token and token is None:
         problems.append("TELEGRAM_BOT_TOKEN")
@@ -358,7 +372,7 @@ def _live_setup(
             problems.append(f"the parameter set cannot be loaded ({type(exc).__name__})")
     if problems or config is None or parameter_set is None:
         return problems
-    return LiveSetup(chat_id, token, database_url, config, parameter_set)
+    return LiveSetup(chat_id, user_ids, token, database_url, config, parameter_set)
 
 
 def _pg_stores(url: str) -> tuple[ShadowRuntimeStores, Callable[[], None]]:
@@ -423,6 +437,7 @@ async def run_live_rehearsal(
         settings = RehearsalSettings(
             symbol=symbol,
             chat_id=setup.chat_id,
+            authorized_user_ids=setup.authorized_user_ids,
             initial_equity=setup.config.account.initial_equity,
             risk_rate=setup.config.account.risk_rate,
             minute_poll_interval_seconds=setup.config.timing.minute_poll_interval_seconds,

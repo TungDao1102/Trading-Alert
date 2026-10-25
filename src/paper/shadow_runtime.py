@@ -357,6 +357,7 @@ class ShadowCoordinator:
         stores: ShadowRuntimeStores,
         bot: TelegramTextBot | None,
         chat_id: int,
+        authorized_user_ids: frozenset[int],
         clock: Callable[[], datetime],
         ledger: ShadowLedger,
         public: ShadowPublicFeed,
@@ -370,9 +371,18 @@ class ShadowCoordinator:
         application_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         require_shadow(mode)
+        # Phase 23 (D-02): the allow-list is required and never allow-all. The members are never
+        # put in the message.
+        if (
+            not isinstance(authorized_user_ids, frozenset)
+            or not authorized_user_ids
+            or any(isinstance(m, bool) or not isinstance(m, int) for m in authorized_user_ids)
+        ):
+            raise ValueError("authorized_user_ids must be a non-empty frozenset of int user ids")
         self._mode = mode
         self._stores = stores
         self._chat_id = chat_id
+        self._authorized_user_ids = authorized_user_ids
         self._clock = clock
         self._ledger = ledger
         self._public = public
@@ -461,10 +471,12 @@ class ShadowCoordinator:
 
         The resolver, the dispatcher and the reply function are the SHADOW ones (16-04, 16-11);
         the dispatcher runs the synchronous `dispatch_callback` off the event loop. The chat gate
-        is `authorized_chat_gate` (D-16); user-id authorization is Phase 23.
+        is `authorized_chat_gate` (D-16); since Phase 23 the user and chat-type gate is
+        `authorized_user_gate` over the required allow-list (D-01, D-02).
         """
         return {
             "authorized_chat_id": self._chat_id,
+            "authorized_user_ids": self._authorized_user_ids,
             "binding_context_resolver": self._book.resolve,
             "dispatch": self._dispatch,
             "reply_text_fn": self._reply,
@@ -1299,6 +1311,7 @@ class ShadowWiring:
 
     stores: ShadowRuntimeStores
     chat_id: int
+    authorized_user_ids: frozenset[int]
     bot: TelegramTextBot | None = None
     confirm_ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -1335,6 +1348,7 @@ def build_coordinator(
             stores=wiring.stores,
             bot=wiring.bot,
             chat_id=wiring.chat_id,
+            authorized_user_ids=wiring.authorized_user_ids,
             clock=clock,
             ledger=ledger,
             public=public,

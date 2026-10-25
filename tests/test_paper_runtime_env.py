@@ -107,12 +107,50 @@ def test_allowed_names_are_exactly_the_documented_set() -> None:
             "POSTGRES_PORT",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_AUTHORIZED_CHAT_ID",
+            "TELEGRAM_AUTHORIZED_USER_IDS",
             "PAPER_RUNTIME_CONFIG",
             "PAPER_STRATEGY_ID",
             "PAPER_PARAMETER_SET_ID",
         }
     )
     assert not any(name.startswith("BINANCE_") for name in ALLOWED_ENV_NAMES)
+
+
+def test_parse_authorized_user_ids_accepts_positive_integers() -> None:
+    from src.paper.runtime_config import parse_authorized_user_ids
+
+    assert parse_authorized_user_ids("777001") == frozenset({777001})
+    assert parse_authorized_user_ids(" 777001 , 777002 ") == frozenset({777001, 777002})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        " ",
+        "777001,",
+        ",777001",
+        "777001,,777002",
+        "abc",
+        "12a",
+        "-5",
+        "+5",
+        "0",
+        "1.5",
+        chr(0xFF11) + chr(0xFF12),  # fullwidth digits
+        "True",
+        "777001,777001",
+    ],
+)
+def test_parse_authorized_user_ids_refuses_anything_else_without_echoing_it(text: str) -> None:
+    from src.paper.runtime_config import parse_authorized_user_ids
+
+    with pytest.raises(ValueError) as info:
+        parse_authorized_user_ids(text)
+    message = str(info.value)
+    assert "TELEGRAM_AUTHORIZED_USER_IDS" in message
+    for fragment in text.replace(",", " ").split():
+        assert fragment not in message
 
 
 @pytest.fixture(autouse=True)

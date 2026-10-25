@@ -136,6 +136,7 @@ from src.paper.runtime_config import (
     RuntimeConfig,
     load_runtime_config,
     load_runtime_config_with_provenance,
+    parse_authorized_user_ids,
     read_env,
     refuse_trade_capable_env,
 )
@@ -517,6 +518,17 @@ def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
         chat_id = int(chat)
     except ValueError:
         raise ConfigNotRatified(["TELEGRAM_AUTHORIZED_CHAT_ID (must be an integer)"]) from None
+    # Phase 23 (D-02): with Telegram configured the user allow-list is required, never allow-all.
+    # The messages name the variable only, never a value.
+    user_ids_text = values.get("TELEGRAM_AUTHORIZED_USER_IDS")
+    if not user_ids_text or not user_ids_text.strip():
+        raise ConfigNotRatified(["TELEGRAM_AUTHORIZED_USER_IDS (missing)"])
+    try:
+        authorized_user_ids = parse_authorized_user_ids(user_ids_text)
+    except ValueError:
+        raise ConfigNotRatified(
+            ["TELEGRAM_AUTHORIZED_USER_IDS (must be comma-separated positive integers)"]
+        ) from None
     url = values.get("DATABASE_URL_SYNC") or values.get("DATABASE_URL")
     if not url:
         raise ConfigNotRatified(["DATABASE_URL_SYNC or DATABASE_URL"])
@@ -527,7 +539,10 @@ def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
         return build_application(token=token, **callback_kwargs)
 
     return ShadowWiring(
-        stores=_pg_shadow_stores(url), chat_id=chat_id, application_factory=application_factory
+        stores=_pg_shadow_stores(url),
+        chat_id=chat_id,
+        authorized_user_ids=authorized_user_ids,
+        application_factory=application_factory,
     )
 
 

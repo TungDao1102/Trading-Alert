@@ -15,6 +15,7 @@ rehearsal (plan 16-40).
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from src.adapters.telegram_callbacks import DispatchResult, on_callback
 from src.backtest.costs import build_cost_model
 from src.core.types import Candle
 from src.domain.approval import Approval
-from src.domain.enums import DailyState
+from src.domain.enums import ApprovalResult, DailyState
 from src.domain.registry import load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
@@ -51,7 +52,9 @@ from telegram import error as tg_error
 
 from tests.backtest_case_helpers import DEFAULT_COST_MODEL
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
+    STRANGER_USER_ID,
     T0,
     USER_ID,
     FakeBot,
@@ -322,7 +325,9 @@ class Rig:
         confirm_ttl_seconds: int = 60,
         application_factory: Callable[[dict[str, Any]], Any] | None = None,
         constraints_for: Callable[[str, datetime], ConstraintSnapshot] | None = None,
+        authorized_user_ids: frozenset[int] = AUTHORIZED_USER_IDS,
     ) -> None:
+        self.authorized_user_ids = authorized_user_ids
         self.now = now
         self.constraints_for = (
             constraints_for if constraints_for is not None else lambda symbol, at: CONSTRAINTS
@@ -344,6 +349,7 @@ class Rig:
             stores=self.stores,
             bot=self.bot,
             chat_id=CHAT_ID,
+            authorized_user_ids=self.authorized_user_ids,
             clock=lambda: self.now,
             ledger=self.ledger,
             public=self.public,
@@ -871,7 +877,13 @@ def test_the_running_loop_hands_a_risk_passed_outcome_to_the_shadow_chain(live: 
         script,
         pipeline=pipeline,
         risk_inputs=None,
-        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+        shadow=ShadowWiring(
+            stores=stores,
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=bot,
+            sleep=RecordingSleep(),
+        ),
     )
 
     assert code == 0
@@ -892,7 +904,12 @@ def test_the_start_is_not_refused_when_the_shadow_chain_binds_the_risk_inputs(
         pipeline=SpyPipeline([]),
         risk_inputs=None,
         context_factory=None,
-        shadow=ShadowWiring(stores=RuntimeStores(), chat_id=CHAT_ID, bot=FakeBot()),
+        shadow=ShadowWiring(
+            stores=RuntimeStores(),
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=FakeBot(),
+        ),
     )
     assert code == 0
     assert live.records(RuntimeEventType.RUNTIME_START)
@@ -1359,6 +1376,7 @@ def lifecycle_wiring(trace: list[str]) -> tuple[ShadowWiring, FakeApplication]:
     wiring = ShadowWiring(
         stores=RuntimeStores(),
         chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
         bot=bot,
         sleep=RecordingSleep(),
         application_factory=lambda kwargs: application,
@@ -1676,7 +1694,11 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
         )
     with pytest.raises(ConfigNotRatified, match="DATABASE_URL"):
         runtime._shadow_from_env(
-            {"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_AUTHORIZED_CHAT_ID": "4242"}
+            {
+                "TELEGRAM_BOT_TOKEN": token,
+                "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+                "TELEGRAM_AUTHORIZED_USER_IDS": "777001",
+            }
         )
 
     seen: list[str] = []
@@ -1691,11 +1713,13 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
         {
             "TELEGRAM_BOT_TOKEN": token,
             "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+            "TELEGRAM_AUTHORIZED_USER_IDS": "777001, 777002",
             "DATABASE_URL_SYNC": "postgresql://u:p@h/db",
         }
     )
     assert wiring is not None
     assert wiring.chat_id == 4242 and wiring.stores is stores
+    assert wiring.authorized_user_ids == frozenset({777001, 777002})
     assert seen == ["postgresql://u:p@h/db"]
     assert wiring.application_factory is not None
 
@@ -1708,6 +1732,56 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
     monkeypatch.setattr("src.adapters.telegram_callbacks.build_application", fake_build_application)
     assert wiring.application_factory({"authorized_chat_id": 4242, "clock": None}) == "application"
     assert captured == {"token": token, "authorized_chat_id": 4242, "clock": None}
+
+
+def test_a_configured_telegram_without_a_usable_user_allow_list_refuses_the_start() -> None:
+    """Phase 23 (D-02): token and chat set, user ids missing or unparsable -> not ratified."""
+    from src.paper import runtime
+    from src.paper.runtime_config import ConfigNotRatified
+
+    base = {
+        "TELEGRAM_BOT_TOKEN": "123456:test-token-value",
+        "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+        "DATABASE_URL_SYNC": "postgresql://u:p@h/db",
+    }
+    for missing in (
+        {},
+        {"TELEGRAM_AUTHORIZED_USER_IDS": ""},
+        {"TELEGRAM_AUTHORIZED_USER_IDS": " "},
+    ):
+        with pytest.raises(ConfigNotRatified) as missing_info:
+            runtime._shadow_from_env({**base, **missing})
+        assert missing_info.value.problems == ["TELEGRAM_AUTHORIZED_USER_IDS (missing)"]
+    for bad in ("abc", "777001,", "0", "-5", "777001,777001"):
+        with pytest.raises(ConfigNotRatified) as bad_info:
+            runtime._shadow_from_env({**base, "TELEGRAM_AUTHORIZED_USER_IDS": bad})
+        assert bad_info.value.problems == [
+            "TELEGRAM_AUTHORIZED_USER_IDS (must be comma-separated positive integers)"
+        ]
+        assert bad not in str(bad_info.value), "no input text in the message"
+    # With Telegram unconfigured the start stays SKIPPED, whatever the allow-list says.
+    assert runtime._shadow_from_env({"TELEGRAM_AUTHORIZED_USER_IDS": "abc"}) is None
+
+
+def test_the_coordinator_requires_a_non_empty_integer_allow_list() -> None:
+    parameter = inspect.signature(ShadowCoordinator).parameters["authorized_user_ids"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+    for bad in (frozenset(), frozenset({True}), {USER_ID}):
+        with pytest.raises(ValueError):
+            Rig(authorized_user_ids=bad)  # type: ignore[arg-type]
+    assert Rig().coordinator.callback_kwargs()["authorized_user_ids"] == AUTHORIZED_USER_IDS
+
+
+async def test_a_press_by_a_user_outside_the_allow_list_changes_no_approval() -> None:
+    rig = Rig()
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    result = await rig.tap(f"APR:{short}", "q-stranger", at=T_APPROVE, user=STRANGER_USER_ID)
+
+    assert result.ok is False and result.reason_code == "USER_NOT_AUTHORIZED"
+    assert all(a.status == ApprovalResult.PENDING for a in rig.stores.approvals.values())
 
 
 def test_the_postgresql_stores_implement_every_member_of_the_chain_port() -> None:
@@ -1808,7 +1882,13 @@ def _crash_before_the_shadow_write(rig: Live, stores: FailingAlertStores, bot: F
         script,
         pipeline=pipeline,
         risk_inputs=None,
-        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+        shadow=ShadowWiring(
+            stores=stores,
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=bot,
+            sleep=RecordingSleep(),
+        ),
     )
     assert code == 7
     [heartbeat] = rig.records(RuntimeEventType.PAPER_BAR_PROCESSED)
@@ -1827,7 +1907,13 @@ def _restart(rig: Live, stores: FailingAlertStores, bot: FakeBot) -> int:
         script,
         pipeline=SpyPipeline([]),
         risk_inputs=None,
-        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+        shadow=ShadowWiring(
+            stores=stores,
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=bot,
+            sleep=RecordingSleep(),
+        ),
     )
 
 

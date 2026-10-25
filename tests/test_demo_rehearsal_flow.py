@@ -75,6 +75,7 @@ def environ() -> dict[str, str]:
         "BINANCE_DEMO_API_SECRET": FAKE_SECRET,
         "TELEGRAM_BOT_TOKEN": FAKE_TOKEN,
         "TELEGRAM_AUTHORIZED_CHAT_ID": str(AUTH_CHAT),
+        "TELEGRAM_AUTHORIZED_USER_IDS": str(AUTH_USER),
     }
 
 

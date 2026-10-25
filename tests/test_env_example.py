@@ -152,6 +152,13 @@ def test_existing_variable_names_are_unchanged() -> None:
         assert name in text or name in commented
 
 
+def test_the_user_allow_list_variable_is_named_without_a_value() -> None:
+    """Phase 23 (D-02): both examples name TELEGRAM_AUTHORIZED_USER_IDS and carry no id."""
+    assert "TELEGRAM_AUTHORIZED_USER_IDS" in ENV_EXAMPLE.read_text(encoding="utf-8")
+    soak = (REPO_ROOT / "deploy" / "soak.env.example").read_text(encoding="utf-8").splitlines()
+    assert "TELEGRAM_AUTHORIZED_USER_IDS=" in soak, "an empty assignment, never a value"
+
+
 def test_real_env_file_stays_gitignored() -> None:
     proc = subprocess.run(
         ["git", "check-ignore", "-q", ".env"],

@@ -155,6 +155,7 @@ class RehearsalSettings:
 
     symbol: str
     chat_id: int
+    authorized_user_ids: frozenset[int]
     initial_equity: Decimal
     risk_rate: Decimal
     minute_poll_interval_seconds: int
@@ -704,6 +705,7 @@ async def run_rehearsal(
         stores=marked,
         bot=recording,
         chat_id=settings.chat_id,
+        authorized_user_ids=settings.authorized_user_ids,
         clock=clock,
         ledger=ledger,
         public=public,
