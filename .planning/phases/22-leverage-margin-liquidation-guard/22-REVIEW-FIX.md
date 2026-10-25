@@ -72,7 +72,8 @@ come after a POST was sent when the symbol was not yet at the target.
 **Files modified:** `src/execution/manager.py`, `tests/test_execution_manager.py`
 **Commit:** `9912b549`
 **Status:** fixed (a)(b)(c in process); the DB-level arbiter is not built (see below)
-**Applied fix:** (a)(b) new gate 5f3: after the guard passes, the same pure `evaluate_pre_placement` runs
+**Applied fix:** (a)(b) new gate 5f4 (named 5f3 when written; renamed on 2026-10-25 because the
+Phase 21 equity comparison already holds 5f3): after the guard passes, the same pure `evaluate_pre_placement` runs
 again with a clock read after the guard (mark and last price age, remaining validity before the
 `goodTillDate` floor); readings unchanged, so it can only tighten; an unreadable clock refuses like gate 5e.
 (c) `_one_placement_per_symbol`, a decorator on `execute_approved_plan`: a SECOND approval of a symbol that
@@ -239,7 +240,7 @@ None.
 ## Merge notes
 
 Files that the Phase 21 fix is also likely to touch: `src/execution/manager.py` (decorator and import near
-`execute_approved_plan`, gate 5f3 after the guard, one `:=` at the gate 5e evaluation),
+`execute_approved_plan`, gate 5f4 after the guard and after gate 5f3, one `:=` at the gate 5e evaluation),
 `src/risk/reservations.py` and `src/persistence/risk_reservations.py` (the claim derivation; Phase 21
 files), `tests/test_execution_manager.py` (appended tests, two edited clock tests),
 `tests/test_risk_reservations.py`, `tests/test_risk_reservation_margin_pg.py`, `docs/GLOSSARY.md`.

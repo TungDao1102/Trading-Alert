@@ -3589,7 +3589,7 @@ async def test_mark_age_a_fresh_mark_stamped_after_now_utc_places() -> None:
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
     # The clock was read after the gate 5e reads (the mark read among them) and, since 22-REVIEW
-    # WR-02, once more after the position mode and the guard (gate 5f3), never before the reads.
+    # WR-02, once more after the position mode and the guard (gate 5f4), never before the reads.
     assert calls_seen_by_clock == [len(PRE_PLACEMENT_READS), len(PRE_PLACEMENT_READS) + 1]
     assert _reads_only(adapter)[: len(PRE_PLACEMENT_READS)] == PRE_PLACEMENT_READS
 
@@ -3735,7 +3735,7 @@ async def test_the_clock_is_read_after_both_price_reads_and_again_after_the_guar
     )
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
-    # The second reading is gate 5f3 (22-REVIEW WR-02): after the position mode, before the consume.
+    # The second reading is gate 5f4 (22-REVIEW WR-02): after the position mode, before the consume.
     assert calls_seen_by_clock == [PRE_PLACEMENT_READS, [*PRE_PLACEMENT_READS, "get_position_mode"]]
 
 

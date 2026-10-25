@@ -617,9 +617,12 @@ async def execute_approved_plan(
           margin for exactly the order that will be sent. A NO_TRADE verdict returns its code
           (a guard that raises, or a request that cannot be built, is UNCERTAIN_ACCOUNT_STATE),
           before anything is consumed. A pass completes the in-memory plan snapshot.
-      5f3. Clock-dependent recheck (22-REVIEW WR-02): the guard takes several REST calls, so
-          the pure pre-placement evaluation of gate 5e runs again with a clock read after it
-          (mark and last price age, remaining validity); the readings are unchanged.
+      5f3. Equity comparison (Phase 21 review WR-03): the sizing equity may not exceed the live
+          equity the guard read.
+      5f4. Clock-dependent recheck (22-REVIEW WR-02; named 5f3 until 2026-10-25): the guard
+          takes several REST calls, so the pure pre-placement evaluation of gate 5e runs again
+          with a clock read after it (mark and last price age, remaining validity); the
+          readings are unchanged.
       7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
          protection registry (plan 19-15, D-10). No protective order is placed here: the stop
          is placed after the first fill by `src/execution/protection.py`.
@@ -1129,7 +1132,7 @@ async def execute_approved_plan(
             is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
         )
 
-    # Gate 5f3 (22-REVIEW WR-02): the guard takes several REST calls, so the clock-dependent part
+    # Gate 5f4 (22-REVIEW WR-02): the guard takes several REST calls, so the clock-dependent part
     # of gate 5e is judged AGAIN at an instant read after it: the mark and last price ages
     # (`max_mark_price_age_ms`, `max_last_price_age_ms`) and the remaining validity before the
     # exchange's goodTillDate floor are measured when the order is about to be consumed and sent,
