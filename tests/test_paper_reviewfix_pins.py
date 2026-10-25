@@ -204,23 +204,10 @@ class _CountingBot:
 
 
 def _notify_payload() -> dict[str, Any]:
-    return {
-        "symbol": "BTCUSDT",
-        "direction": "LONG",
-        "setup": "TREND_PULLBACK_LONG",
-        "entry_min": Decimal("100.10"),
-        "entry_max": Decimal("100.30"),
-        "stop_loss": Decimal("99.50"),
-        "take_profits": [(Decimal("101.50"), Decimal("0.5"))],
-        "rr": Decimal("2.0"),
-        "risk_pct": Decimal("0.005"),
-        "expiry_utc": datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
-        "invalidation": "CANDLE_CLOSE < 99.50",
-        "exposure_quote": Decimal("50.00"),
-        "reason_codes": ["SETUP_DETECTED"],
-        "signal_id": "sig_pin_0001",
-        "detected_at_utc": datetime(2026, 9, 19, 9, 0, tzinfo=UTC),
-    }
+    # Phase 23 (D-14): a SIMULATE payload carries the quantity and a consistent money block.
+    from tests.support.simulate_payload import make_simulate_payload
+
+    return make_simulate_payload(signal_id="sig_pin_0001")
 
 
 def test_journal_callback_failure_never_triggers_resend() -> None:
