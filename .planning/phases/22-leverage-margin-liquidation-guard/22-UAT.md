@@ -138,8 +138,9 @@ reason: Not built. tests/test_phase22_gate.py::test_invariant_13_nothing_in_src_
 
 ### 21. Owner approval of the probe-limits files
 expected: The owner approves the Demo probe-limits files used for the 2026-10-24 run.
-result: skipped
-reason: Owner attestation; no code or test can stand in for it and an assistant cannot approve it. Left for the owner.
+result: pass
+source: owner-statement
+evidence: the owner approved the files in a message of 2026-10-25; recorded in 22-PROBE-LIMITS-APPROVAL.md with the SHA-256 of each file. This is the owner's own approval, written down by the assistant, not an assistant judgement.
 
 ### 22. Mainnet behavior
 expected: Any of the above on mainnet.
@@ -150,10 +151,10 @@ reason: No mainnet use; live placement is disabled (LIVE_ORDERS_DISABLED). Phase
 ## Summary
 
 total: 22
-passed: 16
+passed: 17
 issues: 0
 pending: 0
-skipped: 1
+skipped: 0
 blocked: 5
 
 ## Gaps
