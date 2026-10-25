@@ -112,6 +112,9 @@ def build_simulate_keyboard(signal_id: str) -> InlineKeyboardMarkup:
 
     `callback_data` stays within Telegram's 64-byte limit via
     `_short_signal_id` (CR-05).
+
+    Since Phase 23 no production path sends this keyboard; it stays for wire-format stability
+    (use `build_decision_keyboard`).
     """
     short = _short_signal_id(signal_id)
     sim_data = f"SIM:{short}"
@@ -192,6 +195,9 @@ def build_approve_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     the SKIP button is a separate keyboard so each callback_data
     carries a single short id and the receiver parses one prefix at
     a time.
+
+    Since Phase 23 no production path sends this single-button keyboard; the message carries
+    `build_decision_keyboard` (APPROVE and SKIP in one row). It stays for wire-format stability.
     """
     apr_data = _short_signal_id_with_prefix(signal_id, APR_PREFIX)
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -206,6 +212,9 @@ def build_skip_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     `sha256(signal_id)[:32]` (32 hex chars). The full payload is
     `SKP:` (4) + 32 hex = 36 bytes, well under Telegram's 64-byte
     limit. The keyboard carries exactly one button labeled SKIP.
+
+    Since Phase 23 no production path sends this single-button keyboard; the message carries
+    `build_decision_keyboard` (APPROVE and SKIP in one row). It stays for wire-format stability.
     """
     skp_data = _short_signal_id_with_prefix(signal_id, SKP_PREFIX)
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -213,15 +222,16 @@ def build_skip_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("SKIP", callback_data=skp_data)]])
 
 
-def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
-    """Build the SHADOW decision keyboard: one row, an APPROVE and a SKIP button.
+def build_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
+    """Build the decision keyboard: one row, an APPROVE and a SKIP button, for every mode.
 
-    Button contract (Phase 16, plan 16-04, D-16, F-961): SHADOW alerts use the live `APR:` and
-    `SKP:` prefixes ONLY. Both buttons carry the same short id (`sha256(signal_id)[:32]`), so one
-    short-id mapping backs the pair, and both are backed by a PENDING approval row. The
-    SIMULATE-only keyboard (`build_simulate_keyboard`, inert `SIM:`/`SKIP:` data that resolves to
-    SIMULATE_RECORDED and never advances an approval) is never sent by SHADOW code; it stays in
-    this module only for wire-format stability (Phase 7 D-05).
+    One message carries both buttons in SHADOW, DEMO and LIVE (Phase 23, D-05). Button contract
+    (Phase 16, plan 16-04, D-16, F-961): the live `APR:` and `SKP:` prefixes ONLY, so a SKIP press
+    is recorded as SKIPPED and never as an inert SIMULATE label (F-405). Both buttons carry the
+    same short id (`sha256(signal_id)[:32]`), so one short-id mapping backs the pair, and both are
+    backed by a PENDING approval row. The SIMULATE-only keyboard (`build_simulate_keyboard`, inert
+    `SIM:`/`SKIP:` data that resolves to SIMULATE_RECORDED and never advances an approval) stays
+    in this module only for wire-format stability (Phase 7 D-05).
 
     Each payload is `APR:`/`SKP:` (4 bytes) + 32 hex = 36 bytes, under Telegram's 64-byte limit;
     `_short_signal_id_with_prefix` re-checks the ceiling.
@@ -238,6 +248,11 @@ def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
+    """The SHADOW decision keyboard: `build_decision_keyboard`, kept under its Phase 16 name."""
+    return build_decision_keyboard(signal_id)
 
 
 def build_confirm_keyboard(signal_id: str) -> InlineKeyboardMarkup:
@@ -964,6 +979,7 @@ __all__ = [
     "TelegramTextBot",
     "build_approve_keyboard",
     "build_confirm_keyboard",
+    "build_decision_keyboard",
     "build_shadow_decision_keyboard",
     "build_simulate_keyboard",
     "build_skip_keyboard",
