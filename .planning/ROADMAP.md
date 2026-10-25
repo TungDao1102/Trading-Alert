@@ -1233,10 +1233,34 @@ Input: .planning/phases/23-telegram-approval-hardening-money/23-NOTES.md
 - [P16R-02] `ShadowConfirm._deferred_confirmed` keeps only the last adopted CONFIRM of one `expire_due` sweep, so `on_confirmed` runs once for the last of several adopted CONFIRMs (`src/paper/shadow_confirm.py:1077`, `:1215`). Harmless today because `ShadowCoordinator._on_confirmed` ignores its arguments and `_ensure_drivers` builds drivers for every reservation; it becomes a real defect the day a hook uses its arguments. Decide when the two-step confirm is reworked: keep a list, or document that the hook takes no arguments, and add a test with two adoptions in one sweep (source: review of c654524..6f73e5b, 2026-10-20, reviewer C/B/A hand-back; detail in .planning/phases/16-paper-runtime-composition/deferred-items.md; decision: none required)
 - [P20-OPS-REMOTE] Remote operator commands (owner request 2026-10-21): the owner restricts ssh to the EC2 host to one home IP and wants ssh kept for critical operations, so non-critical operator actions run through authenticated commands such as Telegram bot commands: SAFE_MODE exit (`exit_safe_mode`, plan 20-15), `python -m src.ops.rest_gate_cli status/clear` (plan 20-07, if built), and the EXEC-06 controls of plan 20-17. Reuse this phase's allow-list on `from_user.id`, the private-chat rule and the two-step confirm; commands that raise risk (SAFE_MODE exit, gate clear) need the confirm, risk-reducing ones (disable entries, close) first. Phase 24 wires it into the runtime. Proposed home chosen by the assistant, to be confirmed by the owner (source: 20-DEFERRED.md written by plan 20-24; decision: none yet)
 
-**Plans:** 0 plans
+**Plans:** 13 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 23 to break down)
+
+**Wave 1**
+- [ ] 23-01-PLAN.md - Allow-list and private-chat gate at the callback edge, from TELEGRAM_AUTHORIZED_USER_IDS to the journal; actor threaded into the decision (D-01, D-02, D-03, D-15)
+- [ ] 23-02-PLAN.md - Money at stake: pure builder, carrier value and canonical JSON in the risk layer (D-13)
+- [ ] 23-03-PLAN.md - Operator-alert wording formatters and the Phase 23 fixture generator (D-14)
+- [ ] 23-04-PLAN.md - Approval row carries the decider and the money: _decide writes actor_id, migration 0013 money_json (D-03, D-13)
+- [ ] 23-05-PLAN.md - CONFIRM-time pre-placement recheck adapter and prior-outcome description (D-11, D-12, G4-032)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 23-06-PLAN.md - Shared confirm core with SHADOW/DEMO/LIVE profiles, SHADOW byte-identical, P16R-02 list (D-09, D-10, D-16)
+- [ ] 23-07-PLAN.md - Decided-message edge: bounded edit/send with RetryAfter, keyboard removal, finalize hook, stale-tap flag, error handling (D-06, D-07, D-08)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 23-08-PLAN.md - G4-042: migration 0014 excludes EXPIRED from the one-decided-per-plan index, owner gate O-2 (D-16) *(checkpoint: owner decision)*
+- [ ] 23-09-PLAN.md - Message renderers: UTC times, money block, DEMO/LIVE request composer, SIMULATE quantity and money, one APPROVE+SKIP keyboard (D-05, D-13, D-14)
+- [ ] 23-10-PLAN.md - SHADOW decided messages: keyboard removal after SKIP, CONFIRM, CANCEL and expiry, texts unchanged (D-06, D-08)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 23-11-PLAN.md - DEMO/LIVE approval desk: one message, money rows, SKIP recorded, stale taps, G4-032 replies; Demo rehearsal one-message keyboard (D-05, D-07, D-12)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 23-12-PLAN.md - DEMO/LIVE two-step confirm flow: card, recheck, on_confirmed seam, criterion-4 matrix, finals, expiry (D-09, D-10, D-11)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 23-13-PLAN.md - Canonical docs (TELEGRAM trust model F-127, GLOSSARY 9.3, DATA_MODEL, DECISIONS per O-2), Phase 23 gate, owner register (D-04, D-15, D-17)
 
 ### Phase 24: Live Runtime Composition + Demo Rehearsal
 
