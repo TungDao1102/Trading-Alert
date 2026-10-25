@@ -11,6 +11,8 @@ import importlib.util
 from pathlib import Path
 from types import ModuleType
 
+from src.ops.alert_wording import CLOSE_REQUIRED_WORDING, EVENT_WORDING
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATOR_PATH = REPO_ROOT / "scripts" / "gen_phase23_fixtures.py"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "phase23"
@@ -42,6 +44,16 @@ def test_render_all_equals_the_files_on_disk() -> None:
 
     assert rendered  # something is generated
     assert rendered == _on_disk(FIXTURE_ROOT)
+
+
+def test_one_golden_alert_text_per_wording_entry() -> None:
+    names = sorted(_on_disk(FIXTURE_ROOT / "alerts"))
+    expected = {f"CLOSE_REQUIRED__{code}.txt" for code in CLOSE_REQUIRED_WORDING}
+    expected.add("CLOSE_REQUIRED__GENERIC.txt")
+    expected.update(f"{event}.txt" for event in EVENT_WORDING)
+
+    assert names == sorted(expected)
+    assert len(names) == 16  # nine branch codes, the generic one and six events
 
 
 def test_every_generated_text_is_lf_and_ends_with_one_newline() -> None:
