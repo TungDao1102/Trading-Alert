@@ -485,3 +485,40 @@ def test_a_press_that_confirms_one_entry_calls_the_hook_exactly_once() -> None:
 def test_the_deferred_confirmations_are_a_list_not_the_last_one_only() -> None:
     source = CORE_SOURCE.read_text(encoding="utf-8")
     assert "_deferred_confirmed: list[" in source
+
+
+class PerCorrelationUnreadableStores(UnreadableJournalStores):
+    """Like `UnreadableJournalStores`, but only the listed correlations are unreadable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unreadable_ids: set[str] = set()
+
+    def journal_for_correlation(self, correlation_id: str) -> list[Any]:
+        if self.unreadable or correlation_id in self.unreadable_ids:
+            raise ConnectionError("journal unreadable for " + correlation_id)
+        return InMemoryShadowStores.journal_for_correlation(self, correlation_id)
+
+
+def test_an_adoption_is_not_lost_when_a_later_entry_of_the_same_sweep_raises() -> None:
+    stores = PerCorrelationUnreadableStores()
+    rig = CoreRig(DEMO_CONFIRM_PROFILE, stores=stores)
+    entries = (rig.issue(1), rig.issue(2))
+    # Both CONFIRM appends commit and raise; neither press can read the journal back.
+    stores.unreadable = True
+    for n, entry in enumerate(entries, start=1):
+        with pytest.raises(ConnectionError):
+            rig.confirm(entry, correlation=f"cbq:c{n}")
+    stores.raise_after_confirm_write = False
+    stores.unreadable = False
+    stores.unreadable_ids = {DEMO_CONFIRM_PROFILE.correlation("apr-2")}  # only the second
+
+    rig.now = T_ISSUE + timedelta(seconds=TTL + 1)
+    with pytest.raises(ConnectionError, match="apr-2"):
+        rig.book.expire_due(rig.now)
+    # apr-1 was adopted before apr-2 raised: its CONFIRM still reached the hook, once.
+    assert [call[0].approval_id for call in rig.hook_calls] == ["apr-1"]
+
+    stores.unreadable_ids = set()
+    rig.book.expire_due(rig.now + timedelta(seconds=1))
+    assert [call[0].approval_id for call in rig.hook_calls] == ["apr-1", "apr-2"]

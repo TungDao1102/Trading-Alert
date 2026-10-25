@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Final, Protocol, TypeVar
+from typing import Any, Final, Protocol, TypeVar, cast
 
 import structlog
 
@@ -367,9 +367,10 @@ class ConfirmBook:
         # Bounded: a press whose reply never ran cannot grow it without limit.
         self._results: dict[str, ConfirmRecord] = {}
         self._press_correlation: str | None = None
-        # Set by `_finish_confirm` inside the book lock, taken and called by `handle_confirm`
-        # after the locks are released.
-        self._deferred_confirmed: tuple[Approval, TradePlan, datetime] | None = None
+        # Appended by `_finish_confirm` inside the book lock (one item per CONFIRM finished by
+        # the running press or sweep), taken and called by `_in_section` after the locks are
+        # released (P16R-02, D-16: a list, so a sweep that adopts several loses none).
+        self._deferred_confirmed: list[tuple[Approval, TradePlan, datetime]] = []
 
     # ---- read side ------------------------------------------------------ #
 
@@ -904,15 +905,22 @@ class ConfirmBook:
         """Run `body` under the book lock and, with a reservation port, its serialized section.
 
         Every path that can finish a CONFIRM (a press, an adopted stored CONFIRM) runs here, so
-        `on_confirmed` is called once for it AFTER the section and the book lock are released
-        (B2-CR-01): the hook may take the coordinator lock without waiting on the ledger lock.
+        `on_confirmed` is called once for each of them AFTER the section and the book lock are
+        released (B2-CR-01): the hook may take the coordinator lock without waiting on the ledger
+        lock. One sweep can adopt several CONFIRMs (P16R-02, D-16): the hook receives each, in
+        order, with its own approval, plan and confirm instant. A hook that raises does not skip
+        the later ones; the first hook exception is re-raised after all ran. When the body itself
+        raised after finishing some CONFIRMs (they are journaled and their state is CONFIRMED, so
+        no later sweep would adopt them again), their hooks still run and the body error wins.
 
         `press_correlation` is the id of the CONFIRM or CANCEL press being handled; the reply
         record is stored under it. A sweep passes None and records nothing. A body that raises
         leaves no record behind (B2-WR-03).
         """
+        body_error: BaseException | None = None
+        result: _T | None = None
         with self._lock:
-            self._deferred_confirmed = None
+            self._deferred_confirmed = []
             self._press_correlation = press_correlation
             try:
                 if self._reservations is None:
@@ -920,16 +928,43 @@ class ConfirmBook:
                 else:
                     with self._reservations.section():
                         result = body()
-            except BaseException:
+            except BaseException as exc:
                 if press_correlation is not None:
                     self._results.pop(press_correlation, None)
-                raise
+                body_error = exc
             finally:
                 self._press_correlation = None
-            deferred, self._deferred_confirmed = self._deferred_confirmed, None
-        if deferred is not None and self._on_confirmed is not None:
-            self._on_confirmed(*deferred)
-        return result
+            deferred, self._deferred_confirmed = self._deferred_confirmed, []
+        hook_error = self._run_confirmed_hooks(deferred, suppress=body_error is not None)
+        if body_error is not None:
+            raise body_error
+        if hook_error is not None:
+            raise hook_error
+        return cast(_T, result)
+
+    def _run_confirmed_hooks(
+        self, deferred: list[tuple[Approval, TradePlan, datetime]], *, suppress: bool
+    ) -> Exception | None:
+        """Call `on_confirmed` for each finished CONFIRM, in order; return the first error.
+
+        Every item is attempted even after one raised. With `suppress` (the body already raised)
+        the errors are only logged, because the body error is the one the caller must see.
+        """
+        hook = self._on_confirmed
+        if hook is None:
+            return None
+        first_error: Exception | None = None
+        for item in deferred:
+            try:
+                hook(*item)
+            except Exception as exc:  # noqa: BLE001 - every adopted CONFIRM gets its call
+                log.warning(
+                    f"{self._profile.log_namespace}.on_confirmed_failed",
+                    error_class=type(exc).__name__,
+                )
+                if first_error is None:
+                    first_error = exc
+        return None if suppress else first_error
 
     def _reconcile_unknown(self, entry: ConfirmEntry) -> ConfirmResult | None:
         """Settle an earlier *_CONFIRMED append of unknown outcome against the journal.
@@ -1094,9 +1129,9 @@ class ConfirmBook:
                 return self._result(
                     entry, ConfirmOutcome.REJECTED_OTHER, outcome.reason_code, replayed=False
                 )
-        # State is already CONFIRMED, so a replay can never set this a second time. The hook runs
-        # in `handle_confirm` once the section is released (B2-CR-01).
-        self._deferred_confirmed = (entry.approval, entry.plan, confirmed_at_utc)
+        # State is already CONFIRMED, so a replay can never append this a second time. The hook
+        # runs in `_in_section` once the section is released (B2-CR-01).
+        self._deferred_confirmed.append((entry.approval, entry.plan, confirmed_at_utc))
         return result
 
     def _reject_terminal(
