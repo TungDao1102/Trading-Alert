@@ -61,6 +61,20 @@ class ApprovalAlreadyDecided(Exception):
         self.existing = existing
 
 
+class ApprovalDecidedDifferently(ApprovalRejected):
+    """A press lost to a stored decision with a DIFFERENT outcome (Phase 23, D-06, D-09).
+
+    Same reason code and message as the plain `ApprovalRejected` it replaces (INVALIDATED,
+    "approval already decided with a different outcome"), so every existing `except
+    ApprovalRejected` caller still catches it. `existing` is the STORED approval, which lets a
+    composer answer "already decided" from stored state instead of from a local guess.
+    """
+
+    def __init__(self, reason_code: RejectionReason, message: str = "", *, existing: Approval):
+        super().__init__(reason_code, message)
+        self.existing = existing
+
+
 # Per-token in-process locks: two concurrent `resolve_callback` calls
 # for the same token hash serialize on the token's lock so only one
 # performs the PENDING->decided transition. This is a latency optimization
@@ -268,9 +282,10 @@ def _resolve_locked(
         existing = lost.existing
         if existing.action == deciding_action and existing.status == new_result:
             return existing
-        raise ApprovalRejected(
+        raise ApprovalDecidedDifferently(
             reason_code=RejectionReason.INVALIDATED,
             message="approval already decided with a different outcome",
+            existing=existing,
         ) from None
 
     return new_approval
@@ -278,6 +293,7 @@ def _resolve_locked(
 
 __all__ = [
     "ApprovalAlreadyDecided",
+    "ApprovalDecidedDifferently",
     "resolve_callback",
     "LookupByTokenHash",
     "SaveApproval",
