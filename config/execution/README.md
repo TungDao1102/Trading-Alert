@@ -92,6 +92,7 @@ One key per line, so the checks of plan 19-01 can parse the list.
 ### `[account]` (Phase 21, D-03; F-012)
 
 - `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the other required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). The owner set 15000 on 2026-10-23 (DECISIONS D084, provenance `DECISION`); the code carries no default.
+- `account.max_daily_loss_age_ms` - REQUIRED: the maximum age of a known daily loss, counted on the injected clock from the completed backfill that made it known (milliseconds). The stream path never renews it, only a completed backfill does. An age greater than the value, or negative (a stamp in the future), makes the loss unknown (NO_TRADE); an age exactly equal to the value passes. Used by `LiveDayRiskService` (`src/execution/day_risk_service.py`). The owner set 300000 (300 seconds) on 2026-10-25 (DECISIONS D087, provenance `DECISION`); the code carries no default. The Phase 24 composition must run the backfill on a schedule shorter than this value while trading is possible.
 
 ### `[margin]` (Phase 22; D-10, D-11, D-13, amendment A4; OWNER-OPEN O-2, O-3)
 
@@ -103,10 +104,10 @@ All three keys are REQUIRED (they would keep the live path refused while they ar
 
 ## Phase 20 notes
 
-Of the nineteen keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
+Of the twenty keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
 `require_live_ready()` leave it out (`ALERT_ONLY_LIMIT_KEYS` in the loader), so the sentence below
-about the live path refusing covers the eighteen required keys, `account.max_equity_age_ms`
-(Phase 21, D-03) among them and the three `margin` keys (Phase 22) too.
+about the live path refusing covers the nineteen required keys, `account.max_equity_age_ms` and
+`account.max_daily_loss_age_ms` (Phase 21, D-03 and D087) among them and the three `margin` keys (Phase 22) too.
 
 `stale_feed.max_user_data_silence_ms` is not the paper runtime's `max_ws_message_silence_seconds`
 (`src/paper/coverage.py`); the two are separate keys in separate files and neither reads the other.

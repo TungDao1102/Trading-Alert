@@ -248,6 +248,7 @@ async def build_day_risk_rig(
         quote_asset="USDT",
         funding_policy=policy,
         parameter_set=TEST_ONLY_PARAMETER_SET,
+        limits=test_only_execution_limits(),
     )
     return DayRiskRig(service, day_store, day_reader, clock)
 

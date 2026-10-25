@@ -67,7 +67,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         ),
         "stale_feed": ("max_mark_price_age_ms", "max_user_data_silence_ms"),
         "alerts": ("dedupe_window_ms",),
-        "account": ("max_equity_age_ms",),
+        "account": ("max_equity_age_ms", "max_daily_loss_age_ms"),
         "margin": ("liquidation_buffer_bps", "max_bracket_age_ms", "headroom_bps"),
     }
 )
@@ -96,6 +96,7 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "stale_feed.max_user_data_silence_ms": "stale_feed_max_user_data_silence_ms",
         "alerts.dedupe_window_ms": "alerts_dedupe_window_ms",
         "account.max_equity_age_ms": "account_max_equity_age_ms",
+        "account.max_daily_loss_age_ms": "account_max_daily_loss_age_ms",
         "margin.liquidation_buffer_bps": "margin_liquidation_buffer_bps",
         "margin.max_bracket_age_ms": "margin_max_bracket_age_ms",
         "margin.headroom_bps": "margin_headroom_bps",
@@ -188,6 +189,10 @@ class ExecutionLimits:
     only over-estimated; an age greater than this value, or negative, is stale (NO_TRADE
     UNCERTAIN_ACCOUNT_STATE), and an age exactly equal to it passes. It is a REQUIRED key: it is
     not in ``ALERT_ONLY_LIMIT_KEYS``, so while it is unset the live path refuses.
+    ``account_max_daily_loss_age_ms`` (Phase 21 review WR-05; the owner set 300000 on 2026-10-25,
+    DECISIONS D087): the maximum age, in milliseconds, of a known daily loss, counted from the
+    completed backfill that made it known. An older loss, or a stamp dated in the future, is
+    unknown (NO_TRADE); an age exactly equal to it passes. REQUIRED, not alert-only.
     ``margin_liquidation_buffer_bps`` (plan 22-02, D-09, D-10, OWNER-OPEN O-2): the liquidation
     buffer, in basis points of the ENTRY price; the margin guard compares it as a price distance
     beyond the stop. ``margin_max_bracket_age_ms`` (plan 22-02, D-11, OWNER-OPEN O-3): the
@@ -197,8 +202,8 @@ class ExecutionLimits:
     (amendment A4) and REQUIRED (not in ``ALERT_ONLY_LIMIT_KEYS``). The owner set them on
     2026-10-24 (DECISIONS D085), provenance DECISION, in the values file. No number is chosen
     here, and the consumers (plans 22-12, 22-13 and 22-14)
-    read them from a loaded object. With the three margin keys the file holds nineteen keys,
-    eighteen required and one alert-only.
+    read them from a loaded object. With the three margin keys and the daily-loss age the file
+    holds twenty keys, nineteen required and one alert-only.
     """
 
     max_unprotected_ms: int | None
@@ -217,6 +222,7 @@ class ExecutionLimits:
     alerts_dedupe_window_ms: int | None
     reconcile_entry_stale_grace_ms: int | None
     account_max_equity_age_ms: int | None
+    account_max_daily_loss_age_ms: int | None
     margin_liquidation_buffer_bps: int | None
     margin_max_bracket_age_ms: int | None
     margin_headroom_bps: int | None

@@ -212,11 +212,14 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # plus Phase 21 (plan 21-02): key text `max_equity_age_ms` and field
     # `account_max_equity_age_ms` (52 -> 54), plus Phase 22 (plan 22-02): the three margin key texts
     # `liquidation_buffer_bps`, `max_bracket_age_ms`, `headroom_bps` and their three field names
-    # `margin_<key>` (54 -> 60; derived from the code, no text collides with an earlier name).
-    assert len(GUARDED_NAMES) == 60
+    # `margin_<key>` (54 -> 60; derived from the code, no text collides with an earlier name), plus
+    # the daily-loss age of the Phase 21 review WR-05: key text `max_daily_loss_age_ms` and field
+    # `account_max_daily_loss_age_ms` (60 -> 62).
+    assert len(GUARDED_NAMES) == 62
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
     # Plan 21-02 (D-03): the equity-age bound has no numeric default under either spelling.
     assert {"max_equity_age_ms", "account_max_equity_age_ms"} <= GUARDED_NAMES
+    assert {"max_daily_loss_age_ms", "account_max_daily_loss_age_ms"} <= GUARDED_NAMES
     # Plan 22-02 (D-10, D-11, D-13): the buffer, the bracket age and the headroom have no numeric
     # default under either spelling (OWNER-OPEN O-2, O-3).
     assert {

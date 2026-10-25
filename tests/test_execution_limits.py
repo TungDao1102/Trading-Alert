@@ -46,6 +46,10 @@ EXPECTED_UNSET = (
 # set it on 2026-10-23 (DECISIONS D084, 15000 ms), so the committed file no longer leaves it unset.
 EQUITY_AGE_KEY = "account.max_equity_age_ms"
 EQUITY_AGE_DECIDED_MS = 15000
+# Phase 21 review WR-05: the daily-loss age, REQUIRED. The owner set 300000 on 2026-10-25
+# (DECISIONS D087), so the committed file no longer leaves it unset.
+DAILY_LOSS_AGE_KEY = "account.max_daily_loss_age_ms"
+DAILY_LOSS_AGE_DECIDED_MS = 300000
 # Phase 22 (plan 22-02; D-10, D-11, D-13, amendment A4): the three margin keys, REQUIRED. The owner
 # set them on 2026-10-24 (DECISIONS D085, O-2 and O-3), so the committed file no longer leaves
 # them unset. The section is the last one, after `account`.
@@ -69,7 +73,7 @@ MARGIN_DECIDED = {
 # equity age is set by D084, the three margin keys by D085).
 COMMITTED_UNSET = EXPECTED_UNSET
 # Every required key in file order, the equity age included.
-ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, *MARGIN_KEYS)
+ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, DAILY_LOSS_AGE_KEY, *MARGIN_KEYS)
 
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
 # "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
@@ -105,6 +109,7 @@ def test_the_real_file_loads_with_every_field_unset() -> None:
     assert limits.max_mark_price_age_ms is None
     assert limits.max_last_price_age_ms is None
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS
+    assert limits.account_max_daily_loss_age_ms == DAILY_LOSS_AGE_DECIDED_MS  # D087
     assert limits.unset_keys() == COMMITTED_UNSET
     for field_name in PHASE20_FIELDS.values():
         assert getattr(limits, field_name) is None, field_name
@@ -152,6 +157,7 @@ def test_a_fully_set_document_is_live_ready() -> None:
     assert limits.stale_feed_max_user_data_silence_ms == 11
     assert limits.alerts_dedupe_window_ms == 10
     assert limits.account_max_equity_age_ms == 10
+    assert limits.account_max_daily_loss_age_ms == 11
     assert limits.margin_liquidation_buffer_bps == 10
     assert limits.margin_max_bracket_age_ms == 11
     assert limits.margin_headroom_bps == 12
@@ -408,6 +414,7 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         alerts_dedupe_window_ms=None,
         reconcile_entry_stale_grace_ms=None,
         account_max_equity_age_ms=None,
+        account_max_daily_loss_age_ms=None,
         margin_liquidation_buffer_bps=None,
         margin_max_bracket_age_ms=None,
         margin_headroom_bps=None,
@@ -457,10 +464,11 @@ def test_the_readme_carries_no_value_and_states_the_rules() -> None:
 def test_the_committed_file_names_only_not_configured_except_the_owner_numbers() -> None:
     text = LIMITS_FILE.read_text(encoding="utf-8")
     # The only numbers in the file are the owner's D084 equity age (2026-10-23) and the three
-    # D085 margin keys (2026-10-24).
+    # D085 margin keys (2026-10-24) and the D087 daily-loss age (2026-10-25).
     numeric = re.findall(r"^\s*([a-z_]+)\s*=\s*[-+]?\d+", text, flags=re.MULTILINE)
     assert numeric == [
         "max_equity_age_ms",
+        "max_daily_loss_age_ms",
         "liquidation_buffer_bps",
         "max_bracket_age_ms",
         "headroom_bps",
@@ -470,7 +478,8 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # WR-03 the sixth, quick task 261020-l4p the seventh, plan 20-01 the seven Phase 20 keys, plan
     # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms,
     # plan 22-02 the three margin keys). The equity age has a number and the label DECISION since
-    # D084 and the three margin keys since D085: 38 minus 2 minus 6 = 30.
+    # D084, the daily-loss age since D087 and the three margin keys since D085: 40 minus 2 minus 2
+    # minus 6 = 30.
     assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
 
 
@@ -501,7 +510,7 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     for section, count in _PHASE20_SECTIONS.items():
         assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    # The eighteen required keys plus the alert-only key of plan 20-28, in file order.
+    # The nineteen required keys plus the alert-only key of plan 20-28, in file order.
     assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(ALL_REQUIRED_KEYS)
     assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
@@ -638,6 +647,11 @@ def test_the_real_file_has_every_section_and_label_unset_except_the_decided_keys
                 assert document[section][key] == EQUITY_AGE_DECIDED_MS
                 assert document["provenance"][section][key] == "DECISION"
                 continue
+            if f"{section}.{key}" == DAILY_LOSS_AGE_KEY:
+                # Set by the owner on 2026-10-25 (D087): a number and the label DECISION.
+                assert document[section][key] == DAILY_LOSS_AGE_DECIDED_MS
+                assert document["provenance"][section][key] == "DECISION"
+                continue
             if f"{section}.{key}" in MARGIN_DECIDED:
                 # Set by the owner on 2026-10-24 (D085): a number and the label DECISION.
                 assert document[section][key] == MARGIN_DECIDED[f"{section}.{key}"]
@@ -753,7 +767,8 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
 
 def test_the_account_section_precedes_margin_and_has_the_prefixed_field() -> None:
     assert list(el.EXECUTION_LIMIT_KEYS)[-2:] == ["account", "margin"]
-    assert el.EXECUTION_LIMIT_KEYS["account"] == ("max_equity_age_ms",)
+    assert el.EXECUTION_LIMIT_KEYS["account"] == ("max_equity_age_ms", "max_daily_loss_age_ms")
+    assert el.EXECUTION_LIMIT_FIELDS[DAILY_LOSS_AGE_KEY] == "account_max_daily_loss_age_ms"
     assert el.EXECUTION_LIMIT_FIELDS[_ACCOUNT_KEY] == _ACCOUNT_FIELD
     assert _ACCOUNT_FIELD in el.ExecutionLimits.__dataclass_fields__
 
@@ -837,14 +852,14 @@ def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fi
         assert el.EXECUTION_LIMIT_FIELDS[dotted] == field_name, dotted
         assert field_name in el.ExecutionLimits.__dataclass_fields__, field_name
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    assert len(dotted_keys) == 19
+    assert len(dotted_keys) == 20
     assert dotted_keys[-3:] == list(MARGIN_KEYS)
 
 
 def test_the_margin_keys_are_required_not_alert_only() -> None:
     for dotted in MARGIN_KEYS:
         assert dotted not in el.ALERT_ONLY_LIMIT_KEYS, dotted
-    assert len(ALL_REQUIRED_KEYS) == 18
+    assert len(ALL_REQUIRED_KEYS) == 19
 
 
 def test_the_committed_file_holds_the_margin_keys_set_with_the_decision_label() -> None:

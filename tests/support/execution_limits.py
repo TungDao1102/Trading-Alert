@@ -52,6 +52,8 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "reconcile.entry_stale_grace_ms": 4747,
     # Phase 21 (D-03): a FAKE equity age bound.
     "account.max_equity_age_ms": 9137,
+    # Phase 21 review WR-05: a FAKE daily-loss age bound (the owner's number is 300000, D087).
+    "account.max_daily_loss_age_ms": 7919,
     # Phase 22 (plan 22-02; D-10, D-11, D-13): FAKE margin numbers, never the owner's choice
     # (OWNER-OPEN O-2, O-3). On an entry of 80000 a buffer of 137 bps is a distance of 1096.
     "margin.liquidation_buffer_bps": 137,

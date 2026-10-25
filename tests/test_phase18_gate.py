@@ -479,8 +479,9 @@ def test_invariant_5_no_unratified_default_in_src_or_scripts() -> None:
     # plan 20-01 (37 -> 50: 6 new key texts and 7 "<section>_<key>" field names), then the
     # alert-only key of plan 20-28 (50 -> 52: its key text and its field name), then Phase 21
     # (plan 21-02): key text max_equity_age_ms and field account_max_equity_age_ms (52 -> 54), then
-    # Phase 22 (plan 22-02): three margin key texts and three "margin_<key>" fields (54 -> 60).
-    assert len(unratified_tests.GUARDED_NAMES) == 60
+    # Phase 22 (plan 22-02): three margin key texts and three "margin_<key>" fields (54 -> 60),
+    # then the daily-loss age of the Phase 21 review WR-05 (60 -> 62).
+    assert len(unratified_tests.GUARDED_NAMES) == 62
     assert unratified_tests.ALLOW_LIST == {}
     unratified_tests.test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts()
     unratified_tests.test_no_production_file_imports_the_test_only_limits()

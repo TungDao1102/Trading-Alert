@@ -18,9 +18,10 @@ status: partial
 
 **Summary:**
 - Findings in scope: 10
-- Fixed: 9 (WR-10 partly: the PLACED exit only, the operator reason is left to the owner)
-- Skipped: 1 (WR-05, needs the owner; only its documentation fallback was applied)
-- Needs owner (also listed under Skipped or Fixed below): WR-05, the operator release reason of WR-10
+- Fixed: 10 (WR-10 partly: the PLACED exit only, the operator reason is left to the owner; WR-05
+  fixed on 2026-10-25 with the owner number 300 s, DECISIONS D087)
+- Skipped: 0
+- Needs owner (also listed under Fixed below): the operator release reason of WR-10
 
 **Where the tests ran:** the isolated worktree `.claude/worktrees/agent-a631a3571d0cfb6d1`, branch
 `worktree-agent-a631a3571d0cfb6d1`, with `TEST_DATABASE_URL` set, so the `*_pg.py` files ran (they did
@@ -208,13 +209,32 @@ two release-table oracles updated.
 ### WR-05: A "known" daily loss never expires by time
 
 **File:** `src/execution/day_risk_service.py:285-287` and `:466-469`
-**Reason:** needs-owner. The fix is an age bound for the loss, i.e. a new owner-chosen number (the
-review itself says "from an owner key, NOT_CONFIGURED until the owner decides"). Adding the key would
-also add one more `NOT_CONFIGURED` limit to `config/execution/execution-limits-v1.toml`, which blocks
-the live path until set. No key and no default was added. Only the reviewer's "at minimum" fallback was
-done, in commit `70cb6502`: `current_daily_loss_quote` now states that a known loss has no age bound
-and that freshness is delegated to the Phase 20 feed checks and to the caller (run `backfill` on a
-schedule and after a gap). The Phase 24 composition should also run `backfill` periodically.
+**Status:** FIXED on 2026-10-25 with an owner number (owner answer "A, A với 300 giây, đổi tên";
+DECISIONS D087). It was first skipped (needs-owner, only the documentation fallback of commit
+`70cb6502`); the owner then chose 300 seconds.
+**Applied fix:** New required key `account.max_daily_loss_age_ms` = 300000 in
+`config/execution/execution-limits-v1.toml` (provenance `DECISION`, next to
+`account.max_equity_age_ms`; loader, field `account_max_daily_loss_age_ms`, README, glossary and the
+key-count tests extended). `LiveDayRiskService` takes `limits` as a required constructor argument
+(a missing key raises `ExecutionLimitsNotConfigured`; no default number in code) and keeps the
+injected-clock instant at which a COMPLETED backfill marked the loss known. `_backfill_is_current`
+(used by `current_daily_loss_quote`, `_known_net_pnl`, `evaluate` and the day open) is False for a
+loss older than the limit, a stamp in the future or an unreadable clock; an age equal to the limit
+passes (the D084 equality convention). The stream path (`ingest_fill`) never renews the stamp, only
+a completed backfill does; a failed backfill or any invalidation clears it. The "no age bound"
+paragraph of the docstring was replaced.
+**Tests:** `test_a_loss_known_299_seconds_ago_is_known`, `test_a_loss_known_301_seconds_ago_is_unknown`,
+`test_the_age_edge_passes_when_equal_and_fails_one_millisecond_over`,
+`test_a_stamp_in_the_future_is_unknown`, `test_a_new_backfill_renews_an_expired_loss`,
+`test_a_failed_backfill_does_not_leave_an_old_stamp_to_renew_the_loss`,
+`test_the_loss_age_limit_is_required_and_has_no_default` (`tests/test_day_risk_service.py`),
+`test_a_stream_fill_does_not_extend_the_age_of_a_known_loss` (`tests/test_day_risk_stream.py`),
+`test_invariant_2b_the_daily_loss_age_limit_is_the_owner_number_and_required` and
+`test_invariant_4c_decisions_d087_records_the_wr08_reading_and_the_loss_age` (Phase 21 gate).
+**Note for Phase 24 (composition):** the loss expires 300 s after the last completed backfill, so
+the composition MUST run `backfill` on a schedule shorter than 300 s (and after any stream gap)
+while trading is possible; otherwise every entry is NO_TRADE with the loss unknown. Setting the key
+does not open the live path (`LIVE_ORDERS_DISABLED` stays).
 **Original issue:** After one successful `backfill`, the loss stays "known" until an invalidation; a
 fill the stream never delivers and that raises no gap leaves it understated for the rest of the day.
 

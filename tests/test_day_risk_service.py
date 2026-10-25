@@ -29,6 +29,7 @@ from src.execution.day_risk_service import (
     components_from_income,
     components_from_user_trade,
 )
+from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.persistence.errors import RowConflict, StoreUnavailable
 from src.risk.daily_loss import (
     BLOCKED_DAILY_LOSS_UNKNOWN,
@@ -171,6 +172,7 @@ async def build(
     equity: Decimal | None = None,
     policy: FundingPolicy = UNVERIFIED,
     clock: VirtualTime | None = None,
+    limits: ExecutionLimits | None = None,
 ) -> Rig:
     clock = clock if clock is not None else VirtualTime(start)
     if account is None:
@@ -189,6 +191,7 @@ async def build(
         quote_asset="USDT",
         funding_policy=policy,
         parameter_set=PARAMS,
+        limits=limits if limits is not None else only_limits(),
     )
     return Rig(service, day_store, day_reader, account, clock)
 
@@ -927,6 +930,7 @@ def test_the_funding_policy_has_no_default_and_must_be_a_policy() -> None:
             "quote_asset": "USDT",
             "funding_policy": UNVERIFIED,
             "parameter_set": PARAMS,
+            "limits": only_limits(),
         }
         arguments.update(overrides)
         return LiveDayRiskService(**arguments)
@@ -940,6 +944,7 @@ def test_the_funding_policy_has_no_default_and_must_be_a_policy() -> None:
         "symbols": {"BTCUSDT"},
         "quote_asset": "USDT",
         "parameter_set": PARAMS,
+        "limits": only_limits(),
     }
     with pytest.raises(TypeError):
         LiveDayRiskService(**omitted)  # type: ignore[arg-type]
@@ -949,6 +954,86 @@ def test_the_funding_policy_has_no_default_and_must_be_a_policy() -> None:
         make(symbols=set())
     with pytest.raises(ValueError):
         make(quote_asset=" ")
+
+
+# ------------------------------------------------------------------------- loss age (WR-05, D087)
+
+# The owner's number (DECISIONS D087, 2026-10-25): 300 seconds, as milliseconds.
+LOSS_AGE_MS = 300000
+
+
+async def loss_age_rig() -> Rig:
+    """A rig with the owner's 300000 ms loss age, after one backfill and one evaluate."""
+    rig = await build(limits=only_limits(account_max_daily_loss_age_ms=LOSS_AGE_MS))
+    await rig.service.backfill(now_utc=T0)
+    verdict = await rig.service.evaluate(now_utc=T0, exposure=False)
+    assert verdict.state is DailyState.NORMAL
+    return rig
+
+
+async def test_a_loss_known_299_seconds_ago_is_known() -> None:
+    rig = await loss_age_rig()
+    await rig.clock.advance(299)
+    assert rig.service.current_daily_loss_quote(DAY) == Decimal("0")
+    assert (await rig.service.evaluate(now_utc=T0, exposure=False)).state is DailyState.NORMAL
+
+
+async def test_a_loss_known_301_seconds_ago_is_unknown() -> None:
+    rig = await loss_age_rig()
+    await rig.clock.advance(301)
+    assert rig.service.current_daily_loss_quote(DAY) is None
+    assert_blocked(
+        await rig.service.evaluate(now_utc=T0, exposure=False), BLOCKED_DAILY_LOSS_UNKNOWN
+    )
+
+
+async def test_the_age_edge_passes_when_equal_and_fails_one_millisecond_over() -> None:
+    rig = await loss_age_rig()
+    await rig.clock.advance(300)  # exactly the limit: equal passes (the D084 convention)
+    assert rig.service.current_daily_loss_quote(DAY) == Decimal("0")
+    await rig.clock.advance(0.001)  # one millisecond over fails
+    assert rig.service.current_daily_loss_quote(DAY) is None
+
+
+async def test_a_stamp_in_the_future_is_unknown() -> None:
+    rig = await loss_age_rig()
+    rig.clock._now = T0 - timedelta(seconds=1)  # the clock went back: a negative age
+    assert rig.service.current_daily_loss_quote(DAY) is None
+
+
+async def test_a_new_backfill_renews_an_expired_loss() -> None:
+    rig = await loss_age_rig()
+    await rig.clock.advance(301)
+    assert rig.service.current_daily_loss_quote(DAY) is None
+    await rig.service.backfill(now_utc=T0 + timedelta(seconds=301))
+    assert rig.service.current_daily_loss_quote(DAY) == Decimal("0")
+    await rig.clock.advance(299)  # counted from the new backfill, not from the first one
+    assert rig.service.current_daily_loss_quote(DAY) == Decimal("0")
+
+
+async def test_a_failed_backfill_does_not_leave_an_old_stamp_to_renew_the_loss() -> None:
+    rig = await loss_age_rig()
+    rig.store.raise_next("add_components", RuntimeError("down"))
+    await rig.service.backfill(now_utc=T0)
+    assert rig.service.current_daily_loss_quote(DAY) is None
+
+
+def test_the_loss_age_limit_is_required_and_has_no_default() -> None:
+    arguments: dict[str, Any] = {
+        "reader": ScriptedDayRiskReader(),
+        "store": InMemoryDayRiskStore(),
+        "equity": object(),
+        "clock": lambda: T0,
+        "symbols": {"BTCUSDT"},
+        "quote_asset": "USDT",
+        "funding_policy": UNVERIFIED,
+        "parameter_set": PARAMS,
+    }
+    with pytest.raises(TypeError):
+        LiveDayRiskService(**arguments)
+    with pytest.raises(ExecutionLimitsNotConfigured) as caught:
+        LiveDayRiskService(**arguments, limits=only_limits(account_max_daily_loss_age_ms=None))
+    assert caught.value.keys == ("account.max_daily_loss_age_ms",)
 
 
 # ------------------------------------------------------------------------- module guards

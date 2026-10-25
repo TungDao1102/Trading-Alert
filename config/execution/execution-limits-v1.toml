@@ -17,6 +17,7 @@
 #   stale_feed.max_user_data_silence_ms        Phase 20, D-25, D058: maximum silence of the user-data stream (not the paper runtime max_ws_message_silence_seconds)
 #   alerts.dedupe_window_ms                    Phase 20, D-23: window in which a repeated alert is deduplicated
 #   account.max_equity_age_ms                  Phase 21, D-03 (F-012): maximum age of the account equity reading used for live sizing, the daily-loss base and the reservation gate
+#   account.max_daily_loss_age_ms              Phase 21 review WR-05: maximum age of a known daily loss, counted from the backfill that made it known (owner answer 2026-10-25, DECISIONS D087)
 # Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
 # (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED, except
 # reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
@@ -52,6 +53,7 @@ dedupe_window_ms = "NOT_CONFIGURED"
 
 [account]
 max_equity_age_ms = 15000
+max_daily_loss_age_ms = 300000
 
 [margin]
 liquidation_buffer_bps = 300
@@ -85,6 +87,7 @@ dedupe_window_ms = "NOT_CONFIGURED"
 
 [provenance.account]
 max_equity_age_ms = "DECISION"
+max_daily_loss_age_ms = "DECISION"
 
 [provenance.margin]
 liquidation_buffer_bps = "DECISION"

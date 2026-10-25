@@ -35,6 +35,12 @@ Rules this module keeps:
   failed read leaves it unknown (no retry, no sleep, no default), and the generation is bumped
   by the stream path of plan 21-16 (ACCOUNT_UPDATE, stream gaps, unusable fills), which makes
   the loss unknown again until the next backfill. ``_backfill_generation`` is that private counter.
+  A known loss also EXPIRES (review WR-05; owner answer 2026-10-25, DECISIONS D087): the injected
+  clock instant at which a completed backfill marked the loss known is kept, and the loss is
+  unknown again once ``account.max_daily_loss_age_ms`` (300000 ms, a required constructor
+  argument through ``limits``, no default here) has passed. An age equal to the limit passes,
+  an older loss, a stamp dated in the future, or an unreadable clock is unknown. Only a completed
+  backfill renews the stamp: the stream path (``ingest_fill``) never does.
 * D-14, the latch. A newly derived DAILY_STOP is persisted (``latch_stop``) before the verdict is
   returned; a held latch stays DAILY_STOP for the rest of the UTC day, also after a restart and
   whatever the loss does. If the write fails the verdict is still DAILY_STOP (it only reduces
@@ -72,11 +78,12 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Iterable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
 from src.domain.enums import DailyState
+from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.risk.daily_loss import (
     BLOCKED_DAY_BASE_UNAVAILABLE,
     BLOCKED_DAY_STATE_MISSING,
@@ -98,6 +105,8 @@ from src.risk.daily_loss import (
 )
 
 FUNDING_INCOME_TYPE = "FUNDING_FEE"
+_LOSS_AGE_KEY = "account.max_daily_loss_age_ms"
+_ONE_MS = timedelta(milliseconds=1)
 # WR-09: income types read only to prove the folded fills are the whole story. REALIZED_PNL and
 # COMMISSION rows of a symbol outside ``symbols`` (or with no symbol) are fills the fold never
 # saw; INSURANCE_CLEAR is the liquidation clearance fee, which has no component kind at all.
@@ -250,7 +259,11 @@ class LiveDayRiskService:
         quote_asset: str,
         funding_policy: FundingPolicy,
         parameter_set: dict[str, Any],
+        limits: ExecutionLimits,
     ) -> None:
+        loss_age_ms = limits.account_max_daily_loss_age_ms
+        if loss_age_ms is None:
+            raise ExecutionLimitsNotConfigured((_LOSS_AGE_KEY,))
         ordered = tuple(sorted(set(symbols)))
         if not ordered or any(not isinstance(name, str) or name == "" for name in ordered):
             raise ValueError("symbols must be a non-empty collection of non-empty strings")
@@ -270,6 +283,9 @@ class LiveDayRiskService:
         self._quote_asset = quote_asset
         self._funding_policy = funding_policy
         self._parameter_set = parameter_set
+        self._max_loss_age = loss_age_ms * _ONE_MS
+        # The injected-clock instant at which a completed backfill marked the loss known (WR-05).
+        self._loss_known_at: datetime | None = None
         # Plan 21-16 bumps this (ACCOUNT_UPDATE, stream gap, unusable fill): a backfill that
         # started under an older generation never makes the loss known.
         self._backfill_generation = 0
@@ -320,19 +336,24 @@ class LiveDayRiskService:
                 )
             self._store.add_components(tuple(components))
         except Exception as exc:  # noqa: BLE001 - any failed read or write leaves the loss unknown
-            self._trades_complete_for = None
-            self._funding_read_ok_for = None
+            self._clear_loss_marks()
             self._last_error_type = type(exc).__name__
             return
         if outside:
-            self._trades_complete_for = None
-            self._funding_read_ok_for = None
+            self._clear_loss_marks()
             self._last_error_type = OUTSIDE_SYMBOLS_ERROR
             return
         self._last_error_type = None
         if generation == self._backfill_generation:
+            try:
+                stamp = self._clock()
+            except Exception as exc:  # noqa: BLE001 - no readable clock, no known loss
+                self._clear_loss_marks()
+                self._last_error_type = type(exc).__name__
+                return
             self._trades_complete_for = (day, generation)
             self._funding_read_ok_for = (day, generation)
+            self._loss_known_at = stamp
 
     def _is_unfolded_loss_row(self, row: Any, requested_type: str) -> bool:
         """True for a cross-check income row the fold of the configured fills cannot account for."""
@@ -383,14 +404,16 @@ class LiveDayRiskService:
         evaluate counts. This is the callable plan 21-15's ``make_reserving_save_atomic`` takes
         as ``daily_loss_quote``.
 
-        Freshness limit (review WR-05, OWNER-OPEN): "known" has NO age bound. A loss source the
-        stream never reports and that raises no gap (a manual trade in the exchange UI, a symbol
-        outside ``symbols``, a dropped liquidation or ADL frame, a half-open socket) leaves the
-        loss understated until the next ``backfill``. The equity has the owner bound
-        ``account.max_equity_age_ms``; the loss has none because the number is the owner's and is
-        not invented here. Until the owner sets a loss-age key, freshness is delegated to the
-        Phase 20 feed checks (``stale_feed.max_user_data_silence_ms``) and to the caller, which
-        should run ``backfill`` on a schedule and after any stream gap (Phase 24 composition).
+        Freshness limit (review WR-05; owner answer 2026-10-25, DECISIONS D087): "known" expires.
+        A loss source the stream never reports and that raises no gap (a manual trade in the
+        exchange UI, a symbol outside ``symbols``, a dropped liquidation or ADL frame, a
+        half-open socket) leaves the loss understated until the next ``backfill``, so a loss older
+        than ``account.max_daily_loss_age_ms`` (300000 ms) after the completed backfill that made
+        it known is None. An age equal to the limit passes; a stamp in the future, or an
+        unreadable clock, gives None. A stream fill (``ingest_fill``) does not
+        renew the stamp, only a completed ``backfill`` does. The Phase 24 composition must run
+        ``backfill`` on a schedule shorter than that limit while trading is possible, and after
+        any stream gap.
         """
         if utc_day not in self._evaluated_days or not self._backfill_is_current(utc_day):
             return None
@@ -408,10 +431,14 @@ class LiveDayRiskService:
             return None
         return loss.loss_quote
 
-    def _mark_loss_incomplete(self) -> None:
-        self._backfill_generation += 1
+    def _clear_loss_marks(self) -> None:
         self._trades_complete_for = None
         self._funding_read_ok_for = None
+        self._loss_known_at = None
+
+    def _mark_loss_incomplete(self) -> None:
+        self._backfill_generation += 1
+        self._clear_loss_marks()
 
     # ------------------------------------------------------------------ the day
 
@@ -585,9 +612,23 @@ class LiveDayRiskService:
         return dataclasses.replace(opened, stop_latched_at_utc=stamp)
 
     def _backfill_is_current(self, day: date) -> bool:
-        """True when both completeness marks belong to ``day`` and the current generation."""
+        """True when both marks belong to ``day`` and the generation, and the loss is not expired.
+
+        The age is the injected clock now minus the stamp of the backfill that made the loss
+        known (WR-05, D087): older than the limit, negative (a future stamp), an unreadable
+        clock or a missing stamp is not current. An age equal to the limit passes.
+        """
         expected = (day, self._backfill_generation)
-        return self._trades_complete_for == expected and self._funding_read_ok_for == expected
+        if self._trades_complete_for != expected or self._funding_read_ok_for != expected:
+            return False
+        stamp = self._loss_known_at
+        if stamp is None:
+            return False
+        try:
+            age = self._clock() - stamp
+        except Exception:  # noqa: BLE001 - an unreadable clock leaves the loss unknown
+            return False
+        return timedelta(0) <= age <= self._max_loss_age
 
 
 __all__ = [

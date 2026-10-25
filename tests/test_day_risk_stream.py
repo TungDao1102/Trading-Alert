@@ -187,6 +187,19 @@ async def test_a_stream_fill_between_backfills_adds_to_the_loss() -> None:
     assert rig.service.current_daily_loss_quote(DAY) == Decimal("3.5")
 
 
+async def test_a_stream_fill_does_not_extend_the_age_of_a_known_loss() -> None:
+    # WR-05, D087: only a completed backfill renews the stamp. The fake limit is 7919 ms.
+    rig = await known_rig()
+    await rig.clock.advance(7)
+    rig.service.ingest_fill(fill("-1", "0.5"))
+    assert rig.service.current_daily_loss_quote(DAY) == Decimal("1.5")
+    await rig.clock.advance(1)  # 8 s after the backfill: the fill at 7 s did not renew it
+    assert rig.service.current_daily_loss_quote(DAY) is None
+    assert_unknown(await rig.service.evaluate(now_utc=T0, exposure=False))
+    await rig.service.backfill(now_utc=T0)  # a completed backfill renews it
+    assert rig.service.current_daily_loss_quote(DAY) == Decimal("1.5")
+
+
 async def test_the_most_adverse_of_stream_and_rest_counts_once_for_the_same_trade() -> None:
     # Stream says pnl -1 / commission 0.5 (loss 1.5); REST says pnl -3 / commission 0.5 (loss 3.5).
     rig = await known_rig(ScriptedDayRiskReader(trades={"BTCUSDT": (rest_row("-3", "0.5"),)}))

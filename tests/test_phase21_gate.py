@@ -173,6 +173,25 @@ def test_invariant_2_the_equity_age_limit_is_the_owner_number_and_required() -> 
     ), "DECISIONS D084 must record the equity age number"
 
 
+DAILY_LOSS_AGE_KEY = "account.max_daily_loss_age_ms"
+
+
+def test_invariant_2b_the_daily_loss_age_limit_is_the_owner_number_and_required() -> None:
+    # Phase 21 review WR-05: a known daily loss expires 300 s after the backfill that made it
+    # known (owner answer 2026-10-25, DECISIONS D087). Required, no default in the service.
+    from src.execution.execution_limits import ALERT_ONLY_LIMIT_KEYS, load_execution_limits
+
+    section, key = DAILY_LOSS_AGE_KEY.split(".")
+    document = tomllib.loads(EXECUTION_LIMITS_FILE.read_text(encoding="utf-8"))
+    assert document[section][key] == 300000, "the owner number of D087 (300 seconds)"
+    assert document["provenance"][section][key] == "DECISION"
+    assert DAILY_LOSS_AGE_KEY not in ALERT_ONLY_LIMIT_KEYS
+    limits = load_execution_limits(EXECUTION_LIMITS_FILE)
+    assert limits.account_max_daily_loss_age_ms == 300000
+    assert DAILY_LOSS_AGE_KEY not in limits.unset_keys()
+    assert limits.unset_keys(), "the live path must still refuse while other keys are unset"
+
+
 # --------------------------------------------------------------------------- #
 # Vocabulary, flags, trigger, migration head, producer rows.
 # --------------------------------------------------------------------------- #
