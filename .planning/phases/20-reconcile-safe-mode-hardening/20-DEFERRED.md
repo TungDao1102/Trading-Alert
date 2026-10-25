@@ -102,17 +102,20 @@ Source: `20-REVIEW.md` (34 findings) and the three-part audit of DECISIONS D001 
 
 ### Review findings not fixed in Phase 20
 
+Update 2026-10-25 (owner request, `20-REVIEW-FIX.md`): WR-A4, WR-B5, WR-C5, WR-C7, WR-C8 and WR-C10 are fixed in the rows below; WR-C6 stays open and needs the owner. The rows keep their text for the record.
+
 | Finding | Item | Receiving phase |
 |---------|------|-----------------|
-| WR-A4 | FLAT sweep omits `spill`, so protective-cancel audit rows are lost when the journal is down | Phase 24 |
+| WR-A4 | FLAT sweep omits `spill`, so protective-cancel audit rows are lost when the journal is down. FIXED 2026-10-25 (commit 5693421b, `tests/test_protection_sweep_spill.py`); the optional verdict-only success is not done | closed |
 | IN-A1, IN-A2, IN-A4 | shared `_last_result` across concurrent closes; PROTECTION clearing guard lacks two-read FLAT evidence from PROTECTED/COMPLETE/TP_UNAVAILABLE; `recheck` read in `_confirm` has no effect | Phase 24 review |
-| WR-B5 | a raising position verifier aborts the whole sweep | Phase 24 |
+| WR-B5 | a raising position verifier aborts the whole sweep. FIXED 2026-10-25 (commit 3fceff63, `tests/test_sweeper_verifier_failure.py`) | closed |
 | WR-B6 | a feed time in the future counted as fresh. CLOSED by plan 20-30: it is stale beyond the ratified `[drift]` skew. Phase 24 must pass `ReconcileLoop(feed_clock_skew=clock_skew_from_drift(binance_limits.drift))` and document which clock stamps the user-data liveness time; RUNBOOK ~line 130 needs one sentence on the skew | Phase 24 (composition) |
 | WR-B7 | lot-filter refresh runs inside the tick lock with no timeout | Phase 24 |
 | IN-B1, IN-B2, IN-B3 | raw vs sanitised symbol; stale docstring and wall-clock fallback; `now_utc` UTC-awareness | Phase 24 review |
 | WR-C3 | restore adopted any persisted deadline. CLOSED by plan 20-30: a deadline beyond `recorded_at_utc` plus the largest policy wait is untrusted (`GATE_STATE_UNKNOWN`, operator clears); a single supervisor sleep is sliced by `reconnect_wait_max_seconds`. Still open: no cap on the total wait (needs an owner number); RUNBOOK needs one sentence | Phase 24 |
-| WR-C5 to WR-C8 | tenacity swallows `CancelledError`; failed CRITICAL alert not re-queued; blocking write-ahead and journal-first alert before an emergency close | Phase 24 |
-| WR-C10 | `clear --reason` / `--force` not durably recorded | Phase 23 / 24 (operator surface) |
+| WR-C5, WR-C7, WR-C8 | FIXED 2026-10-25: tenacity swallowed `CancelledError` (commit 230208df); blocking write-ahead before a risk-reducing action (d413f66d); journal-first alert, SAFE_MODE and journal row before the emergency close (e222cdbc). See `20-REVIEW-FIX.md`, which also lists the residuals (the closer's own pre_send journal write; the same `_is_retryable` shape in `src/paper/shadow.py`) | closed |
+| WR-C6 | a CRITICAL alert whose send failed is never re-queued in process, and the dedupe window suppresses its repeats. NOT fixed: needs an owner decision (redelivery bound and delay are new numbers; or a sender-to-sink delivery-state channel in the Phase 24 composition) | Owner decision, then Phase 24 |
+| WR-C10 | `clear --reason` / `--force` not durably recorded. FIXED 2026-10-25 (commit b6bfb3d9, `tests/test_rest_gate_clear_audit.py`): an fsynced `<state file>.clear-audit.jsonl` line before the change. `20-29-SUMMARY.md` never said it was fixed (it lists it as "Not touched"); the register and the code agreed until this fix | closed |
 | IN-C1 to IN-C5 | redaction regex, queue sharing, spill hygiene, drill assertion, alert timestamps | Phase 24 review |
 
 ### Owner-configuration constraints (still `NOT_CONFIGURED`)
