@@ -316,6 +316,13 @@ class RecordingBot:
         self.delivered.append(text)
         return result
 
+    async def edit_message_reply_markup(
+        self, *, chat_id: str | int, message_id: int, reply_markup: Any = None
+    ) -> object:
+        return await self._require().edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
+        )
+
 
 # --------------------------------------------------------------------------- #
 # The labelled test signal.
