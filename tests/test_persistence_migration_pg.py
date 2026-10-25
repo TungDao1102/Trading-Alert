@@ -23,7 +23,9 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
     `daily_loss_components` tables.
   * Migration 0011 (Phase 21, plan 21-12, D-16) adds the `risk_reservations` table.
   * Migration 0012 (Phase 22, plan 22-08, D-14) adds the three nullable margin columns and their
-    two named CHECKs to `risk_reservations`; the head test pins 0012.
+    two named CHECKs to `risk_reservations`.
+  * Migration 0013 (Phase 23, plan 23-04, D-13) adds the nullable `money_json` column and its
+    named CHECK to `approvals`; the head test pins 0013.
 """
 
 from __future__ import annotations
@@ -111,6 +113,8 @@ REVISION_0011 = "0011_risk_reservations"
 MIGRATION_0011 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0011_risk_reservations.py"
 REVISION_0012 = "0012_reservation_margin"
 MIGRATION_0012 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0012_reservation_margin.py"
+REVISION_0013 = "0013_approval_money"
+MIGRATION_0013 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0013_approval_money.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -478,7 +482,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0012
+    assert alembic_head_revision() == REVISION_0013
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -795,7 +799,8 @@ def test_downgrade_0006_keeps_rows_and_removes_only_the_column_and_the_check(
     engine = make_sync_engine(pg_empty_db)
     try:
         after = _present_columns(engine)("approvals")
-        assert before - after == {"approved_quantity"}
+        # Going below 0006 also passes 0013, so its later column leaves with it.
+        assert before - after == {"approved_quantity", "money_json"}
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             approvals = conn.execute(text("SELECT count(*) FROM approvals")).scalar_one()
@@ -1055,7 +1060,7 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0012
+        assert version == REVISION_0013
     finally:
         engine.dispose()
 
@@ -1120,7 +1125,7 @@ def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_the
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0012
+        assert version == REVISION_0013
     finally:
         engine.dispose()
 
@@ -1176,7 +1181,7 @@ def test_downgrade_0011_drops_only_the_reservations_table_and_upgrade_restores_i
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0012
+        assert version == REVISION_0013
     finally:
         engine.dispose()
 
@@ -1350,7 +1355,7 @@ def test_downgrade_0012_drops_only_the_margin_columns_and_checks_and_keeps_the_r
                     "FROM risk_reservations"
                 )
             ).all()
-        assert version == REVISION_0012
+        assert version == REVISION_0013
         # The stored margin was lost by the downgrade: the restored columns are empty (unknown).
         assert [tuple(row) for row in restored] == [(None, None, None)]
     finally:
@@ -1392,3 +1397,126 @@ def test_risk_reservations_margin_checks_refuse_bad_rows(engine: Engine) -> None
     # The legacy form (all three NULL) is accepted.
     with engine.begin() as conn:
         conn.execute(_RESERVATION_INSERT, {**base, "margin": None, "price": None, "leverage": None})
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0013: approvals.money_json (Phase 23, plan 23-04, D-13)
+# --------------------------------------------------------------------------------------
+_MONEY_CHECK = "ck_approvals_money_json"
+
+
+def _approval_columns(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'approvals'"
+            )
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def _approval_checks(engine: Engine) -> set[str]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT conname FROM pg_constraint "
+                "WHERE conrelid = 'approvals'::regclass AND contype = 'c'"
+            )
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def test_migration_0013_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0013, ("src", "tests")) == []
+
+
+def test_migration_0013_revises_0012() -> None:
+    text_of_migration = MIGRATION_0013.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0012}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0013}"' in text_of_migration
+
+
+def test_the_money_json_column_is_nullable_text_and_the_check_exists(engine: Engine) -> None:
+    with engine.connect() as conn:
+        column = conn.execute(
+            text(
+                "SELECT is_nullable, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'approvals' "
+                "AND column_name = 'money_json'"
+            )
+        ).one()
+    assert tuple(column) == ("YES", "text")
+    assert _MONEY_CHECK in _approval_checks(engine)
+
+
+def test_the_money_json_check_refuses_non_object_text_and_accepts_null_and_an_object(
+    engine: Engine,
+) -> None:
+    insert_and_commit(engine, make_signal(1), make_plan(1, 1))
+    for label, bad in {"empty": "", "word": "x", "array": "[1]", "open only": "{"}.items():
+        with expect_db_error(_CHECK_VIOLATION) as info:
+            insert_and_commit(engine, make_approval(1, 1, 1, money_json=bad))
+        assert info.constraint == _MONEY_CHECK, (label, info.constraint)
+
+    insert_and_commit(engine, make_approval(1, 1, 1, money_json=None))
+    insert_and_commit(
+        engine,
+        make_approval(2, 1, 1, money_json='{"a":"1"}', action="SKIP_USER"),
+    )
+    with engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT approval_id, money_json FROM approvals ORDER BY approval_id")
+        ).all()
+    assert [tuple(row) for row in stored] == [(hexid(0x2001), None), (hexid(0x2002), '{"a":"1"}')]
+
+
+def test_downgrade_0013_drops_only_the_money_column_and_check_and_keeps_the_rows(
+    pg_empty_db: str,
+) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        full_schema = _public_tables(engine)
+        columns_at_head = _approval_columns(engine)
+        checks_at_head = _approval_checks(engine)
+        assert "money_json" in columns_at_head
+        assert _MONEY_CHECK in checks_at_head
+        insert_and_commit(
+            engine,
+            make_signal(1),
+            make_plan(1, 1),
+            make_approval(1, 1, 1, actor_id="777001", money_json='{"a":"1"}'),
+        )
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0012)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == full_schema
+        assert _approval_columns(engine) == columns_at_head - {"money_json"}
+        assert _approval_checks(engine) == checks_at_head - {_MONEY_CHECK}
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            kept = conn.execute(
+                text("SELECT approval_id, actor_id, status, request_hash FROM approvals")
+            ).all()
+        assert version == REVISION_0012
+        assert [tuple(row) for row in kept] == [(hexid(0x2001), "777001", "PENDING", "e" * 64)]
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _approval_columns(engine) == columns_at_head
+        assert _approval_checks(engine) == checks_at_head
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            restored = conn.execute(text("SELECT money_json FROM approvals")).all()
+        assert version == REVISION_0013
+        # The stored money was lost by the downgrade: the restored column is empty (not recorded).
+        assert [tuple(row) for row in restored] == [(None,)]
+    finally:
+        engine.dispose()

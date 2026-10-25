@@ -181,6 +181,7 @@ def approval_to_row(a: Approval) -> ApprovalRow:
         consumption_status=a.consumption_status.value,
         consumed_at_utc=a.consumed_at_utc,
         approved_quantity=a.approved_quantity,
+        money_json=a.money_json,
     )
 
 
@@ -207,6 +208,7 @@ def approval_from_row(r: ApprovalRow) -> Approval:
         consumption_status=ApprovalConsumptionStatus(r.consumption_status),
         consumed_at_utc=r.consumed_at_utc,
         approved_quantity=r.approved_quantity,
+        money_json=r.money_json,
     )
 
 

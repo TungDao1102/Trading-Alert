@@ -817,3 +817,122 @@ def test_seeded_round_trip_for_approvals_and_mappings_including_consumed(engine:
         assert store.lookup_by_token_hash(pending.approval_token_hash) == expected
 
     assert consumed_cases > 0, "the property must exercise CONSUMED approvals"
+
+
+# --------------------------------------------------------------------------- #
+# actor_id and money_json (Phase 23, plan 23-04; D-03, D-13).
+# --------------------------------------------------------------------------- #
+
+MONEY_JSON = '{"schema":"money-at-stake/1","risk_amount":"10.5"}'
+
+
+def _stored_text(engine: Engine, column: str, approval_id: str) -> str | None:
+    with Session(engine) as session:
+        value = session.execute(
+            text(f"SELECT {column} FROM approvals WHERE approval_id = :id"),  # noqa: S608
+            {"id": approval_id},
+        ).scalar_one()
+    return None if value is None else str(value)
+
+
+def test_tracer_decided_actor_and_money_survive_a_new_store_instance(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approval = _pending(1, approved_quantity=Decimal("0.08"), money_json=MONEY_JSON, actor_id="")
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.APPROVED), actor_id="777001"),
+        None,
+    )
+
+    fresh = PgApprovalStore(OperationalDatabase(seeded))
+    assert fresh is not store
+    stored = fresh.get(approval.approval_id)
+    assert stored is not None
+    assert stored.actor_id == "777001"
+    assert stored.money_json == MONEY_JSON
+    assert stored.status is ApprovalResult.APPROVED
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "777001"
+    assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
+
+
+def test_a_second_decision_keeps_the_first_actor(seeded: Engine, store: PgApprovalStore) -> None:
+    approval = _pending(1, actor_id="")
+    store.insert_pending(approval)
+    decided = _decided(approval, ApprovalResult.APPROVED)
+    store.save_atomic(replace(decided, actor_id="777001"), None)
+
+    with pytest.raises(ApprovalAlreadyDecided):
+        store.save_atomic(replace(decided, actor_id="777002"), None)
+
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "777001"
+
+
+def test_a_lost_race_to_a_sibling_row_never_overwrites_the_stored_actor(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approve = _pending(1, action=ApprovalAction.APPROVE, actor_id="")
+    skip = _pending(2, action=ApprovalAction.SKIP_USER, actor_id="")
+    store.insert_pending(approve)
+    store.insert_pending(skip)
+    store.save_atomic(replace(_decided(approve, ApprovalResult.APPROVED), actor_id="777001"), None)
+
+    with pytest.raises(ApprovalAlreadyDecided):
+        store.save_atomic(replace(_decided(skip, ApprovalResult.SKIPPED), actor_id="777002"), None)
+
+    assert _stored_text(seeded, "actor_id", approve.approval_id) == "777001"
+    assert _stored_text(seeded, "actor_id", skip.approval_id) == ""
+    assert _approval_status(seeded, skip.approval_id) == "PENDING"
+
+
+def test_money_json_is_part_of_the_insert_identity(seeded: Engine, store: PgApprovalStore) -> None:
+    approval = _pending(1, money_json=MONEY_JSON)
+    store.insert_pending(approval)
+    store.insert_pending(approval)  # the same request again is a no-op
+    assert _count(seeded, "approvals") == 1
+
+    with pytest.raises(RowConflict, match="money_json"):
+        store.insert_pending(replace(approval, money_json='{"schema":"other"}'))
+    with pytest.raises(RowConflict, match="money_json"):
+        store.insert_pending(replace(approval, money_json=None))
+    assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
+
+
+def test_a_decision_never_changes_the_stored_money(seeded: Engine, store: PgApprovalStore) -> None:
+    approval = _pending(1, money_json=MONEY_JSON)
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.APPROVED), money_json='{"tampered":"1"}'),
+        None,
+    )
+
+    assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
+
+
+def test_a_row_written_without_money_reads_back_none(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    insert_and_commit(seeded, make_approval(1, 1, 1))
+
+    stored = store.get(hexid(0x2001))
+    assert stored is not None
+    assert stored.money_json is None
+
+
+def test_the_restart_expiry_persists_its_runtime_actor(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    """`invalidate_pending_on_restart` stamps RUNTIME_RESTART; since 23-04 PostgreSQL keeps it."""
+    approval = _pending(1, actor_id="")
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.EXPIRED), actor_id="RUNTIME_RESTART"), None
+    )
+
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "RUNTIME_RESTART"
+    stored = store.get(approval.approval_id)
+    assert stored is not None
+    assert stored.status is ApprovalResult.EXPIRED
