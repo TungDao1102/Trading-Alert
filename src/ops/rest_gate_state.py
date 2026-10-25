@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,6 +253,26 @@ class FileGateStateStore:
         except FileExistsError:
             raise GateStateExists from None
         return record
+
+    @property
+    def clear_audit_path(self) -> Path:
+        """The append-only audit file of the operator `clear` command, next to the state file."""
+        return self._path.with_name(f"{self._path.name}.clear-audit.jsonl")
+
+    def append_clear_audit(self, entry: Mapping[str, object]) -> None:
+        """Append one JSON line to the clear audit file and fsync it (WR-C10).
+
+        The file is append-only and never rewritten. A failure propagates: the caller refuses to
+        change the state when the reason for the change cannot be recorded.
+        """
+        line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
+        path = self.clear_audit_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "ab") as handle:
+            handle.write(line.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
 
     def reinitialize(
         self, *, now_utc: datetime, operator_id: str, aside_kind: str

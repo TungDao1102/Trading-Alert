@@ -20,6 +20,10 @@ never read `.env` or any environment value, and print no secret. The library fun
 Exit codes: 0 done; 2 usage error, or `status` found the file missing, corrupt or unreadable;
 3 `clear` refused a future deadline without `--force`; 4 `clear` could not write (the old file
 is untouched).
+
+Every `clear` that goes ahead appends its operator id, reason, forced flag, overridden deadlines
+and time to `<state file>.clear-audit.jsonl` (fsynced) before it changes anything; if that line
+cannot be written, nothing is changed and the exit code is 4.
 """
 
 from __future__ import annotations
@@ -120,6 +124,14 @@ def status_report(store: FileGateStateStore, now_utc: datetime) -> CliResult:
     return CliResult(EXIT_OK if record is not None else EXIT_REFUSED_OR_UNREADABLE, tuple(lines))
 
 
+def _audit_best_effort(store: FileGateStateStore, entry: dict[str, object]) -> None:
+    """The closing audit line; the opening one is already durable, so a failure here is logged."""
+    try:
+        store.append_clear_audit(entry)
+    except OSError as exc:
+        log.warning("rest_gate_cli.clear_audit_close_failed", error_type=type(exc).__name__)
+
+
 def clear_state(
     store: FileGateStateStore,
     now_utc: datetime,
@@ -127,7 +139,11 @@ def clear_state(
     reason: str,
     force: bool,
 ) -> CliResult:
-    """Write a fresh valid initialized record; it takes effect at the next restart."""
+    """Write a fresh valid initialized record; it takes effect at the next restart.
+
+    The reason, the forced flag and the overridden deadlines are appended durably to
+    ``<state file>.clear-audit.jsonl`` before the change (review WR-C10).
+    """
     operator = operator_id.strip()
     why = reason.strip()
     if not operator or not why:
@@ -155,20 +171,41 @@ def clear_state(
         )
     forced = bool(future)
     aside_kind = "corrupt" if inspection.corrupt else "replaced"
+    previous = "corrupt" if inspection.corrupt else "valid" if inspection.exists else "missing"
+    # WR-C10: the operator, the reason, the forced flag and the overridden deadlines are written
+    # durably BEFORE anything changes; if they cannot be recorded, nothing is changed.
+    audit: dict[str, object] = {
+        "forced": forced,
+        "now_utc": _utc_text(now_utc),
+        "operator_id": operator,
+        "overridden": future,
+        "previous": previous,
+        "reason": why,
+    }
+    try:
+        store.append_clear_audit({**audit, "outcome": "requested"})
+    except OSError as exc:
+        log.error("rest_gate_cli.clear_audit_failed", error_type=type(exc).__name__)
+        return CliResult(
+            EXIT_WRITE_FAILED,
+            ("failed: the audit line could not be written; nothing was changed",),
+        )
     try:
         store.reinitialize(now_utc=now_utc, operator_id=operator, aside_kind=aside_kind)
     except (OSError, ValueError) as exc:
         log.error("rest_gate_cli.clear_failed", operator_id=operator, error_type=type(exc).__name__)
+        _audit_best_effort(store, {**audit, "outcome": "failed", "error_type": type(exc).__name__})
         return CliResult(
             EXIT_WRITE_FAILED,
             ("failed: the new state could not be written; the old file is untouched",),
         )
+    _audit_best_effort(store, {**audit, "outcome": "cleared"})
     log.info(
         "rest_gate_cli.clear",
         operator_id=operator,
         reason=why,
         forced=forced,
-        previous=("corrupt" if inspection.corrupt else "valid" if inspection.exists else "missing"),
+        previous=previous,
     )
     lines = [
         f"cleared: {store.path} now holds a fresh initialized record (by {operator})"

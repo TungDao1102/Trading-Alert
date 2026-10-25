@@ -164,7 +164,11 @@ def test_clear_on_a_missing_file_writes_a_fresh_initialized_record(tmp_path: Pat
     assert record.initialized_at_utc == T0
     assert record.ban_until_utc is None and record.pause_until_utc is None
     assert "next restart" in _text(result)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["gate.json"]  # nothing to keep aside
+    # nothing to keep aside (WR-C10: the clear audit sidecar is the one extra file)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "gate.json",
+        "gate.json.clear-audit.jsonl",
+    ]
 
 
 def test_clear_on_an_initialized_record_without_a_deadline(tmp_path: Path) -> None:
@@ -302,7 +306,11 @@ def test_clear_write_failure_leaves_the_old_file_untouched(
     result = clear_state(store, clock(), operator_id="op-2", reason="r", force=False)
     assert result.exit_code == 4
     assert store.path.read_bytes() == before
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["gate.json"]  # no tmp, no aside left
+    # no tmp, no aside left (WR-C10: the audit sidecar keeps the requested and failed lines)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "gate.json",
+        "gate.json.clear-audit.jsonl",
+    ]
 
 
 def test_clear_takes_effect_only_after_restart_restore(tmp_path: Path) -> None:
