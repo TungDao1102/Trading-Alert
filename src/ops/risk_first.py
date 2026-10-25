@@ -6,10 +6,13 @@ is down. Two helpers carry that rule:
 
 - `record_after`: the action has already happened. Try the journal; if it fails, write the
   record to the local spill; if that fails too, raise `AuditRecordLost`.
-- `act_then_record`: write the record to the spill first (write-ahead, so a crash during the
-  action still leaves the evidence), run the action, then try the journal and remove the
-  spill file on success. The action's result or exception is preserved. `AuditRecordLost` is
-  raised only when the action succeeded and neither the journal nor the spill took the record.
+- `act_then_record`: start the write-ahead to the spill (in a worker thread, so a crash during
+  the action still leaves the evidence once the write lands), run the action beside it, then try
+  the journal and remove the spill file on success. The action never waits for the spill disk
+  (Phase 20 review WR-C7); only the settling of the audit record may, and only when the journal
+  failed and the spill is the one remaining record. The action's result or exception is
+  preserved. `AuditRecordLost` is raised only when the action succeeded and neither the journal
+  nor the spill took the record.
 
 A spill failure before the action is remembered, never raised: the action still runs. Every
 message and note here names exception CLASSES only, never exception text (which may carry
@@ -21,6 +24,7 @@ Binance truth (D-30).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -96,6 +100,46 @@ def record_after(*, spill: LocalSpill | None, journal: Any, event: JournalEvent)
         )
 
 
+type _SpillOutcome = tuple[SpillToken | None, str]
+
+
+def _start_spill(spill: LocalSpill | None, event: JournalEvent) -> asyncio.Future[_SpillOutcome]:
+    """Start the write-ahead in a worker thread and return at once (WR-C7).
+
+    The file write, its fsync and `replace_with_retry` (which sleeps on a Windows lock) must not
+    run on the event loop in front of a risk-reducing action: a stalled disk would hold the
+    action and every other coroutine. `_try_spill` never raises an `Exception`.
+    """
+    loop = asyncio.get_running_loop()
+    if spill is None:
+        done: asyncio.Future[_SpillOutcome] = loop.create_future()
+        done.set_result((None, _NO_SPILL))
+        return done
+    return loop.run_in_executor(None, _try_spill, spill, event)
+
+
+def _spill_result(future: asyncio.Future[_SpillOutcome]) -> _SpillOutcome | None:
+    """The finished write-ahead's outcome, or None while it is still running."""
+    if not future.done() or future.cancelled() or future.exception() is not None:
+        return None
+    return future.result()
+
+
+def _discard_when_written(spill: LocalSpill | None, future: asyncio.Future[_SpillOutcome]) -> None:
+    """The journal took the record: remove the spill file, now or when the write finishes."""
+    outcome = _spill_result(future)
+    if outcome is not None:
+        _discard_quietly(spill, outcome[0])
+        return
+
+    def discard(finished: asyncio.Future[_SpillOutcome]) -> None:
+        late = _spill_result(finished)
+        if late is not None:
+            _discard_quietly(spill, late[0])
+
+    future.add_done_callback(discard)
+
+
 async def act_then_record[T](
     *,
     spill: LocalSpill | None,
@@ -103,31 +147,39 @@ async def act_then_record[T](
     event: JournalEvent,
     action: Callable[[], Awaitable[T]],
 ) -> T:
-    """Write ahead to the spill, run `action`, then record `event` in the journal.
+    """Start the spill write-ahead, run `action` beside it, then record `event` in the journal.
 
     Returns the action's result. If the action raises, that exception is re-raised after the
     audit attempt (a lost audit record is attached to it as a note, class names only).
 
+    The action never waits for the spill disk (WR-C7). When the journal takes the record the
+    spill file is removed as soon as its write has finished, without waiting for it. Only when
+    the journal failed does the call wait for the write-ahead, because that file is then the one
+    remaining record and its fate decides whether the audit record is lost.
+
     Raises:
         AuditRecordLost: the action succeeded but the journal and the spill both failed.
     """
-    token, spill_error = _try_spill(spill, event)
+    spill_future = _start_spill(spill, event)
     try:
         result = await action()
     except BaseException as exc:
         journal_error = _try_journal(journal, event)
         if journal_error is None:
-            _discard_quietly(spill, token)
-        elif token is None:
-            exc.add_note(
-                f"audit record {event.journal_event_id} lost: "
-                f"journal={journal_error}, spill={spill_error}"
-            )
+            _discard_when_written(spill, spill_future)
+        else:
+            outcome = _spill_result(spill_future)
+            if outcome is not None and outcome[0] is None:
+                exc.add_note(
+                    f"audit record {event.journal_event_id} lost: "
+                    f"journal={journal_error}, spill={outcome[1]}"
+                )
         raise
     journal_error = _try_journal(journal, event)
     if journal_error is None:
-        _discard_quietly(spill, token)
+        _discard_when_written(spill, spill_future)
         return result
+    token, spill_error = await spill_future
     if token is not None:
         return result  # the record waits in the spill until replay
     raise AuditRecordLost(

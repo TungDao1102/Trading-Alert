@@ -10,6 +10,7 @@ Evidence label: executed tests with fakes only. No database, no network, no Bina
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -187,26 +188,34 @@ def test_record_after_spills_when_the_journal_is_down(tmp_path: Path) -> None:
     assert _spill_files(tmp_path / "spill") == ["unit_test_a.json"]
 
 
-async def test_act_then_record_writes_the_spill_before_the_action_and_clears_it_after(
+async def test_act_then_record_starts_the_spill_beside_the_action_and_clears_it_after(
     tmp_path: Path,
 ) -> None:
+    """WR-C7: the write-ahead runs in a worker thread beside the action, never in front of it.
+
+    The strict "file exists before the action" ordering is gone on purpose (a stalled disk would
+    hold the risk-reducing action); `tests/test_risk_first_write_ahead.py` proves the action
+    does not wait for the write. Here: the record is spilled, journaled once, and cleared.
+    """
     from src.ops.risk_first import act_then_record
     from src.ops.spill import LocalSpill
 
     spill = LocalSpill(tmp_path / "spill")
     journal = RecordingJournal()
-    seen_during_action: list[list[str]] = []
 
     async def action() -> str:
-        seen_during_action.append(_spill_files(tmp_path / "spill"))
         assert journal.events == []  # nothing waited for the journal before the action
         return "done"
 
     result = await act_then_record(spill=spill, journal=journal, event=_event(), action=action)
 
     assert result == "done"
-    assert seen_during_action == [["unit_test_a.json"]]
     assert len(journal.events) == 1
+    # The discard may follow the worker's last step by a moment; let the loop settle.
+    for _ in range(200):
+        if _spill_files(tmp_path / "spill") == []:
+            break
+        await asyncio.sleep(0.01)
     assert _spill_files(tmp_path / "spill") == []
 
 
