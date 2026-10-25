@@ -66,17 +66,15 @@ evidence: tests/test_execution_manager.py::test_gate_5f3_refuses_a_sizing_equity
 
 ### 9. Reservation caps count resting and approved-but-unplaced plans, and concurrent approvals cannot both pass
 expected: RESERVED, PLACED, OPEN count against the portfolio caps; a refusal leaves the approval PENDING and changes nothing; two concurrent approvals that only one fits cannot both pass; a released reservation frees the cap.
-result: skipped
-reason: The pure logic (tests/test_risk_reservations.py, tests/test_live_risk_inputs.py, tests/test_live_risk_parity.py) passed this run, but the concurrency and atomic-transaction claim needs PostgreSQL (test_risk_reservation_approval_pg.py::test_two_concurrent_approvals_that_only_one_fits_cannot_both_pass and the other *_pg files) and the PG server refused connections in this run. Not claimed. Recorded evidence only: 21-VERIFICATION.md, 137 passed on 2026-10-23.
+result: pass
 source: assistant-evidence
-evidence: tests/test_risk_reservations.py passed (non-PG part); PG part not run
+evidence: PostgreSQL 127.0.0.1:5432 (trading_test) up on 2026-10-25; TRADING_CI_STRICT=1 uv run pytest tests/test_risk_reservation_approval_pg.py tests/test_day_risk_pg.py tests/test_risk_reservations_pg.py tests/test_persistence_migration_pg.py -> 215 passed, including test_two_concurrent_approvals_that_only_one_fits_cannot_both_pass and test_two_approvals_acted_on_either_side_of_midnight_still_serialise; the non-PG logic passed in the first run
 
 ### 10. Migrations 0010 and 0011 apply and round-trip
 expected: alembic upgrade head creates the day-risk and risk_reservations tables with their CHECKs; the downgrade/upgrade cycle is clean; the migration head is the documented one.
-result: skipped
-reason: Needs PostgreSQL (tests/test_persistence_migration_pg.py, tests/test_day_risk_pg.py, tests/test_risk_reservations_pg.py); the server at 127.0.0.1:5432 refused connections during this run. Only the head-name check ran: tests/test_phase21_gate.py::test_invariant_6_the_migration_head_is_0012_reservation_margin passed.
+result: pass
 source: assistant-evidence
-evidence: tests/test_phase21_gate.py::test_invariant_6 (passed); PG round trip not run
+evidence: the same 215-test strict PostgreSQL run, which includes tests/test_persistence_migration_pg.py (migrations 0010 and 0011) and tests/test_phase21_gate.py::test_invariant_6 (head 0012)
 
 ### 11. Secrets and balances are not logged
 expected: A successful account, balance or config read logs no balance, no account alias and nothing of the response body; the free-text income `info` field is never read.
@@ -117,10 +115,10 @@ evidence: 21-VERIFICATION.md requirements table (OPS-02 pending) and human_verif
 ## Summary
 
 total: 15
-passed: 10
+passed: 12
 issues: 0
 pending: 0
-skipped: 2
+skipped: 0
 blocked: 3
 
 ## Gaps
