@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -1313,3 +1314,99 @@ def test_the_renderers_do_no_arithmetic() -> None:
             binops = [n for n in ast.walk(node) if isinstance(n, (ast.BinOp, ast.AugAssign))]
             assert not binops, f"{node.name} does arithmetic at line {binops[0].lineno}"
     assert found == names
+
+
+# --------------------------------------------------------------------------- #
+# Plan 23-09 task 2 (D-05, D-13): one keyboard for every mode, refusals, plain figures.
+# --------------------------------------------------------------------------- #
+
+
+def test_decision_keyboard_has_one_row_with_approve_and_skip() -> None:
+    from src.adapters.telegram_notify import (
+        build_decision_keyboard,
+        build_shadow_decision_keyboard,
+    )
+
+    signal_id = "sig_test_0000000000000000000000000000000000000000000000000000"
+    keyboard = build_decision_keyboard(signal_id)
+
+    assert len(keyboard.inline_keyboard) == 1
+    row = keyboard.inline_keyboard[0]
+    assert [button.text for button in row] == ["APPROVE", "SKIP"]
+    approve, skip = (button.callback_data for button in row)
+    assert approve is not None and skip is not None
+    assert approve.startswith("APR:") and skip.startswith("SKP:")
+    assert approve[len("APR:") :] == skip[len("SKP:") :]
+    assert len(approve.encode("utf-8")) == 36 and len(skip.encode("utf-8")) == 36
+    shadow = build_shadow_decision_keyboard(signal_id)
+    assert shadow.inline_keyboard == keyboard.inline_keyboard
+
+
+_TP1_PRICE = Decimal("51000")
+_TP2_PRICE = Decimal("52000")
+_HALF = Decimal("0.5")
+
+
+def _refusal_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs = _request_kwargs()
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_request_without_money_is_refused_naming_the_reason() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    with pytest.raises(ValueError, match="MONEY_AT_STAKE_MISSING"):
+        format_approval_request(mode_label="DEMO", **_refusal_kwargs(money=None))
+    with pytest.raises(ValueError, match="MONEY_AT_STAKE_MISSING"):
+        format_approval_request(mode_label="DEMO", **_refusal_kwargs(money={"notional": "1"}))
+
+
+@pytest.mark.parametrize(
+    ("override", "field"),
+    [
+        ({"approved_quantity": Decimal("0.07")}, "approved_quantity"),
+        ({"stop_loss": Decimal("49400")}, "stop_loss"),
+        ({"direction": "SHORT"}, "direction"),
+        ({"take_profits": [(_TP1_PRICE + 1, _HALF), (_TP2_PRICE, _HALF)]}, "TP1 price"),
+        ({"take_profits": [(_TP1_PRICE, _HALF), (_TP2_PRICE, Decimal("0.4"))]}, "TP2 fraction"),
+        ({"take_profits": [(Decimal("51000"), Decimal("1"))]}, "take_profits"),
+    ],
+)
+def test_request_whose_money_disagrees_with_the_message_is_refused(
+    override: dict[str, Any], field: str
+) -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    with pytest.raises(ValueError, match=field):
+        format_approval_request(mode_label="LIVE", **_refusal_kwargs(**override))
+
+
+@pytest.mark.parametrize("label", ["SHADOW", "demo", "", "SIMULATE", "Live"])
+def test_request_refuses_any_label_but_demo_and_live(label: str) -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    with pytest.raises(ValueError, match="mode_label"):
+        format_approval_request(mode_label=label, **_request_kwargs())
+
+
+def test_money_block_prints_plain_fixed_point_and_never_rounds() -> None:
+    from dataclasses import replace
+
+    from src.adapters.telegram_notify import render_money_block
+
+    money = _request_kwargs()["money"]
+    odd = replace(
+        money,
+        notional=Decimal("1E+2"),
+        loss_at_stop_gross=Decimal("0.100"),
+        loss_at_stop_net=Decimal("0.1000001"),
+        equity=Decimal("1E-7"),
+    )
+
+    lines = render_money_block(odd)
+
+    assert lines[0] == "Notional: 100 USDT"
+    assert lines[2] == "Loss at SL: 0.100 USDT gross, 0.1000001 USDT net of modeled costs"
+    assert lines[-1].startswith("Equity used: 0.0000001 USDT (")
+    assert not any(re.search(r"\d[Ee][+-]?\d", line) for line in lines)
