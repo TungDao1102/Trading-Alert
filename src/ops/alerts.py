@@ -501,7 +501,14 @@ def _failure_of_state(retry_state: RetryCallState) -> TelegramFailure:
 
 
 def _is_retryable(exc: BaseException) -> bool:
-    """Transient faults only: programming errors and refusals fail at once."""
+    """Transient faults only: programming errors and refusals fail at once.
+
+    WR-C5: tenacity's attempt manager stores any ``BaseException``, so a cancellation would be
+    retried (and could be swallowed by a later success). Only an ``Exception`` is retryable; a
+    ``CancelledError``, ``KeyboardInterrupt`` or ``SystemExit`` is re-raised at once.
+    """
+    if not isinstance(exc, Exception):
+        return False
     if isinstance(exc, (ValueError, KeyError, TypeError)):
         return False
     if isinstance(exc, TelegramSendError):
