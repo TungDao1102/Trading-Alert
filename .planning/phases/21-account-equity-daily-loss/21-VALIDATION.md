@@ -2,7 +2,7 @@
 phase: "21"
 slug: account-equity-daily-loss
 status: validated
-nyquist_compliant: true
+nyquist_compliant: false
 wave_0_complete: true
 created: "2026-10-25"
 ---
@@ -42,7 +42,7 @@ created: "2026-10-25"
 | 21-08..21-10 | RISK-02 | Daily loss fold, recorded Demo frames, DAILY_STOP cancel-then-alert | `test_daily_loss.py`, `test_daily_loss_recorded.py`, `test_daily_stop.py` | `uv run pytest -m "not docker" tests/test_daily_loss.py tests/test_daily_loss_recorded.py tests/test_daily_stop.py -p no:xdist` | green |
 | 21-09, 21-12 | RISK-02 | Day state and reservations persistence (PG) | `test_day_risk_pg.py`, `test_risk_reservations.py`, `test_risk_reservations_pg.py`, `test_risk_reservation_approval_pg.py`, `test_risk_reservation_margin_pg.py` | `uv run pytest tests/test_risk_reservations.py -p no:xdist` (PG files: set `TEST_DATABASE_URL`) | green (PG only with URL) |
 | 21-11, 21-13..21-16 | RISK-02, EXEC-01 | Live risk inputs, parity, day-risk service, stream path | `test_live_risk_inputs.py`, `test_live_risk_parity.py`, `test_day_risk_service.py`, `test_day_risk_stream.py` | `uv run pytest -m "not docker" tests/test_live_risk_inputs.py tests/test_live_risk_parity.py tests/test_day_risk_service.py tests/test_day_risk_stream.py -p no:xdist` | green |
-| 21-14..21-16 | EXEC-01 | Manager gates (incl. 5f3 equity comparison), phase gate | `test_phase21_gate.py` | `uv run pytest -m "not docker" tests/test_phase21_gate.py -p no:xdist` | green |
+| 21-14..21-16 | EXEC-01 | Manager gates (incl. 5f3 equity comparison), phase gate | `test_phase21_gate.py`, `test_execution_manager.py::test_gate_5f3_refuses_a_sizing_equity_above_the_live_equity_the_guard_read` | `uv run pytest -m "not docker" tests/test_phase21_gate.py tests/test_execution_manager.py -p no:xdist` | green |
 | review-fix | RISK-01, RISK-02 | WR-01..WR-09 and WR-05/D087 pins live inside the files above (day_risk_service, daily_stop WR-07, live_risk_inputs WR-04, phase21_gate WR-03) | same files | same commands | green |
 | Nyquist | EXEC-01 SC1 | Equity source + day service -> `build_live_risk_inputs` -> `check_portfolio`: stale equity gives UNCERTAIN_ACCOUNT_STATE, a latched day gives DAILY_STOP_BLOCK, a normal day passes | `test_phase21_composition.py` | `uv run pytest -m "not docker" tests/test_phase21_composition.py -p no:xdist` | green (3 tests) |
 | Nyquist | RISK-02 | Failed DAILY_STOP alert is reported in `alerts_failed` and not re-sent on the next call | `test_daily_stop.py::test_a_failed_daily_stop_alert_is_not_resent_on_the_next_call` | `uv run pytest tests/test_daily_stop.py -p no:xdist` | green (pins current behavior) |
@@ -77,7 +77,7 @@ Existing infrastructure covers all phase requirements.
 - [x] Sampling continuity
 - [x] Wave 0 covers all MISSING references (none)
 - [x] No watch-mode flags
-- [x] `nyquist_compliant: true` set in frontmatter
+- [ ] `nyquist_compliant` stays false: gap 3 (ACCOUNT_UPDATE and stream gap to invalidate) is not wired in src until Phase 24
 
 **Approval:** approved 2026-10-25
 
