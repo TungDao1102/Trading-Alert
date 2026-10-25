@@ -873,6 +873,9 @@ class ProtectionCoordinator:
         self._step_lock = asyncio.Lock()
         self._store_failed = False
         self._db_failure_reported = False
+        # Plan 20 review WR-C8: while a list is set, `_record_journal` parks its rows here instead
+        # of writing them (set and cleared inside one synchronous stretch, never across an await).
+        self._deferred_journal: list[tuple[JournalEvent, datetime]] | None = None
         self._unknown_fills_journaled: set[tuple[str, str]] = set()
         self.fill_sink_failures = 0
         # Plan 20-14 (D-19, Q4): the durable intent of an action the REST gate refused.
@@ -2592,7 +2595,11 @@ class ProtectionCoordinator:
     # ------------------------------------------------------------------ #
 
     async def _enter_close_required(self, tracked: _Tracked, branch: str) -> None:
-        """Once per plan: SAFE_MODE, critical alert, journaled reason, then the emergency close.
+        """Once per plan: the emergency close first, then journaled reason, SAFE_MODE, alert.
+
+        Plan 20 review WR-C8: the in-memory state flips before the close, the audit side effects
+        (journal row, SAFE_MODE, critical alerts) follow it, so a slow or failing journal never
+        holds up the reduce-only close.
 
         The stop is never cancelled here (a stop that is still open is kept until the position is
         flat) and never resent. The entry remainder cancel is issued by the caller's step (the
@@ -2601,19 +2608,50 @@ class ProtectionCoordinator:
         entry = tracked.entry
         now = self._now()
         tracked.close_branch = branch
-        self._transition(tracked, ProtectionState.CLOSE_REQUIRED, branch, now)
-        if branch == BRANCH_B1_ENTRY_NOT_TERMINAL:
-            # Accepted knowingly (owner note): a position with a good stop is closed because an
-            # entry cancel was slow; the reason is journaled.
-            self._journal_note(
-                tracked,
-                EVENT_CLOSE_REQUIRED,
-                {"accepted_knowingly": "STOP_KEPT_ENTRY_CANCEL_SLOW", "branch": branch},
-                now,
-            )
+        # WR-C8 (D-16): the close must not wait for the journal, SAFE_MODE or the alert sink. The
+        # plan state flips in memory first (``blocks_new_entries()`` is True from here on, so new
+        # entries fail closed); the rows it would journal are parked and written after the close.
+        # This stretch has no await, so no other coroutine can park its rows into the list.
+        parked: list[tuple[JournalEvent, datetime]] = []
+        self._deferred_journal = parked
+        try:
+            self._transition(tracked, ProtectionState.CLOSE_REQUIRED, branch, now)
+            if branch == BRANCH_B1_ENTRY_NOT_TERMINAL:
+                # Accepted knowingly (owner note): a position with a good stop is closed because
+                # an entry cancel was slow; the reason is journaled.
+                self._journal_note(
+                    tracked,
+                    EVENT_CLOSE_REQUIRED,
+                    {"accepted_knowingly": "STOP_KEPT_ENTRY_CANCEL_SLOW", "branch": branch},
+                    now,
+                )
+        finally:
+            self._deferred_journal = None
+        # The rows and effects are written the moment the closer has answered (or raised), before
+        # the close-failure transition of ``_attempt_close``, so the journal keeps its order.
+        await self._attempt_close(
+            tracked,
+            branch,
+            after_close=lambda: self._record_close_required(entry, branch, parked, now),
+        )
+
+    def _record_close_required(
+        self,
+        entry: RestingEntry,
+        branch: str,
+        parked: list[tuple[JournalEvent, datetime]],
+        now: datetime,
+    ) -> None:
+        """After the close attempt: the parked journal rows, SAFE_MODE and the critical alerts.
+
+        Runs whether the close succeeded, failed or raised. Each step is attempted on its own: one
+        failing never skips the others, and none of them can undo or delay the close (WR-C8).
+        """
+        for event, parked_at in parked:
+            self._record_journal(event, parked_at)
         try:
             self._safe_mode.enter_safe_mode(reason=SAFE_MODE_CLOSE_REQUIRED, now_utc=now)
-        except Exception:  # noqa: BLE001, S110 - the alert and the close still go out
+        except Exception:  # noqa: BLE001, S110 - the alert still goes out
             pass
         try:
             self._alerts.critical(
@@ -2634,19 +2672,40 @@ class ProtectionCoordinator:
                     reason=branch,
                     now_utc=now,
                 )
-            except Exception:  # noqa: BLE001, S110 - the close below must still run
+            except Exception:  # noqa: BLE001, S110 - the close already ran
                 pass
-        await self._attempt_close(tracked, branch)
 
-    async def _attempt_close(self, tracked: _Tracked, reason: str) -> bool:
-        """One emergency close attempt; True only when REST shows the position flat."""
+    async def _attempt_close(
+        self, tracked: _Tracked, reason: str, *, after_close: Callable[[], None] | None = None
+    ) -> bool:
+        """One emergency close attempt; True only when REST shows the position flat.
+
+        ``after_close`` (WR-C8) runs exactly once, as soon as the closer has answered or raised
+        and before any journal row of this attempt: the audit side effects that must not delay
+        the close. It must not raise.
+        """
+        pending_hook = after_close
+
+        def settle() -> None:
+            nonlocal pending_hook
+            if pending_hook is not None:
+                hook, pending_hook = pending_hook, None
+                hook()
+
         try:
-            closed = await self._closer.close_position(entry=tracked.entry, reason=reason)
-        except Exception as exc:  # noqa: BLE001 - a failed close attempt never declares safety
-            self._journal_note(
-                tracked, EVENT_CLOSE_ATTEMPT_ERROR, {"error_type": type(exc).__name__}, self._now()
-            )
-            closed = False
+            try:
+                closed = await self._closer.close_position(entry=tracked.entry, reason=reason)
+            except Exception as exc:  # noqa: BLE001 - a failed close attempt never declares safety
+                settle()
+                self._journal_note(
+                    tracked,
+                    EVENT_CLOSE_ATTEMPT_ERROR,
+                    {"error_type": type(exc).__name__},
+                    self._now(),
+                )
+                closed = False
+        finally:
+            settle()
         if closed:
             return True
         if tracked.state is not ProtectionState.CLOSE_FAILED:
@@ -2988,6 +3047,9 @@ class ProtectionCoordinator:
 
     def _record_journal(self, event: JournalEvent, now: datetime) -> None:
         """Journal an event; a failing journal loses only the audit row (D034)."""
+        if self._deferred_journal is not None:
+            self._deferred_journal.append((event, now))
+            return
         try:
             self._journal.record(event)
         except Exception:  # noqa: BLE001 - protection outranks the audit row

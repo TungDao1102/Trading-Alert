@@ -669,7 +669,8 @@ async def test_branch_q4_refused_stop_is_journaled_not_sent_and_the_deadline_sti
         ("CLOSE_FAILED", "CLOSE_NOT_SENT"),
     ]
     assert rig.safe_mode.entered_reasons == ["CLOSE_REQUIRED"]
-    assert [a.event for a in rig.alerts.alerts] == ["CLOSE_REQUIRED", "EMERGENCY_CLOSE_NOT_SENT"]
+    # WR-C8: the close goes first, so the closer's own alert precedes the coordinator's.
+    assert [a.event for a in rig.alerts.alerts] == ["EMERGENCY_CLOSE_NOT_SENT", "CLOSE_REQUIRED"]
     assert rig.coordinator.blocks_new_entries() is True
     assert rig.fake.positions["BTCUSDT"] == D("0.004")  # nothing claims the position is safe
 
