@@ -15,10 +15,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from src.approval import confirm_core
 from src.approval.confirm_core import (
     DEMO_CONFIRM_PROFILE,
@@ -353,3 +355,133 @@ def test_a_valid_confirm_in_the_core_reaches_the_hook_once() -> None:
     result = rig.confirm(entry)
     assert result.outcome is ConfirmOutcome.CONFIRMED and not result.replayed
     assert len(rig.hook_calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: P16R-02 - every CONFIRM adopted in one sweep reaches on_confirmed once, in order.
+# --------------------------------------------------------------------------- #
+
+
+class UnreadableJournalStores(InMemoryShadowStores):
+    """A CONFIRM append that commits and then raises, and a journal read that can be broken.
+
+    The press cannot settle the unknown append (the read raises), so the entry keeps
+    `confirm_append_unknown` and a later sweep adopts the committed CONFIRM.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raise_after_confirm_write = True
+        self.unreadable = True
+
+    def record_journal(self, event: Any) -> None:
+        super().record_journal(event)
+        if self.raise_after_confirm_write and event.event_type.endswith("_CONFIRMED"):
+            raise ConnectionError("commit acknowledgement lost")
+
+    def journal_for_correlation(self, correlation_id: str) -> list[Any]:
+        if self.unreadable:
+            raise ConnectionError("journal unreadable")
+        return super().journal_for_correlation(correlation_id)
+
+
+def _two_unknown_confirms(rig: CoreRig, stores: UnreadableJournalStores) -> tuple[Any, Any]:
+    """Two entries whose CONFIRM append committed but is unknown; returns their two entries."""
+    entries = (rig.issue(1), rig.issue(2))
+    for n, entry in enumerate(entries, start=1):
+        with pytest.raises(ConnectionError):
+            rig.confirm(entry, correlation=f"cbq:c{n}")
+        assert entry.confirm_append_unknown and entry.state is ConfirmState.PENDING
+    assert rig.hook_calls == []
+    stores.raise_after_confirm_write = False
+    stores.unreadable = False
+    return entries
+
+
+def _lock_is_free(rig: CoreRig) -> bool:
+    """True when another thread can take the book lock (the hook runs outside it, B2-CR-01)."""
+    got: list[bool] = []
+
+    def probe() -> None:
+        acquired = rig.book._lock.acquire(blocking=False)  # type: ignore[attr-defined]
+        got.append(acquired)
+        if acquired:
+            rig.book._lock.release()  # type: ignore[attr-defined]
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join()
+    return got == [True]
+
+
+def test_two_adoptions_in_one_sweep_reach_the_hook_once_each_in_order() -> None:
+    stores = UnreadableJournalStores()
+    lock_free: list[bool] = []
+    rig = CoreRig(DEMO_CONFIRM_PROFILE, stores=stores, on_confirmed=lambda a, p, t: None)
+    rig._on_confirmed = lambda a, p, t: lock_free.append(_lock_is_free(rig))
+    a, b = _two_unknown_confirms(rig, stores)
+    confirmed_at = T_ISSUE
+
+    rig.now = T_ISSUE + timedelta(seconds=TTL + 1)
+    expired = rig.book.expire_due(rig.now)
+
+    assert expired == []  # both were adopted as CONFIRMED, neither expired
+    assert [call[0].approval_id for call in rig.hook_calls] == ["apr-1", "apr-2"]
+    assert [call[1].trade_plan_id for call in rig.hook_calls] == [
+        a.plan.trade_plan_id,
+        b.plan.trade_plan_id,
+    ]
+    assert [call[2] for call in rig.hook_calls] == [confirmed_at, confirmed_at]
+    assert lock_free == [True, True], "the hook ran while the book lock was held"
+    assert a.state is b.state is ConfirmState.CONFIRMED
+    # A second sweep adopts nothing and calls nothing.
+    assert rig.book.expire_due(rig.now + timedelta(seconds=5)) == []
+    assert len(rig.hook_calls) == 2
+
+
+def test_a_hook_that_raises_on_the_first_adoption_still_receives_the_second() -> None:
+    stores = UnreadableJournalStores()
+
+    def boom_on_first(approval: Approval, plan: TradePlan, at: Any) -> None:
+        if approval.approval_id == "apr-1":
+            raise RuntimeError("hook failed for apr-1")
+
+    rig = CoreRig(DEMO_CONFIRM_PROFILE, stores=stores, on_confirmed=boom_on_first)
+    _two_unknown_confirms(rig, stores)
+
+    rig.now = T_ISSUE + timedelta(seconds=TTL + 1)
+    with pytest.raises(RuntimeError, match="apr-1"):
+        rig.book.expire_due(rig.now)
+
+    assert [call[0].approval_id for call in rig.hook_calls] == ["apr-1", "apr-2"]
+    assert _lock_is_free(rig)
+
+
+def test_the_first_of_several_hook_errors_is_the_one_re_raised() -> None:
+    stores = UnreadableJournalStores()
+
+    def boom(approval: Approval, plan: TradePlan, at: Any) -> None:
+        raise RuntimeError(f"hook failed for {approval.approval_id}")
+
+    rig = CoreRig(DEMO_CONFIRM_PROFILE, stores=stores, on_confirmed=boom)
+    _two_unknown_confirms(rig, stores)
+
+    rig.now = T_ISSUE + timedelta(seconds=TTL + 1)
+    with pytest.raises(RuntimeError, match="apr-1"):
+        rig.book.expire_due(rig.now)
+    assert len(rig.hook_calls) == 2
+
+
+def test_a_press_that_confirms_one_entry_calls_the_hook_exactly_once() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    assert rig.confirm(entry).outcome is ConfirmOutcome.CONFIRMED
+    assert len(rig.hook_calls) == 1
+    rig.now = T_ISSUE + timedelta(seconds=TTL + 1)
+    rig.book.expire_due(rig.now)  # nothing left to adopt or expire
+    assert len(rig.hook_calls) == 1
+
+
+def test_the_deferred_confirmations_are_a_list_not_the_last_one_only() -> None:
+    source = CORE_SOURCE.read_text(encoding="utf-8")
+    assert "_deferred_confirmed: list[" in source
