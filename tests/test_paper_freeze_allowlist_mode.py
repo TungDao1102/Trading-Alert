@@ -607,3 +607,57 @@ def test_workflow_header_says_what_the_check_does_not_prove() -> None:
     assert "registry immutability" in header
     assert "never" in header and "host" in header
     assert "cache" in header and "not evidence" in header
+
+
+def test_module_entry_point_runs_the_check(tmp_path: Path) -> None:
+    """`python -m src.paper.freeze` must run the check; importing the module alone runs nothing.
+
+    Regression: the module had `_cli_main` but no `__main__` guard, so the hourly workflow exited 0
+    on every tick without writing a line. The tests call `_cli_main` directly and missed it.
+    """
+    import subprocess
+    import sys
+
+    # The one allowlist entry on master (the workflow's pin). Read from the source, not the module,
+    # because the fixture above empties the allowlist for this file.
+    strategy_id = "trend-pullback"
+    parameter_set_id = "research-run-1-a01"
+    parameter_set_hash = "6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87"
+    state = tmp_path / "pinned_epoch.json"
+    state.write_text(
+        json.dumps(
+            {
+                "epoch_id": "e" * 64,
+                "strategy_id": strategy_id,
+                "parameter_set_id": parameter_set_id,
+                "parameter_set_hash": parameter_set_hash,
+                "opened_at_utc": "2026-10-25T12:37:43.833841+00:00",
+                "evidence_claim_open": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    diff_log = tmp_path / "registry_diff.jsonl"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.paper.freeze",
+            "--check",
+            "--from-allowlist",
+            "--diff-log",
+            str(diff_log),
+            "--pinned-state",
+            str(state),
+            "--registry-root",
+            str(ROOT / "params"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    lines = diff_log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["outcome"] == "clean"
