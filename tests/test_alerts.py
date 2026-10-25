@@ -751,3 +751,38 @@ def test_daily_state_trigger_has_no_production_caller() -> None:
             if named:
                 offenders.append(f"{path.relative_to(src_root)}:{node.lineno}")  # type: ignore[attr-defined]
     assert offenders == []
+
+
+# --------------------------------------------------------------------------- #
+# Plan 23-03 (D-14): the drained text is the worded text for a worded event.
+# --------------------------------------------------------------------------- #
+
+
+async def test_close_required_is_drained_as_the_header_plus_the_plain_words() -> None:
+    h = Harness()
+    _close_required(h.sink)
+
+    await h.sender.drain()
+
+    text = h.bot.sent[0].text
+    expected_header = (
+        "[CRITICAL] CLOSE_REQUIRED\n"
+        "subject: BTCUSDT\n"
+        "reason: B2_STOP_UNCONFIRMED\n"
+        "at: 2026-09-19T00:00:00Z"
+    )
+    assert text.startswith(expected_header + "\nWhat happened: ")
+    assert "\nPosition: " in text
+    assert "\nSystem already did: " in text
+    assert "\nYou must: " in text
+
+
+async def test_an_event_without_wording_is_drained_exactly_as_before() -> None:
+    h = Harness()
+    h.sink.alert(event="STALE_DATA", subject="SYSTEM", reason="STALE_FEED", now_utc=NOW)
+
+    await h.sender.drain()
+
+    assert h.bot.sent[0].text == (
+        "[HIGH] STALE_DATA\nsubject: SYSTEM\nreason: STALE_FEED\nat: 2026-09-19T00:00:00Z"
+    )
