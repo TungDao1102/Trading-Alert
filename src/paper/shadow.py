@@ -69,6 +69,7 @@ from src.adapters.telegram_notify import (
     format_approve,
     send_text,
 )
+from src.approval.confirm_core import ConfirmOutcome, ConfirmRecord
 from src.approval.mapping import ShortIdMapping, make_short_id_mapping
 from src.approval.replay import ApprovalAlreadyDecided
 from src.approval.tokens import issue_one_time_token, token_hash_of
@@ -153,17 +154,6 @@ class ShadowDecisionOutcome(str, Enum):
     SKIPPED = "SKIPPED"
     REPLAYED = "REPLAYED"
     REJECTED_APPROVAL_EXPIRED = "REJECTED_APPROVAL_EXPIRED"
-    REJECTED_OTHER = "REJECTED_OTHER"
-
-
-class ConfirmOutcome(str, Enum):
-    """What a CONFIRM or CANCEL press amounted to, as shown to the operator (plan 16-11)."""
-
-    CONFIRMED = "CONFIRMED"
-    CANCELLED = "CANCELLED"
-    EXPIRED_TTL = "EXPIRED_TTL"
-    REJECTED_PLAN_EXPIRED = "REJECTED_PLAN_EXPIRED"
-    REJECTED_USER_MISMATCH = "REJECTED_USER_MISMATCH"
     REJECTED_OTHER = "REJECTED_OTHER"
 
 
@@ -867,16 +857,6 @@ async def send_shadow_alert(
 # --------------------------------------------------------------------------- #
 # Decision replies: the only other sender in this module.
 # --------------------------------------------------------------------------- #
-
-
-@dataclass(frozen=True)
-class ConfirmRecord:
-    """What the last CONFIRM or CANCEL press amounted to (consumed by the reply function)."""
-
-    outcome: ConfirmOutcome
-    detail: str
-    confirm_requested_at_utc: datetime | None
-    plan_expiry_utc: datetime | None
 
 
 class ConfirmResultSource(Protocol):
