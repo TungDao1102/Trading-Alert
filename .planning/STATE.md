@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 23
 current_phase_name: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
-current_plan: 1
-status: executed
-stopped_at: Phase 23 context gathered
-last_updated: "2026-10-25T14:26:27.474Z"
-last_activity: 2026-10-24
-last_activity_desc: Phase 22 executed, verification human_needed
-state_head: 0672a020f972b1d3aef6b42f66f2fc4c9ff6f82f
+current_plan: 2
+status: executing
+stopped_at: Completed 23-01-PLAN.md
+last_updated: "2026-10-25T14:43:48.928Z"
+last_activity: 2026-10-25
+last_activity_desc: Phase 23 execution started
+state_head: b7e0fc85a128d7618569925c2ae847e402616181
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 328
-  completed_plans: 312
+  completed_plans: 313
 milestone_name: milestone
 ---
 
@@ -27,16 +27,16 @@ milestone_name: milestone
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 22 — Leverage, Margin + Liquidation Guard
+**Current focus:** Phase 23 — Telegram Approval Hardening + Two-Step Confirm + Money Amounts
 
 ## Current Position
 
-Phase: 23 (Telegram Approval Hardening + Two-Step Confirm + Money Amounts) — READY TO EXECUTE
+Phase: 23 (Telegram Approval Hardening + Two-Step Confirm + Money Amounts) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 1
+Current Plan: 2
 Total Plans in Phase: 13
-Status: Phase 22 executed; owner items O-1 to O-4 and Demo samples pending
-Last activity: 2026-10-24 — Phase 22 executed (16/16), verification human_needed
+Status: Ready to execute
+Last activity: 2026-10-25 — Phase 23 execution started
 
 Progress: [██████░░░░] 61%
 
@@ -244,6 +244,7 @@ Progress: [██████░░░░] 61%
 | Phase 19 P16 | about 30 min (commit clock, 13:45 to 14:13) | 3 tasks | 13 files |
 | Phase 20 P01 | 15 min | 3 tasks | 7 files |
 | Phase 20 P02 | 18 min | 3 tasks | 6 files |
+| Phase 23 P01 | approx 1h | 3 tasks | 25 files |
 
 ## Accumulated Context
 
@@ -573,6 +574,8 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-63: R7: the soak image is rebuilt from a commit containing the TP2 guard and the 16-62 gate repeated before plan 16-43 pins the epoch
 - [Phase 20]: 20-01: Phase 20 ExecutionLimits fields are <section>_<key> (EXECUTION_LIMIT_FIELDS); Phase 19 field names unchanged; the numeric-default guard covers key texts and field names
 - [Phase 20]: 20-02: PROTECTION is a seventh TransitionKind (not persisted, no GLOSSARY block until O-01); ProtectionCoordinator._transition is the only place a protection state changes and refuses moves outside the table (journal PROTECTION_TRANSITION_REJECTED, SAFE_MODE PROTECTION_STATE_INVALID). — D-29, T-A, D077. Audit added the edges PROTECTED_ENTRY_OPEN -> FLAT and AWAITING_FILL -> ENTRY_UNRESOLVED (covered by the docstring intent). O-H exception not built (default NO). Phase 20 has no exchange event-time column: no general stale-event detection (deferred to Phase 24).
+- [Phase 23]: 23-01: new Telegram edge refusal codes are plain strings in src/approval/reason_codes.py, not RejectionReason members (enum stays 21; DispatchResult.reason_code is RejectionReason | str | None)
+- [Phase 23]: 23-01: authorized_user_ids is a required keyword-only frozenset[int] on on_callback, build_application, ShadowCoordinator, ShadowWiring and RehearsalSettings; a configured Telegram without TELEGRAM_AUTHORIZED_USER_IDS refuses the paper start
 
 ### Pending Todos
 
@@ -659,6 +662,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-25T12:58:13.918Z
-Stopped at: Phase 23 context gathered
-Resume file: .planning/phases/23-telegram-approval-hardening-money/23-CONTEXT.md
+Last session: 2026-10-25T14:43:43.610Z
+Stopped at: Completed 23-01-PLAN.md
+Resume file: None

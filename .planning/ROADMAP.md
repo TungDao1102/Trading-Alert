@@ -1233,12 +1233,12 @@ Input: .planning/phases/23-telegram-approval-hardening-money/23-NOTES.md
 - [P16R-02] `ShadowConfirm._deferred_confirmed` keeps only the last adopted CONFIRM of one `expire_due` sweep, so `on_confirmed` runs once for the last of several adopted CONFIRMs (`src/paper/shadow_confirm.py:1077`, `:1215`). Harmless today because `ShadowCoordinator._on_confirmed` ignores its arguments and `_ensure_drivers` builds drivers for every reservation; it becomes a real defect the day a hook uses its arguments. Decide when the two-step confirm is reworked: keep a list, or document that the hook takes no arguments, and add a test with two adoptions in one sweep (source: review of c654524..6f73e5b, 2026-10-20, reviewer C/B/A hand-back; detail in .planning/phases/16-paper-runtime-composition/deferred-items.md; decision: none required)
 - [P20-OPS-REMOTE] Remote operator commands (owner request 2026-10-21): the owner restricts ssh to the EC2 host to one home IP and wants ssh kept for critical operations, so non-critical operator actions run through authenticated commands such as Telegram bot commands: SAFE_MODE exit (`exit_safe_mode`, plan 20-15), `python -m src.ops.rest_gate_cli status/clear` (plan 20-07, if built), and the EXEC-06 controls of plan 20-17. Reuse this phase's allow-list on `from_user.id`, the private-chat rule and the two-step confirm; commands that raise risk (SAFE_MODE exit, gate clear) need the confirm, risk-reducing ones (disable entries, close) first. Phase 24 wires it into the runtime. Proposed home chosen by the assistant, to be confirmed by the owner (source: 20-DEFERRED.md written by plan 20-24; decision: none yet)
 
-**Plans:** 13 plans
+**Plans:** 1/13 plans executed
 
 Plans:
 
 **Wave 1**
-- [ ] 23-01-PLAN.md - Allow-list and private-chat gate at the callback edge, from TELEGRAM_AUTHORIZED_USER_IDS to the journal; actor threaded into the decision (D-01, D-02, D-03, D-15)
+- [x] 23-01-PLAN.md - Allow-list and private-chat gate at the callback edge, from TELEGRAM_AUTHORIZED_USER_IDS to the journal; actor threaded into the decision (D-01, D-02, D-03, D-15)
 - [ ] 23-02-PLAN.md - Money at stake: pure builder, carrier value and canonical JSON in the risk layer (D-13)
 - [ ] 23-03-PLAN.md - Operator-alert wording formatters and the Phase 23 fixture generator (D-14)
 - [ ] 23-04-PLAN.md - Approval row carries the decider and the money: _decide writes actor_id, migration 0013 money_json (D-03, D-13)
@@ -1460,7 +1460,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 31/31 | Executed, human_needed | 2026-10-23 |
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
-| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |
+| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 1/13 | In Progress | - |
 | 24. Live Runtime Composition + Demo Rehearsal | 0/TBD | Not started | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
