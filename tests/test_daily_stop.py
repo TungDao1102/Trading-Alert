@@ -590,3 +590,25 @@ def test_the_module_has_no_wall_clock_no_float_and_no_protective_cancel() -> Non
         "place_market_close",
         "place_algo_protective",
     }
+
+
+async def test_a_failed_daily_stop_alert_is_not_resent_on_the_next_call() -> None:
+    # Nyquist (WR-07 pin): the stop alert is one-shot. `alerts_due` belongs to the caller's
+    # verdict; a sink that raised on the first call is reported in `alerts_failed` and the
+    # next verdict (alerts_due empty, the latch already announced) sends nothing: the alert is
+    # lost, the caller must log `alerts_failed`. Observation: there is no retry in this module.
+    fake = BinanceSemanticsFakeAdapter()
+    await _rest_entry(fake, HASH_P)
+    plans = [PlacedPlanRef(PLAN_P, HASH_P, "BTCUSDT")]
+    failing = RecordingAlertSink(fail_with=RuntimeError("sink down"))
+
+    first = await _enforce(fake, _verdict(), plans, RecordingJournal(), failing)
+    assert first.alerts_failed == ((ALERT_DAILY_STOP, "RuntimeError"),)
+
+    healthy = RecordingAlertSink()
+    second = await _enforce(
+        fake, _verdict(latch_now=False, alerts_due=()), plans, RecordingJournal(), healthy
+    )
+
+    assert healthy.attempts == 0 and healthy.alerts == []
+    assert second.alerts_emitted == () and second.alerts_failed == ()
