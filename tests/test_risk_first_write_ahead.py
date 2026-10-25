@@ -198,6 +198,31 @@ async def test_a_raising_action_is_not_held_by_a_stalled_spill() -> None:
     assert spill.discarded == [TOKEN]
 
 
+async def test_a_raising_action_with_the_journal_down_waits_for_the_spill_and_keeps_it() -> None:
+    spill = StalledSpill()
+
+    async def action() -> None:
+        await _wait_for(spill.started)
+        raise RuntimeError("exchange said no")
+
+    task = asyncio.ensure_future(
+        act_then_record(
+            spill=spill,  # type: ignore[arg-type]
+            journal=RaisingJournal(),
+            event=_event(),
+            action=action,
+        )
+    )
+    await _wait_for(spill.started)
+    await asyncio.sleep(0.05)
+    assert not task.done()  # the action has ended; only the settling of the record waits
+    spill.release.set()
+    with pytest.raises(RuntimeError, match="exchange said no"):
+        await asyncio.wait_for(task, timeout=5)
+    assert spill.written == ["unit_test_wa"]
+    assert spill.discarded == []
+
+
 def test_the_helper_signature_is_unchanged() -> None:
     assert list(inspect.signature(act_then_record).parameters) == [
         "spill",

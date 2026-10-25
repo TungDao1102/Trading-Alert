@@ -251,6 +251,11 @@ async def test_act_then_record_preserves_an_action_exception_and_still_records(
         await act_then_record(spill=spill, journal=journal, event=_event(), action=action)
 
     assert len(journal.events) == 1
+    # The journal took the record, so the write-ahead is discarded once its write has finished.
+    for _ in range(200):
+        if _spill_files(tmp_path / "spill") == []:
+            break
+        await asyncio.sleep(0.01)
     assert _spill_files(tmp_path / "spill") == []
 
 

@@ -154,8 +154,9 @@ async def act_then_record[T](
 
     The action never waits for the spill disk (WR-C7). When the journal takes the record the
     spill file is removed as soon as its write has finished, without waiting for it. Only when
-    the journal failed does the call wait for the write-ahead, because that file is then the one
-    remaining record and its fate decides whether the audit record is lost.
+    the journal failed does the call wait for the write-ahead (after the action has ended),
+    because that file is then the one remaining record and its fate decides whether the audit
+    record is lost. In that double fault a stalled spill disk delays the return, not the action.
 
     Raises:
         AuditRecordLost: the action succeeded but the journal and the spill both failed.
@@ -168,11 +169,13 @@ async def act_then_record[T](
         if journal_error is None:
             _discard_when_written(spill, spill_future)
         else:
-            outcome = _spill_result(spill_future)
-            if outcome is not None and outcome[0] is None:
+            # The journal is down, so the spill file is the only record: settle it (the action
+            # has already ended, so nothing risk-reducing waits here).
+            token, spill_error = await spill_future
+            if token is None:
                 exc.add_note(
                     f"audit record {event.journal_event_id} lost: "
-                    f"journal={journal_error}, spill={outcome[1]}"
+                    f"journal={journal_error}, spill={spill_error}"
                 )
         raise
     journal_error = _try_journal(journal, event)
