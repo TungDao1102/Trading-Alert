@@ -35,13 +35,14 @@ from src.approval.confirm_core import (
     ConfirmState,
 )
 from src.domain.approval import Approval
-from src.domain.enums import ApprovalAction, ApprovalResult
+from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.paper import shadow, shadow_confirm
 
 from tests.shadow_fakes import (
     CHAT_ID,
+    OTHER_USER_ID,
     T0,
     USER_ID,
     InMemoryShadowStores,
@@ -126,7 +127,9 @@ class CoreRig:
         if self._on_confirmed is not None:
             self._on_confirmed(approval, plan, at)
 
-    def approved(self, n: int = 1, **plan_overrides: Any) -> tuple[Signal, TradePlan, Approval]:
+    def approved(
+        self, n: int = 1, *, request_hash: str | None = None, **plan_overrides: Any
+    ) -> tuple[Signal, TradePlan, Approval]:
         """An APPROVED approval of plan n in the stores (the state after the APPROVE press)."""
         signal = make_shadow_signal(n)
         plan = make_shadow_plan(signal, plan_hash=f"{n:x}".rjust(64, "d"), **plan_overrides)
@@ -140,7 +143,7 @@ class CoreRig:
             "action": ApprovalAction.APPROVE,
             "approval_token_hash": token_hash,
             "requested_at_utc": T0,
-            "request_hash": plan.plan_hash,
+            "request_hash": plan.plan_hash if request_hash is None else request_hash,
         }
         pending = Approval(
             **base, result=ApprovalResult.PENDING, status=ApprovalResult.PENDING, actor_id=""
@@ -156,9 +159,16 @@ class CoreRig:
         self.stores.save_atomic(approved, None)
         return signal, plan, approved
 
-    def issue(self, n: int = 1, *, user: int | None = USER_ID) -> ConfirmEntry:
+    def issue(
+        self,
+        n: int = 1,
+        *,
+        user: int | None = USER_ID,
+        request_hash: str | None = None,
+        **plan_overrides: Any,
+    ) -> ConfirmEntry:
         """Approve plan n and issue its confirm card (delivered through the edit path)."""
-        signal, plan, approval = self.approved(n)
+        signal, plan, approval = self.approved(n, request_hash=request_hash, **plan_overrides)
         entry = self.book.issue(
             short_id=f"s{n:03d}",
             approval=approval,
@@ -522,3 +532,263 @@ def test_an_adoption_is_not_lost_when_a_later_entry_of_the_same_sweep_raises() -
     stores.unreadable_ids = set()
     rig.book.expire_due(rig.now + timedelta(seconds=1))
     assert [call[0].approval_id for call in rig.hook_calls] == ["apr-1", "apr-2"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: the D-10 refusal matrix at core level. Nothing reaches on_confirmed except one valid
+# CONFIRM by the approving user, inside the TTL and the plan expiry, after the re-check.
+# --------------------------------------------------------------------------- #
+
+
+def _terminal_events(rig: CoreRig) -> list[Any]:
+    terminal = set(rig.profile.terminal_events)
+    return [e for e in rig.stores.journal if e.event_type in terminal]
+
+
+def test_matrix_a_valid_confirm_is_confirmed_once_with_the_confirm_actor_journaled() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    rig.now = T_ISSUE + timedelta(seconds=10)
+    result = rig.confirm(entry)
+
+    assert result.outcome is ConfirmOutcome.CONFIRMED and not result.replayed
+    assert len(rig.hook_calls) == 1
+    approval, plan, at = rig.hook_calls[0]
+    assert (approval.approval_id, plan.trade_plan_id, at) == (
+        "apr-1",
+        entry.plan.trade_plan_id,
+        rig.now,
+    )
+    (confirmed,) = rig.journal("DEMO_CONFIRMED")
+    body = _payload(confirmed)
+    assert body["approving_user_id"] == str(USER_ID)  # the CONFIRM actor (D-03)
+    assert body["mode"] == "DEMO"
+    assert body["plan_hash"] == entry.plan.plan_hash
+    assert rig.recheck_calls == 1
+    assert [e.event_type for e in _terminal_events(rig)] == ["DEMO_CONFIRMED"]
+
+
+def test_matrix_a_double_tap_replays_the_outcome_and_never_calls_the_hook_twice() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    first = rig.confirm(entry, correlation="cbq:tap-1")
+    second = rig.confirm(entry, correlation="cbq:tap-2")  # a new press, same user
+
+    assert first.outcome is ConfirmOutcome.CONFIRMED and not first.replayed
+    assert second.outcome is ConfirmOutcome.CONFIRMED and second.replayed
+    assert len(rig.hook_calls) == 1
+    assert len(rig.journal("DEMO_CONFIRMED")) == 1
+
+
+def test_matrix_a_replayed_confirm_with_the_same_correlation_writes_nothing_more() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    rig.confirm(entry, correlation="cbq:same")
+    rows_before = list(rig.stores.journal)
+    again = rig.confirm(entry, correlation="cbq:same")
+
+    assert again.outcome is ConfirmOutcome.CONFIRMED and again.replayed
+    assert rig.stores.journal == rows_before
+    assert len(rig.hook_calls) == 1
+
+
+def test_matrix_a_confirm_after_the_ttl_is_expired_and_never_reaches_the_hook() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    # The boundary is inclusive: at issued_at + 60 s the token is already dead.
+    result = rig.confirm(entry, at=T_ISSUE + timedelta(seconds=TTL))
+
+    assert result.outcome is ConfirmOutcome.EXPIRED_TTL
+    assert result.reason == "CONFIRM_TTL_ELAPSED"
+    assert rig.hook_calls == []
+    (expired,) = rig.journal("DEMO_CONFIRM_EXPIRED")
+    assert _payload(expired)["reason"] == "CONFIRM_TTL_ELAPSED"
+    # A later press hits the dead token: journaled, replayed, still no hook.
+    later = rig.confirm(entry, at=T_ISSUE + timedelta(seconds=TTL + 5), correlation="cbq:late")
+    assert later.replayed and later.outcome is ConfirmOutcome.EXPIRED_TTL
+    assert rig.hook_calls == []
+
+
+def test_matrix_the_last_second_inside_the_ttl_still_confirms() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    result = rig.confirm(entry, at=T_ISSUE + timedelta(seconds=TTL - 1))
+    assert result.outcome is ConfirmOutcome.CONFIRMED
+    assert len(rig.hook_calls) == 1
+
+
+def test_matrix_a_confirm_by_another_user_is_rejected_and_the_owner_can_still_confirm() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    refused = rig.confirm(entry, user=OTHER_USER_ID, correlation="cbq:other")
+
+    assert refused.outcome is ConfirmOutcome.REJECTED_USER_MISMATCH
+    assert rig.hook_calls == []
+    (rejected,) = rig.journal("DEMO_CONFIRM_REJECTED")
+    body = _payload(rejected)
+    assert body["reason"] == "USER_MISMATCH"
+    assert body["presented_user_id"] == str(OTHER_USER_ID)
+    assert _terminal_events(rig) == []  # not terminal: the token is still usable by its owner
+    assert entry.state is ConfirmState.PENDING
+
+    ok = rig.confirm(entry, correlation="cbq:owner")
+    assert ok.outcome is ConfirmOutcome.CONFIRMED
+    assert len(rig.hook_calls) == 1
+
+
+def test_matrix_a_press_without_a_user_id_is_a_user_mismatch() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    result = rig.confirm(rig.issue(), user=None)
+    assert result.outcome is ConfirmOutcome.REJECTED_USER_MISMATCH
+    assert rig.hook_calls == []
+
+
+def test_matrix_a_confirm_from_another_chat_is_rejected() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    result = rig.confirm(rig.issue(), chat_id=CHAT_ID + 1)
+    assert result.outcome is ConfirmOutcome.REJECTED_OTHER
+    assert result.reason == "CHAT_MISMATCH"
+    assert rig.hook_calls == []
+
+
+def test_matrix_a_confirm_at_or_after_the_plan_expiry_is_refused_and_terminal() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue(expiry_utc=T_ISSUE + timedelta(seconds=30))  # inside the 60 s TTL
+    result = rig.confirm(entry, at=T_ISSUE + timedelta(seconds=30))  # inclusive boundary
+
+    assert result.outcome is ConfirmOutcome.REJECTED_PLAN_EXPIRED
+    assert rig.hook_calls == []
+    assert entry.state is ConfirmState.EXPIRED
+    (expired,) = rig.journal("DEMO_CONFIRM_EXPIRED")
+    assert _payload(expired)["reason"] == RejectionReason.APPROVAL_EXPIRED.value
+    assert rig.recheck_calls == 0  # the binding gate refuses before the re-check runs
+
+
+def test_matrix_a_recheck_refusal_is_terminal_and_never_reaches_the_hook() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE, recheck=lambda s, p, n: "MARK_PRICE_CROSSED_STOP")
+    entry = rig.issue()
+    result = rig.confirm(entry)
+
+    assert result.outcome is ConfirmOutcome.REJECTED_OTHER
+    assert result.reason == "MARK_PRICE_CROSSED_STOP"
+    assert rig.hook_calls == []
+    assert entry.state is ConfirmState.EXPIRED
+    (expired,) = rig.journal("DEMO_CONFIRM_EXPIRED")
+    body = _payload(expired)
+    assert body["reason"] == "MARK_PRICE_CROSSED_STOP"
+    assert body["rejected_at_confirm"] is True
+    # The refusal is final: a second press replays it.
+    again = rig.confirm(entry, correlation="cbq:again")
+    assert again.replayed and again.outcome is ConfirmOutcome.REJECTED_OTHER
+    assert rig.hook_calls == []
+
+
+def test_matrix_a_recheck_that_raises_fails_closed_as_recheck_error() -> None:
+    def broken(signal: Signal, plan: TradePlan, now_utc: Any) -> str | None:
+        raise RuntimeError("price feed down")
+
+    rig = CoreRig(DEMO_CONFIRM_PROFILE, recheck=broken)
+    result = rig.confirm(rig.issue())
+    assert result.outcome is ConfirmOutcome.REJECTED_OTHER
+    assert result.reason == "RECHECK_ERROR"
+    assert rig.hook_calls == []
+
+
+def test_matrix_a_stale_plan_hash_is_refused_by_the_binding_gate() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue(request_hash="e" * 64)  # the approval was granted for another plan hash
+    result = rig.confirm(entry)
+    assert result.outcome is ConfirmOutcome.REJECTED_OTHER
+    assert result.reason == RejectionReason.STALE_SETUP.value
+    assert rig.hook_calls == []
+
+
+def test_matrix_cancel_is_journaled_by_the_approving_user_and_never_reaches_the_hook() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    result = rig.cancel(entry)
+
+    assert result.outcome is ConfirmOutcome.CANCELLED
+    (cancelled,) = rig.journal("DEMO_CONFIRM_CANCELLED")
+    assert _payload(cancelled)["approving_user_id"] == str(USER_ID)
+    assert _payload(cancelled)["mode"] == "DEMO"
+    assert rig.hook_calls == []
+    # A CONFIRM after the CANCEL cannot flip it.
+    after = rig.confirm(entry, correlation="cbq:after-cancel")
+    assert after.outcome is ConfirmOutcome.CANCELLED and after.replayed
+    assert rig.hook_calls == []
+
+
+def test_matrix_a_cancel_by_another_user_is_rejected() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue()
+    result = rig.cancel(entry, user=OTHER_USER_ID)
+    assert result.outcome is ConfirmOutcome.REJECTED_USER_MISMATCH
+    assert rig.journal("DEMO_CONFIRM_CANCELLED") == []
+    assert entry.state is ConfirmState.PENDING
+
+
+def test_matrix_a_restart_expires_every_outstanding_confirm_with_runtime_restart() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    rig.issue()  # ISSUED is journaled; the raw token lives in this process only
+    fresh = ConfirmBook(
+        rig.stores,
+        profile=DEMO_CONFIRM_PROFILE,
+        clock=lambda: rig.now,
+        card_renderer=_card(DEMO_CONFIRM_PROFILE),
+        on_confirmed=rig._hook,
+    )
+    swept = fresh.expire_on_restart(T_ISSUE + timedelta(seconds=5))
+
+    assert swept == ["apr-1"]
+    (expired,) = rig.journal("DEMO_CONFIRM_EXPIRED")
+    body = _payload(expired)
+    assert body["reason"] == "RUNTIME_RESTART" and body["swept"] is True
+    assert body["mode"] == "DEMO"
+    assert rig.hook_calls == []
+    assert fresh.expire_on_restart(T_ISSUE + timedelta(seconds=6)) == []  # idempotent
+    confirm_core.assert_no_stranded_approvals(
+        rig.stores, T_ISSUE + timedelta(seconds=TTL + 1), profile=DEMO_CONFIRM_PROFILE
+    )
+
+
+def test_matrix_a_stranded_approval_is_detected_per_profile() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    rig.approved(1)  # APPROVED, no card, no outcome
+    late = T_ISSUE + timedelta(seconds=TTL + 1)
+    with pytest.raises(confirm_core.StrandedApprovals):
+        confirm_core.assert_no_stranded_approvals(rig.stores, late, profile=DEMO_CONFIRM_PROFILE)
+    # The SHADOW names are not the DEMO names: a SHADOW-profile check sees the same gap too.
+    with pytest.raises(confirm_core.StrandedApprovals):
+        confirm_core.assert_no_stranded_approvals(rig.stores, late, profile=SHADOW_CONFIRM_PROFILE)
+
+
+def test_matrix_a_missing_user_id_expires_the_confirm_at_once() -> None:
+    rig = CoreRig(DEMO_CONFIRM_PROFILE)
+    entry = rig.issue(user=None)
+    assert entry.state is ConfirmState.EXPIRED
+    assert entry.reason == "USER_ID_UNAVAILABLE"
+    # Nobody can confirm: the bound id (-1) matches no Telegram user.
+    assert rig.confirm(entry).outcome is ConfirmOutcome.REJECTED_USER_MISMATCH
+    assert rig.hook_calls == []
+
+
+def test_the_live_profile_confirms_through_the_same_path_with_live_names() -> None:
+    rig = CoreRig(LIVE_CONFIRM_PROFILE)
+    entry = rig.issue()
+    result = rig.confirm(entry)
+
+    assert result.outcome is ConfirmOutcome.CONFIRMED
+    assert len(rig.hook_calls) == 1
+    (confirmed,) = rig.journal("LIVE_CONFIRMED")
+    assert _payload(confirmed)["mode"] == "LIVE"
+    assert confirmed.entity_type == "LiveConfirm"
+    assert rig.journal("DEMO_CONFIRMED") == [] and rig.journal("SHADOW_CONFIRMED") == []
+
+
+def test_the_hook_is_the_only_seam_a_book_without_a_hook_confirms_and_places_nothing() -> None:
+    rig = CoreRig(LIVE_CONFIRM_PROFILE)
+    rig.book._on_confirmed = None  # type: ignore[attr-defined]
+    result = rig.confirm(rig.issue())
+    assert result.outcome is ConfirmOutcome.CONFIRMED
+    assert rig.hook_calls == []
