@@ -464,7 +464,9 @@ async def test_a_failed_answer_never_stops_the_press_from_going_through_the_gate
     short_id = apr.removeprefix("APR:")
     answer = AnswerRecorder(h, error)
 
-    with caplog.at_level(logging.WARNING):
+    # Phase 23 (D-08): an expired query ("too_old") is logged at DEBUG, any other failure at
+    # WARNING; the class name is in the log either way and the text never is.
+    with caplog.at_level(logging.DEBUG):
         valid = await press(h, apr, "q1", answer)
         rejected = await press(h, apr, "q2", answer, chat_id=OTHER_CHAT_ID)
         confirm = await press(h, f"CNF:{short_id}", "q3", answer)

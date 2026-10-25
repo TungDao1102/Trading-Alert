@@ -40,7 +40,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,6 +62,7 @@ from src.approval.binding import ApprovalRejected, Callback
 from src.approval.mapping import ShortIdMapping, make_short_id_mapping
 from src.approval.reason_codes import (
     APPROVAL_STORE_FAILURE,
+    CALLBACK_HANDLER_ERROR,
     CHAT_NOT_PRIVATE,
     USER_ID_UNAVAILABLE,
     USER_NOT_AUTHORIZED,
@@ -107,6 +108,10 @@ EVENT_TYPE_CALLBACK_RECEIVED: str = "CALLBACK_RECEIVED"
 # rejected by the binding gate).
 EVENT_TYPE_CALLBACK_RESOLVED: str = "CALLBACK_RESOLVED"
 EVENT_TYPE_CALLBACK_REJECTED: str = "CALLBACK_REJECTED"
+
+# Phase 23 (D-08): an exception raised inside the callback handler AFTER the gates. Journaled with
+# the correlation id and the exception CLASS name only, never the message text.
+EVENT_TYPE_CALLBACK_HANDLER_FAILED: str = "CALLBACK_HANDLER_FAILED"
 
 
 # --------------------------------------------------------------------------- #
@@ -831,6 +836,44 @@ def _build_user_reject_receipt(
     )
 
 
+def _build_handler_failed_receipt(
+    *,
+    parsed: ParsedCallback,
+    error_class: str,
+    callback_at_utc: datetime,
+    correlation_id: str,
+) -> JournalEvent:
+    """Build the journal event of an exception raised after the gates (Phase 23, D-08).
+
+    The payload is the short id, the callback kind, the exception class name and the correlation
+    id: no message text, no token and no callback data (B2-WR-08, T-23-22).
+    """
+    if callback_at_utc.tzinfo is None:
+        raise ValueError("callback_at_utc must be UTC-aware")
+    payload = {
+        "short_id": parsed.short_id,
+        "kind": parsed.kind.value,
+        "error_class": error_class,
+        "correlation_id": correlation_id,
+    }
+    entity_id = f"short:{parsed.short_id}"
+    return JournalEvent(
+        journal_event_id=correlated_event_id(
+            prefix="cb",
+            correlation_id=correlation_id,
+            event_type=EVENT_TYPE_CALLBACK_HANDLER_FAILED,
+            entity_id=entity_id,
+            step="handler_error",
+        ),
+        occurred_at_utc=callback_at_utc,
+        event_type=EVENT_TYPE_CALLBACK_HANDLER_FAILED,
+        entity_type="Approval",
+        entity_id=entity_id,
+        correlation_id=correlation_id,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _journal_outcome(
     journal_receipt: JournalReceipt,
     *,
@@ -934,11 +977,45 @@ async def answer_callback_safely(query: Any) -> None:
     `answerCallbackQuery` is cosmetic: the callback is processed through the gates whether or
     not it succeeds. A failure (an expired query, a network fault, a rate limit) is logged by
     exception class only, never retried, and never raised.
+
+    Phase 23 (D-08): a callback that waited out a downtime raises `BadRequest: Query is too old
+    ...`. That is expected after a restart, so it is logged at debug level; everything else keeps
+    the warning. The class is matched by name, so this module still imports no PTB type, and the
+    exception text is only compared, never logged.
     """
     try:
         await query.answer()
     except Exception as exc:  # noqa: BLE001 - cosmetic call; the press is still processed
-        log.warning("telegram.callback.answer_failed: %s", type(exc).__name__)
+        if type(exc).__name__ == "BadRequest" and "query is too old" in str(exc).lower():
+            log.debug("telegram.callback.answer_expired: %s", type(exc).__name__)
+        else:
+            log.warning("telegram.callback.answer_failed: %s", type(exc).__name__)
+
+
+def make_application_error_handler() -> Callable[[object, Any], Coroutine[Any, Any, None]]:
+    """The PTB application error handler (Phase 23, D-08): log the class and the press only.
+
+    Before this the application had none: PTB logged the traceback of every exception that
+    escaped a callback, message text included. The handler logs ONE line with the exception class
+    name and, when the update is a callback query, its correlation id (`cbq:<id>`). It never logs
+    the exception text, the callback data or the token, never raises and changes no approval state.
+    """
+
+    async def _on_application_error(update: object, context: Any) -> None:
+        try:
+            error = getattr(context, "error", None)
+            query = getattr(update, "callback_query", None)
+            query_id = getattr(query, "id", None)
+            correlation = f"cbq:{query_id}" if isinstance(query_id, str) and query_id else None
+            log.error(
+                "telegram.application.error: %s correlation_id=%s",
+                type(error).__name__,
+                correlation,
+            )
+        except Exception:  # noqa: BLE001 - an error handler must never raise
+            return
+
+    return _on_application_error
 
 
 async def on_callback(
@@ -953,6 +1030,7 @@ async def on_callback(
     confirm_handler: ConfirmHandler | None = None,
     approved_handler: ApprovedHandler | None = None,
     finalize_message: FinalizeHook | None = None,
+    error_journal: JournalReceipt | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> DispatchResult:
     """PTB `CallbackQueryHandler` entry point.
@@ -982,6 +1060,12 @@ async def on_callback(
     Phase 23 (D-06): `finalize_message`, when given, is awaited after the reply of every press
     that passed both gates (never for a refused press); an error in it is logged by class name
     and changes nothing.
+
+    Phase 23 (D-08): an exception raised after the gates is caught here. It is logged by class
+    name and correlation id, journaled as `CALLBACK_HANDLER_FAILED` when `error_journal` is given
+    (a failing journal is logged and swallowed), and the authorized chat gets one neutral text.
+    The result is `ok=False` with `CALLBACK_HANDLER_ERROR`. `CancelledError` still propagates, and
+    a malformed update still raises `ValueError` before any correlation exists.
     """
     _validate_authorized_user_ids(authorized_user_ids)
     query = update.callback_query
@@ -1030,8 +1114,69 @@ async def on_callback(
             callback_at_utc=callback_at_utc,
             correlation_id=correlation_id,
         )
+    except Exception as exc:  # noqa: BLE001 - D-08: journaled, answered neutrally, never raised
+        return await _handle_press_failure(
+            exc,
+            parsed=parsed,
+            callback_chat_id=callback_chat_id,
+            authorized_chat_id=authorized_chat_id,
+            reply_text_fn=reply_text_fn,
+            error_journal=error_journal,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
     finally:
         _PRESS_CORRELATION.reset(token)
+
+
+async def _handle_press_failure(
+    exc: Exception,
+    *,
+    parsed: ParsedCallback,
+    callback_chat_id: int,
+    authorized_chat_id: int,
+    reply_text_fn: Callable[[int, str], Awaitable[None]] | None,
+    error_journal: JournalReceipt | None,
+    callback_at_utc: datetime,
+    correlation_id: str,
+) -> DispatchResult:
+    """Log, journal and answer an exception raised after the gates (Phase 23, D-08).
+
+    Only the exception class name and the correlation id leave this function (log, journal and
+    reply): never the exception text, a token or callback data (B2-WR-08, T-23-22).
+    """
+    error_class = type(exc).__name__
+    log.error("telegram.callback.handler_failed: %s correlation_id=%s", error_class, correlation_id)
+    if error_journal is not None:
+        try:
+            error_journal(
+                _build_handler_failed_receipt(
+                    parsed=parsed,
+                    error_class=error_class,
+                    callback_at_utc=callback_at_utc,
+                    correlation_id=correlation_id,
+                )
+            )
+        except Exception as journal_exc:  # noqa: BLE001 - the neutral answer still goes out
+            log.error(
+                "telegram.callback.handler_failed_journal_failed: %s correlation_id=%s",
+                type(journal_exc).__name__,
+                correlation_id,
+            )
+    if reply_text_fn is not None and callback_chat_id == authorized_chat_id:
+        try:
+            await reply_text_fn(
+                callback_chat_id,
+                f"An internal error stopped this tap (reference {correlation_id}). "
+                "Do not tap again; check the journal.",
+            )
+        except Exception as reply_exc:  # noqa: BLE001 - nothing more can be done for this press
+            log.error(
+                "telegram.callback.handler_failed_reply_failed: %s correlation_id=%s",
+                type(reply_exc).__name__,
+                correlation_id,
+            )
+    return DispatchResult(ok=False, kind=parsed.kind, reason_code=CALLBACK_HANDLER_ERROR)
 
 
 async def _answer_press(
@@ -1199,6 +1344,7 @@ def build_application(
     confirm_handler: ConfirmHandler | None = None,
     approved_handler: ApprovedHandler | None = None,
     finalize_message: FinalizeHook | None = None,
+    error_journal: JournalReceipt | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     """Build a PTB `Application` wired with the approval-callback handler.
@@ -1230,11 +1376,13 @@ def build_application(
             confirm_handler=confirm_handler,
             approved_handler=approved_handler,
             finalize_message=finalize_message,
+            error_journal=error_journal,
             clock=clock,
         )
 
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CallbackQueryHandler(_handler))
+    app.add_error_handler(make_application_error_handler())
     return app
 
 
@@ -1250,6 +1398,7 @@ __all__ = [
     "ConfirmReply",
     "DispatchCallable",
     "DispatchResult",
+    "EVENT_TYPE_CALLBACK_HANDLER_FAILED",
     "EVENT_TYPE_CALLBACK_RECEIVED",
     "EVENT_TYPE_CALLBACK_REJECTED",
     "EVENT_TYPE_CALLBACK_RESOLVED",
@@ -1268,6 +1417,7 @@ __all__ = [
     "current_press_correlation",
     "dispatch_callback",
     "format_approve",
+    "make_application_error_handler",
     "on_callback",
     "parse_callback_data",
 ]
