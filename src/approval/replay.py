@@ -80,6 +80,10 @@ def _lock_for_token(token_hash: str) -> _threading.Lock:
         return lock
 
 
+# The approvals.actor_id column width (src/persistence).
+_ACTOR_ID_MAX_LENGTH = 64
+
+
 def resolve_callback(
     callback: Callback,
     lookup_by_token_hash: LookupByTokenHash,
@@ -91,6 +95,7 @@ def resolve_callback(
     approval_parameter_set_id: str,
     approval_parameter_set_hash: str,
     now_utc: datetime | None = None,
+    actor_id: str = "",
 ) -> Approval:
     """Resolve a Telegram callback to an existing or transitioned approval.
 
@@ -115,6 +120,10 @@ def resolve_callback(
         approval_parameter_set_hash: The parameter set hash on the parent.
         now_utc: The current UTC-aware datetime. If None, uses
             callback.callback_at_utc.
+        actor_id: The Telegram user id (as text) of the press that decides the
+            approval (Phase 23, D-03). Set only in the PENDING -> decided
+            transition; a replay returns the stored row and keeps the first
+            actor. At most 64 characters (the approvals.actor_id column width).
 
     Returns:
         The Approval after resolution — either the existing decided
@@ -124,6 +133,9 @@ def resolve_callback(
         ApprovalRejected: The binding gate failed. The exception's
             `reason_code` carries the canonical RejectionReason.
     """
+    if len(actor_id) > _ACTOR_ID_MAX_LENGTH:
+        raise ValueError(f"actor_id must be at most {_ACTOR_ID_MAX_LENGTH} characters")
+
     # Derive now_utc from the callback if not provided.
     effective_now = now_utc if now_utc is not None else callback.callback_at_utc
 
@@ -151,6 +163,7 @@ def resolve_callback(
             approval_parameter_set_id=approval_parameter_set_id,
             approval_parameter_set_hash=approval_parameter_set_hash,
             effective_now=effective_now,
+            actor_id=actor_id,
         )
 
 
@@ -166,6 +179,7 @@ def _resolve_locked(
     approval_parameter_set_id: str,
     approval_parameter_set_hash: str,
     effective_now: datetime,
+    actor_id: str,
 ) -> Approval:
     # Look up the approval by token hash. A wrong token (lookup returns
     # None) is rejected — the binding gate's token gate would also
@@ -242,6 +256,7 @@ def _resolve_locked(
         result=new_result,
         status=new_result,
         acted_at_utc=effective_now,
+        actor_id=actor_id or approval.actor_id,
     )
 
     # Save exactly once. If save raises (e.g., notify failure), the

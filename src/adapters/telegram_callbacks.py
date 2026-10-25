@@ -60,6 +60,12 @@ from src.adapters.telegram_notify import (
 )
 from src.approval.binding import ApprovalRejected, Callback
 from src.approval.mapping import ShortIdMapping, make_short_id_mapping
+from src.approval.reason_codes import (
+    APPROVAL_STORE_FAILURE,
+    CHAT_NOT_PRIVATE,
+    USER_ID_UNAVAILABLE,
+    USER_NOT_AUTHORIZED,
+)
 from src.approval.replay import resolve_callback
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
@@ -206,10 +212,11 @@ def parse_callback_data(raw: str) -> ParsedCallback:
 class CallbackPress:
     """What the SHADOW confirm layer is told about one button press (plan 16-11).
 
-    Built by `on_callback` AFTER the authorized-chat gate. `from_user_id` is the Telegram user
-    who pressed (`query.from_user.id`, None when Telegram gave none) and `message_id` the id of
-    the message carrying the button. User-id authorization stays Phase 23: the confirm layer
-    only BINDS the confirm to the user that pressed APPROVE.
+    Built by `on_callback` AFTER the authorized-chat gate and the Phase 23 user gate
+    (`authorized_user_gate`: listed user, private chat). `from_user_id` is the Telegram user who
+    pressed (`query.from_user.id`, None when Telegram gave none) and `message_id` the id of the
+    message carrying the button. The confirm layer BINDS the confirm to the user that pressed
+    APPROVE.
     """
 
     parsed: ParsedCallback
@@ -250,6 +257,44 @@ def authorized_chat_gate(*, callback_chat_id: int, authorized_chat_id: int) -> b
     return callback_chat_id == authorized_chat_id
 
 
+def _validate_authorized_user_ids(authorized_user_ids: object) -> None:
+    """Raise `ValueError` unless the allow-list is a non-empty frozenset of real ints.
+
+    Never allow-all (D-02): an empty set, a plain set or a bool/str member is a programming error
+    and is refused at the entry point, before any decision. The members are never put in the
+    message.
+    """
+    if not isinstance(authorized_user_ids, frozenset) or not authorized_user_ids:
+        raise ValueError("authorized_user_ids must be a non-empty frozenset of int")
+    for member in authorized_user_ids:
+        if isinstance(member, bool) or not isinstance(member, int):
+            raise ValueError("authorized_user_ids must contain only int user ids")
+
+
+def authorized_user_gate(
+    *,
+    from_user_id: object,
+    chat_type: object,
+    authorized_user_ids: frozenset[int],
+) -> str | None:
+    """Return the plain refusal code of a press, or None when the press may go on (Phase 23).
+
+    The second, independent gate after the chat gate (D-01: the two fail independently). The
+    order is fixed: user id present, then chat type exactly "private", then membership in the
+    required allow-list. A refusal happens BEFORE any short-id or token lookup. The chat type is
+    compared with the plain string (`telegram.constants.ChatType.PRIVATE == "private"`), so this
+    function stays free of any PTB import.
+    """
+    _validate_authorized_user_ids(authorized_user_ids)
+    if isinstance(from_user_id, bool) or not isinstance(from_user_id, int):
+        return USER_ID_UNAVAILABLE
+    if not isinstance(chat_type, str) or chat_type != "private":
+        return CHAT_NOT_PRIVATE
+    if from_user_id not in authorized_user_ids:
+        return USER_NOT_AUTHORIZED
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Dependency-injection callables (receiver never touches DB directly).
 # --------------------------------------------------------------------------- #
@@ -286,13 +331,23 @@ class DispatchResult:
     the callback kind for the renderer. `approval` is the resulting
     Approval (the existing row on replay, the newly-transitioned
     row on a fresh approval). `reason_code` carries the rejection
-    reason on failure (None on success).
+    reason on failure (None on success): a `RejectionReason` member, or since Phase 23 a plain
+    string from `src.approval.reason_codes` (orchestrator resolution 7: the enum stays at 21).
     """
 
     ok: bool
     kind: CallbackKind
     approval: Approval | None = None
-    reason_code: RejectionReason | None = None
+    reason_code: RejectionReason | str | None = None
+
+
+def _reason_label(reason_code: RejectionReason | str | None) -> str | None:
+    """The journal/render text of a reason code (enum -> value, plain string -> itself)."""
+    if reason_code is None:
+        return None
+    if isinstance(reason_code, RejectionReason):
+        return reason_code.value
+    return reason_code
 
 
 def dispatch_callback(
@@ -309,8 +364,16 @@ def dispatch_callback(
     save_atomic: SaveAtomic,
     now_utc: datetime | None = None,
     binding_context: dict[str, Any] | None = None,
+    from_user_id: int | None = None,
+    chat_type: str | None = None,
+    authorized_user_ids: frozenset[int] | None = None,
 ) -> DispatchResult:
     """Dispatch a parsed callback to the approval core.
+
+    Phase 23 (D-01, D-02, D-03): right after the chat gate and before the receipt, a press is
+    checked by `authorized_user_gate` when `authorized_user_ids` is given. `on_callback` always
+    passes it (and refuses by itself first); only direct library callers omit it, which skips
+    this step. `from_user_id` also becomes the `actor_id` of a decided approval.
 
     Per D-02: the order is fixed and never reordered.
       1. Strict parse (already done by the caller — we receive a
@@ -358,6 +421,35 @@ def dispatch_callback(
             kind=parsed.kind,
             reason_code=RejectionReason.INVALIDATED,
         )
+
+    # Gate 2b (Phase 23): the user and chat-type gate, still BEFORE any state lookup.
+    if authorized_user_ids is not None:
+        user_refusal = authorized_user_gate(
+            from_user_id=from_user_id,
+            chat_type=chat_type,
+            authorized_user_ids=authorized_user_ids,
+        )
+        if user_refusal is not None:
+            journal_receipt(
+                _build_user_reject_receipt(
+                    parsed=parsed,
+                    callback_chat_id=callback_chat_id,
+                    from_user_id=from_user_id,
+                    chat_type=chat_type,
+                    reason=user_refusal,
+                    callback_at_utc=callback_at_utc,
+                    correlation_id=correlation_id,
+                )
+            )
+            _journal_outcome(
+                journal_receipt,
+                parsed=parsed,
+                ok=False,
+                reason_code=user_refusal,
+                callback_at_utc=callback_at_utc,
+                correlation_id=correlation_id,
+            )
+            return DispatchResult(ok=False, kind=parsed.kind, reason_code=user_refusal)
 
     # Gate 3: journal-first receipt (raw, BEFORE any state lookup).
     receipt = _build_callback_receipt(
@@ -504,6 +596,11 @@ def dispatch_callback(
             approval_parameter_set_id=binding_context["parameter_set_id"],
             approval_parameter_set_hash=binding_context["parameter_set_hash"],
             now_utc=now_utc if now_utc is not None else datetime.now(UTC),
+            actor_id=(
+                str(from_user_id)
+                if isinstance(from_user_id, int) and not isinstance(from_user_id, bool)
+                else ""
+            ),
         )
     except ApprovalRejected as exc:
         _journal_outcome(
@@ -534,9 +631,10 @@ def dispatch_callback(
             reason_code=RejectionReason.INVALIDATED,
         )
     except Exception as exc:  # noqa: BLE001 - fail closed: nothing was approved
-        # An infrastructure failure (a store or connection error) is not a domain rejection. The
-        # press still ends in INVALIDATED, but the class and the correlation id are logged so the
-        # cause is diagnosable; never the message text, the token or the callback data (B2-WR-08).
+        # An infrastructure failure (a store or connection error) is not a domain rejection. Since
+        # Phase 23 it has its own plain code, APPROVAL_STORE_FAILURE (it used to be INVALIDATED);
+        # the class and the correlation id are logged so the cause is diagnosable; never the
+        # message text, the token or the callback data (B2-WR-08).
         log.error(
             "telegram.callback.dispatch_failed: %s correlation_id=%s",
             type(exc).__name__,
@@ -546,14 +644,14 @@ def dispatch_callback(
             journal_receipt,
             parsed=parsed,
             ok=False,
-            reason_code=RejectionReason.INVALIDATED,
+            reason_code=APPROVAL_STORE_FAILURE,
             callback_at_utc=callback_at_utc,
             correlation_id=correlation_id,
         )
         return DispatchResult(
             ok=False,
             kind=parsed.kind,
-            reason_code=RejectionReason.INVALIDATED,
+            reason_code=APPROVAL_STORE_FAILURE,
         )
 
     _journal_outcome(
@@ -652,23 +750,75 @@ def _build_chat_reject_receipt(
     )
 
 
+def _build_user_reject_receipt(
+    *,
+    parsed: ParsedCallback,
+    callback_chat_id: int,
+    from_user_id: int | None,
+    chat_type: str | None,
+    reason: str,
+    callback_at_utc: datetime,
+    correlation_id: str,
+) -> JournalEvent:
+    """Build the journal receipt for a refused user or chat type (Phase 23, D-01, D-02).
+
+    Journaled as CALLBACK_RECEIVED with `user_gate_rejected=True` and the plain reason code, like
+    the chat-gate receipt. Only the pressing actor's id is recorded, never the allow-list (T-23-03).
+    """
+    if callback_at_utc.tzinfo is None:
+        raise ValueError("callback_at_utc must be UTC-aware")
+    safe_user_id = (
+        from_user_id
+        if isinstance(from_user_id, int) and not isinstance(from_user_id, bool)
+        else None
+    )
+    safe_chat_type = chat_type[:32] if isinstance(chat_type, str) else None
+    payload = {
+        "chat_id": callback_chat_id,
+        "from_user_id": safe_user_id,
+        "chat_type": safe_chat_type,
+        "callback_data": parsed.raw,
+        "kind": parsed.kind.value,
+        "short_id": parsed.short_id,
+        "user_gate_rejected": True,
+        "reason": reason,
+    }
+    entity_id = f"short:{parsed.short_id}"
+    return JournalEvent(
+        journal_event_id=correlated_event_id(
+            prefix="cb",
+            correlation_id=correlation_id,
+            event_type=EVENT_TYPE_CALLBACK_RECEIVED,
+            entity_id=entity_id,
+            step="user_reject",
+        ),
+        occurred_at_utc=callback_at_utc,
+        event_type=EVENT_TYPE_CALLBACK_RECEIVED,
+        entity_type="Approval",
+        entity_id=entity_id,
+        correlation_id=correlation_id,
+        payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _journal_outcome(
     journal_receipt: JournalReceipt,
     *,
     parsed: ParsedCallback,
     ok: bool,
-    reason_code: RejectionReason | None,
+    reason_code: RejectionReason | str | None,
     callback_at_utc: datetime,
     correlation_id: str,
 ) -> None:
     event_type = EVENT_TYPE_CALLBACK_RESOLVED if ok else EVENT_TYPE_CALLBACK_REJECTED
-    reason_label = reason_code.value if reason_code is not None else "NONE"
+    reason_text = _reason_label(reason_code)
+    reason_label = reason_text if reason_text is not None else "NONE"
     entity_id = f"short:{parsed.short_id}"
     payload = {
         "short_id": parsed.short_id,
         "kind": parsed.kind.value,
         "ok": ok,
-        "reason_code": reason_code.value if reason_code is not None else None,
+        "reason_code": reason_text,
         "correlation_id": correlation_id,
     }
     journal_receipt(
@@ -743,6 +893,7 @@ async def on_callback(
     context: ContextTypes.DEFAULT_TYPE,
     *,
     authorized_chat_id: int,
+    authorized_user_ids: frozenset[int],
     binding_context_resolver: Callable[[str], dict[str, Any] | None],
     dispatch: DispatchCallable,
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None = None,
@@ -768,7 +919,13 @@ async def on_callback(
     `confirm_handler` serves `CNF:` / `CXL:` presses after the chat gate (they never enter
     `dispatch_callback`; without a handler they are refused); `approved_handler` runs after a
     press reached APPROVED; `clock` replaces the wall clock for the press time (tests).
+
+    Phase 23 (D-01, D-02): `authorized_user_ids` is REQUIRED (no default, never allow-all; an
+    empty set or a non-int member is a `ValueError` here). After the chat gate and before any
+    lookup the press must come from a listed user in a chat of type "private"; otherwise it is
+    refused, journaled with only the presser's id, and answered with the generic "Rejected".
     """
+    _validate_authorized_user_ids(authorized_user_ids)
     query = update.callback_query
     if query is None:
         raise ValueError("update.callback_query must not be None")
@@ -785,6 +942,7 @@ async def on_callback(
     if chat is None:
         raise ValueError("update.effective_chat must not be None")
     callback_chat_id = int(chat.id)
+    chat_type = getattr(chat, "type", None)
 
     # Correlation comes from Telegram's callback_query.id, which is stable
     # across redelivery of the same callback (D-10, research C7, A10). A
@@ -803,6 +961,8 @@ async def on_callback(
             parsed,
             callback_chat_id=callback_chat_id,
             authorized_chat_id=authorized_chat_id,
+            authorized_user_ids=authorized_user_ids,
+            chat_type=chat_type if isinstance(chat_type, str) else None,
             binding_context_resolver=binding_context_resolver,
             dispatch=dispatch,
             reply_text_fn=reply_text_fn,
@@ -821,6 +981,8 @@ async def _answer_press(
     *,
     callback_chat_id: int,
     authorized_chat_id: int,
+    authorized_user_ids: frozenset[int],
+    chat_type: str | None,
     binding_context_resolver: Callable[[str], dict[str, Any] | None],
     dispatch: DispatchCallable,
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None,
@@ -854,12 +1016,48 @@ async def _answer_press(
 
     from_user = getattr(query, "from_user", None)
     from_user_id = getattr(from_user, "id", None)
+    typed_user_id = (
+        from_user_id
+        if isinstance(from_user_id, int) and not isinstance(from_user_id, bool)
+        else None
+    )
+
+    # Phase 23 (D-01, D-02): the user and chat-type gate. It runs before CallbackPress, the
+    # confirm handler and any lookup. `on_callback` builds its own refusal, so the gate holds even
+    # if an injected dispatcher ignores the new keywords (T-23-05).
+    user_refusal = authorized_user_gate(
+        from_user_id=from_user_id,
+        chat_type=chat_type,
+        authorized_user_ids=authorized_user_ids,
+    )
+    if user_refusal is not None:
+        await _dispatched(
+            dispatch,
+            parsed,
+            callback_chat_id=callback_chat_id,
+            authorized_chat_id=authorized_chat_id,
+            callback_at_utc=callback_at_utc,
+            raw_token="",
+            correlation_id=correlation_id,
+            binding_context=None,
+            from_user_id=typed_user_id,
+            chat_type=chat_type,
+            authorized_user_ids=authorized_user_ids,
+        )
+
+        if reply_text_fn is not None:
+            refused_chat_id = getattr(query.message, "chat_id", None)
+            if refused_chat_id is not None:
+                await reply_text_fn(int(refused_chat_id), "Rejected")
+
+        return DispatchResult(ok=False, kind=parsed.kind, reason_code=user_refusal)
+
     message_id = getattr(query.message, "message_id", None)
     press = CallbackPress(
         parsed=parsed,
         chat_id=callback_chat_id,
         authorized_chat_id=authorized_chat_id,
-        from_user_id=from_user_id if isinstance(from_user_id, int) else None,
+        from_user_id=typed_user_id,
         message_id=message_id if isinstance(message_id, int) else None,
         callback_at_utc=callback_at_utc,
         correlation_id=correlation_id,
@@ -889,6 +1087,9 @@ async def _answer_press(
         raw_token=raw_token,
         correlation_id=correlation_id,
         binding_context=binding,
+        from_user_id=typed_user_id,
+        chat_type=chat_type,
+        authorized_user_ids=authorized_user_ids,
     )
 
     handled = False
@@ -917,7 +1118,7 @@ async def _answer_press(
 def _render_outcome_text(result: DispatchResult, parsed: ParsedCallback) -> str:
     """Render the outcome text for a callback (best-effort, human-readable)."""
     if not result.ok:
-        reason = result.reason_code.value if result.reason_code else "UNKNOWN"
+        reason = _reason_label(result.reason_code) or "UNKNOWN"
         return f"Rejected ({reason}): {parsed.kind.value}"
     if result.approval is None:
         return f"Recorded: {parsed.kind.value}"
@@ -928,6 +1129,7 @@ def build_application(
     *,
     token: str,
     authorized_chat_id: int,
+    authorized_user_ids: frozenset[int],
     binding_context_resolver: Callable[[str], dict[str, Any] | None],
     dispatch: DispatchCallable,
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None = None,
@@ -948,6 +1150,7 @@ def build_application(
     """
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN must be a non-empty string")
+    _validate_authorized_user_ids(authorized_user_ids)
 
     from telegram.ext import ApplicationBuilder, CallbackQueryHandler
 
@@ -956,6 +1159,7 @@ def build_application(
             update,
             context,
             authorized_chat_id=authorized_chat_id,
+            authorized_user_ids=authorized_user_ids,
             binding_context_resolver=binding_context_resolver,
             dispatch=dispatch,
             reply_text_fn=reply_text_fn,
@@ -993,6 +1197,7 @@ __all__ = [
     "TelegramBot",
     "answer_callback_safely",
     "authorized_chat_gate",
+    "authorized_user_gate",
     "build_application",
     "current_press_correlation",
     "dispatch_callback",
