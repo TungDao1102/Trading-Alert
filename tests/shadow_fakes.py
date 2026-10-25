@@ -19,6 +19,7 @@ constant it guards.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -245,23 +246,69 @@ class SentMessage:
     message_id: int | None = None
 
 
-class FakeBot:
-    """Records sends and edits; raises queued exceptions (real `telegram.error` ones)."""
+_LIVE_MODES = frozenset({"DEMO", "LIVE"})
 
-    def __init__(self, trace: list[str] | None = None) -> None:
+
+def assert_live_text(text: str, mode: str) -> None:
+    """Fail unless a DEMO or LIVE `text` names its mode and shows every time as UTC only.
+
+    The Phase 23 DEMO/LIVE messages (plans 23-11, 23-12) carry `Mode: <mode>`, never the SHADOW
+    label, and show times in UTC with no Asia/Ho_Chi_Minh display pair (D-18).
+    """
+    assert mode in _LIVE_MODES, f"unknown live mode: {mode!r}"
+    assert f"Mode: {mode}" in text, f"mode missing: {text!r}"
+    assert "Asia/Ho_Chi_Minh" not in text, f"a Ho Chi Minh time in a {mode} text: {text!r}"
+    for match in re.finditer(_STAMP, text):
+        assert text[match.end() : match.end() + 4] == " UTC", f"a time without UTC: {text!r}"
+
+
+class FakeBot:
+    """Records sends and edits; raises queued exceptions (real `telegram.error` ones).
+
+    `text_check` runs on every text BEFORE it is recorded (and before a queued error is raised);
+    the default is the SHADOW check. `FakeBot.for_mode("DEMO")` checks the DEMO/LIVE rules.
+    `edit_message_reply_markup` records into `markup_edits` only (not `trace`, not `edited`) and
+    has its own error queue, so a SHADOW test sees the same recording as before.
+    """
+
+    def __init__(
+        self,
+        trace: list[str] | None = None,
+        *,
+        text_check: Callable[[str], None] = assert_shadow_text,
+    ) -> None:
         self.trace: list[str] = trace if trace is not None else []
         self.sent: list[SentMessage] = []
         self.edited: list[SentMessage] = []
+        self.markup_edits: list[SentMessage] = []
         self.send_attempts = 0
         self._errors: list[BaseException] = []
+        self._markup_errors: list[BaseException] = []
+        self._text_check = text_check
+
+    @classmethod
+    def for_mode(cls, mode: str, trace: list[str] | None = None) -> FakeBot:
+        """A bot that checks texts with `assert_live_text` for DEMO or LIVE."""
+        return cls(trace, text_check=lambda text: assert_live_text(text, mode))
 
     def queue_error(self, exc: BaseException) -> None:
         self._errors.append(exc)
 
+    def queue_markup_error(self, exc: BaseException) -> None:
+        self._markup_errors.append(exc)
+
+    async def edit_message_reply_markup(
+        self, *, chat_id: int | str, message_id: int, reply_markup: Any = None
+    ) -> object:
+        if self._markup_errors:
+            raise self._markup_errors.pop(0)
+        self.markup_edits.append(SentMessage(chat_id, "", reply_markup, message_id))
+        return SimpleNamespace(message_id=message_id)
+
     async def send_message(
         self, *, chat_id: int | str, text: str, reply_markup: Any = None
     ) -> object:
-        assert_shadow_text(text)
+        self._text_check(text)
         self.send_attempts += 1
         self.trace.append("send")
         if self._errors:
@@ -273,7 +320,7 @@ class FakeBot:
     async def edit_message_text(
         self, *, chat_id: int | str, message_id: int, text: str, reply_markup: Any = None
     ) -> object:
-        assert_shadow_text(text)
+        self._text_check(text)
         self.trace.append("edit")
         if self._errors:
             raise self._errors.pop(0)
