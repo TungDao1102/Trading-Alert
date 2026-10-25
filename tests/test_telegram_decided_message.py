@@ -10,6 +10,7 @@ The tracer slice: a SKP press through `on_callback` with a finalize hook built o
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,10 +35,12 @@ from src.adapters.telegram_notify import (
     finalize_decided_message,
     send_text_bounded,
 )
+from src.approval.binding import ApprovalRejected
 from src.approval.mapping import derive_short_id
+from src.approval.replay import ApprovalAlreadyDecided, ApprovalDecidedDifferently
 from src.approval.tokens import issue_one_time_token, token_hash_of
 from src.domain.approval import Approval
-from src.domain.enums import ApprovalAction, ApprovalResult
+from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
 from src.paper.notify import NOTIFY_MAX_ATTEMPTS, NOTIFY_MAX_DELAY_SECONDS
 from telegram import error as tg_error
 
@@ -351,6 +354,7 @@ class Harness:
         self.journal: list[Any] = []
         self.replies: list[tuple[int, str]] = []
         self.order: list[str] = []
+        self.save_error: BaseException | None = None
 
     def lookup_by_short_id(self, short_id: str) -> tuple[str, str] | None:
         return (SIGNAL_ID, "tp_dec")
@@ -359,6 +363,8 @@ class Harness:
         return self.approvals.get(token_hash)
 
     def save_atomic(self, approval: Approval, mapping: Any) -> None:
+        if self.save_error is not None:
+            raise self.save_error
         self.saved.append(approval)
         self.approvals[approval.approval_token_hash] = approval
 
@@ -568,3 +574,85 @@ async def test_without_a_hook_nothing_changes() -> None:
     result = await _press(harness)
     assert result.ok is True
     assert harness.order == ["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the state-based "already decided" flag (D-06, D-09; research Pitfall 7).
+# --------------------------------------------------------------------------- #
+
+
+def _decided(approval: Approval, result: ApprovalResult) -> Approval:
+    return replace(approval, result=result, status=result, acted_at_utc=NOW, actor_id="777001")
+
+
+def test_decided_differently_is_an_approval_rejected_that_carries_the_stored_row() -> None:
+    stored = _decided(_pending("x", ApprovalAction.APPROVE), ApprovalResult.APPROVED)
+    exc = ApprovalDecidedDifferently(
+        reason_code=RejectionReason.INVALIDATED,
+        message="approval already decided with a different outcome",
+        existing=stored,
+    )
+    assert isinstance(exc, ApprovalRejected)
+    assert exc.existing is stored
+    assert exc.reason_code is RejectionReason.INVALIDATED
+    assert "different outcome" in str(exc)
+
+
+async def test_a_fresh_approve_is_not_already_decided_and_a_replay_is() -> None:
+    raw = issue_one_time_token()
+    harness = Harness(_pending(raw, ApprovalAction.APPROVE), raw)
+
+    first = await _press(harness, prefix="APR:")
+    assert first.ok is True
+    assert first.already_decided is False
+    assert len(harness.saved) == 1
+
+    second = await _press(harness, prefix="APR:", query_id="q-dec-2")
+    third = await _press(harness, prefix="APR:", query_id="q-dec-3")
+    for replay in (second, third):
+        assert replay.ok is True
+        assert replay.already_decided is True
+        assert replay.approval is not None
+        assert replay.approval.status == ApprovalResult.APPROVED
+    # Three presses, one transition: state is unchanged by the replays.
+    assert len(harness.saved) == 1
+
+
+async def test_a_tap_on_the_sibling_button_of_a_decided_plan_is_flagged() -> None:
+    raw = issue_one_time_token()
+    harness = Harness(_pending(raw, ApprovalAction.SKIP_USER), raw)
+    approved = _decided(_pending("sibling", ApprovalAction.APPROVE), ApprovalResult.APPROVED)
+    harness.save_error = ApprovalAlreadyDecided(approved)
+
+    result = await _press(harness, prefix="SKP:")
+
+    assert result.ok is False
+    assert result.reason_code is RejectionReason.INVALIDATED
+    assert result.approval is approved
+    assert result.already_decided is True
+    assert harness.saved == []
+    # The journal is exactly what it was before this flag: one rejected outcome, INVALIDATED.
+    rejected = [e for e in harness.journal if e.event_type == "CALLBACK_REJECTED"]
+    assert len(rejected) == 1
+    assert '"reason_code":"INVALIDATED"' in rejected[0].payload_json
+
+
+async def test_a_lost_cross_process_race_to_the_same_decision_is_flagged() -> None:
+    raw = issue_one_time_token()
+    harness = Harness(_pending(raw, ApprovalAction.APPROVE), raw)
+    stored = _decided(_pending(raw, ApprovalAction.APPROVE), ApprovalResult.APPROVED)
+    harness.save_error = ApprovalAlreadyDecided(stored)
+
+    result = await _press(harness, prefix="APR:")
+
+    assert result.ok is True
+    assert result.already_decided is True
+    assert result.approval is stored
+
+
+async def test_a_rejection_that_is_not_a_decision_is_not_flagged() -> None:
+    raw = issue_one_time_token()
+    harness = Harness(_pending(raw, ApprovalAction.APPROVE), raw)
+    result = await _press(harness, prefix="APR:", chat_id=OTHER_CHAT_ID)
+    assert result.ok is False
+    assert result.already_decided is False
