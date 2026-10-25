@@ -66,7 +66,7 @@ from src.approval.reason_codes import (
     USER_ID_UNAVAILABLE,
     USER_NOT_AUTHORIZED,
 )
-from src.approval.replay import resolve_callback
+from src.approval.replay import ApprovalDecidedDifferently, resolve_callback
 from src.domain.approval import Approval
 from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
 from src.domain.journal import JournalEvent, correlated_event_id
@@ -333,12 +333,19 @@ class DispatchResult:
     row on a fresh approval). `reason_code` carries the rejection
     reason on failure (None on success): a `RejectionReason` member, or since Phase 23 a plain
     string from `src.approval.reason_codes` (orchestrator resolution 7: the enum stays at 21).
+
+    `already_decided` (Phase 23, D-06, D-09) is True when the press changed nothing because the
+    plan was already decided in the store: a replay to an existing decision, a lost race that
+    resolved to the same decision, or a tap on the sibling button of a decided plan. It is derived
+    from stored state (the save callable was not the one that wrote), never from a local guess,
+    and it changes no journal row. A composer may answer "already decided" from it.
     """
 
     ok: bool
     kind: CallbackKind
     approval: Approval | None = None
     reason_code: RejectionReason | str | None = None
+    already_decided: bool = False
 
 
 def _reason_label(reason_code: RejectionReason | str | None) -> str | None:
@@ -584,7 +591,10 @@ def dispatch_callback(
         # callable is only invoked from the PENDING->decided path,
         # not the replay path.
         save_atomic(approval, new_mapping)
+        # Set only after the write returned: a replay, or a lost race, never reaches this line.
+        transitioned.append(True)
 
+    transitioned: list[bool] = []
     try:
         approval = resolve_callback(
             callback=callback,
@@ -601,6 +611,24 @@ def dispatch_callback(
                 if isinstance(from_user_id, int) and not isinstance(from_user_id, bool)
                 else ""
             ),
+        )
+    except ApprovalDecidedDifferently as exc:
+        # The plan was decided with the other outcome (the sibling button): journaled exactly
+        # like any ApprovalRejected, and flagged from the STORED row (research Pitfall 7).
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=exc.reason_code,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
+        return DispatchResult(
+            ok=False,
+            kind=parsed.kind,
+            approval=exc.existing,
+            reason_code=exc.reason_code,
+            already_decided=True,
         )
     except ApprovalRejected as exc:
         _journal_outcome(
@@ -662,7 +690,9 @@ def dispatch_callback(
         callback_at_utc=callback_at_utc,
         correlation_id=correlation_id,
     )
-    return DispatchResult(ok=True, kind=parsed.kind, approval=approval)
+    return DispatchResult(
+        ok=True, kind=parsed.kind, approval=approval, already_decided=not transitioned
+    )
 
 
 # --------------------------------------------------------------------------- #
