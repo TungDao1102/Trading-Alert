@@ -28,6 +28,7 @@ from typing import Any
 from src.adapters.telegram_notify import format_approval_request, format_approve
 from src.ops.alert_wording import worded_alert_text
 from src.ops.alerts import OperationalAlert
+from src.paper.notify import format_simulate
 from src.risk.cost_rates import FEE_SOURCE_PARAMETER, CostRates
 from src.risk.money_at_stake import (
     EQUITY_SOURCE_ACCOUNT_LIVE,
@@ -177,7 +178,7 @@ def approve_fields() -> dict[str, Any]:
 
 
 def _messages_section() -> dict[str, str]:
-    """The APPROVE texts: the plain one and the DEMO and LIVE requests with the money block."""
+    """The APPROVE texts (plain, DEMO and LIVE request with money) and the SIMULATE text."""
     fields = approve_fields()
     money = parse_money_json(fixture_money_json())
     return {
@@ -190,6 +191,7 @@ def _messages_section() -> dict[str, str]:
             mode_label="LIVE", money=money, **fields
         )
         + "\n",
+        "messages/simulate.txt": format_simulate(money=money, **fields) + "\n",
     }
 
 

@@ -111,7 +111,8 @@ the renderer writes every digit and never rounds (D-13).
 
 Files: `approve_base.txt` (`format_approve`: no mode line, no money, times in UTC),
 `approve_request_demo.txt` and `approve_request_live.txt` (`format_approval_request`, `Mode:
-DEMO` / `Mode: LIVE`), `simulate.txt` (`format_simulate`, plan 23-09 task 3). None names
+DEMO` / `Mode: LIVE`), `simulate.txt` (`format_simulate`: the same quantity line and money block as the request,
+times in UTC, no mode line; a payload without money is a FAILED outcome with zero attempts). None names
 Asia/Ho_Chi_Minh: D-14 shows these messages in UTC with an explicit suffix. docs/DECISIONS.md D025
 names Asia/Ho_Chi_Minh the presentation zone; the conflict is owner item O-3 (open) and D025 is
 not edited here. SHADOW texts keep their UTC + Asia/Ho_Chi_Minh pairs.
