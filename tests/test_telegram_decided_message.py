@@ -388,7 +388,7 @@ class Harness:
         }
 
 
-def _pending(raw: str, action: ApprovalAction = ApprovalAction.SKIP) -> Approval:
+def _pending(raw: str, action: ApprovalAction = ApprovalAction.SKIP_USER) -> Approval:
     return Approval(
         approval_id="appr_dec_00000000000000000000000000000000000000000",
         trade_plan_id="tp_dec",

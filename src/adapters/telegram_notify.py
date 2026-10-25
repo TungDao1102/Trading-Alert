@@ -32,11 +32,12 @@ from __future__ import annotations
 import hashlib
 import math
 import warnings
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from telegram import InlineKeyboardMarkup
@@ -279,6 +280,14 @@ class TelegramTextBot(Protocol):
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> object: ...
 
+    async def edit_message_reply_markup(
+        self,
+        *,
+        chat_id: str | int,
+        message_id: int,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> object: ...
+
 
 # --------------------------------------------------------------------------- #
 # Plan 16-04 (D-12, D-16): Telegram failures are classified HERE, once.
@@ -406,6 +415,191 @@ async def edit_to_confirm_card(
     `edit_text` (`MESSAGE_NOT_MODIFIED` included: the caller decides that it counts as success).
     """
     return await edit_text(bot, chat_id, message_id, text, keyboard)
+
+
+async def edit_reply_markup(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    message_id: int,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> object:
+    """Edit only the keyboard of one message (same failure handling as `send_text`)."""
+    try:
+        return await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=keyboard
+        )
+    except (ValueError, KeyError, TypeError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - classified, never swallowed
+        raise TelegramSendError(classify_telegram_error(exc)) from None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 23, plan 23-07 (D-06, D-07): a decided message is made final, within a bound.
+#
+# These helpers wrap Telegram MESSAGE calls only. Nothing here, and nothing else in the Telegram
+# adapters, imports or retries a placement: a placement is never re-sent (Q5, D080). The two
+# bounds restate `NOTIFY_MAX_ATTEMPTS` and `NOTIFY_MAX_DELAY_SECONDS` of `src.paper.notify` (this
+# adapter must not import the paper package); a test pins the equality.
+# --------------------------------------------------------------------------- #
+
+EDIT_MAX_ATTEMPTS: int = 3
+RETRY_AFTER_CAP_SECONDS: int = 30
+
+SleepFn = Callable[[float], Awaitable[None]]
+
+
+def build_removed_keyboard() -> InlineKeyboardMarkup:
+    """An explicit EMPTY inline keyboard: sent as `reply_markup` it removes the buttons.
+
+    Whether an empty markup removes the keyboard on the live Bot API is research assumption A1
+    (owner-run check, plan 23-13); `finalize_decided_message` falls back once to a keyboard-only
+    edit, and the state-based stale-tap refusal is the real guarantee.
+    """
+    from telegram import InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup([])
+
+
+@dataclass(frozen=True)
+class BoundedOutcome:
+    """The end of a bounded call: its result, the attempts made and the final failure (or None).
+
+    `failure` is None on success, which includes a benign "message is not modified" (then
+    `result` is None). `failure.detail` is an exception class name, never message text.
+    """
+
+    result: object | None
+    attempts: int
+    failure: TelegramFailure | None
+
+    @property
+    def ok(self) -> bool:
+        return self.failure is None
+
+
+async def call_bounded(
+    op: Callable[[], Awaitable[object]],
+    *,
+    sleep: SleepFn,
+    max_attempts: int = EDIT_MAX_ATTEMPTS,
+    retry_after_cap_seconds: int = RETRY_AFTER_CAP_SECONDS,
+    window_seconds: float | None = None,
+) -> BoundedOutcome:
+    """Await `op()` up to `max_attempts` times, honouring the server's RetryAfter.
+
+    A failure is classified once (a `TelegramSendError` already carries its failure; a raw
+    exception goes through `classify_telegram_error`; ValueError, KeyError and TypeError are
+    programming errors and propagate). "Message is not modified" is success. RATE_LIMITED sleeps
+    the server's `retry_after` and retries, but stops WITHOUT sleeping when it exceeds
+    `retry_after_cap_seconds` or the remaining `window_seconds` (the total sleep budget, None =
+    unbounded by a window). TRANSIENT retries without a sleep. REJECTED and UNKNOWN stop: a
+    refusal is never retried. No sleep follows the last attempt. The outcome is returned, never
+    raised. For messages only: never wrap a placement in this function (Q5, D080).
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    slept = 0.0
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return BoundedOutcome(await op(), attempts, None)
+        except (ValueError, KeyError, TypeError):
+            raise
+        except TelegramSendError as exc:
+            failure = exc.failure
+        except Exception as exc:  # noqa: BLE001 - classified, reported by class name only
+            failure = classify_telegram_error(exc)
+        if failure.kind is TelegramFailureKind.MESSAGE_NOT_MODIFIED:
+            return BoundedOutcome(None, attempts, None)
+        if attempts >= max_attempts:
+            return BoundedOutcome(None, attempts, failure)
+        if failure.kind is TelegramFailureKind.RATE_LIMITED:
+            wait = failure.retry_after_seconds or 0
+            if wait > retry_after_cap_seconds:
+                return BoundedOutcome(None, attempts, failure)
+            if window_seconds is not None and wait > window_seconds - slept:
+                return BoundedOutcome(None, attempts, failure)
+            await sleep(wait)
+            slept += wait
+            continue
+        if failure.kind is TelegramFailureKind.TRANSIENT:
+            continue
+        return BoundedOutcome(None, attempts, failure)
+
+
+async def send_text_bounded(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+    *,
+    sleep: SleepFn,
+    max_attempts: int = EDIT_MAX_ATTEMPTS,
+    retry_after_cap_seconds: int = RETRY_AFTER_CAP_SECONDS,
+    window_seconds: float | None = None,
+) -> BoundedOutcome:
+    """Send one text message through `call_bounded` (`result` is the sent message)."""
+    return await call_bounded(
+        lambda: send_text(bot, chat_id, text, keyboard),
+        sleep=sleep,
+        max_attempts=max_attempts,
+        retry_after_cap_seconds=retry_after_cap_seconds,
+        window_seconds=window_seconds,
+    )
+
+
+@dataclass(frozen=True)
+class FinalizeOutcome:
+    """What `finalize_decided_message` achieved: `done`, the last `method` tried, the attempts."""
+
+    done: bool
+    method: Literal["edit_text", "edit_reply_markup"]
+    attempts: int
+    failure: TelegramFailure | None
+
+
+async def finalize_decided_message(
+    bot: TelegramTextBot,
+    *,
+    chat_id: str | int,
+    message_id: int,
+    text: str | None,
+    sleep: SleepFn,
+    max_attempts: int = EDIT_MAX_ATTEMPTS,
+    retry_after_cap_seconds: int = RETRY_AFTER_CAP_SECONDS,
+    window_seconds: float | None = None,
+) -> FinalizeOutcome:
+    """Make a decided message final: its final text AND no keyboard, in one `editMessageText`.
+
+    With `text` the edit carries the empty keyboard as `reply_markup`; with `text` None (a restart
+    lost it) only the keyboard is removed. A refused text edit falls back ONCE to a keyboard-only
+    edit. The outcome is returned and never raised, so a failed removal never rolls back a
+    decision (D-06, F-509, research Pitfall 6).
+    """
+    keyboard = build_removed_keyboard()
+
+    async def _bounded(op: Callable[[], Awaitable[object]]) -> BoundedOutcome:
+        return await call_bounded(
+            op,
+            sleep=sleep,
+            max_attempts=max_attempts,
+            retry_after_cap_seconds=retry_after_cap_seconds,
+            window_seconds=window_seconds,
+        )
+
+    attempts = 0
+    if text is not None:
+        edited = await _bounded(lambda: edit_text(bot, chat_id, message_id, text, keyboard))
+        attempts += edited.attempts
+        if edited.failure is None:
+            return FinalizeOutcome(True, "edit_text", attempts, None)
+        if edited.failure.kind is not TelegramFailureKind.REJECTED:
+            return FinalizeOutcome(False, "edit_text", attempts, edited.failure)
+    removed = await _bounded(lambda: edit_reply_markup(bot, chat_id, message_id, keyboard))
+    attempts += removed.attempts
+    return FinalizeOutcome(removed.failure is None, "edit_reply_markup", attempts, removed.failure)
 
 
 # --------------------------------------------------------------------------- #

@@ -874,6 +874,29 @@ async def _dispatched(
 ConfirmHandler = Callable[[CallbackPress], Awaitable[ConfirmReply]]
 ApprovedHandler = Callable[[CallbackPress, DispatchResult], Awaitable[bool]]
 
+# Phase 23 (D-06): runs after the reply of every press that passed both gates (APR, SKP, CNF,
+# CXL). A composer builds it on `finalize_decided_message` to make the decided message final and
+# remove its keyboard. A failure in it is logged by class name and changes nothing.
+FinalizeHook = Callable[[CallbackPress, DispatchResult], Awaitable[None]]
+
+
+async def _run_finalize_hook(
+    finalize_message: FinalizeHook | None,
+    press: CallbackPress,
+    result: DispatchResult,
+) -> None:
+    """Await the finalize hook of a press; never let it raise (the decision is already made)."""
+    if finalize_message is None:
+        return
+    try:
+        await finalize_message(press, result)
+    except Exception as exc:  # noqa: BLE001 - the press is decided; a hook failure changes nothing
+        log.error(
+            "telegram.callback.finalize_failed: %s correlation_id=%s",
+            type(exc).__name__,
+            press.correlation_id,
+        )
+
 
 async def answer_callback_safely(query: Any) -> None:
     """Clear the Telegram spinner once, without text, and never let a failure escape.
@@ -899,6 +922,7 @@ async def on_callback(
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None = None,
     confirm_handler: ConfirmHandler | None = None,
     approved_handler: ApprovedHandler | None = None,
+    finalize_message: FinalizeHook | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> DispatchResult:
     """PTB `CallbackQueryHandler` entry point.
@@ -924,6 +948,10 @@ async def on_callback(
     empty set or a non-int member is a `ValueError` here). After the chat gate and before any
     lookup the press must come from a listed user in a chat of type "private"; otherwise it is
     refused, journaled with only the presser's id, and answered with the generic "Rejected".
+
+    Phase 23 (D-06): `finalize_message`, when given, is awaited after the reply of every press
+    that passed both gates (never for a refused press); an error in it is logged by class name
+    and changes nothing.
     """
     _validate_authorized_user_ids(authorized_user_ids)
     query = update.callback_query
@@ -968,6 +996,7 @@ async def on_callback(
             reply_text_fn=reply_text_fn,
             confirm_handler=confirm_handler,
             approved_handler=approved_handler,
+            finalize_message=finalize_message,
             callback_at_utc=callback_at_utc,
             correlation_id=correlation_id,
         )
@@ -988,6 +1017,7 @@ async def _answer_press(
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None,
     confirm_handler: ConfirmHandler | None,
     approved_handler: ApprovedHandler | None,
+    finalize_message: FinalizeHook | None,
     callback_at_utc: datetime,
     correlation_id: str,
 ) -> DispatchResult:
@@ -1071,7 +1101,9 @@ async def _answer_press(
             confirm_chat_id = getattr(query.message, "chat_id", None)
             if confirm_chat_id is not None:
                 await reply_text_fn(int(confirm_chat_id), reply.text)
-        return DispatchResult(ok=reply.ok, kind=parsed.kind)
+        confirm_result = DispatchResult(ok=reply.ok, kind=parsed.kind)
+        await _run_finalize_hook(finalize_message, press, confirm_result)
+        return confirm_result
 
     binding = binding_context_resolver(parsed.short_id)
     raw_token = ""
@@ -1112,6 +1144,7 @@ async def _answer_press(
         if chat_id is not None:
             await reply_text_fn(int(chat_id), text)
 
+    await _run_finalize_hook(finalize_message, press, result)
     return result
 
 
@@ -1135,6 +1168,7 @@ def build_application(
     reply_text_fn: Callable[[int, str], Awaitable[None]] | None = None,
     confirm_handler: ConfirmHandler | None = None,
     approved_handler: ApprovedHandler | None = None,
+    finalize_message: FinalizeHook | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> Application[Any, Any, Any, Any, Any, Any]:
     """Build a PTB `Application` wired with the approval-callback handler.
@@ -1165,6 +1199,7 @@ def build_application(
             reply_text_fn=reply_text_fn,
             confirm_handler=confirm_handler,
             approved_handler=approved_handler,
+            finalize_message=finalize_message,
             clock=clock,
         )
 
@@ -1188,6 +1223,7 @@ __all__ = [
     "EVENT_TYPE_CALLBACK_RECEIVED",
     "EVENT_TYPE_CALLBACK_REJECTED",
     "EVENT_TYPE_CALLBACK_RESOLVED",
+    "FinalizeHook",
     "JournalReceipt",
     "LookupByShortId",
     "LookupByTokenHash",
