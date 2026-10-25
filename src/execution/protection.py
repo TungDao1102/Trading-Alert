@@ -2780,6 +2780,10 @@ class ProtectionCoordinator:
                 adapter=self._adapter,  # type: ignore[arg-type]
                 journal=self._journal,
                 now_utc=self._now(),
+                # WR-A4 (D-16, F-702): with the journal down the audit rows of the cancels fall
+                # back to the coordinator's spill, so they are not lost and the sweep can finish.
+                # The composition passes a ``LocalSpill`` (the ``IntentSpill`` view has ``write``).
+                spill=self._spill,  # type: ignore[arg-type]
             )
         except Exception as exc:  # noqa: BLE001 - retried by the next step; the legs are journaled
             self._journal_note(
