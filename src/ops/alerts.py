@@ -53,6 +53,7 @@ from src.adapters.telegram_notify import (
 from src.domain.enums import DailyState
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
+from src.ops.alert_wording import worded_alert_text
 from src.ops.risk_first import AuditRecordLost, record_after
 from src.ops.spill import LocalSpill
 from src.paper.notify import (
@@ -628,10 +629,9 @@ class TelegramAlertSender:
         delivered = failed = audit_lost = 0
         while self._queue:
             alert = self._queue.popleft()
+            text = worded_alert_text(alert) or render_alert_text(alert)
             try:
-                attempts, failure = await _send_bounded(
-                    self._bot, self._chat_id, render_alert_text(alert), self._sleep
-                )
+                attempts, failure = await _send_bounded(self._bot, self._chat_id, text, self._sleep)
             except BaseException:
                 self._queue.appendleft(alert)  # cancelled mid-send: nothing is lost
                 raise

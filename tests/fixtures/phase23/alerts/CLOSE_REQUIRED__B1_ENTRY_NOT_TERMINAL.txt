@@ -1,0 +1,8 @@
+[CRITICAL] CLOSE_REQUIRED
+subject: plan-0001
+reason: B1_ENTRY_NOT_TERMINAL
+at: 2026-10-09T03:00:00Z
+What happened: A position was filled and its stop is confirmed on the exchange, but the rest of the entry order was still open after the allowed time (B1_ENTRY_NOT_TERMINAL).
+Position: A position is open and has a confirmed stop; the unfilled rest of the entry may still fill.
+System already did: The plan moved to CLOSE_REQUIRED, new entries are blocked (SAFE_MODE CLOSE_REQUIRED) and a reduce-only MARKET emergency close was attempted; if that close fails, EMERGENCY_CLOSE_FAILED or EMERGENCY_CLOSE_NOT_SENT follows as its own alert. An open stop is kept until the position is flat; the stop is never cancelled here. The cancel of the entry rest is issued again on each protection step. Closing a position that has a good stop for this reason is accepted knowingly and journaled.
+You must: Check on the exchange that the position is closed and the entry order is cancelled, and read the journal for B1_ENTRY_NOT_TERMINAL before any manual action.

@@ -1,0 +1,8 @@
+[CRITICAL] ENTRY_STATE_UNKNOWN
+subject: SYSTEM
+reason: ENTRY_STATE_UNKNOWN
+at: 2026-10-09T03:00:00Z
+What happened: The entry order was sent once and its result is not known: the exchange answer was unclear and one lookup by client order id did not settle it (ENTRY_STATE_UNKNOWN). This needs reconciliation.
+Position: An entry order may be resting on the exchange and may fill, so a position may be open or may open.
+System already did: The entry was not re-sent and will not be. SAFE_MODE blocks new entries. The entry is kept as unknown and given to the protection step, which looks it up by client order id and places the stop if it finds a fill; a failed hand-off raises PROTECTION_HANDOFF_FAILED.
+You must: Check the exchange for this order and for a position on the symbol, and reconcile before any manual action. Do not approve the plan again.

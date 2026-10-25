@@ -1,0 +1,8 @@
+[HIGH] TP_UNAVAILABLE
+subject: plan-0001
+reason: TP_UNAVAILABLE
+at: 2026-10-09T03:00:00Z
+What happened: The take profit orders could not be put in place after the entry was filled (TP_UNAVAILABLE); the reason code in the header says why.
+Position: A position is open. Its stop is confirmed, but it has no confirmed take profit.
+System already did: The confirmed stop is kept and nothing is closed for this reason alone (no automatic flatten, no single take profit fallback). SAFE_MODE ENTRY_WITHOUT_PROTECTIVE blocks new entries.
+You must: Check the exchange position and confirm its stop is there. Decide yourself whether to place take profits or close; the system will not do it.

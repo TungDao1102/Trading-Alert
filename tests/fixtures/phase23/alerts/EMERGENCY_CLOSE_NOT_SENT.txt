@@ -1,0 +1,8 @@
+[CRITICAL] EMERGENCY_CLOSE_NOT_SENT
+subject: plan-0001
+reason: PRE_SEND_REFUSED
+at: 2026-10-09T03:00:00Z
+What happened: The emergency close was not sent: the request gate refused it before it left the system (EMERGENCY_CLOSE_NOT_SENT, PRE_SEND_REFUSED), for example during an exchange rate limit pause.
+Position: A position may be open, with or without a stop. Nothing was sent, so the close has not happened.
+System already did: The refusal is journaled and kept as a pending close that carries no price or quantity. No safety is claimed; the next protection step reads the position again, and the unprotected deadline keeps running.
+You must: Check the exchange position now. If the pause blocks the system, close or protect the position yourself as soon as the exchange allows.

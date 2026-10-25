@@ -1,0 +1,8 @@
+[CRITICAL] CLOSE_REQUIRED
+subject: plan-0001
+reason: B4_FILL_AFTER_STOP
+at: 2026-10-09T03:00:00Z
+What happened: A stop that was confirmed earlier is no longer active while a position exists (B4_FILL_AFTER_STOP).
+Position: A position is open and may have no active stop.
+System already did: The plan moved to CLOSE_REQUIRED, new entries are blocked (SAFE_MODE CLOSE_REQUIRED) and a reduce-only MARKET emergency close was attempted; if that close fails, EMERGENCY_CLOSE_FAILED or EMERGENCY_CLOSE_NOT_SENT follows as its own alert. The stop is never placed again for this reason; the rest of the entry is cancelled and the exposure is closed by MARKET.
+You must: Check the exchange position and the journal before any manual action. If the position is still open, close it or protect it yourself.
