@@ -336,11 +336,15 @@ def test_no_receipt_or_outcome_payload_has_a_wall_clock_field() -> None:
             assert "received_at" not in payload
 
 
+_USER_ID = 777001  # the one listed operator of the local fakes below (Phase 23, D-02)
+
+
 class _FakeQuery:
     def __init__(self, query_id: Any, data: str = f"APR:{SHORT_ID}") -> None:
         self.id = query_id
         self.data = data
         self.message = SimpleNamespace(chat_id=CHAT_ID)
+        self.from_user = SimpleNamespace(id=_USER_ID)
 
     async def answer(self) -> None:
         return None
@@ -349,7 +353,7 @@ class _FakeQuery:
 class _FakeUpdate:
     def __init__(self, query: _FakeQuery) -> None:
         self.callback_query = query
-        self.effective_chat = SimpleNamespace(id=CHAT_ID)
+        self.effective_chat = SimpleNamespace(id=CHAT_ID, type="private")
 
 
 async def _on_callback(query: _FakeQuery, seen: list[str]) -> None:
@@ -363,6 +367,7 @@ async def _on_callback(query: _FakeQuery, seen: list[str]) -> None:
         _FakeUpdate(query),  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=frozenset({_USER_ID}),
         binding_context_resolver=lambda sid: None,
         dispatch=fake_dispatch,
         reply_text_fn=None,

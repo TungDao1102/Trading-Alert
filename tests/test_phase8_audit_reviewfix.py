@@ -76,6 +76,7 @@ EXPIRY = datetime(2026, 9, 19, 14, 0, tzinfo=UTC)
 PLAN_HASH = "0" * 64
 PARAM_HASH = "1" * 64
 CHAT_ID = 123
+USER_ID = 777001  # the one listed operator of the local fakes (Phase 23, D-02)
 
 
 def _make_pending_approval(
@@ -415,6 +416,7 @@ class _FakeQuery:
         self.id = query_id
         self.data = data
         self.message = SimpleNamespace(chat_id=chat_id)
+        self.from_user = SimpleNamespace(id=USER_ID)
         self.answered = False
 
     async def answer(self) -> None:
@@ -424,7 +426,7 @@ class _FakeQuery:
 class _FakeUpdate:
     def __init__(self, query: _FakeQuery, chat_id: int) -> None:
         self.callback_query = query
-        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.effective_chat = SimpleNamespace(id=chat_id, type="private")
 
 
 async def test_wr01_on_callback_gates_chat_before_resolver() -> None:
@@ -445,6 +447,7 @@ async def test_wr01_on_callback_gates_chat_before_resolver() -> None:
         update,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=frozenset({USER_ID}),
         binding_context_resolver=lambda sid: resolver_calls.append(sid),
         dispatch=fake_dispatch,
         reply_text_fn=None,
@@ -476,6 +479,7 @@ async def test_wr02_unauthorized_chat_gets_generic_rejection() -> None:
         update,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=frozenset({USER_ID}),
         binding_context_resolver=lambda sid: None,
         dispatch=fake_dispatch,
         reply_text_fn=fake_reply,
@@ -504,6 +508,7 @@ async def test_wr17_rapid_callbacks_get_distinct_correlations() -> None:
             update,  # type: ignore[arg-type]
             None,  # type: ignore[arg-type]
             authorized_chat_id=CHAT_ID,
+            authorized_user_ids=frozenset({USER_ID}),
             binding_context_resolver=lambda sid: None,
             dispatch=fake_dispatch,
             reply_text_fn=None,

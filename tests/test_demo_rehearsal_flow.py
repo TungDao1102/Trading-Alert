@@ -56,6 +56,7 @@ FAKE_KEY = "FAKEKEY0123456789ABCDEF"
 FAKE_SECRET = "FAKESECRET0123456789GHIJKL"
 FAKE_TOKEN = "123456789:FAKETELEGRAMTOKENFAKETELEGRAMTOKEN12"
 AUTH_CHAT = 424242
+AUTH_USER = 777001  # the one listed operator of the scripted taps (Phase 23, D-02)
 OTHER_CHAT = 777000
 MARK = Decimal("60000.0")
 
@@ -646,12 +647,16 @@ class FakeApprovalChannel:
             id=f"q{self._tap_no}",
             message=SimpleNamespace(chat_id=chat_id),
             answer=_answer,
+            from_user=SimpleNamespace(id=AUTH_USER),
         )
-        update = SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=chat_id))
+        update = SimpleNamespace(
+            callback_query=query, effective_chat=SimpleNamespace(id=chat_id, type="private")
+        )
         result = await on_callback(
             update,
             None,  # type: ignore[arg-type]
             authorized_chat_id=self._deps.authorized_chat_id,
+            authorized_user_ids=frozenset({AUTH_USER}),
             binding_context_resolver=self._deps.binding_context_resolver,
             dispatch=self._deps.dispatch,
             reply_text_fn=None,

@@ -55,6 +55,7 @@ from src.paper.shadow_confirm import (
 )
 
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
     OTHER_CHAT_ID,
     OTHER_USER_ID,
@@ -166,6 +167,7 @@ class Harness:
             update,
             cast(Any, None),
             authorized_chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
             binding_context_resolver=self.book.resolve,
             dispatch=self.book.dispatch,
             reply_text_fn=self.reply,

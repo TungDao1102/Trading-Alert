@@ -47,9 +47,11 @@ from src.paper.shadow import (
 from telegram import error as tg_error
 
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
     OTHER_CHAT_ID,
     T0,
+    USER_ID,
     FakeBot,
     InMemoryShadowStores,
     RecordingSleep,
@@ -130,6 +132,26 @@ async def test_skp_callback_skips_with_action_and_timestamp() -> None:
     assert result.approval.actor_id == str(CHAT_ID)
     decision = h.book.take_last_decision()
     assert decision is not None and decision.outcome is ShadowDecisionOutcome.SKIPPED
+
+
+async def test_on_callback_records_the_pressing_user_as_actor() -> None:
+    """Phase 23 (D-03): through `on_callback` the actor is the user id, not the chat id."""
+    h = Harness()
+    await h.alert()
+    _, skp = h.buttons()
+
+    result = await on_callback(
+        make_callback_update(data=skp, chat_id=CHAT_ID, query_id="skip-user"),
+        cast(Any, None),
+        authorized_chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
+        binding_context_resolver=h.book.resolve,
+        dispatch=h.book.dispatch,
+        reply_text_fn=None,
+    )
+
+    assert result.approval is not None
+    assert result.approval.actor_id == str(USER_ID)
 
 
 async def test_skip_after_approve_cannot_flip_the_decision() -> None:
@@ -359,6 +381,7 @@ async def test_every_outcome_reply_is_one_labelled_shadow_message() -> None:
             update,
             cast(Any, None),
             authorized_chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
             binding_context_resolver=h.book.resolve,
             dispatch=h.book.dispatch,
             reply_text_fn=reply,
@@ -400,6 +423,7 @@ async def test_a_failed_reply_never_raises_into_the_handler() -> None:
         update,
         cast(Any, None),
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
         binding_context_resolver=h.book.resolve,
         dispatch=h.book.dispatch,
         reply_text_fn=reply,

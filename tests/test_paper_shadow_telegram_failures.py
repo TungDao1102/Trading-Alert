@@ -37,6 +37,7 @@ from src.paper.shadow_confirm import (
 from telegram import error as tg_error
 
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
     OTHER_CHAT_ID,
     USER_ID,
@@ -420,6 +421,7 @@ async def press(h: Harness, data: str, query: str, answer: Any, *, chat_id: int 
         update,
         cast(Any, None),
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
         binding_context_resolver=h.book.resolve,
         dispatch=h.book.dispatch,
         reply_text_fn=h.reply,
@@ -500,7 +502,6 @@ async def test_after_a_mixed_failure_sequence_no_approval_is_stranded() -> None:
 # Plan 16-58, B2-WR-08: an infrastructure error in dispatch is diagnosable and still fails closed.
 # --------------------------------------------------------------------------- #
 
-from src.domain.enums import RejectionReason  # noqa: E402
 
 from tests.shadow_fakes import InMemoryShadowStores  # noqa: E402
 
@@ -517,6 +518,11 @@ class FailingSaveStores(InMemoryShadowStores):
 async def test_an_infrastructure_error_in_dispatch_is_logged_by_class_and_fails_closed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Phase 23 (plan 23-01, STATE.md item from 16-58): a store failure is no longer INVALIDATED.
+
+    This assertion changed on purpose: the branch now reports the plain code
+    APPROVAL_STORE_FAILURE (src/approval/reason_codes.py).
+    """
     h = Harness(stores=FailingSaveStores())
     await h.alert()
     apr, _skp = h.alert_buttons()
@@ -524,7 +530,7 @@ async def test_an_infrastructure_error_in_dispatch_is_logged_by_class_and_fails_
     with caplog.at_level(logging.ERROR):
         result = await h.tap(apr, "q-db")
 
-    assert result.ok is False and result.reason_code is RejectionReason.INVALIDATED
+    assert result.ok is False and result.reason_code == "APPROVAL_STORE_FAILURE"
     assert all(a.status is not ApprovalResult.APPROVED for a in h.stores.approvals.values())
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(errors) == 1
