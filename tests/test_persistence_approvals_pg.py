@@ -919,3 +919,20 @@ def test_a_row_written_without_money_reads_back_none(
     stored = store.get(hexid(0x2001))
     assert stored is not None
     assert stored.money_json is None
+
+
+def test_the_restart_expiry_persists_its_runtime_actor(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    """`invalidate_pending_on_restart` stamps RUNTIME_RESTART; since 23-04 PostgreSQL keeps it."""
+    approval = _pending(1, actor_id="")
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.EXPIRED), actor_id="RUNTIME_RESTART"), None
+    )
+
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "RUNTIME_RESTART"
+    stored = store.get(approval.approval_id)
+    assert stored is not None
+    assert stored.status is ApprovalResult.EXPIRED
