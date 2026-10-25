@@ -205,6 +205,20 @@ def test_invariant_4b_decisions_d086_records_the_phase_21_answers() -> None:
     assert "FUNDING_SOURCE_VERIFIED" in rows[0] and "LIVE_NET_PNL_SEMANTICS_VERIFIED" in rows[0]
 
 
+def test_invariant_4c_decisions_d087_records_the_wr08_reading_and_the_loss_age() -> None:
+    decisions = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
+    rows = [line for line in decisions.splitlines() if line.startswith("| D087 |")]
+    assert len(rows) == 1, "DECISIONS must carry exactly one D087 row"
+    for needle in (
+        "2026-10-25, owner answer",
+        "any earlier stored day",
+        "fresh",
+        "account.max_daily_loss_age_ms",
+        "300000",
+    ):
+        assert needle in rows[0], f"D087 does not mention {needle!r}"
+
+
 def test_invariant_5_daily_stop_is_an_expiry_trigger() -> None:
     from src.execution.manager import _EXPIRY_TRIGGERS
 

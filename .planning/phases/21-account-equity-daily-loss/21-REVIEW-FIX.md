@@ -161,6 +161,10 @@ store that never held a day still blocks, and a row of a later day does not coun
 rollover from a persisted previous day"; this reads "previous" as "any earlier", as the reviewer
 proposed (D-08 also requires the fresh REST read, which is kept). Flagged here because it relaxes a
 D-07 block.
+**Owner decision (2026-10-25):** ACCEPTED, recorded as DECISIONS D087 (owner answer "A, A với 300
+giây, đổi tên"). The day-start equity is always taken fresh from the exchange, so the daily limit
+depends only on that base; what is lost is only the loss of the skipped past days. The relaxed D-07
+block is documented in D087.
 **Tests:** `test_a_two_day_gap_with_exposure_opens_from_a_fresh_read`,
 `test_a_later_day_row_is_not_an_earlier_day` (2 cases),
 `test_has_earlier_day_is_true_for_any_stored_day_before_and_false_otherwise` (PG), the

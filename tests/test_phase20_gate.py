@@ -398,10 +398,11 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
     rows = [line for line in lines if re.match(r"\| D\d+ \|", line)]
     ids = [re.match(r"\| (D\d+) \|", row).group(1) for row in rows]  # type: ignore[union-attr]
     after_d078 = ids[ids.index("D078") + 1 :]
-    assert after_d078 == ["D079", "D080", "D081", "D082", "D083", "D084", "D085", "D086"], (
+    assert after_d078 == ["D079", "D080", "D081", "D082", "D083", "D084", "D085", "D086", "D087"], (
         f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
         "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
-        "wrote D085 (Phase 22 O-1 to O-4) and D086 (Phase 21 O-3 to O-6)"
+        "wrote D085 (Phase 22 O-1 to O-4) and D086 (Phase 21 O-3 to O-6); the owner answer of "
+        "2026-10-25 wrote D087 (Phase 21 WR-08 and WR-05)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:
