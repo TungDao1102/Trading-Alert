@@ -3,9 +3,9 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 23
 current_phase_name: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
-current_plan: 3
+current_plan: 6
 status: executing
-stopped_at: Completed 23-02-PLAN.md
+stopped_at: Completed 23-05-PLAN.md (Wave 1 done)
 last_updated: "2026-10-25T14:53:13.640Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 23 execution started
@@ -14,7 +14,7 @@ progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 328
-  completed_plans: 314
+  completed_plans: 317
 milestone_name: milestone
 ---
 

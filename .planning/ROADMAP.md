@@ -1240,9 +1240,9 @@ Plans:
 **Wave 1**
 - [x] 23-01-PLAN.md - Allow-list and private-chat gate at the callback edge, from TELEGRAM_AUTHORIZED_USER_IDS to the journal; actor threaded into the decision (D-01, D-02, D-03, D-15)
 - [x] 23-02-PLAN.md - Money at stake: pure builder, carrier value and canonical JSON in the risk layer (D-13)
-- [ ] 23-03-PLAN.md - Operator-alert wording formatters and the Phase 23 fixture generator (D-14)
-- [ ] 23-04-PLAN.md - Approval row carries the decider and the money: _decide writes actor_id, migration 0013 money_json (D-03, D-13)
-- [ ] 23-05-PLAN.md - CONFIRM-time pre-placement recheck adapter and prior-outcome description (D-11, D-12, G4-032)
+- [x] 23-03-PLAN.md - Operator-alert wording formatters and the Phase 23 fixture generator (D-14)
+- [x] 23-04-PLAN.md - Approval row carries the decider and the money: _decide writes actor_id, migration 0013 money_json (D-03, D-13)
+- [x] 23-05-PLAN.md - CONFIRM-time pre-placement recheck adapter and prior-outcome description (D-11, D-12, G4-032)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 23-06-PLAN.md - Shared confirm core with SHADOW/DEMO/LIVE profiles, SHADOW byte-identical, P16R-02 list (D-09, D-10, D-16)
