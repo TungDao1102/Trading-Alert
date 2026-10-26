@@ -146,9 +146,7 @@ class Rig:
 
     async def issue_and_send(self) -> IssuedRequest:
         issued = self.issue()
-        outcome = await self.desk.send(
-            self.bot, chat_id=CHAT_ID, issued=issued, sleep=self.sleep
-        )
+        outcome = await self.desk.send(self.bot, chat_id=CHAT_ID, issued=issued, sleep=self.sleep)
         assert outcome.sent
         return issued
 
@@ -279,7 +277,10 @@ async def test_send_is_one_message_with_approve_and_skip_and_journals_the_messag
     (message,) = rig.bot.sent
     assert message.text == issued.text
     short = issued.mapping.short_id
-    assert keyboard_buttons(message.reply_markup) == [("APPROVE", f"APR:{short}"), ("SKIP", f"SKP:{short}")]
+    assert keyboard_buttons(message.reply_markup) == [
+        ("APPROVE", f"APR:{short}"),
+        ("SKIP", f"SKP:{short}"),
+    ]
     assert message.reply_markup == build_decision_keyboard(rig.signal.signal_id)
     (sent,) = rig.stores.journal_of_type("DEMO_APPROVAL_REQUEST_SENT")
     assert json.loads(sent.payload_json)["message_id"] == 1
@@ -305,3 +306,371 @@ async def test_a_skip_tap_records_skipped_with_the_actor_and_makes_the_message_f
     assert edit.text == f"{issued.text}\nDecision: SKIPPED by user 777001 at {ACTED}"
     assert edit.reply_markup.inline_keyboard == ()
     assert len(rig.bot.sent) == 1, "a fresh SKIP sends no extra message"
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: send failures, stale taps, G4-032, fail-closed APPROVE, expiry, strangers.
+# --------------------------------------------------------------------------- #
+
+
+async def test_retry_after_is_honoured_then_the_request_goes_out() -> None:
+    rig = Rig()
+    issued = rig.issue()
+    rig.bot.queue_error(RetryAfter(2))
+
+    outcome = await rig.desk.send(rig.bot, chat_id=CHAT_ID, issued=issued, sleep=rig.sleep)
+
+    assert outcome.sent and outcome.attempts == 2
+    assert rig.sleep.calls == [2]
+
+
+async def test_a_forbidden_send_is_journaled_and_leaves_both_approvals_pending() -> None:
+    rig = Rig()
+    issued = rig.issue()
+    rig.bot.queue_error(Forbidden("blocked by the user"))
+
+    outcome = await rig.desk.send(rig.bot, chat_id=CHAT_ID, issued=issued, sleep=rig.sleep)
+
+    assert not outcome.sent and outcome.message_id is None
+    assert outcome.failure is not None and outcome.failure.kind.value == "REJECTED"
+    (failed,) = rig.stores.journal_of_type("DEMO_APPROVAL_REQUEST_SEND_FAILED")
+    payload = json.loads(failed.payload_json)
+    assert payload["kind"] == "REJECTED" and payload["error_class"] == "Forbidden"
+    assert "blocked" not in failed.payload_json
+    assert all(a.status is ApprovalResult.PENDING for a in rig.stores.approvals.values())
+    assert not rig.stores.journal_of_type("DEMO_APPROVAL_REQUEST_SENT")
+
+
+def test_issue_refuses_missing_or_mismatching_money_before_any_write() -> None:
+    rig = Rig()
+    with pytest.raises(MoneyAtStakeUnavailable) as missing:
+        rig.issue(money=None)
+    assert missing.value.reason_code == MONEY_AT_STAKE_MISSING
+    different = make_desk_money(
+        sized=SizedResult(
+            is_no_trade=False,
+            quantity=D("0.09"),
+            quantity_before_rounding=D("0.09"),
+            quantity_after_rounding=D("0.09"),
+            quantization_decision="ACCEPTED",
+            realized_risk=D("60"),
+            modeled_costs_per_unit=D("20"),
+            sizing_entry_price=D("50100"),
+        )
+    )
+    with pytest.raises(ValueError, match="quantity"):
+        rig.issue(money=different)
+    assert rig.stores.trace == []
+    assert rig.stores.approvals == {} and rig.stores.journal == []
+
+
+def test_the_second_issue_for_one_signal_is_refused_before_any_write() -> None:
+    rig = Rig()
+    rig.issue()
+    trace = list(rig.stores.trace)
+    with pytest.raises(ValueError, match="already issued"):
+        rig.issue()
+    assert rig.stores.trace == trace
+
+
+def test_only_demo_and_live_profiles_are_accepted() -> None:
+    stores = InMemoryShadowStores()
+    for profile in (DEMO_CONFIRM_PROFILE, LIVE_CONFIRM_PROFILE):
+        ApprovalDesk(stores, profile=profile, clock=lambda: T0, intent_reader=lambda _id: None)
+    with pytest.raises(ValueError):
+        ApprovalDesk(
+            stores, profile=SHADOW_CONFIRM_PROFILE, clock=lambda: T0, intent_reader=lambda _id: None
+        )
+
+
+def test_the_desk_is_proven_against_the_narrow_stores_port() -> None:
+    stores: DeskStores = InMemoryShadowStores()
+    assert stores is not None
+
+
+async def test_three_skip_taps_give_one_transition_and_one_final_edit() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+
+    await rig.tap("SKP", short, query_id="q1")
+    await rig.tap("SKP", short, query_id="q2")
+    await rig.tap("SKP", short, query_id="q3")
+
+    saves = [t for t in rig.stores.trace if t == "save_atomic"]
+    assert len(saves) == 1
+    assert rig.row(ApprovalAction.SKIP_USER).status is ApprovalResult.SKIPPED
+    expected = "Mode: DEMO\nAlready decided: SKIPPED. Nothing changed. [ALREADY_DECIDED]"
+    assert texts(rig.bot)[1:] == [expected, expected]
+    assert len(rig.bot.edited) == 1, "the final text is edited once"
+
+
+async def test_approve_after_skip_changes_nothing_and_says_already_decided() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    await rig.tap("SKP", short, query_id="q1")
+
+    result = await rig.tap("APR", short, query_id="q2")
+
+    assert not result.ok
+    assert rig.row(ApprovalAction.APPROVE).status is ApprovalResult.PENDING
+    assert rig.row(ApprovalAction.SKIP_USER).status is ApprovalResult.SKIPPED
+    assert texts(rig.bot)[-1] == (
+        "Mode: DEMO\nAlready decided: SKIPPED. Nothing changed. [ALREADY_DECIDED]"
+    )
+    assert "Decision: SKIPPED" in rig.bot.edited[-1].text
+
+
+async def test_a_fresh_approve_without_a_card_handler_is_recorded_and_places_nothing() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+
+    result = await rig.tap("APR", issued.mapping.short_id, query_id="q-apr")
+
+    assert result.ok
+    approve = rig.row(ApprovalAction.APPROVE)
+    assert approve.status is ApprovalResult.APPROVED and approve.actor_id == "777001"
+    assert texts(rig.bot)[-1] == f"Mode: DEMO\n{NO_HANDLER_REPLY}"
+    (edit,) = rig.bot.edited
+    assert "No confirmation card handler is attached, so nothing can be confirmed" in edit.text
+    assert f"Decision: APPROVED by user 777001 at {ACTED}" in edit.text
+    assert edit.reply_markup.inline_keyboard == ()
+    assert rig.intents.get_entry(approval_id=approve.approval_id) is None, "nothing was placed"
+
+
+async def test_a_confirmation_attached_desk_does_not_claim_a_missing_handler() -> None:
+    rig = Rig()
+    rig.desk.confirmation_attached = True
+    issued = await rig.issue_and_send()
+
+    await rig.tap("APR", issued.mapping.short_id, query_id="q-apr")
+
+    assert "no confirmation card handler" not in texts(rig.bot)[-1]
+    assert "no confirmation card handler" not in rig.bot.edited[-1].text
+    assert "Nothing was placed." in rig.bot.edited[-1].text
+
+
+@pytest.mark.parametrize(
+    ("status", "needle"),
+    [
+        (ExecutionIntentStatus.ACKED, "already executed"),
+        (ExecutionIntentStatus.UNKNOWN, "needs reconciliation"),
+        (ExecutionIntentStatus.SENT, "needs reconciliation"),
+        (ExecutionIntentStatus.INTENDED, "needs reconciliation"),
+        (ExecutionIntentStatus.REJECTED, "rejected"),
+    ],
+)
+async def test_a_redelivered_approve_after_expiry_is_answered_from_the_stored_intent(
+    status: ExecutionIntentStatus, needle: str
+) -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    await rig.tap("APR", short, query_id="q-apr")
+    rig.record_entry_intent(status)
+    approved = rig.row(ApprovalAction.APPROVE)
+    rig.now = rig.plan.expiry_utc + timedelta(seconds=1)
+
+    result = await rig.tap("APR", short, query_id="q-redelivered")
+
+    assert not result.ok
+    reply = texts(rig.bot)[-1]
+    assert needle in reply and "APPROVAL_EXPIRED" not in reply.split("\n", 1)[1][:0]
+    assert reply.startswith("Mode: DEMO\n")
+    if needle == "needs reconciliation":
+        assert reconciliation_required_text() in reply
+    else:
+        assert reconciliation_required_text() not in reply
+    assert rig.row(ApprovalAction.APPROVE) == approved, "no state change"
+
+
+async def test_a_redelivered_approve_after_expiry_without_an_intent_is_plainly_refused() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    await rig.tap("APR", short, query_id="q-apr")
+    rig.now = rig.plan.expiry_utc + timedelta(seconds=1)
+
+    await rig.tap("APR", short, query_id="q-redelivered")
+
+    assert texts(rig.bot)[-1] == "Mode: DEMO\nRefused: APPROVAL_EXPIRED. Nothing changed."
+
+
+async def test_the_intent_reader_is_not_called_for_a_pending_approval() -> None:
+    rig = Rig()
+    calls: list[str] = []
+    rig.desk = ApprovalDesk(
+        rig.stores,
+        profile=DEMO_CONFIRM_PROFILE,
+        clock=lambda: rig.now,
+        intent_reader=lambda approval_id: calls.append(approval_id),  # type: ignore[func-returns-value]
+    )
+    issued = await rig.issue_and_send()
+    rig.now = rig.plan.expiry_utc + timedelta(seconds=1)
+
+    await rig.tap("APR", issued.mapping.short_id, query_id="q-late")
+
+    assert calls == []
+    assert rig.row(ApprovalAction.APPROVE).status is ApprovalResult.PENDING
+
+
+async def test_an_unreadable_intent_is_never_described_as_expired_or_rejected() -> None:
+    rig = Rig()
+
+    def broken(approval_id: str) -> IntentRecord | None:
+        raise RuntimeError("store down")
+
+    rig.desk = ApprovalDesk(
+        rig.stores, profile=DEMO_CONFIRM_PROFILE, clock=lambda: rig.now, intent_reader=broken
+    )
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    await rig.tap("APR", short, query_id="q-apr")
+    rig.now = rig.plan.expiry_utc + timedelta(seconds=1)
+
+    await rig.tap("APR", short, query_id="q-redelivered")
+
+    assert "needs reconciliation" in texts(rig.bot)[-1]
+
+
+async def test_a_tap_after_expiry_on_a_pending_request_finalizes_it_as_expired() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rig.now = rig.plan.expiry_utc + timedelta(seconds=1)
+
+    await rig.tap("APR", issued.mapping.short_id, query_id="q-late")
+
+    assert texts(rig.bot)[-1] == "Mode: DEMO\nRefused: APPROVAL_EXPIRED. Nothing changed."
+    (edit,) = rig.bot.edited
+    expiry = format_utc(rig.plan.expiry_utc)
+    assert edit.text == (
+        f"{issued.text}\nEXPIRED: the plan expired at {expiry}; no decision was taken."
+    )
+    assert edit.reply_markup.inline_keyboard == ()
+    assert all(a.status is ApprovalResult.PENDING for a in rig.stores.approvals.values())
+
+
+async def test_a_store_failure_keeps_the_keyboard() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+
+    def boom(approval: Any, mapping: Any) -> None:
+        raise ConnectionError("db down")
+
+    rig.stores.save_atomic = boom  # type: ignore[method-assign]
+    result = await rig.tap("SKP", issued.mapping.short_id, query_id="q-fail")
+
+    assert not result.ok and result.reason_code == "APPROVAL_STORE_FAILURE"
+    assert texts(rig.bot)[-1] == "Mode: DEMO\nRefused: APPROVAL_STORE_FAILURE. Nothing changed."
+    assert rig.bot.edited == [] and rig.bot.markup_edits == []
+
+
+async def test_the_expiry_sweep_finalizes_untapped_requests_once_and_writes_no_row() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rows_before = dict(rig.stores.approvals)
+
+    assert (
+        await rig.desk.finalize_expired_requests(
+            rig.bot, now_utc=rig.plan.expiry_utc - timedelta(seconds=1), sleep=rig.sleep
+        )
+        == []
+    )
+    done = await rig.desk.finalize_expired_requests(
+        rig.bot, now_utc=rig.plan.expiry_utc, sleep=rig.sleep
+    )
+    again = await rig.desk.finalize_expired_requests(
+        rig.bot, now_utc=rig.plan.expiry_utc + timedelta(minutes=1), sleep=rig.sleep
+    )
+
+    assert done == [issued.mapping.short_id] and again == []
+    (edit,) = rig.bot.edited
+    assert edit.text.endswith(
+        f"EXPIRED: the plan expired at {format_utc(rig.plan.expiry_utc)}; no decision was taken."
+    )
+    assert edit.reply_markup.inline_keyboard == ()
+    assert rig.stores.approvals == rows_before
+
+
+async def test_the_expiry_sweep_leaves_a_tapped_request_alone() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    await rig.tap("SKP", issued.mapping.short_id, query_id="q1")
+    edits = len(rig.bot.edited)
+
+    done = await rig.desk.finalize_expired_requests(
+        rig.bot, now_utc=rig.plan.expiry_utc + timedelta(hours=1), sleep=rig.sleep
+    )
+
+    assert done == [] and len(rig.bot.edited) == edits
+
+
+async def test_a_failed_final_edit_is_journaled_and_changes_no_decision() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rig.bot.queue_error(Forbidden("cannot edit"))
+    rig.bot.queue_markup_error(Forbidden("cannot edit"))
+
+    result = await rig.tap("SKP", issued.mapping.short_id, query_id="q1")
+
+    assert result.ok
+    assert rig.row(ApprovalAction.SKIP_USER).status is ApprovalResult.SKIPPED
+    (failed,) = rig.stores.journal_of_type("DEMO_DECIDED_MESSAGE_EDIT_FAILED")
+    payload = json.loads(failed.payload_json)
+    assert payload["trigger"] == "SKIP" and payload["error_class"] == "Forbidden"
+    assert "cannot edit" not in failed.payload_json
+
+
+async def test_a_stranger_or_a_wrong_chat_touches_nothing_and_gets_a_plain_refusal() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+
+    await rig.tap("SKP", short, query_id="q-stranger", user_id=STRANGER_USER_ID)
+    await rig.tap("APR", short, query_id="q-group", chat_type="group")
+    await rig.tap("APR", short, query_id="q-chat", chat_id=OTHER_CHAT_ID)
+
+    assert rig.bot.edited == [] and rig.bot.markup_edits == []
+    assert texts(rig.bot)[1:] == ["Mode: DEMO\nRefused. Nothing changed."] * 3
+    assert all(a.status is ApprovalResult.PENDING for a in rig.stores.approvals.values())
+    assert rig.desk._decisions == {}, "gate refusals leave no record behind"
+
+
+async def test_a_short_id_lost_in_a_restart_loses_its_keyboard_only() -> None:
+    first = Rig()
+    issued = await first.issue_and_send()
+    second = Rig(stores=first.stores)
+
+    await second.tap("APR", issued.mapping.short_id, query_id="q-after-restart")
+
+    assert texts(second.bot) == ["Mode: DEMO\nRefused: INVALIDATED. Nothing changed."]
+    assert second.bot.edited == []
+    (markup,) = second.bot.markup_edits
+    assert markup.message_id == 1
+    assert all(a.status is ApprovalResult.PENDING for a in second.stores.approvals.values())
+
+
+async def test_the_live_desk_labels_every_text_live() -> None:
+    rig = Rig(mode="LIVE")
+    issued = await rig.issue_and_send()
+    assert "Mode: LIVE" in issued.text
+
+    await rig.tap("APR", issued.mapping.short_id, query_id="q-apr")
+    await rig.tap("APR", issued.mapping.short_id, query_id="q-again")
+
+    assert rig.stores.journal_of_type("LIVE_APPROVAL_REQUEST_ISSUED")
+    assert rig.stores.journal_of_type("LIVE_APPROVAL_REQUEST_SENT")
+    assert all("Mode: LIVE" in t for t in texts(rig.bot))
+
+
+def test_money_for_reads_the_stored_money_by_short_id_or_plan_id() -> None:
+    rig = Rig()
+    money = make_desk_money()
+    issued = rig.issue(money=money)
+
+    assert rig.desk.money_for(issued.mapping.short_id) == money
+    assert rig.desk.money_for(rig.plan.trade_plan_id) == money
+    assert rig.desk.money_for("unknown") is None
+    assert rig.desk.plan_context(issued.mapping.short_id) == (rig.signal, rig.plan)
+    assert rig.desk.plan_context("unknown") is None
