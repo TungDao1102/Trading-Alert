@@ -37,7 +37,8 @@ expired and journaled with reason `RUNTIME_RESTART` (fail closed, as plan 16-04)
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+import json
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -58,6 +59,7 @@ from src.adapters.telegram_notify import (
     TelegramTextBot,
     build_confirm_keyboard,
     edit_to_confirm_card,
+    finalize_decided_message,
     send_text,
 )
 from src.approval.confirm_core import (
@@ -88,6 +90,9 @@ from src.approval.confirm_core import ConfirmBook as CoreConfirmBook
 from src.approval.confirm_core import (
     assert_no_stranded_approvals as core_assert_no_stranded_approvals,
 )
+from src.approval.reason_codes import APPROVAL_STORE_FAILURE, CALLBACK_HANDLER_ERROR
+from src.domain.approval import Approval
+from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.paper.notify import NOTIFY_MAX_ATTEMPTS
@@ -114,6 +119,13 @@ EVENT_SHADOW_CONFIRM_REJECTED: Final = SHADOW_CONFIRM_PROFILE.event_rejected
 EVENT_SHADOW_CONFIRM_NOTICE_FAILED: Final = SHADOW_CONFIRM_PROFILE.event_notice_failed
 
 TERMINAL_CONFIRM_EVENTS: Final = SHADOW_CONFIRM_PROFILE.terminal_events
+
+# Phase 23 (D-06): a keyboard-only edit that removes the buttons of a decided message was refused
+# or failed. Journaled with the classified failure kind only; the decision is never changed by it.
+EVENT_SHADOW_KEYBOARD_REMOVAL_FAILED: Final = "SHADOW_KEYBOARD_REMOVAL_FAILED"
+_KEYBOARD_JOURNAL_PREFIX: Final = "shadow-kbd"
+# The failures of a press that leave the decision open: the keyboard stays so it can be retried.
+_TRANSIENT_REASONS: Final = frozenset({APPROVAL_STORE_FAILURE, CALLBACK_HANDLER_ERROR})
 
 DELIVERY_EDIT: Final = "edit"
 DELIVERY_FALLBACK_SEND: Final = "fallback_send"
@@ -214,6 +226,14 @@ class ConfirmBook(CoreConfirmBook):
         )
         require_shadow(mode)
         self._mode = mode
+
+    def entry_for_approval(self, approval_id: str) -> ConfirmEntry | None:
+        """The entry of one approval, or None (a swept orphan has no entry in memory)."""
+        with self._lock:
+            for entry in self._entries.values():
+                if entry.approval.approval_id == approval_id:
+                    return entry
+        return None
 
     def _render_card(
         self,
@@ -427,10 +447,161 @@ async def _delivered(
 
 @dataclass(frozen=True)
 class ConfirmCallbacks:
-    """The two hooks to pass to `on_callback` (`approved_handler`, `confirm_handler`)."""
+    """The hooks to pass to `on_callback`: `approved_handler`, `confirm_handler` and, since
+    Phase 23 (D-06), `finalize_message` (the SHADOW keyboard rule, never a text change)."""
 
     approved_handler: Callable[[CallbackPress, DispatchResult], Awaitable[bool]]
     confirm_handler: Callable[[CallbackPress], Awaitable[ConfirmReply]]
+    finalize_message: Callable[[CallbackPress, DispatchResult], Awaitable[None]]
+
+
+def _journal_keyboard_removal_failed(
+    stores: ConfirmStores | None,
+    *,
+    entry: ConfirmEntry | None,
+    approval: Approval | None,
+    short_id: str,
+    message_id: int,
+    trigger: str,
+    step: str,
+    correlation_id: str,
+    now_utc: datetime,
+    failure_kind: str,
+    attempts: int,
+) -> None:
+    """Journal one failed keyboard removal: the classified kind only, never the error text."""
+    if stores is None:
+        return
+    known = entry.approval if entry is not None else approval
+    if known is not None:
+        entity_type = SHADOW_CONFIRM_PROFILE.entity_type
+        entity_id = known.approval_id
+        correlation = SHADOW_CONFIRM_PROFILE.correlation(known.approval_id)
+    else:
+        entity_type = "Approval"
+        entity_id = f"short:{short_id}"
+        correlation = correlation_id
+    payload = {
+        "short_id": short_id,
+        "message_id": message_id,
+        "trigger": trigger,
+        "failure_kind": failure_kind,
+        "attempts": attempts,
+        "mode": SHADOW_CONFIRM_PROFILE.mode_label,
+    }
+    stores.record_journal(
+        JournalEvent(
+            journal_event_id=correlated_event_id(
+                prefix=_KEYBOARD_JOURNAL_PREFIX,
+                correlation_id=correlation,
+                event_type=EVENT_SHADOW_KEYBOARD_REMOVAL_FAILED,
+                entity_id=entity_id,
+                step=step,
+            ),
+            occurred_at_utc=now_utc,
+            event_type=EVENT_SHADOW_KEYBOARD_REMOVAL_FAILED,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            correlation_id=correlation,
+            signal_id=entry.signal.signal_id if entry is not None else None,
+            trade_plan_id=entry.plan.trade_plan_id if entry is not None else None,
+            approval_id=known.approval_id if known is not None else None,
+            payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+    )
+
+
+async def _remove_keyboard(
+    *,
+    bot: TelegramTextBot,
+    chat_id: int,
+    message_id: int,
+    sleep: Callable[[float], Awaitable[None]],
+    stores: ConfirmStores | None,
+    entry: ConfirmEntry | None,
+    approval: Approval | None,
+    short_id: str,
+    trigger: str,
+    step: str,
+    correlation_id: str,
+    now_utc: datetime,
+) -> bool:
+    """A keyboard-only edit of one message; a failure is journaled and never raised (D-06)."""
+    outcome = await finalize_decided_message(
+        bot, chat_id=chat_id, message_id=message_id, text=None, sleep=sleep
+    )
+    if outcome.done:
+        return True
+    failure_kind = outcome.failure.kind.value if outcome.failure is not None else "UNKNOWN"
+    log.warning(
+        "paper.shadow_confirm.keyboard_removal_failed",
+        trigger=trigger,
+        failure_kind=failure_kind,
+        attempts=outcome.attempts,
+    )
+    try:
+        _journal_keyboard_removal_failed(
+            stores,
+            entry=entry,
+            approval=approval,
+            short_id=short_id,
+            message_id=message_id,
+            trigger=trigger,
+            step=step,
+            correlation_id=correlation_id,
+            now_utc=now_utc,
+            failure_kind=failure_kind,
+            attempts=outcome.attempts,
+        )
+    except Exception as exc:  # noqa: BLE001 - the decision stands; the journal gap is logged
+        log.error(
+            "paper.shadow_confirm.keyboard_removal_journal_failed", error_class=type(exc).__name__
+        )
+    return False
+
+
+async def finalize_expired_cards(
+    *,
+    confirm: ConfirmBook,
+    bot: TelegramTextBot,
+    chat_id: int,
+    approval_ids: Iterable[str],
+    sleep: Callable[[float], Awaitable[None]],
+    stores: ConfirmStores | None,
+) -> int:
+    """Remove the keyboard of every delivered card that `expire_due` just expired (D-06).
+
+    `approval_ids` is what `ConfirmBook.expire_due` returned (it returns approval ids). An id
+    without a delivered card (a swept orphan: never delivered, or only the token was lost in a
+    restart) has no message id and is skipped. Returns the number of keyboards removed. `expire_due`
+    returns a card once, so a second sweep does nothing.
+    """
+    removed = 0
+    for approval_id in approval_ids:
+        entry = confirm.entry_for_approval(approval_id)
+        if (
+            entry is None
+            or entry.state is not ConfirmState.EXPIRED
+            or not entry.delivered
+            or entry.message_id is None
+        ):
+            continue
+        done = await _remove_keyboard(
+            bot=bot,
+            chat_id=chat_id,
+            message_id=entry.message_id,
+            sleep=sleep,
+            stores=stores,
+            entry=entry,
+            approval=entry.approval,
+            short_id=entry.short_id,
+            trigger="ttl_expiry",
+            step="ttl_expiry",
+            correlation_id=SHADOW_CONFIRM_PROFILE.correlation(approval_id),
+            now_utc=confirm.now(),
+        )
+        removed += 1 if done else 0
+    return removed
 
 
 def make_confirm_callbacks(
@@ -440,8 +611,12 @@ def make_confirm_callbacks(
     bot: TelegramTextBot,
     mode: Mode,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    stores: ConfirmStores | None = None,
 ) -> ConfirmCallbacks:
-    """Wire the confirm flow into `on_callback`. No exchange object is passed or reachable."""
+    """Wire the confirm flow into `on_callback`. No exchange object is passed or reachable.
+
+    `stores` is where a failed keyboard removal is journaled (None: logged only).
+    """
     require_shadow(mode)
 
     async def approved_handler(press: CallbackPress, result: DispatchResult) -> bool:
@@ -521,7 +696,44 @@ def make_confirm_callbacks(
             return ConfirmReply(ok=outcome is ConfirmOutcome.CANCELLED, text=outcome.value)
         raise ValueError(f"not a confirm press: {press.parsed.kind!r}")
 
-    return ConfirmCallbacks(approved_handler=approved_handler, confirm_handler=confirm_handler)
+    async def finalize_message(press: CallbackPress, result: DispatchResult) -> None:
+        """After the reply of a press that passed both gates: drop the keyboard when no decision
+        can follow (D-06). Keyboard-only: the SHADOW text of the message is never touched.
+
+        Kept: a delivered PENDING card (CNF/CXL), a card still PENDING after a refusal that left
+        the confirm open (another user) and a transient failure of the press itself.
+        """
+        if press.message_id is None:
+            return  # an inaccessible message: nothing to edit
+        short_id = press.parsed.short_id
+        entry = confirm.get(short_id)
+        if press.parsed.kind in (CallbackKind.APPROVE, CallbackKind.SKIP):
+            if result.reason_code in _TRANSIENT_REASONS:
+                return
+            if entry is not None and entry.state is ConfirmState.PENDING and entry.delivered:
+                return  # the card is the open decision
+        elif entry is not None and entry.state is ConfirmState.PENDING:
+            return  # CONFIRM or CANCEL refused without ending the confirm
+        await _remove_keyboard(
+            bot=bot,
+            chat_id=press.chat_id,
+            message_id=press.message_id,
+            sleep=sleep,
+            stores=stores,
+            entry=entry,
+            approval=result.approval,
+            short_id=short_id,
+            trigger="press",
+            step=f"press:{press.correlation_id}",
+            correlation_id=press.correlation_id,
+            now_utc=press.callback_at_utc,
+        )
+
+    return ConfirmCallbacks(
+        approved_handler=approved_handler,
+        confirm_handler=confirm_handler,
+        finalize_message=finalize_message,
+    )
 
 
 __all__ = [
@@ -532,6 +744,7 @@ __all__ = [
     "EVENT_SHADOW_CONFIRM_ISSUED",
     "EVENT_SHADOW_CONFIRM_NOTICE_FAILED",
     "EVENT_SHADOW_CONFIRM_REJECTED",
+    "EVENT_SHADOW_KEYBOARD_REMOVAL_FAILED",
     "REASON_CARD_DELIVERY_FAILED",
     "REASON_CHAT_MISMATCH",
     "REASON_CONFIRM_ALREADY_EXPIRED",
@@ -559,6 +772,7 @@ __all__ = [
     "StrandedApprovals",
     "assert_no_stranded_approvals",
     "deliver_confirm_card",
+    "finalize_expired_cards",
     "make_confirm_callbacks",
     "render_confirm_card",
 ]

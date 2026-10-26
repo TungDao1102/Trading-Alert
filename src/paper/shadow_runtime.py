@@ -425,7 +425,12 @@ class ShadowCoordinator:
             reservations=self._reservations,
         )
         self._callbacks = make_confirm_callbacks(
-            approvals=self._book, confirm=self._confirm, bot=self._bot, mode=mode, sleep=sleep
+            approvals=self._book,
+            confirm=self._confirm,
+            bot=self._bot,
+            mode=mode,
+            sleep=sleep,
+            stores=stores,
         )
         self._reply = make_shadow_reply_fn(
             self._bot, mode=mode, clock=clock, book=self._book, confirm_book=self._confirm
@@ -489,6 +494,8 @@ class ShadowCoordinator:
             "reply_text_fn": self._reply,
             "confirm_handler": self._callbacks.confirm_handler,
             "approved_handler": self._callbacks.approved_handler,
+            "finalize_message": self._callbacks.finalize_message,
+            "error_journal": self._stores.record_journal,
             "clock": self._clock,
         }
 
