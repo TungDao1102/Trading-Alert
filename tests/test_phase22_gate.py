@@ -17,8 +17,8 @@ This file asserts, against the real tree and without any network or live evidenc
   CLOSE_POSITION, recorded for the Phase 24 composition);
 - the `RejectionReason` enum still has 21 members (amendment A3) and no Phase 22 plain code is
   one of them; every plain code is a module-level string of its module and has its row in
-  GLOSSARY 9.3; the migration head is `0013_approval_money`; the two configuration calls are on
-  the shadow order surface; the nine error codes are REJECTED_DEFINITIVE on PLACEMENT only;
+  GLOSSARY 9.3; the migration head is `0014_decided_excl_expired`; the two configuration calls are
+  on the shadow order surface; the nine error codes are REJECTED_DEFINITIVE on PLACEMENT only;
 - the wiring facts: `ProtectionCoordinator` accepts `liquidation_watch` (default None), the
   placement context requires `margin_guard`, and gate 5f2 sits after the position mode and before
   the hand-off record;
@@ -380,11 +380,11 @@ def test_invariant_6d_glossary_91_lists_exactly_the_enum() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_invariant_7_the_migration_head_is_0013_approval_money() -> None:
+def test_invariant_7_the_migration_head_is_0014_decided_excl_expired() -> None:
     from tests.pg_support import alembic_head_revision
 
-    assert alembic_head_revision() == "0013_approval_money", (
-        "plan 23-04 moved the head to 0013; a later migration must update this gate on purpose"
+    assert alembic_head_revision() == "0014_decided_excl_expired", (
+        "plan 23-08 moved the head to 0014; a later migration must update this gate on purpose"
     )
 
 

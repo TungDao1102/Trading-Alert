@@ -25,7 +25,10 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
   * Migration 0012 (Phase 22, plan 22-08, D-14) adds the three nullable margin columns and their
     two named CHECKs to `risk_reservations`.
   * Migration 0013 (Phase 23, plan 23-04, D-13) adds the nullable `money_json` column and its
-    named CHECK to `approvals`; the head test pins 0013.
+    named CHECK to `approvals`.
+  * Migration 0014 (Phase 23, plan 23-08, G4-042) recreates `uq_approvals_one_decided_per_plan`
+    with the predicate `status NOT IN ('PENDING','EXPIRED')`; its downgrade refuses when a plan
+    holds more than one non-PENDING row. The head test pins 0014.
 """
 
 from __future__ import annotations
@@ -115,6 +118,8 @@ REVISION_0012 = "0012_reservation_margin"
 MIGRATION_0012 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0012_reservation_margin.py"
 REVISION_0013 = "0013_approval_money"
 MIGRATION_0013 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0013_approval_money.py"
+REVISION_0014 = "0014_decided_excl_expired"
+MIGRATION_0014 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0014_decided_excl_expired.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -191,7 +196,8 @@ def _normalize(sql: str) -> str:
 
 
 PARTIAL_INDEX_PREDICATES = {
-    "uq_approvals_one_decided_per_plan": "status<>'pending'",
+    # 0014 (G4-042): PostgreSQL stores `NOT IN ('PENDING','EXPIRED')` as `<> ALL (ARRAY[...])`.
+    "uq_approvals_one_decided_per_plan": "status<>allarray['pending','expired']",
     "uq_orders_client_order_id": "client_order_idisnotnull",
     "uq_orders_algo_client_id": "algo_client_idisnotnull",
     "uq_execution_intents_client_order_id": "client_order_idisnotnull",
@@ -482,7 +488,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0013
+    assert alembic_head_revision() == REVISION_0014
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -1060,7 +1066,7 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0013
+        assert version == REVISION_0014
     finally:
         engine.dispose()
 
@@ -1125,7 +1131,7 @@ def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_the
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0013
+        assert version == REVISION_0014
     finally:
         engine.dispose()
 
@@ -1181,7 +1187,7 @@ def test_downgrade_0011_drops_only_the_reservations_table_and_upgrade_restores_i
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0013
+        assert version == REVISION_0014
     finally:
         engine.dispose()
 
@@ -1355,7 +1361,7 @@ def test_downgrade_0012_drops_only_the_margin_columns_and_checks_and_keeps_the_r
                     "FROM risk_reservations"
                 )
             ).all()
-        assert version == REVISION_0013
+        assert version == REVISION_0014
         # The stored margin was lost by the downgrade: the restored columns are empty (unknown).
         assert [tuple(row) for row in restored] == [(None, None, None)]
     finally:
@@ -1515,8 +1521,98 @@ def test_downgrade_0013_drops_only_the_money_column_and_check_and_keeps_the_rows
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             restored = conn.execute(text("SELECT money_json FROM approvals")).all()
-        assert version == REVISION_0013
+        assert version == REVISION_0014
         # The stored money was lost by the downgrade: the restored column is empty (not recorded).
         assert [tuple(row) for row in restored] == [(None,)]
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0014: EXPIRED leaves uq_approvals_one_decided_per_plan (Phase 23, plan 23-08, G4-042)
+# --------------------------------------------------------------------------------------
+_ONE_DECIDED_INDEX = "uq_approvals_one_decided_per_plan"
+
+
+def _one_decided_index_sql(engine: Engine) -> str:
+    with engine.connect() as conn:
+        return str(
+            conn.execute(
+                text("SELECT indexdef FROM pg_indexes WHERE indexname = :n"),
+                {"n": _ONE_DECIDED_INDEX},
+            ).scalar_one()
+        )
+
+
+def test_migration_0014_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0014, ("src", "tests")) == []
+
+
+def test_migration_0014_revises_0013() -> None:
+    text_of_migration = MIGRATION_0014.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0013}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0014}"' in text_of_migration
+    assert len(REVISION_0014) <= 32  # alembic_version.version_num is VARCHAR(32)
+
+
+def test_the_head_index_predicate_excludes_pending_and_expired(engine: Engine) -> None:
+    definition = _one_decided_index_sql(engine)
+    assert "UNIQUE" in definition
+    assert "NOT IN" in definition or "<> ALL" in definition
+    assert "'PENDING'" in definition
+    assert "'EXPIRED'" in definition
+
+
+def test_downgrade_0014_restores_the_old_predicate_on_an_empty_table(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    run_alembic(pg_empty_db, "downgrade", REVISION_0013)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        definition = _one_decided_index_sql(engine)
+        assert "<> 'PENDING'" in definition
+        assert "'EXPIRED'" not in definition
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0013
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert "'EXPIRED'" in _one_decided_index_sql(engine)
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_0014_refuses_when_a_plan_holds_two_expired_rows(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        insert_and_commit(
+            engine,
+            make_signal(1),
+            make_plan(1, 1),
+            make_approval(1, 1, 1, status="EXPIRED", result="EXPIRED"),
+            make_approval(2, 1, 1, status="EXPIRED", result="EXPIRED", action="SKIP_USER"),
+        )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="1 plans have more than one non-PENDING approval"):
+        run_alembic(pg_empty_db, "downgrade", REVISION_0013)
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            statuses = (
+                conn.execute(text("SELECT status FROM approvals ORDER BY approval_id"))
+                .scalars()
+                .all()
+            )
+        assert version == REVISION_0014
+        assert list(statuses) == ["EXPIRED", "EXPIRED"]
+        assert "'EXPIRED'" in _one_decided_index_sql(engine)
     finally:
         engine.dispose()
