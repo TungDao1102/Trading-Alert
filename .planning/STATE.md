@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 23
 current_phase_name: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
-current_plan: 12
+current_plan: 13
 status: executing
-stopped_at: Completed 23-11-PLAN.md
-last_updated: "2026-10-26T02:24:49.754Z"
+stopped_at: Completed 23-12-PLAN.md
+last_updated: "2026-10-26T02:43:30.869Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 23 execution started
-state_head: d0e4f86e6ed54bd24fe1bbda62cc513b6823ce37
+state_head: c0f455cd112f6e31d40eda49cc0a60af82b66307
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 328
-  completed_plans: 323
+  completed_plans: 324
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 23 (Telegram Approval Hardening + Two-Step Confirm + Money Amounts) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 12
+Current Plan: 13
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 23 execution started
@@ -249,6 +249,7 @@ Progress: [██████░░░░] 61%
 | Phase 23 P08 | 1 session | 3 tasks | 12 files |
 | Phase 23 P10 | 40min | 2 tasks | 3 files |
 | Phase 23 P11 | 70min | 3 tasks | 5 files |
+| Phase 23 P12 | 25min | 3 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -585,6 +586,7 @@ Recent decisions affecting current work:
 - [Phase 23]: TP fractions of the DEMO/LIVE request come from the stored money block, not a constant (no src.backtest import in src.execution; Phase 19 invariant 7)
 - [Phase 23]: Desk answers an unreadable entry intent on an APPROVED expired redelivery as needs reconciliation (never expired/rejected, Q5)
 - [Phase 23]: Desk final message text is derived from stored approval rows, edited once per request
+- [Phase 23]: 23-12: validity_rule is called with keywords (expiry_utc, now_utc) so a partial over check_remaining_validity binds directly; a refused-before-recheck CONFIRM awaits no prefetch; a handler that raised is answered with the neutral text; the confirm core was not changed
 
 ### Pending Todos
 
@@ -671,6 +673,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-26T02:24:48.504Z
-Stopped at: Completed 23-11-PLAN.md
+Last session: 2026-10-26T02:43:29.792Z
+Stopped at: Completed 23-12-PLAN.md
 Resume file: None
