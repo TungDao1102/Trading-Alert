@@ -2046,3 +2046,44 @@ def test_main_in_dry_run_builds_the_guard_once_over_the_guarded_adapter_and_send
 def test_a_scripted_margin_guard_is_still_accepted_directly() -> None:
     stub = StubMarginGuard()
     assert _build_context_with(FakeDemoAdapter(), margin_guard=stub).margin_guard is stub
+
+
+# --------------------------------------------------------------------------- #
+# Phase 23, plan 23-11 (D-05): ONE message carries APPROVE and SKIP for every step kind.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("kind", ["APPROVE", "SKIP"])
+async def test_the_real_channel_sends_one_message_with_approve_and_skip(kind: str) -> None:
+    sent: list[tuple[int, str, Any]] = []
+
+    class RecordingBot:
+        async def send_message(self, *, chat_id: int, text: str, reply_markup: Any = None) -> None:
+            sent.append((chat_id, text, reply_markup))
+
+    signal_id = "ab" * 32
+    channel = dr.PtbApprovalChannel(None)  # type: ignore[arg-type]
+    channel._app = SimpleNamespace(bot=RecordingBot())
+
+    await channel.send_approval(chat_id=AUTH_CHAT, text="rehearsal", signal_id=signal_id, kind=kind)
+
+    ((chat_id, text, markup),) = sent
+    short = derive_short_id(signal_id)
+    assert (chat_id, text) == (AUTH_CHAT, "rehearsal")
+    assert [
+        (button.text, button.callback_data) for row in markup.inline_keyboard for button in row
+    ] == [("APPROVE", f"APR:{short}"), ("SKIP", f"SKP:{short}")]
+    assert len(markup.inline_keyboard) == 1, "both buttons sit in one row of one message"
+
+
+def test_the_rehearsal_script_no_longer_builds_one_button_keyboards() -> None:
+    tree = ast.parse(Path(dr.__file__).read_text(encoding="utf-8"))
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    names |= {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "build_decision_keyboard" in names
+    assert not {"build_approve_keyboard", "build_skip_keyboard"} & names
