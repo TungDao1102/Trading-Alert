@@ -185,6 +185,7 @@ class ConfirmFlow:
         self._desk_finalize = desk.finalize_hook(bot, sleep=sleep)
         self._replies: dict[str, object] = {}
         self._finalized: dict[str, tuple[int, str]] = {}
+        self._notified: dict[str, str] = {}
         self._short_by_approval: dict[str, str] = {}
         self._chat_by_short: dict[str, int | str] = {}
         # From now on a fresh APPROVE is answered "Nothing was placed." (wording only).
@@ -409,6 +410,9 @@ class ConfirmFlow:
     async def _prefetch_for(self, press: CallbackPress) -> None:
         """Await the composition's fresh readings, only for a CONFIRM that could still succeed.
 
+        Not for a press of another user or chat, after the confirm window or after the plan
+        expiry: those are refused before the recheck and need no exchange data.
+
         A prefetch error is logged by class name; the CONFIRM then refuses through the recheck
         (CONFIRM_INPUTS_UNAVAILABLE), it is never waved through.
         """
@@ -420,6 +424,8 @@ class ConfirmFlow:
             or entry.state is not ConfirmState.PENDING
             or press.chat_id != press.authorized_chat_id
             or press.from_user_id != entry.approving_user_id
+            or press.callback_at_utc >= entry.expires_at_utc
+            or press.callback_at_utc >= entry.plan.expiry_utc
         ):
             return
         try:
@@ -436,6 +442,15 @@ class ConfirmFlow:
             body = "Already confirmed. Nothing changed." if result.replayed else ""
         elif outcome is ConfirmOutcome.CANCELLED:
             body = "Already cancelled. Nothing changed." if result.replayed else ""
+        elif outcome is ConfirmOutcome.REJECTED_USER_MISMATCH:
+            body = (
+                f"Refused: {result.reason}. Only the user who pressed APPROVE can confirm. "
+                "Nothing changed."
+            )
+        elif outcome is ConfirmOutcome.EXPIRED_TTL:
+            body = f"Refused: {result.reason}. The confirm window ran out. Nothing was placed."
+        elif outcome is ConfirmOutcome.REJECTED_PLAN_EXPIRED:
+            body = f"Refused: {result.reason}. The plan has expired. Nothing was placed."
         else:
             body = f"Refused: {result.reason}. Nothing was placed."
         return f"Mode: {self._mode}\n{body}" if body else ""
@@ -536,16 +551,75 @@ class ConfirmFlow:
         kind = press.parsed.kind
         short_id = press.parsed.short_id
         entry = self._book.get(short_id)
-        if kind in (CallbackKind.APPROVE, CallbackKind.SKIP):
+        is_confirm_press = kind in (CallbackKind.CONFIRM, CallbackKind.CANCEL)
+        if not is_confirm_press:
             if entry is None:
                 await self._desk_finalize(press, result)
                 return
             self._desk.take_decision(press.correlation_id)
-        elif entry is None:
+        if press.message_id is None:
+            return  # an inaccessible message: nothing to edit
+        if entry is None:
+            # No confirm context (a restart lost the token): the buttons are dead, drop them.
+            await self._remove_keyboard(None, short_id, press, trigger=kind.value)
             return
         if entry.state is ConfirmState.PENDING:
+            if (
+                not is_confirm_press
+                and entry.message_id is not None
+                and press.message_id != entry.message_id
+            ):
+                # The card was sent as a new message: the old request message loses its buttons.
+                await self._remove_keyboard(entry, short_id, press, trigger=kind.value)
+            return  # a decision is still open on the card: it keeps its keyboard
+        final_done = await self._edit_final(
+            entry, press.chat_id, press.message_id, trigger=kind.value
+        )
+        if not final_done and is_confirm_press:
+            await self._send_final_message(entry)
+
+    async def _remove_keyboard(
+        self, entry: ConfirmEntry | None, short_id: str, press: CallbackPress, *, trigger: str
+    ) -> None:
+        """A keyboard-only edit of the pressed message; a failure is journaled, never raised."""
+        message_id = press.message_id
+        if message_id is None:
             return
-        await self._edit_final(entry, press.chat_id, press.message_id, trigger=kind.value)
+        outcome = await finalize_decided_message(
+            self._bot, chat_id=press.chat_id, message_id=message_id, text=None, sleep=self._sleep
+        )
+        if outcome.done:
+            return
+        log.warning(
+            f"{self._profile.log_namespace}.keyboard_removal_failed",
+            trigger=trigger,
+            kind=None if outcome.failure is None else outcome.failure.kind.value,
+        )
+        self._journal_edit_failed(
+            entry,
+            short_id=short_id,
+            message_id=message_id,
+            trigger=trigger,
+            failure=outcome.failure,
+            attempts=outcome.attempts,
+            correlation_id=press.correlation_id,
+        )
+
+    async def _send_final_message(self, entry: ConfirmEntry) -> None:
+        """The final edit failed after a CONFIRM or CANCEL: say the outcome once as a message."""
+        text = self._final_text(entry)
+        chat_id = self._chat_by_short.get(entry.short_id)
+        if text is None or chat_id is None or self._notified.get(entry.short_id) == text:
+            return
+        outcome = await send_text_bounded(self._bot, chat_id, text, sleep=self._sleep)
+        if outcome.failure is None:
+            self._notified[entry.short_id] = text
+        else:
+            log.warning(
+                f"{self._profile.log_namespace}.final_message_failed",
+                kind=outcome.failure.kind.value,
+                detail=outcome.failure.detail,
+            )
 
     async def _edit_final(
         self, entry: ConfirmEntry, chat_id: int | str, message_id: int | None, *, trigger: str
@@ -570,27 +644,43 @@ class ConfirmFlow:
         )
         self._journal_edit_failed(
             entry,
+            short_id=entry.short_id,
             message_id=message_id,
             trigger=trigger,
             failure=outcome.failure,
             attempts=outcome.attempts,
+            correlation_id=None,
         )
         return False
 
     def _journal_edit_failed(
         self,
-        entry: ConfirmEntry,
+        entry: ConfirmEntry | None,
         *,
+        short_id: str,
         message_id: int,
         trigger: str,
         failure: TelegramFailure | None,
         attempts: int,
+        correlation_id: str | None,
     ) -> None:
-        """Journal one failed final edit (classified kind only); it never changes the decision."""
+        """Journal one failed final edit (classified kind only); it never changes the decision.
+
+        Without a confirm entry (a restart lost it) the row hangs on the short id, like the core's
+        NO_CONFIRM_CONTEXT row.
+        """
         event_type = f"{self._mode}_CONFIRM_MESSAGE_EDIT_FAILED"
-        correlation = self._profile.correlation(entry.approval.approval_id)
+        step_key = correlation_id or self._clock().isoformat()
+        if entry is not None:
+            entity_type = self._profile.entity_type
+            entity_id = entry.approval.approval_id
+            correlation = self._profile.correlation(entity_id)
+        else:
+            entity_type = "Approval"
+            entity_id = f"short:{short_id}"
+            correlation = f"{self._profile.correlation_prefix}short:{short_id}"
         payload: Mapping[str, Any] = {
-            "short_id": entry.short_id,
+            "short_id": short_id,
             "message_id": message_id,
             "trigger": trigger,
             "attempts": attempts,
@@ -605,17 +695,17 @@ class ConfirmFlow:
                         prefix=f"{self._mode.lower()}-cnf-edit",
                         correlation_id=correlation,
                         event_type=event_type,
-                        entity_id=entry.approval.approval_id,
-                        step=f"{trigger}:{message_id}:{self._clock().isoformat()}",
+                        entity_id=entity_id,
+                        step=f"{trigger}:{message_id}:{step_key}",
                     ),
                     occurred_at_utc=self._clock(),
                     event_type=event_type,
-                    entity_type=self._profile.entity_type,
-                    entity_id=entry.approval.approval_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
                     correlation_id=correlation,
-                    signal_id=entry.signal.signal_id,
-                    trade_plan_id=entry.plan.trade_plan_id,
-                    approval_id=entry.approval.approval_id,
+                    signal_id=None if entry is None else entry.signal.signal_id,
+                    trade_plan_id=None if entry is None else entry.plan.trade_plan_id,
+                    approval_id=None if entry is None else entry.approval.approval_id,
                     payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
                 )
             )
