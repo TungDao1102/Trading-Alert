@@ -936,3 +936,102 @@ def test_the_restart_expiry_persists_its_runtime_actor(
     stored = store.get(approval.approval_id)
     assert stored is not None
     assert stored.status is ApprovalResult.EXPIRED
+
+
+# --------------------------------------------------------------------------- #
+# G4-042 (Phase 23 plan 23-08, D-16, OWNER-OPEN O-2): EXPIRED rows are outside the index.
+# --------------------------------------------------------------------------- #
+
+
+def _expired_by_restart(approval: Approval) -> Approval:
+    return replace(_decided(approval, ApprovalResult.EXPIRED), actor_id="RUNTIME_RESTART")
+
+
+def _statuses_of_plan(engine: Engine, plan_n: int = 1) -> list[str]:
+    with Session(engine) as session:
+        return list(
+            session.execute(
+                text("SELECT status FROM approvals WHERE trade_plan_id = :p ORDER BY approval_id"),
+                {"p": hexid(0x1000 + plan_n)},
+            ).scalars()
+        )
+
+
+def test_both_pending_siblings_of_an_undecided_plan_can_be_expired_at_restart(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approve = _pending(1)
+    skip = _pending(2, action=ApprovalAction.SKIP_USER)
+    store.insert_pending(approve)
+    store.insert_pending(skip)
+
+    store.save_atomic(_expired_by_restart(approve), None)
+    store.save_atomic(_expired_by_restart(skip), None)  # LEFT_PENDING_SIBLING_DECIDED before 0014
+
+    assert _statuses_of_plan(seeded) == ["EXPIRED", "EXPIRED"]
+    for approval in (approve, skip):
+        stored = store.get(approval.approval_id)
+        assert stored is not None
+        assert stored.status is ApprovalResult.EXPIRED
+        assert stored.actor_id == "RUNTIME_RESTART"
+
+
+@pytest.mark.parametrize("decided_as", [ApprovalResult.APPROVED, ApprovalResult.SKIPPED])
+def test_a_decided_plans_sibling_is_never_expired(
+    seeded: Engine, store: PgApprovalStore, decided_as: ApprovalResult
+) -> None:
+    approve = _pending(1)
+    skip = _pending(2, action=ApprovalAction.SKIP_USER)
+    store.insert_pending(approve)
+    store.insert_pending(skip)
+    decided = _decided(approve, decided_as)
+    store.save_atomic(decided, None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as expired:
+        store.save_atomic(_expired_by_restart(skip), None)
+    with pytest.raises(ApprovalAlreadyDecided) as skipped:
+        store.save_atomic(_decided(skip, ApprovalResult.SKIPPED), None)
+
+    assert expired.value.existing == decided
+    assert skipped.value.existing == decided
+    assert _approval_status(seeded, skip.approval_id) == "PENDING"
+    assert _approval_status(seeded, approve.approval_id) == decided_as.value
+
+
+def test_the_race_query_ignores_expired_rows_and_names_the_one_decided_row(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    """Rows 1 and 2 EXPIRED, row 3 APPROVED, row 4 loses on the index: the lookup of the
+    decided row must pick row 3 and never raise MultipleResultsFound."""
+    rows = [
+        _pending(1),
+        _pending(2, action=ApprovalAction.SKIP_USER),
+        _pending(3),
+        _pending(4, action=ApprovalAction.SKIP_USER),
+    ]
+    for row in rows:
+        store.insert_pending(row)
+    store.save_atomic(_expired_by_restart(rows[0]), None)
+    store.save_atomic(_expired_by_restart(rows[1]), None)
+    approved = _decided(rows[2], ApprovalResult.APPROVED)
+    store.save_atomic(approved, None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as lost:
+        store.save_atomic(_decided(rows[3], ApprovalResult.SKIPPED), None)
+
+    assert lost.value.existing == approved
+    assert _statuses_of_plan(seeded) == ["EXPIRED", "EXPIRED", "APPROVED", "PENDING"]
+
+
+def test_expiring_the_same_approval_twice_replays_to_the_stored_row(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approve = _pending(1)
+    store.insert_pending(approve)
+    expired = _expired_by_restart(approve)
+    store.save_atomic(expired, None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as again:
+        store.save_atomic(expired, None)
+
+    assert again.value.existing.status is ApprovalResult.EXPIRED

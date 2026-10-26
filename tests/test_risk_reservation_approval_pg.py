@@ -681,3 +681,60 @@ def test_the_approval_serialisation_lock_key_is_the_documented_stable_63_bit_key
     digest = hashlib.sha256(b"trading-alert:risk_reservations:approval-serialisation").digest()
     assert APPROVAL_SERIALISATION_LOCK_KEY == int.from_bytes(digest[:8], "big") & (2**63 - 1)
     assert 0 < APPROVAL_SERIALISATION_LOCK_KEY < 2**63
+
+
+# --------------------------------------------------------------------------------------
+# G4-042 (plan 23-08, D-16): EXPIRED rows sit outside uq_approvals_one_decided_per_plan
+# --------------------------------------------------------------------------------------
+def _expire(approval_id: str, *, acted_at: datetime, token: int) -> Approval:
+    return _decision(
+        approval_id,
+        action=ApprovalAction.SKIP_USER,
+        status=ApprovalResult.EXPIRED,
+        token=token,
+        acted_at=acted_at,
+    )
+
+
+def test_expiring_the_sibling_of_an_approved_plan_keeps_its_reservation(
+    engine: Engine,
+    db: OperationalDatabase,
+    approvals: PgApprovalStore,
+    reservations: PgRiskReservationStore,
+) -> None:
+    """T-23-24: the store refuses the EXPIRED decision before the reserving hook can release."""
+    _open_today(db)
+    reservations.register_request(_request(), now_utc=NOW)
+    save = _composed(approvals, reservations)
+    save(_decision(), None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as refused:
+        save(_expire(A3, acted_at=ACTED + timedelta(minutes=1), token=0x3003), None)
+
+    assert refused.value.existing.approval_id == A1
+    record = reservations.get(P1)
+    assert record is not None
+    assert (record.status, record.approval_id) == (ReservationStatus.RESERVED, A1)
+    assert record.release_reason is None
+    assert _approval_status(engine, A3) == "PENDING"
+
+
+def test_both_expiries_of_an_undecided_plan_release_its_request_once(
+    engine: Engine, approvals: PgApprovalStore, reservations: PgRiskReservationStore
+) -> None:
+    reservations.register_request(_request(), now_utc=NOW)
+    save = _composed(approvals, reservations)
+    later = ACTED + timedelta(minutes=1)
+
+    save(_decision(A1, status=ApprovalResult.EXPIRED), None)
+    save(_expire(A3, acted_at=later, token=0x3003), None)
+
+    assert _approval_status(engine, A1) == "EXPIRED"
+    assert _approval_status(engine, A3) == "EXPIRED"
+    record = reservations.get(P1)
+    assert record is not None
+    assert record.status is ReservationStatus.RELEASED
+    assert record.release_reason is ReleaseReason.APPROVAL_EXPIRED
+    # The second release matched no REQUESTED row: it is a no-op, the first timestamp stays.
+    assert record.released_at_utc == ACTED
+    assert reservations.list_counted() == ()
