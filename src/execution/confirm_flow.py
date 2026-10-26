@@ -715,6 +715,42 @@ class ConfirmFlow:
                 error_class=type(exc).__name__,
             )
 
+    # ---- sweeps ------------------------------------------------------------------------ #
+
+    async def finalize_expired(self, now_utc: datetime) -> list[str]:
+        """Expire every confirm past its TTL and edit each delivered card to its final text, once.
+
+        The core journals EXPIRED (CONFIRM_TTL_ELAPSED) and repairs stranded approvals; a card
+        that was delivered and is now EXPIRED becomes its final text with the keyboard removed. A
+        second call expires and edits nothing. Returns the short ids whose card was edited.
+        """
+        finalized: list[str] = []
+        for approval_id in self._book.expire_due(now_utc):
+            short_id = self._short_by_approval.get(approval_id)
+            entry = None if short_id is None else self._book.get(short_id)
+            if (
+                entry is None
+                or entry.state is not ConfirmState.EXPIRED
+                or not entry.delivered
+                or entry.message_id is None
+            ):
+                continue
+            chat_id = self._chat_by_short.get(entry.short_id)
+            if chat_id is None:
+                continue
+            if await self._edit_final(entry, chat_id, entry.message_id, trigger="ttl_sweep"):
+                finalized.append(entry.short_id)
+        return finalized
+
+    def expire_on_restart(self, now_utc: datetime) -> list[str]:
+        """Journal RUNTIME_RESTART for every outstanding confirm of the previous process.
+
+        Call once at startup with a fresh flow. Nothing is edited: the old process' message ids are
+        gone, and a later tap on an old card is refused (NO_CONFIRM_CONTEXT) and loses its buttons.
+        Returns the approval ids that were expired; a second call returns none.
+        """
+        return self._book.expire_on_restart(now_utc)
+
     # ---- callbacks --------------------------------------------------------------------- #
 
     def callback_kwargs(

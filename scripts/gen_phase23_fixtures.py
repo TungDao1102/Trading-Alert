@@ -14,6 +14,9 @@ Sections, one function each so the later plans add theirs without touching this 
   (`messages/approve_base.txt`, `approve_request_demo.txt`, `approve_request_live.txt`) and the
   SIMULATE text of `src/paper/notify.py` (`messages/simulate.txt`), built from the plan 23-02
   LONG fixture (`approve_fields()`, `fixture_money()`).
+- `_confirm_section()` (plan 23-12): the DEMO confirmation card and its CONFIRMED and EXPIRED final
+  texts (`messages/confirm_card_demo.txt`, `confirm_final_confirmed_demo.txt`,
+  `confirm_final_expired_demo.txt`), from the same LONG fixture.
 """
 
 from __future__ import annotations
@@ -25,7 +28,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from src.adapters.telegram_notify import format_approval_request, format_approve
+from src.adapters.telegram_notify import (
+    format_approval_request,
+    format_approve,
+    format_live_confirm_card,
+    format_live_confirm_final,
+)
+from src.execution.confirm_flow import PLACEMENT_NOT_RECORDED
+from src.execution.pre_placement import check_remaining_validity
 from src.ops.alert_wording import worded_alert_text
 from src.ops.alerts import OperationalAlert
 from src.paper.notify import format_simulate
@@ -195,7 +205,73 @@ def _messages_section() -> dict[str, str]:
     }
 
 
-SECTIONS: tuple[Callable[[], dict[str, str]], ...] = (_alerts_section, _messages_section)
+# --------------------------------------------------------------------------- #
+# Confirm card (plan 23-12): the DEMO confirmation card and its two final texts.
+# --------------------------------------------------------------------------- #
+
+CONFIRM_MARK_PRICE = Decimal("50050")
+CONFIRM_MIN_REMAINING_VALIDITY_SECONDS = 600
+CONFIRM_GTD_CLOCK_MARGIN = timedelta(seconds=2)
+CONFIRM_TTL_SECONDS = 60
+CONFIRM_USER_ID = 777001
+
+
+def _confirm_section() -> dict[str, str]:
+    """The card issued at 2026-10-09T03:00:00Z with a mark of 50050 and a 600 s minimum, the
+    CONFIRMED final 30 s later (no entry intent recorded yet) and the TTL EXPIRED final at 61 s.
+
+    The card is built by `format_live_confirm_card` from the stored form of the LONG fixture money
+    and the verdict of `check_remaining_validity` (the placement gate's own rule); nothing here
+    multiplies or rounds an amount.
+    """
+    fields = approve_fields()
+    money = parse_money_json(fixture_money_json())
+    expiry = fields["expiry_utc"]
+    verdict = check_remaining_validity(
+        expiry_utc=expiry,
+        now_utc=FIXED_AT_UTC,
+        min_remaining_validity_seconds=CONFIRM_MIN_REMAINING_VALIDITY_SECONDS,
+        gtd_clock_margin=CONFIRM_GTD_CLOCK_MARGIN,
+    )
+    common: dict[str, Any] = {
+        "mode_label": "DEMO",
+        "symbol": FIXED_SYMBOL,
+        "side": "LONG",
+        "money": money,
+    }
+    card = format_live_confirm_card(
+        **common,
+        mark_price=CONFIRM_MARK_PRICE,
+        plan_expiry_utc=expiry,
+        validity_verdict=verdict,
+        now_utc=FIXED_AT_UTC,
+        ttl_seconds=CONFIRM_TTL_SECONDS,
+    )
+    confirmed = format_live_confirm_final(
+        **common,
+        outcome="CONFIRMED",
+        at_utc=FIXED_AT_UTC + timedelta(seconds=30),
+        user_id=CONFIRM_USER_ID,
+        placement_lines=(PLACEMENT_NOT_RECORDED,),
+    )
+    expired = format_live_confirm_final(
+        **common,
+        outcome="EXPIRED",
+        at_utc=FIXED_AT_UTC + timedelta(seconds=CONFIRM_TTL_SECONDS + 1),
+        reason="CONFIRM_TTL_ELAPSED",
+    )
+    return {
+        "messages/confirm_card_demo.txt": card + "\n",
+        "messages/confirm_final_confirmed_demo.txt": confirmed + "\n",
+        "messages/confirm_final_expired_demo.txt": expired + "\n",
+    }
+
+
+SECTIONS: tuple[Callable[[], dict[str, str]], ...] = (
+    _alerts_section,
+    _messages_section,
+    _confirm_section,
+)
 
 
 def render_all() -> dict[str, str]:
