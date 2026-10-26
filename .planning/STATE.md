@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 23
 current_phase_name: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
-current_plan: 11
+current_plan: 12
 status: executing
-stopped_at: Completed 23-10-PLAN.md
-last_updated: "2026-10-26T02:12:00.844Z"
+stopped_at: Completed 23-11-PLAN.md
+last_updated: "2026-10-26T02:24:49.754Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 23 execution started
-state_head: b2da5642f64da0c2e3752392b44eec26beb1fd64
+state_head: d0e4f86e6ed54bd24fe1bbda62cc513b6823ce37
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 328
-  completed_plans: 322
+  completed_plans: 323
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 23 (Telegram Approval Hardening + Two-Step Confirm + Money Amounts) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 11
+Current Plan: 12
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 23 execution started
@@ -248,6 +248,7 @@ Progress: [██████░░░░] 61%
 | Phase 23 P02 | 35min | 2 tasks | 3 files |
 | Phase 23 P08 | 1 session | 3 tasks | 12 files |
 | Phase 23 P10 | 40min | 2 tasks | 3 files |
+| Phase 23 P11 | 70min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -581,6 +582,9 @@ Recent decisions affecting current work:
 - [Phase 23]: 23-01: authorized_user_ids is a required keyword-only frozenset[int] on on_callback, build_application, ShadowCoordinator, ShadowWiring and RehearsalSettings; a configured Telegram without TELEGRAM_AUTHORIZED_USER_IDS refuses the paper start
 - [Phase 23]: [23-02] MoneyAtStake computed once in src/risk/money_at_stake.py from the SizedResult (net SL loss = realized_risk read, margin via required_initial_margin truncated at 18 digits, TP legs via per_unit_round_trip_cost); stored form money-at-stake/1 canonical JSON, strict parser
 - [Phase 23]: O-2 (G4-042) decided (a) by owner 2026-10-26: EXPIRED excluded from uq_approvals_one_decided_per_plan (0014); store refuses EXPIRED on a plan with an APPROVED/SKIPPED approval
+- [Phase 23]: TP fractions of the DEMO/LIVE request come from the stored money block, not a constant (no src.backtest import in src.execution; Phase 19 invariant 7)
+- [Phase 23]: Desk answers an unreadable entry intent on an APPROVED expired redelivery as needs reconciliation (never expired/rejected, Q5)
+- [Phase 23]: Desk final message text is derived from stored approval rows, edited once per request
 
 ### Pending Todos
 
@@ -667,6 +671,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-26T02:11:59.726Z
-Stopped at: Completed 23-10-PLAN.md
+Last session: 2026-10-26T02:24:48.504Z
+Stopped at: Completed 23-11-PLAN.md
 Resume file: None
