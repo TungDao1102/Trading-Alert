@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 23
 current_phase_name: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
-current_plan: 6
+current_plan: 4
 status: executing
-stopped_at: Completed 23-05-PLAN.md (Wave 1 done)
-last_updated: "2026-10-25T14:53:13.640Z"
+stopped_at: Completed 23-08-PLAN.md (O-2 = a)
+last_updated: "2026-10-26T02:04:50.156Z"
 last_activity: 2026-10-25
 last_activity_desc: Phase 23 execution started
-state_head: 43b2cf233228f757131462105f6ea7b7e55548df
+state_head: c5e40f1679462036ea4fe4b8619266a150fdbc74
 progress:
   total_phases: 29
   completed_phases: 18
   total_plans: 328
-  completed_plans: 317
+  completed_plans: 321
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 23 (Telegram Approval Hardening + Two-Step Confirm + Money Amounts) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 13
 Status: Ready to execute
 Last activity: 2026-10-25 — Phase 23 execution started
@@ -246,6 +246,7 @@ Progress: [██████░░░░] 61%
 | Phase 20 P02 | 18 min | 3 tasks | 6 files |
 | Phase 23 P01 | approx 1h | 3 tasks | 25 files |
 | Phase 23 P02 | 35min | 2 tasks | 3 files |
+| Phase 23 P08 | 1 session | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -578,6 +579,7 @@ Recent decisions affecting current work:
 - [Phase 23]: 23-01: new Telegram edge refusal codes are plain strings in src/approval/reason_codes.py, not RejectionReason members (enum stays 21; DispatchResult.reason_code is RejectionReason | str | None)
 - [Phase 23]: 23-01: authorized_user_ids is a required keyword-only frozenset[int] on on_callback, build_application, ShadowCoordinator, ShadowWiring and RehearsalSettings; a configured Telegram without TELEGRAM_AUTHORIZED_USER_IDS refuses the paper start
 - [Phase 23]: [23-02] MoneyAtStake computed once in src/risk/money_at_stake.py from the SizedResult (net SL loss = realized_risk read, margin via required_initial_margin truncated at 18 digits, TP legs via per_unit_round_trip_cost); stored form money-at-stake/1 canonical JSON, strict parser
+- [Phase 23]: O-2 (G4-042) decided (a) by owner 2026-10-26: EXPIRED excluded from uq_approvals_one_decided_per_plan (0014); store refuses EXPIRED on a plan with an APPROVED/SKIPPED approval
 
 ### Pending Todos
 
@@ -664,6 +666,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-25T14:53:07.683Z
-Stopped at: Completed 23-02-PLAN.md
+Last session: 2026-10-26T02:04:42.385Z
+Stopped at: Completed 23-08-PLAN.md (O-2 = a)
 Resume file: None

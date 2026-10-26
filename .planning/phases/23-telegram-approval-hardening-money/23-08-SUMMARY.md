@@ -2,7 +2,7 @@
 phase: 23-telegram-approval-hardening-money
 plan: 08
 subsystem: persistence
-status: awaiting-owner-decision
+status: complete
 tags: [alembic, approvals, expiry, g4-042, owner-open-o-2]
 requirements-addressed: [PAPER-02]
 requires: [23-04, 23-07]
@@ -27,7 +27,7 @@ key-files:
     - tests/test_paper_shadow_buttons.py
     - tests/test_paper_shadow_runtime.py
 key-decisions:
-  - "D-16 default of O-2 built and tested, NOT yet accepted by the owner (see Owner decision O-2)."
+  - "O-2 decided by the owner on 2026-10-26: option (a), keep the rule (EXPIRED excluded from the index; the store refuses EXPIRED on a decided plan)."
 metrics:
   completed: 2026-10-26
 commits: 3
@@ -72,7 +72,7 @@ Both PENDING siblings (APPROVE and SKIP_USER) of an undecided plan can now be ex
 
 ## Owner decision O-2
 
-**PENDING.** The plan stops at a blocking-human checkpoint. Options: (a) keep this rule (plan 23-13 then writes the DECISIONS row and the DATA_MODEL line), (b) revert plan-level (`git revert` of the three commits `3baf911f`, `57ec8f5f`, `3f4cc5e1`, G4-042 stays open), (c) leave unmerged and OPEN (do not merge develop to master). Answer, verbatim, and date: _to be recorded on resume_.
+**Answer (verbatim, 2026-10-26): "theo cách bạn recommend"** = option (a), keep this rule (the executor's recommendation was (a): exclude EXPIRED from the index, the store refuses EXPIRED on a plan that already has an APPROVED or SKIPPED approval). Date for the DECISIONS row: 2026-10-26. Plan 23-13 writes the DECISIONS row and the DATA_MODEL line (draft text in the plan's checkpoint). No revert; develop may merge with these commits once the owner merges.
 
 ## Known Stubs
 
@@ -84,4 +84,4 @@ None. T-23-24, T-23-25, T-23-26 mitigated and tested; T-23-SC: no dependency cha
 
 ## Self-Check: PASSED
 
-Files found: 0014 migration, all modified test files. Commits `3baf911f`, `57ec8f5f`, `3f4cc5e1` exist on develop. STATE.md and ROADMAP.md were deliberately not advanced because the plan is not complete until the owner answers O-2.
+Files found: 0014 migration, all modified test files. Commits `3baf911f`, `57ec8f5f`, `3f4cc5e1` exist on develop.
