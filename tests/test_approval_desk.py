@@ -83,7 +83,7 @@ def make_desk_money(**overrides: Any) -> MoneyAtStake:
         quantity_before_rounding=D("0.08"),
         quantity_after_rounding=D("0.08"),
         quantization_decision="ACCEPTED",
-        realized_risk=D("40"),
+        realized_risk=D("50"),
         modeled_costs_per_unit=D("20"),
         sizing_entry_price=D("50100"),
     )
