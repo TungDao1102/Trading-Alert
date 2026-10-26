@@ -63,6 +63,9 @@ def test_the_message_goldens_exist_and_name_no_local_zone() -> None:
         "approve_base.txt",
         "approve_request_demo.txt",
         "approve_request_live.txt",
+        "confirm_card_demo.txt",
+        "confirm_final_confirmed_demo.txt",
+        "confirm_final_expired_demo.txt",
         "simulate.txt",
     ]
     for text in _on_disk(FIXTURE_ROOT / "messages").values():

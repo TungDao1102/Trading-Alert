@@ -8,12 +8,14 @@ the wiring is under test and not only the methods. No network, no real Telegram,
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -716,3 +718,169 @@ async def test_a_throttled_edit_beyond_the_cap_expires_the_confirm_without_a_fal
     assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "CARD_DELIVERY_FAILED"
     assert rig.sleep.calls == []
     assert len(rig.bot.sent) == 1, "no fallback send and no notice while Telegram throttles us"
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: TTL sweep and restart, the validity line, the LIVE profile, the import ban, goldens.
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FLOW_PATH = REPO_ROOT / "src" / "execution" / "confirm_flow.py"
+GOLDEN_ROOT = REPO_ROOT / "tests" / "fixtures" / "phase23" / "messages"
+
+
+def golden(name: str) -> str:
+    return (GOLDEN_ROOT / name).read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+
+
+async def test_the_ttl_sweep_expires_the_card_once_and_makes_it_final() -> None:
+    rig, short = await approved_rig()
+    issued_card_edits = len(rig.bot.edited)
+
+    swept = await rig.flow.finalize_expired(T0 + timedelta(seconds=61))
+    again = await rig.flow.finalize_expired(T0 + timedelta(seconds=62))
+
+    assert swept == [short] and again == []
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "CONFIRM_TTL_ELAPSED"
+    assert len(rig.bot.edited) == issued_card_edits + 1, "one final edit, none for the second sweep"
+    assert_final(
+        rig,
+        contains="EXPIRED at 2026-10-09 03:01:01 UTC: no confirmation was taken "
+        "(CONFIRM_TTL_ELAPSED); nothing was placed",
+    )
+    assert rig.confirmed == []
+    # A CONFIRM after the sweep replays the expiry; it can never place.
+    rig.now = T0 + timedelta(seconds=63)
+    late = await rig.tap("CNF", short, query_id="q-late")
+    assert not late.ok and rig.confirmed == [] and rig.prefetch_calls == 0
+
+
+async def test_the_ttl_sweep_leaves_a_live_card_and_an_undelivered_one_alone() -> None:
+    rig, short = await approved_rig()
+
+    swept = await rig.flow.finalize_expired(T0 + timedelta(seconds=59))
+
+    assert swept == []
+    assert len(rig.bot.edited) == 1 and "DEMO_CONFIRM_EXPIRED" not in rig.journal_types()
+
+
+async def test_a_restart_journals_runtime_restart_and_edits_nothing() -> None:
+    rig, short = await approved_rig()
+    edits = len(rig.bot.edited)
+    restarted = rig.make_flow()
+
+    expired = restarted.expire_on_restart(T0 + timedelta(seconds=5))
+    again = restarted.expire_on_restart(T0 + timedelta(seconds=6))
+
+    assert len(expired) == 1 and again == []
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "RUNTIME_RESTART"
+    assert len(rig.bot.edited) == edits and rig.bot.markup_edits == []
+    assert rig.confirmed == []
+
+
+async def test_the_card_names_a_missing_owner_limit_and_never_invents_a_minimum() -> None:
+    rig = Rig(min_validity=None)
+    rig, _ = await approved_rig(rig)
+
+    card = rig.bot.edited[0].text
+
+    assert "placement check: refused (LIMITS_NOT_CONFIGURED)" in card
+    assert "minimum" not in card.lower() and "600" not in card
+
+
+async def test_the_card_shows_the_gate_verdict_for_a_plan_that_is_too_short_lived() -> None:
+    rig = Rig(plan_overrides={"expiry_utc": T0 + timedelta(minutes=5)})
+    rig, short = await approved_rig(rig)
+
+    card = rig.bot.edited[0].text
+
+    assert (
+        "Remaining validity: 300 s to the plan expiry 2026-10-09 03:05:00 UTC; "
+        "placement check: refused (VALIDITY_TOO_SHORT)" in card
+    )
+    # The recheck of the CONFIRM applies the same rule: the press is refused with the same code.
+    rig.now = T0 + timedelta(seconds=10)
+    result = await rig.tap("CNF", short, query_id="q-cnf")
+    assert not result.ok and rig.confirmed == []
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "VALIDITY_TOO_SHORT"
+
+
+async def test_the_card_says_when_the_mark_price_is_unavailable_or_the_rule_breaks() -> None:
+    unavailable, _ = await approved_rig(Rig(mark=None))
+    assert "Mark price: unavailable (entry 50100, SL 49500)" in unavailable.bot.edited[0].text
+
+    def broken(*, expiry_utc: datetime, now_utc: datetime) -> str | None:
+        raise RuntimeError("limits unreadable")
+
+    rig = Rig()
+    rig.flow = rig.make_flow(validity_rule=broken)
+    rig, _ = await approved_rig(rig)
+    assert "placement check: refused (VALIDITY_RULE_ERROR)" in rig.bot.edited[0].text
+
+
+async def test_a_live_flow_renders_live_journals_live_rows_and_only_calls_the_seam() -> None:
+    rig = Rig(mode="LIVE")
+    rig, short = await approved_rig(rig)
+    rig.now = T0 + timedelta(seconds=10)
+
+    result = await rig.tap("CNF", short, query_id="q-cnf")
+
+    assert result.ok and len(rig.confirmed) == 1
+    assert "Mode: LIVE" in rig.bot.edited[0].text
+    assert "LIVE_CONFIRM_ISSUED" in rig.journal_types() and "LIVE_CONFIRMED" in rig.journal_types()
+    assert not any(t.startswith("DEMO_") for t in rig.journal_types())
+    assert "Mode: LIVE" in rig.bot.edited[-1].text
+
+
+def _imported_names(tree: ast.AST) -> list[str]:
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            names.append(module)
+            names.extend(f"{module}.{alias.name}" for alias in node.names)
+    return names
+
+
+def test_the_flow_imports_nothing_that_places_an_order() -> None:
+    tree = ast.parse(FLOW_PATH.read_text(encoding="utf-8"))
+    banned = (
+        "src.execution.manager",
+        "src.execution.enablement",
+        "src.adapters.binance_usdm",
+        "src.paper",
+        "src.backtest",
+    )
+    for name in _imported_names(tree):
+        assert not name.startswith(banned), f"confirm_flow imports {name}"
+    identifiers = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    identifiers |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert "execute_approved_plan" not in identifiers
+    assert "ExecutionManager" not in identifiers
+
+
+async def test_the_card_and_finals_equal_the_generated_goldens() -> None:
+    rig, short = await approved_rig()
+    assert rig.bot.edited[0].text + "\n" == golden("confirm_card_demo.txt")
+
+    rig.now = T0 + timedelta(seconds=30)
+    await rig.tap("CNF", short, query_id="q-cnf")
+    assert rig.bot.edited[-1].text + "\n" == golden("confirm_final_confirmed_demo.txt")
+
+    expiring, expiring_short = await approved_rig()
+    await expiring.flow.finalize_expired(T0 + timedelta(seconds=61))
+    assert expiring_short
+    assert expiring.bot.edited[-1].text + "\n" == golden("confirm_final_expired_demo.txt")
+
+
+def test_the_confirm_goldens_show_utc_only_and_no_float_looking_amounts() -> None:
+    for name in (
+        "confirm_card_demo.txt",
+        "confirm_final_confirmed_demo.txt",
+        "confirm_final_expired_demo.txt",
+    ):
+        text = golden(name)
+        assert "Mode: DEMO" in text and "Asia/Ho_Chi_Minh" not in text
+        assert "e+" not in text.lower() and "e-0" not in text.lower()
