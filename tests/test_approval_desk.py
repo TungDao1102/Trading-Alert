@@ -360,6 +360,9 @@ def test_issue_refuses_missing_or_mismatching_money_before_any_write() -> None:
     )
     with pytest.raises(ValueError, match="quantity"):
         rig.issue(money=different)
+    one_leg = make_desk_money(take_profits=[(D("51000"), D("1"))])
+    with pytest.raises(MoneyAtStakeUnavailable, match="take_profits"):
+        rig.issue(money=one_leg)
     assert rig.stores.trace == []
     assert rig.stores.approvals == {} and rig.stores.journal == []
 

@@ -80,7 +80,6 @@ from src.approval.reason_codes import (
     USER_NOT_AUTHORIZED,
 )
 from src.approval.tokens import issue_one_time_token, token_hash_of
-from src.backtest.semantics import TP1_QUANTITY_FRACTION
 from src.domain.approval import Approval
 from src.domain.canonical import sha256_hex
 from src.domain.enums import ApprovalAction, ApprovalResult, RejectionReason
@@ -452,6 +451,13 @@ class ApprovalDesk:
         tp2 = _json_decimal(take_profit, "tp2", "take_profit_json")
         rr = _json_decimal(_json_object(plan.expected_rr_json, "expected_rr_json"), "tp1_rr", "rr")
         rule = _json_object(plan.invalidation_rule_json, "invalidation_rule_json")
+        # The quantity share of each take-profit comes from the STORED money block that was built
+        # for these legs, never from a constant: no execution module imports the backtest
+        # (Phase 19 invariant 7). `require_money_consistent` still compares prices and the number
+        # of legs with the plan.
+        if len(money.take_profits) != 2:
+            raise MoneyAtStakeUnavailable("take_profits", "the money block needs the two TP legs")
+        fractions = [leg.fraction for leg in money.take_profits]
         return format_approval_request(
             mode_label=self._mode,
             symbol=signal.symbol,
@@ -460,7 +466,7 @@ class ApprovalDesk:
             entry_min=plan.entry_min_price,
             entry_max=plan.entry_max_price,
             stop_loss=plan.stop_loss_price,
-            take_profits=[(tp1, TP1_QUANTITY_FRACTION), (tp2, Decimal(1) - TP1_QUANTITY_FRACTION)],
+            take_profits=list(zip((tp1, tp2), fractions, strict=True)),
             rr=rr,
             risk_pct=plan.risk_rate,
             expiry_utc=plan.expiry_utc,
