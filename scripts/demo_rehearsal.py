@@ -106,8 +106,7 @@ from src.adapters.telegram_callbacks import (  # noqa: E402
     dispatch_callback,
 )
 from src.adapters.telegram_notify import (  # noqa: E402
-    build_approve_keyboard,
-    build_skip_keyboard,
+    build_decision_keyboard,
     format_approve,
 )
 from src.approval.binding import Callback  # noqa: E402
@@ -1296,11 +1295,11 @@ class PtbApprovalChannel:
     async def send_approval(self, *, chat_id: int, text: str, signal_id: str, kind: str) -> None:
         if self._app is None:
             raise RuntimeError("channel is not open")
-        markup = (
-            build_approve_keyboard(signal_id)
-            if kind == "APPROVE"
-            else build_skip_keyboard(signal_id)
-        )
+        # Phase 23 (D-05): ONE message carries APPROVE and SKIP for every step kind. `kind` only
+        # names the button the operator is asked to tap in the text; the other button of a
+        # single-row step is refused by the replay layer (action mismatch), fail closed.
+        del kind
+        markup = build_decision_keyboard(signal_id)
         await self._app.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
 
     async def next_result(self, *, timeout_seconds: int) -> DispatchResult | None:
