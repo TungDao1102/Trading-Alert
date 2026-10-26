@@ -32,7 +32,7 @@ from __future__ import annotations
 import hashlib
 import math
 import warnings
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -963,6 +963,138 @@ def format_approval_request(
     )
 
 
+# --------------------------------------------------------------------------- #
+# The DEMO/LIVE confirmation card (Phase 23, plan 23-12; D041, D-09, D-11, D-12, D-13).
+#
+# The card replaces the request after APPROVE: it names what CONFIRM would hand to the execution
+# step. Every amount is the STORED `MoneyAtStake` value written with `format(value, "f")`: nothing
+# is multiplied or rounded here. Times are UTC with the suffix (D-14). The validity line carries
+# the verdict of the placement gate's own rule, handed in as a code (None = passes).
+# --------------------------------------------------------------------------- #
+
+LiveConfirmOutcome = Literal["CONFIRMED", "CANCELLED", "EXPIRED", "REFUSED"]
+_LIVE_CONFIRM_OUTCOMES: tuple[str, ...] = ("CONFIRMED", "CANCELLED", "EXPIRED", "REFUSED")
+
+
+def _one_line(value: str, field: str) -> str:
+    if not isinstance(value, str) or value == "" or "\n" in value or "\r" in value:
+        raise ValueError(f"{field} must be a non-empty single line")
+    return value
+
+
+def _live_confirm_head(
+    *, mode_label: str, symbol: str, side: str, money: MoneyAtStake
+) -> list[str]:
+    """The lines the card and every final text share: header, mode, quantity, notional, loss."""
+    if mode_label not in REQUEST_MODE_LABELS:
+        raise ValueError(f"mode_label must be DEMO or LIVE, got {mode_label!r}")
+    _one_line(symbol, "symbol")
+    stored = _money_or_refuse(money)
+    if stored.side != side:
+        raise ValueError(f"money.side {stored.side!r} differs from side {side!r}")
+    asset = stored.quote_asset
+    return [
+        f"CONFIRM {symbol} {side}",
+        f"Mode: {mode_label}",
+        f"Quantity: {format(stored.quantity, 'f')}",
+        f"Notional: {format(stored.notional, 'f')} {asset}",
+        f"Loss at SL: {format(stored.loss_at_stop_gross, 'f')} {asset} gross, "
+        f"{format(stored.loss_at_stop_net, 'f')} {asset} net of modeled costs",
+    ]
+
+
+def format_live_confirm_card(
+    *,
+    mode_label: str,
+    symbol: str,
+    side: str,
+    money: MoneyAtStake,
+    mark_price: Decimal | None,
+    plan_expiry_utc: datetime,
+    validity_verdict: str | None,
+    now_utc: datetime,
+    ttl_seconds: int,
+) -> str:
+    """The DEMO or LIVE confirmation card: mode, size, stored money, mark, validity, window.
+
+    `mark_price` None is shown as `unavailable` (never a guessed number). `validity_verdict` is
+    the code of the gate's remaining-validity rule or None when it passes; with the owner's minimum
+    not configured it is `LIMITS_NOT_CONFIGURED` and the card says so (it never invents a minimum).
+    """
+    head = _live_confirm_head(mode_label=mode_label, symbol=symbol, side=side, money=money)
+    stored = _money_or_refuse(money)
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+        raise ValueError(f"ttl_seconds must be a positive integer, got {ttl_seconds!r}")
+    expiry_text = format_utc(plan_expiry_utc)
+    until_text = format_utc(now_utc + timedelta(seconds=ttl_seconds))
+    if mark_price is None:
+        mark_text = "unavailable"
+    elif isinstance(mark_price, Decimal) and mark_price.is_finite():
+        mark_text = format(mark_price, "f")
+    else:
+        raise ValueError(f"mark_price must be a finite Decimal or None, got {mark_price!r}")
+    remaining = max(0, int((plan_expiry_utc - now_utc).total_seconds()))
+    check = (
+        "passes"
+        if validity_verdict is None
+        else f"refused ({_one_line(validity_verdict, 'validity_verdict')})"
+    )
+    return "\n".join(
+        [
+            *head,
+            f"Mark price: {mark_text} (entry {format(stored.entry_price, 'f')}, "
+            f"SL {format(stored.stop_loss_price, 'f')})",
+            f"Remaining validity: {remaining} s to the plan expiry {expiry_text}; "
+            f"placement check: {check}",
+            f"Confirm until {until_text} ({ttl_seconds} s window)",
+        ]
+    )
+
+
+def format_live_confirm_final(
+    *,
+    mode_label: str,
+    symbol: str,
+    side: str,
+    money: MoneyAtStake,
+    outcome: LiveConfirmOutcome,
+    at_utc: datetime,
+    user_id: int | str | None = None,
+    reason: str | None = None,
+    placement_lines: Sequence[str] = (),
+) -> str:
+    """The final text of a card that is decided: the shared head, then one outcome line.
+
+    CONFIRMED and CANCELLED name the user; EXPIRED and REFUSED name the reason code. A CONFIRMED
+    final always carries the placement lines (what the stored entry intent says, or that none is
+    recorded yet); the other outcomes say that nothing was placed.
+    """
+    if outcome not in _LIVE_CONFIRM_OUTCOMES:
+        raise ValueError(f"unknown confirm outcome {outcome!r}")
+    head = _live_confirm_head(mode_label=mode_label, symbol=symbol, side=side, money=money)
+    when = format_utc(at_utc)
+    lines: list[str]
+    if outcome in ("CONFIRMED", "CANCELLED"):
+        if user_id is None or user_id == "":
+            raise ValueError(f"{outcome} needs the user id")
+        who = f"user {_one_line(str(user_id), 'user_id')}"
+        if outcome == "CONFIRMED":
+            if not placement_lines:
+                raise ValueError("a CONFIRMED text needs its placement lines")
+            lines = [f"CONFIRMED by {who} at {when}", *placement_lines]
+        else:
+            lines = [f"CANCELLED by {who} at {when}; nothing was placed"]
+    else:
+        code = _one_line(reason or "", "reason")
+        if outcome == "EXPIRED":
+            lines = [f"EXPIRED at {when}: no confirmation was taken ({code}); nothing was placed"]
+        else:
+            lines = [f"REFUSED at {when}: {code}; nothing was placed"]
+    if outcome != "CONFIRMED" and placement_lines:
+        raise ValueError("only a CONFIRMED text carries placement lines")
+    return "\n".join([*head, *lines])
+
+
 __all__ = [
     "APR_PREFIX",
     "CNF_PREFIX",
@@ -972,6 +1104,7 @@ __all__ = [
     "SKIP_PREFIX",
     "TELEGRAM_CALLBACK_DATA_MAX_BYTES",
     "REQUEST_MODE_LABELS",
+    "LiveConfirmOutcome",
     "TelegramBot",
     "TelegramFailure",
     "TelegramFailureKind",
@@ -988,6 +1121,8 @@ __all__ = [
     "edit_to_confirm_card",
     "format_approval_request",
     "format_approve",
+    "format_live_confirm_card",
+    "format_live_confirm_final",
     "format_utc",
     "send_simulate",
     "render_money_block",
