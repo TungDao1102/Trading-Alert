@@ -1233,7 +1233,7 @@ Input: .planning/phases/23-telegram-approval-hardening-money/23-NOTES.md
 - [P16R-02] `ShadowConfirm._deferred_confirmed` keeps only the last adopted CONFIRM of one `expire_due` sweep, so `on_confirmed` runs once for the last of several adopted CONFIRMs (`src/paper/shadow_confirm.py:1077`, `:1215`). Harmless today because `ShadowCoordinator._on_confirmed` ignores its arguments and `_ensure_drivers` builds drivers for every reservation; it becomes a real defect the day a hook uses its arguments. Decide when the two-step confirm is reworked: keep a list, or document that the hook takes no arguments, and add a test with two adoptions in one sweep (source: review of c654524..6f73e5b, 2026-10-20, reviewer C/B/A hand-back; detail in .planning/phases/16-paper-runtime-composition/deferred-items.md; decision: none required)
 - [P20-OPS-REMOTE] Remote operator commands (owner request 2026-10-21): the owner restricts ssh to the EC2 host to one home IP and wants ssh kept for critical operations, so non-critical operator actions run through authenticated commands such as Telegram bot commands: SAFE_MODE exit (`exit_safe_mode`, plan 20-15), `python -m src.ops.rest_gate_cli status/clear` (plan 20-07, if built), and the EXEC-06 controls of plan 20-17. Reuse this phase's allow-list on `from_user.id`, the private-chat rule and the two-step confirm; commands that raise risk (SAFE_MODE exit, gate clear) need the confirm, risk-reducing ones (disable entries, close) first. Phase 24 wires it into the runtime. Proposed home chosen by the assistant, to be confirmed by the owner (source: 20-DEFERRED.md written by plan 20-24; decision: none yet)
 
-**Plans:** 9/13 plans executed
+**Plans:** 10/13 plans executed
 
 Plans:
 
@@ -1251,7 +1251,7 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 - [x] 23-08-PLAN.md - G4-042: migration 0014 excludes EXPIRED from the one-decided-per-plan index, owner gate O-2 (D-16) *(checkpoint: owner decision)*
 - [x] 23-09-PLAN.md - Message renderers: UTC times, money block, DEMO/LIVE request composer, SIMULATE quantity and money, one APPROVE+SKIP keyboard (D-05, D-13, D-14)
-- [ ] 23-10-PLAN.md - SHADOW decided messages: keyboard removal after SKIP, CONFIRM, CANCEL and expiry, texts unchanged (D-06, D-08)
+- [x] 23-10-PLAN.md - SHADOW decided messages: keyboard removal after SKIP, CONFIRM, CANCEL and expiry, texts unchanged (D-06, D-08)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 23-11-PLAN.md - DEMO/LIVE approval desk: one message, money rows, SKIP recorded, stale taps, G4-032 replies; Demo rehearsal one-message keyboard (D-05, D-07, D-12)
@@ -1460,7 +1460,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 31/31 | Executed, human_needed | 2026-10-23 |
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
-| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 9/13 | In Progress|  |
+| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 10/13 | In Progress|  |
 | 24. Live Runtime Composition + Demo Rehearsal | 0/TBD | Not started | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
