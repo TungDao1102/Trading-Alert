@@ -45,10 +45,13 @@ from src.execution.confirm_recheck import (
 from src.execution.intent_store import IntentRecord
 from src.execution.pre_placement import PrePlacementInputs, check_remaining_validity
 from src.ops.alert_wording import reconciliation_required_text
+from telegram.error import BadRequest, Forbidden, RetryAfter
 
 from tests.shadow_fakes import (
     AUTHORIZED_USER_IDS,
     CHAT_ID,
+    OTHER_USER_ID,
+    STRANGER_USER_ID,
     T0,
     USER_ID,
     FakeBot,
@@ -361,3 +364,355 @@ async def test_the_confirmed_card_shows_the_stored_entry_outcome(
         assert reconciliation_required_text() in final
         assert "rejected" not in final.lower()
     assert len(rig.confirmed) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the criterion-4 refusal matrix through on_callback.
+# --------------------------------------------------------------------------- #
+
+
+def replies(rig: Rig) -> list[str]:
+    """Every message sent after the request itself (the first one)."""
+    return [message.text for message in rig.bot.sent[1:]]
+
+
+def payload_of(rig: Rig, event_type: str) -> dict[str, Any]:
+    (event,) = rig.stores.journal_of_type(event_type)
+    loaded = json.loads(event.payload_json)
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+async def approved_rig(rig: Rig | None = None) -> tuple[Rig, str]:
+    active = Rig() if rig is None else rig
+    issued = await active.issue_and_send()
+    short = issued.mapping.short_id
+    result = await active.approve(short)
+    assert result.ok
+    return active, short
+
+
+def assert_final(rig: Rig, *, contains: str) -> None:
+    final = rig.bot.edited[-1]
+    assert final.message_id == 1
+    assert final.reply_markup.inline_keyboard == ()
+    assert contains in final.text
+
+
+def confirm_events(rig: Rig) -> list[str]:
+    return [
+        t
+        for t in rig.journal_types()
+        if t.startswith("DEMO_CONFIRM") and t != "DEMO_CONFIRM_ISSUED"
+    ]
+
+
+async def test_a_double_tap_confirms_once_and_answers_the_second_from_the_replayed_outcome() -> (
+    None
+):
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+
+    first = await rig.tap("CNF", short, query_id="q-1")
+    second = await rig.tap("CNF", short, query_id="q-2")
+
+    assert first.ok and second.ok
+    assert len(rig.confirmed) == 1
+    assert rig.journal_types().count("DEMO_CONFIRMED") == 1
+    assert replies(rig) == ["Mode: DEMO\nAlready confirmed. Nothing changed."]
+    assert rig.prefetch_calls == 1, "the second tap reads no exchange data"
+    assert len(rig.bot.edited) == 2, "the final card is edited once"
+
+
+async def test_a_redelivered_confirm_writes_no_second_row_and_no_second_call() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+
+    await rig.tap("CNF", short, query_id="q-same")
+    await rig.tap("CNF", short, query_id="q-same")
+
+    assert len(rig.confirmed) == 1
+    assert rig.journal_types().count("DEMO_CONFIRMED") == 1
+    assert confirm_events(rig) == ["DEMO_CONFIRMED"]
+
+
+async def test_a_confirm_after_the_ttl_is_refused_and_the_card_becomes_final() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=60)
+
+    result = await rig.tap("CNF", short, query_id="q-late")
+
+    assert not result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "CONFIRM_TTL_ELAPSED"
+    assert replies(rig) == [
+        "Mode: DEMO\nRefused: CONFIRM_TTL_ELAPSED. The confirm window ran out. Nothing was placed."
+    ]
+    assert_final(
+        rig,
+        contains="EXPIRED at 2026-10-09 03:01:00 UTC: no confirmation was taken "
+        "(CONFIRM_TTL_ELAPSED); nothing was placed",
+    )
+    assert rig.confirmed == []
+    assert rig.prefetch_calls == 0, "a doomed CONFIRM reads no exchange data"
+
+
+async def test_a_confirm_by_another_allowed_user_is_refused_and_keeps_the_keyboard() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+
+    result = await rig.tap("CNF", short, query_id="q-other", user_id=OTHER_USER_ID)
+
+    assert not result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_REJECTED")["reason"] == "USER_MISMATCH"
+    assert replies(rig) == [
+        "Mode: DEMO\nRefused: USER_MISMATCH. Only the user who pressed APPROVE can confirm. "
+        "Nothing changed."
+    ]
+    assert len(rig.bot.edited) == 1 and rig.bot.markup_edits == [], "the card keeps its keyboard"
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+    # The approving user can still confirm afterwards.
+    again = await rig.tap("CNF", short, query_id="q-owner")
+    assert again.ok and len(rig.confirmed) == 1 and rig.prefetch_calls == 1
+
+
+async def test_a_confirm_by_a_user_who_is_not_listed_never_reaches_the_confirm_core() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+
+    result = await rig.tap("CNF", short, query_id="q-stranger", user_id=STRANGER_USER_ID)
+
+    assert not result.ok and result.reason_code == "USER_NOT_AUTHORIZED"
+    assert confirm_events(rig) == []
+    assert replies(rig) == ["Mode: DEMO\nRefused. Nothing changed."]
+    assert len(rig.bot.edited) == 1 and rig.bot.markup_edits == []
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+
+
+async def test_a_confirm_at_the_plan_expiry_is_refused_and_final() -> None:
+    expiry = T0 + timedelta(seconds=30)
+    rig, short = await approved_rig(Rig(plan_overrides={"expiry_utc": expiry}))
+    rig.now = expiry
+
+    result = await rig.tap("CNF", short, query_id="q-expired")
+
+    assert not result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "APPROVAL_EXPIRED"
+    assert replies(rig) == [
+        "Mode: DEMO\nRefused: APPROVAL_EXPIRED. The plan has expired. Nothing was placed."
+    ]
+    assert_final(rig, contains="REFUSED at 2026-10-09 03:00:30 UTC: APPROVAL_EXPIRED")
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("setup", "code"),
+    [
+        ("crossed", "MARK_PRICE_CROSSED_STOP"),
+        ("no_prefetch", "CONFIRM_INPUTS_UNAVAILABLE"),
+        ("prefetch_raises", "CONFIRM_INPUTS_UNAVAILABLE"),
+        ("recheck_raises", "RECHECK_ERROR"),
+    ],
+)
+async def test_a_failed_recheck_refuses_with_its_code_and_places_nothing(
+    setup: str, code: str
+) -> None:
+    rig = Rig()
+    if setup == "crossed":
+        rig.prefetch_mark = D("49400")
+    elif setup == "no_prefetch":
+        rig.prefetch_mark = None
+    elif setup == "prefetch_raises":
+        rig.prefetch_error = RuntimeError("exchange read failed")
+    else:
+
+        def boom(signal: Signal, plan: TradePlan, now: datetime) -> str | None:
+            raise RuntimeError("recheck failed")
+
+        rig.flow = rig.make_flow(recheck=boom)
+    rig, short = await approved_rig(rig)
+    rig.now = T0 + timedelta(seconds=10)
+
+    result = await rig.tap("CNF", short, query_id="q-cnf")
+
+    assert not result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == code
+    assert replies(rig) == [f"Mode: DEMO\nRefused: {code}. Nothing was placed."]
+    assert_final(rig, contains=f"REFUSED at 2026-10-09 03:00:10 UTC: {code}")
+    assert rig.confirmed == []
+    assert rig.prefetch_calls == 1
+
+
+async def test_cancel_journals_the_user_and_the_card_says_nothing_was_placed() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+
+    result = await rig.tap("CXL", short, query_id="q-cxl")
+
+    assert result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_CANCELLED")["approving_user_id"] == "777001"
+    assert_final(
+        rig, contains="CANCELLED by user 777001 at 2026-10-09 03:00:10 UTC; nothing was placed"
+    )
+    assert replies(rig) == []
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+    # A CONFIRM after the CANCEL cannot flip it.
+    late = await rig.tap("CNF", short, query_id="q-late")
+    assert not late.ok
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+    assert replies(rig) == ["Mode: DEMO\nAlready cancelled. Nothing changed."]
+
+
+async def test_a_confirm_after_a_restart_is_refused_and_loses_its_keyboard() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+    restarted = rig.make_flow()  # a fresh book: the confirm token of the old process is gone
+
+    result = await rig.tap("CNF", short, query_id="q-after-restart", flow=restarted)
+
+    assert not result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_REJECTED")["reason"] == "NO_CONFIRM_CONTEXT"
+    assert replies(rig) == ["Mode: DEMO\nRefused: NO_CONFIRM_CONTEXT. Nothing was placed."]
+    (removal,) = rig.bot.markup_edits
+    assert removal.message_id == 1 and removal.reply_markup.inline_keyboard == ()
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+
+
+async def test_a_second_approve_replays_the_card_and_a_skip_after_approve_changes_nothing() -> None:
+    rig, short = await approved_rig()
+
+    again = await rig.approve(short, query_id="q-apr-2")
+    skip = await rig.tap("SKP", short, query_id="q-skp")
+
+    assert again.ok and not skip.ok
+    assert rig.journal_types().count("DEMO_CONFIRM_ISSUED") == 1, "never a second token"
+    assert [edit.text for edit in rig.bot.edited] == [DEMO_CARD, DEMO_CARD]
+    assert rig.bot.markup_edits == []
+    assert rig.row(ApprovalAction.APPROVE).status is ApprovalResult.APPROVED
+    assert rig.confirmed == []
+
+
+async def test_a_stale_approve_tap_after_the_confirm_does_not_undo_the_final_card() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+    await rig.tap("CNF", short, query_id="q-cnf")
+    final = rig.bot.edited[-1].text
+
+    await rig.approve(short, query_id="q-apr-late")
+
+    assert rig.bot.edited[-1].text == final
+    assert len(rig.bot.edited) == 2
+    assert len(rig.confirmed) == 1
+    assert rig.desk.take_decision("cbq:q-apr-late") is None, "the desk record was consumed"
+
+
+async def test_a_failing_on_confirmed_is_answered_neutrally_and_never_called_twice() -> None:
+    rig = Rig()
+    calls: list[str] = []
+
+    def failing(approval: Approval, plan: TradePlan, confirmed_at: datetime) -> None:
+        calls.append(approval.approval_id)
+        raise RuntimeError("placement step down")
+
+    rig.flow = rig.make_flow(on_confirmed=failing)
+    rig, short = await approved_rig(rig)
+    rig.now = T0 + timedelta(seconds=10)
+
+    first = await rig.tap("CNF", short, query_id="q-1")
+    second = await rig.tap("CNF", short, query_id="q-2")
+
+    assert not first.ok and first.reason_code == "CALLBACK_HANDLER_ERROR"
+    assert second.ok, "the journaled CONFIRM is replayed"
+    assert len(calls) == 1
+    assert "An internal error stopped this tap" in replies(rig)[0]
+    assert replies(rig)[0].startswith("Mode: DEMO\n")
+    assert replies(rig)[1] == "Mode: DEMO\nAlready confirmed. Nothing changed."
+
+
+async def test_a_failed_final_edit_is_journaled_and_the_outcome_is_sent_as_a_message() -> None:
+    rig, short = await approved_rig()
+    rig.now = T0 + timedelta(seconds=10)
+    rig.bot.queue_error(Forbidden("bot was blocked"))  # the final text edit
+    rig.bot.queue_markup_error(Forbidden("bot was blocked"))  # and the keyboard-only fallback
+
+    result = await rig.tap("CNF", short, query_id="q-cnf")
+
+    assert result.ok and len(rig.confirmed) == 1, "the decision stands"
+    failure = payload_of(rig, "DEMO_CONFIRM_MESSAGE_EDIT_FAILED")
+    assert failure["kind"] == "REJECTED" and failure["trigger"] == "CONFIRM"
+    (notice,) = replies(rig)
+    assert notice.startswith("CONFIRM BTCUSDT LONG\nMode: DEMO")
+    assert "CONFIRMED by user 777001 at 2026-10-09 03:00:10 UTC" in notice
+
+
+# --------------------------------------------------------------------------- #
+# Card delivery: edit, one fallback send, else the confirm expires.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_refused_card_edit_falls_back_to_exactly_one_send_of_the_same_card() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rig.bot.queue_error(BadRequest("Message can't be edited"))
+
+    await rig.approve(issued.mapping.short_id)
+
+    assert rig.bot.edited == []
+    (old_keyboard,) = rig.bot.markup_edits
+    assert old_keyboard.message_id == 1 and old_keyboard.reply_markup.inline_keyboard == ()
+    assert [m.text for m in rig.bot.sent] == [issued.text, DEMO_CARD]
+    assert buttons_of(rig.bot.sent[1]) == [
+        ("CONFIRM", f"CNF:{issued.mapping.short_id}"),
+        ("CANCEL", f"CXL:{issued.mapping.short_id}"),
+    ]
+    assert payload_of(rig, "DEMO_CONFIRM_ISSUED")["delivery"] == "fallback_send"
+    # The card now lives in message 2; a CONFIRM pressed there finalizes that message.
+    rig.now = T0 + timedelta(seconds=10)
+    await rig.tap("CNF", issued.mapping.short_id, query_id="q-cnf", message_id=2)
+    assert rig.bot.edited[-1].message_id == 2 and len(rig.confirmed) == 1
+
+
+async def test_a_rate_limited_edit_is_retried_inside_the_confirm_window() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rig.bot.queue_error(RetryAfter(2))
+
+    await rig.approve(issued.mapping.short_id)
+
+    assert rig.sleep.calls == [2]
+    assert [edit.text for edit in rig.bot.edited] == [DEMO_CARD]
+    assert payload_of(rig, "DEMO_CONFIRM_ISSUED")["attempts"] == 2
+
+
+async def test_no_card_at_all_expires_the_confirm_notifies_and_makes_the_request_final() -> None:
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rig.bot.queue_error(BadRequest("Message can't be edited"))
+    rig.bot.queue_error(Forbidden("bot was blocked"))
+
+    await rig.approve(issued.mapping.short_id)
+
+    expired = payload_of(rig, "DEMO_CONFIRM_EXPIRED")
+    assert expired["reason"] == "CARD_DELIVERY_FAILED" and expired["failure_kind"] == "REJECTED"
+    assert "DEMO_CONFIRM_ISSUED" not in rig.journal_types()
+    assert rig.confirmed == []
+    assert_final(
+        rig,
+        contains="EXPIRED at 2026-10-09 03:00:00 UTC: no confirmation was taken "
+        "(CARD_DELIVERY_FAILED); nothing was placed",
+    )
+    (notice,) = replies(rig)
+    assert "could not be delivered (REJECTED). Nothing was placed." in notice
+
+
+async def test_a_throttled_edit_beyond_the_cap_expires_the_confirm_without_a_fallback_send() -> (
+    None
+):
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    rig.bot.queue_error(RetryAfter(45))
+
+    await rig.approve(issued.mapping.short_id)
+
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "CARD_DELIVERY_FAILED"
+    assert rig.sleep.calls == []
+    assert len(rig.bot.sent) == 1, "no fallback send and no notice while Telegram throttles us"
