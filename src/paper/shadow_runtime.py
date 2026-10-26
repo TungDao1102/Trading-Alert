@@ -95,6 +95,7 @@ from src.paper.shadow_confirm import (
     TERMINAL_CONFIRM_EVENTS,
     ConfirmBook,
     ConfirmStores,
+    finalize_expired_cards,
     make_confirm_callbacks,
 )
 from src.paper.shadow_fill import (
@@ -834,7 +835,18 @@ class ShadowCoordinator:
         await asyncio.to_thread(self._sweep, now)
         # The confirm book is driven by the callback handlers on this thread, so its TTL sweep runs
         # here too (its state is not shared with the worker thread).
-        self._confirm.expire_due(now)
+        expired = self._confirm.expire_due(now)
+        # D-06: a delivered card whose TTL just ran out loses its keyboard (keyboard-only edit,
+        # the card text stays). No sweep at startup: raw tokens and message ids do not survive a
+        # restart (expire_on_restart journals RUNTIME_RESTART as before).
+        await finalize_expired_cards(
+            confirm=self._confirm,
+            bot=self._bot,
+            chat_id=self._chat_id,
+            approval_ids=expired,
+            sleep=self._sleep,
+            stores=self._stores,
+        )
 
     async def _advance(self, position: _Position, horizon: datetime) -> None:
         symbol = position.reservation.symbol
