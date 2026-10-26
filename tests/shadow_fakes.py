@@ -6,8 +6,9 @@ Telegram bot is constructed.
 `InMemoryShadowStores` implements the `ShadowStores` port with the behaviour of the Phase 17
 PostgreSQL stores that matters to the SHADOW layer: parents must exist before children
 (`ParentRowMissing`), a decision is conditional on PENDING and only ONE approval of a plan may be
-decided (`uq_approvals_one_decided_per_plan`, `ApprovalAlreadyDecided`), and the short-id mapping
-refuses to rebind.
+APPROVED or SKIPPED (`uq_approvals_one_decided_per_plan`, `ApprovalAlreadyDecided`; EXPIRED rows
+are outside it since Alembic 0014, so both siblings can expire, but a decided plan's sibling
+cannot), and the short-id mapping refuses to rebind.
 
 `FakeBot` records `send_message` / `edit_message_text` calls and runs `assert_shadow_text` on every
 text BEFORE recording it (and before raising a queued error), so any SHADOW text that leaves
@@ -168,9 +169,13 @@ class InMemoryShadowStores:
             raise RowConflict(f"approval {approval.approval_id}: row does not exist")
         if current.status != ApprovalResult.PENDING:
             raise ApprovalAlreadyDecided(current)
+        # G4-042 (plan 23-08): EXPIRED rows are outside the one-decided-per-plan index, so only an
+        # APPROVED or SKIPPED sibling blocks a decision, and an EXPIRED decision is refused on a
+        # plan that already has one (same rule as PgApprovalStore._decide).
         for other in self.approvals.values():
-            if other.trade_plan_id == approval.trade_plan_id and (
-                other.status != ApprovalResult.PENDING
+            if other.trade_plan_id == approval.trade_plan_id and other.status in (
+                ApprovalResult.APPROVED,
+                ApprovalResult.SKIPPED,
             ):
                 raise ApprovalAlreadyDecided(other)
         self.approvals[approval.approval_id] = approval

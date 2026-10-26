@@ -297,9 +297,10 @@ async def test_restart_expires_pending_approvals_and_later_callbacks_are_rejecte
 
     report = invalidate_pending_on_restart(h.stores, restart_at)
 
-    # One decision per plan is all PostgreSQL allows; the rest of the pair can no longer be
-    # decided by anyone (its raw token died with the process).
-    assert len(report.expired) == 2
+    # EXPIRED rows are outside the one-decided-per-plan index (G4-042, Alembic 0014): both rows
+    # of each undecided plan are expired and none is left PENDING with a dead token.
+    assert len(report.expired) == 4
+    assert report.left_pending == []
     for approval in report.expired:
         stored = h.stores.approvals[approval.approval_id]
         assert stored.status == ApprovalResult.EXPIRED
@@ -312,7 +313,7 @@ async def test_restart_expires_pending_approvals_and_later_callbacks_are_rejecte
             a.status
             for a in h.stores.approvals.values()
             if a.trade_plan_id == plan_id and a.status != ApprovalResult.PENDING
-        ] == [ApprovalResult.EXPIRED]
+        ] == [ApprovalResult.EXPIRED, ApprovalResult.EXPIRED]
 
     # A new process has an empty book: the callback finds no binding context and is rejected.
     h.book = ShadowApprovalBook(h.stores, clock=lambda: restart_at)
@@ -618,3 +619,37 @@ async def test_wr01_the_pending_approvals_carry_the_issued_plan_quantity() -> No
     assert result.approval is not None
     assert result.approval.status == ApprovalResult.APPROVED
     assert result.approval.approved_quantity == plan.quantity_after_rounding
+
+
+# --------------------------------------------------------------------------- #
+# G4-042 (plan 23-08): the in-memory store mirrors the PostgreSQL expiry rule.
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_fake_expires_both_siblings_of_an_undecided_plan() -> None:
+    h = Harness()
+    await h.alert()
+    first, second = sorted(h.stores.approvals.values(), key=lambda a: a.approval_id)
+
+    report = invalidate_pending_on_restart(h.stores, T0 + timedelta(minutes=30))
+
+    assert {a.approval_id for a in report.expired} == {first.approval_id, second.approval_id}
+    assert report.left_pending == []
+    assert {a.status for a in h.stores.approvals.values()} == {ApprovalResult.EXPIRED}
+
+
+async def test_the_fake_refuses_to_expire_the_sibling_of_a_decided_plan() -> None:
+    h = Harness()
+    await h.alert()
+    apr, _ = h.buttons()
+    assert h.press(apr, query="g4042-1").ok
+
+    report = invalidate_pending_on_restart(h.stores, T0 + timedelta(minutes=30))
+
+    assert report.expired == []
+    assert [a.action for a in report.left_pending] == [ApprovalAction.SKIP_USER]
+    outcomes = {
+        json.loads(e.payload_json)["outcome"]
+        for e in h.stores.journal_of_type("SHADOW_PENDING_INVALIDATED")
+    }
+    assert outcomes == {"LEFT_PENDING_SIBLING_DECIDED"}

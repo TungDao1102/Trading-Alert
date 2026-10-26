@@ -94,6 +94,21 @@ def _constraint_name(exc: IntegrityError) -> str:
     return str(name) if name else "unknown constraint"
 
 
+def _decided_row_of_plan(session: Session, trade_plan_id: str) -> ApprovalRow | None:
+    """The plan's APPROVED or SKIPPED row, or None (G4-042, plan 23-08).
+
+    EXPIRED rows are deliberately not selected: any number of them may exist for one plan, while
+    `uq_approvals_one_decided_per_plan` allows at most one APPROVED-or-SKIPPED row, so the result
+    can never be ambiguous.
+    """
+    return session.execute(
+        select(ApprovalRow).where(
+            ApprovalRow.trade_plan_id == trade_plan_id,
+            ApprovalRow.status.in_((ApprovalResult.APPROVED.value, ApprovalResult.SKIPPED.value)),
+        )
+    ).scalar_one_or_none()
+
+
 def _approval_values(approval: Approval) -> dict[str, Any]:
     """Column values of the mapped row (the mapper is the only domain -> row path)."""
     row = approval_to_row(approval)
@@ -237,6 +252,13 @@ class PgApprovalStore:
     def _decide(session: Session, approval: Approval) -> None:
         try:
             with session.begin_nested():
+                if approval.status == ApprovalResult.EXPIRED:
+                    # G4-042 (23-08): EXPIRED rows are outside the one-decided-per-plan index, so
+                    # the index no longer stops the expiry of a decided plan's sibling. The store
+                    # does: it would release the plan's reservation as APPROVAL_EXPIRED.
+                    already = _decided_row_of_plan(session, approval.trade_plan_id)
+                    if already is not None:
+                        raise ApprovalAlreadyDecided(approval_from_row(already))
                 updated = session.execute(
                     update(ApprovalRow)
                     .where(
@@ -256,12 +278,7 @@ class PgApprovalStore:
                 raise RowConflict(
                     f"approval {approval.approval_id}: constraint violated ({name})"
                 ) from exc
-            decided = session.execute(
-                select(ApprovalRow).where(
-                    ApprovalRow.trade_plan_id == approval.trade_plan_id,
-                    ApprovalRow.status != ApprovalResult.PENDING.value,
-                )
-            ).scalar_one_or_none()
+            decided = _decided_row_of_plan(session, approval.trade_plan_id)
             if decided is None:
                 raise RowConflict(
                     f"approval {approval.approval_id}: decided row for the plan not visible"

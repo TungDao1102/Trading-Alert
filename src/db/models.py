@@ -381,8 +381,8 @@ class ApprovalRow(Base):
             "uq_approvals_one_decided_per_plan",
             "trade_plan_id",
             unique=True,
-            postgresql_where=text("status <> 'PENDING'"),
-            sqlite_where=text("status <> 'PENDING'"),
+            postgresql_where=text("status NOT IN ('PENDING','EXPIRED')"),
+            sqlite_where=text("status NOT IN ('PENDING','EXPIRED')"),
         ).ddl_if(dialect="postgresql"),
         ForeignKeyConstraint(
             ["trade_plan_id"],
