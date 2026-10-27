@@ -1260,7 +1260,7 @@ Plans:
 - [x] 23-12-PLAN.md - DEMO/LIVE two-step confirm flow: card, recheck, on_confirmed seam, criterion-4 matrix, finals, expiry (D-09, D-10, D-11)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 23-13-PLAN.md - Canonical docs (TELEGRAM trust model F-127, GLOSSARY 9.3, DATA_MODEL, DECISIONS per O-2), Phase 23 gate, owner register (D-04, D-15, D-17)
+- [x] 23-13-PLAN.md - Canonical docs (TELEGRAM trust model F-127, GLOSSARY 9.3, DATA_MODEL, DECISIONS per O-2), Phase 23 gate, owner register (D-04, D-15, D-17)
 
 ### Phase 24: Live Runtime Composition + Demo Rehearsal
 
