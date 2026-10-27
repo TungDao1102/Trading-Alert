@@ -543,3 +543,89 @@ def test_invariant_8b_every_requirement_name_is_a_known_requirement() -> None:
     text = planning.read_text(encoding="utf-8")
     for requirement in REQUIREMENT_TESTS:
         assert f"**{requirement}**" in text, requirement
+
+
+# --------------------------------------------------------------------------- #
+# The canonical documents describe what Phase 23 built (plan 23-13).
+# --------------------------------------------------------------------------- #
+
+
+def _doc(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def test_invariant_9_telegram_md_documents_the_gate_and_the_token_trust_model() -> None:
+    text = _doc("docs/integration/TELEGRAM.md")
+    assert text.count("### Token trust model (F-127)") == 1
+    for needle in (
+        "TELEGRAM_AUTHORIZED_USER_IDS",
+        "callback_data",
+        "approval_token_hash",
+        "RUNTIME_RESTART",
+        "NO_CONFIRM_CONTEXT",
+        "CHAT_NOT_PRIVATE",
+        "USER_NOT_AUTHORIZED",
+        "MONEY_AT_STAKE_MISSING",
+        "Asia/Ho_Chi_Minh",
+        "D025",
+        "O-3",
+        "ALREADY_DECIDED",
+        "on_confirmed",
+        "needs reconciliation",
+        "G2-014",
+    ):
+        assert needle in text, f"docs/integration/TELEGRAM.md does not mention {needle!r}"
+    assert "does not carry it" not in text, "the stale SIMULATE quantity sentence is still there"
+
+
+def test_invariant_9b_the_g4_042_rule_is_recorded_as_the_owner_answered() -> None:
+    """O-2 was answered (a) on 2026-10-26 (23-08-SUMMARY.md): one DECISIONS row, one note."""
+    rows = [line for line in _doc("docs/DECISIONS.md").splitlines() if line.startswith("| D088 |")]
+    assert len(rows) == 1, "DECISIONS must carry exactly one D088 row"
+    for needle in (
+        "2026-10-26",
+        "theo cách bạn recommend",
+        "status NOT IN ('PENDING','EXPIRED')",
+        "0014_decided_excl_expired",
+        "G4-042",
+    ):
+        assert needle in rows[0], f"D088 does not mention {needle!r}"
+    assert "D088" in _doc("docs/data/DATA_MODEL.md")
+    assert "0014_decided_excl_expired" in _doc("docs/data/DATA_MODEL.md")
+
+
+def test_invariant_9c_doc_status_has_one_phase23_index_line() -> None:
+    lines = [
+        line
+        for line in _doc("docs/DOC_STATUS.md").splitlines()
+        if line.startswith("- 2026-") and "Phase 23 plan 23-13" in line
+    ]
+    assert len(lines) == 1, "DOC_STATUS must carry exactly one Phase 23 plan 23-13 line"
+    for needle in (
+        "integration/TELEGRAM.md",
+        "GLOSSARY.md",
+        "data/DATA_MODEL.md",
+        "DECISIONS.md",
+        "DEPLOY_GUIDE.vi.md",
+        "0013_approval_money",
+        "0014_decided_excl_expired",
+    ):
+        assert needle in lines[0], f"the DOC_STATUS line does not name {needle!r}"
+
+
+def test_invariant_9d_the_vietnamese_guide_names_the_variable_and_drops_the_stale_text() -> None:
+    text = _doc("docs/operations/DEPLOY_GUIDE.vi.md")
+    assert "TELEGRAM_AUTHORIZED_USER_IDS" in text
+    assert "việc kiểm theo mã người dùng là Phase 23, chưa xây" not in text
+
+
+def test_invariant_9e_the_documents_hold_no_allow_list_value() -> None:
+    """The docs name the variable only; an id, a token or a URL never appears next to it."""
+    for relative in (
+        "docs/integration/TELEGRAM.md",
+        "docs/operations/DEPLOY_GUIDE.vi.md",
+        "docs/GLOSSARY.md",
+    ):
+        for line in _doc(relative).splitlines():
+            if "TELEGRAM_AUTHORIZED_USER_IDS" in line:
+                assert not re.search(r"TELEGRAM_AUTHORIZED_USER_IDS\s*=\s*\d", line), relative
