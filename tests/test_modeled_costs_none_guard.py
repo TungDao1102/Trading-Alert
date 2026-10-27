@@ -57,6 +57,15 @@ UNRELATED_USES: Counter[tuple[str, str, str, str]] = Counter(
         ("src/risk/types.py", "SizedResult.__post_init__", "loop_key_literal", ""): 1,
         ("src/risk/sizing.py", "size_position", "call_label", "_require_decimal"): 1,
         ("src/execution/manager.py", "execute_approved_plan", "key_membership", ""): 1,
+        # Phase 23 (plan 23-02), audited 2026-10-27: build_money_at_stake reads the SizedResult
+        # field and REFUSES a None (MoneyAtStakeUnavailable), so None is never read as zero.
+        ("src/risk/money_at_stake.py", "build_money_at_stake", "attribute_read", "sized"): 1,
+        (
+            "src/risk/money_at_stake.py",
+            "build_money_at_stake",
+            "call_label",
+            "MoneyAtStakeUnavailable",
+        ): 1,
     }
 )
 # Not reads: export lists and the one dict-literal writer of None on filled records.

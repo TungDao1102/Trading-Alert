@@ -25,7 +25,7 @@ from src.adapters.telegram_callbacks import (
 )
 from src.adapters.telegram_notify import (
     EDIT_MAX_ATTEMPTS,
-    RETRY_AFTER_CAP_SECONDS,
+    TELEGRAM_RETRY_WAIT_CAP_SECONDS,
     BoundedOutcome,
     FinalizeOutcome,
     TelegramFailureKind,
@@ -71,7 +71,7 @@ MESSAGE_ID = 7
 
 
 def test_the_bound_equals_the_paper_notify_bound() -> None:
-    assert RETRY_AFTER_CAP_SECONDS == NOTIFY_MAX_DELAY_SECONDS
+    assert TELEGRAM_RETRY_WAIT_CAP_SECONDS == NOTIFY_MAX_DELAY_SECONDS
     assert EDIT_MAX_ATTEMPTS == NOTIFY_MAX_ATTEMPTS
 
 
@@ -126,7 +126,7 @@ async def test_retry_after_is_slept_then_the_call_succeeds() -> None:
 
 async def test_a_retry_after_over_the_cap_stops_without_sleeping() -> None:
     sleep = RecordingSleep()
-    script = Script(tg_error.RetryAfter(RETRY_AFTER_CAP_SECONDS + 1))
+    script = Script(tg_error.RetryAfter(TELEGRAM_RETRY_WAIT_CAP_SECONDS + 1))
     outcome = await call_bounded(script, sleep=sleep)
     assert sleep.calls == []
     assert outcome.attempts == 1

@@ -461,7 +461,7 @@ async def edit_reply_markup(
 # --------------------------------------------------------------------------- #
 
 EDIT_MAX_ATTEMPTS: int = 3
-RETRY_AFTER_CAP_SECONDS: int = 30
+TELEGRAM_RETRY_WAIT_CAP_SECONDS: int = 30
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -500,7 +500,7 @@ async def call_bounded(
     *,
     sleep: SleepFn,
     max_attempts: int = EDIT_MAX_ATTEMPTS,
-    retry_after_cap_seconds: int = RETRY_AFTER_CAP_SECONDS,
+    retry_after_cap_seconds: int = TELEGRAM_RETRY_WAIT_CAP_SECONDS,
     window_seconds: float | None = None,
 ) -> BoundedOutcome:
     """Await `op()` up to `max_attempts` times, honouring the server's RetryAfter.
@@ -554,7 +554,7 @@ async def send_text_bounded(
     *,
     sleep: SleepFn,
     max_attempts: int = EDIT_MAX_ATTEMPTS,
-    retry_after_cap_seconds: int = RETRY_AFTER_CAP_SECONDS,
+    retry_after_cap_seconds: int = TELEGRAM_RETRY_WAIT_CAP_SECONDS,
     window_seconds: float | None = None,
 ) -> BoundedOutcome:
     """Send one text message through `call_bounded` (`result` is the sent message)."""
@@ -585,7 +585,7 @@ async def finalize_decided_message(
     text: str | None,
     sleep: SleepFn,
     max_attempts: int = EDIT_MAX_ATTEMPTS,
-    retry_after_cap_seconds: int = RETRY_AFTER_CAP_SECONDS,
+    retry_after_cap_seconds: int = TELEGRAM_RETRY_WAIT_CAP_SECONDS,
     window_seconds: float | None = None,
 ) -> FinalizeOutcome:
     """Make a decided message final: its final text AND no keyboard, in one `editMessageText`.
