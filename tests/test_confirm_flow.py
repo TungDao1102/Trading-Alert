@@ -494,6 +494,37 @@ async def test_a_confirm_by_a_user_who_is_not_listed_never_reaches_the_confirm_c
     assert rig.confirmed == [] and rig.prefetch_calls == 0
 
 
+async def test_a_replayed_approve_by_another_user_never_becomes_the_approving_user() -> None:
+    """WR-02: the first APPROVE is stored but its handler failed; a replay binds to the actor."""
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    real_issue = rig.flow._book.issue
+    failures: list[str] = []
+
+    def failing_once(**kwargs: Any) -> Any:
+        if not failures:
+            failures.append("boom")
+            raise RuntimeError("handler failed after the approval was stored")
+        return real_issue(**kwargs)
+
+    rig.flow._book.issue = failing_once  # type: ignore[method-assign]
+    await rig.approve(short, query_id="q-apr-1")
+    assert rig.row(ApprovalAction.APPROVE).status is ApprovalResult.APPROVED
+    assert rig.flow._book.get(short) is None
+
+    # Another allow-listed user taps APPROVE: no confirm is created for them.
+    await rig.tap("APR", short, query_id="q-apr-other", user_id=OTHER_USER_ID)
+    assert rig.flow._book.get(short) is None
+    await rig.tap("CNF", short, query_id="q-cnf-other", user_id=OTHER_USER_ID)
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+
+    # The stored approver retrying gets the confirm, bound to them.
+    await rig.approve(short, query_id="q-apr-2")
+    entry = rig.flow._book.get(short)
+    assert entry is not None and entry.approving_user_id == USER_ID
+
+
 async def test_a_confirm_at_the_plan_expiry_is_refused_and_final() -> None:
     expiry = T0 + timedelta(seconds=30)
     rig, short = await approved_rig(Rig(plan_overrides={"expiry_utc": expiry}))

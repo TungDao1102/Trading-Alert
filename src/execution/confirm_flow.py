@@ -267,6 +267,12 @@ class ConfirmFlow:
             log.error(f"{self._profile.log_namespace}.no_stored_money")
             return False
         signal, plan = context
+        # Review WR-02: the confirm is bound to the user that pressed APPROVE, i.e. the stored
+        # `actor_id`. A replayed APPROVE by another allow-listed user (after a failed first
+        # handler) never becomes the approving user, so it creates no confirm.
+        if press.from_user_id is None or result.approval.actor_id != str(press.from_user_id):
+            log.warning(f"{self._profile.log_namespace}.confirm_not_bound_to_stored_actor")
+            return False
         # The approval is stamped by the desk's own, later clock read, so its `acted_at_utc` can sit
         # a few microseconds after the press time. A card is never stamped before the approval it
         # follows, and the TTL, the expiry and the journaled request instant follow this one stamp.

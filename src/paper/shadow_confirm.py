@@ -644,6 +644,11 @@ def make_confirm_callbacks(
         if context is None or result.approval is None:
             return False
         signal, plan = context
+        # Review WR-02: the confirm is bound to the user that pressed APPROVE, i.e. the stored
+        # `actor_id`. A replayed APPROVE by another allow-listed user (after a failed first
+        # handler) never becomes the approving user, so it creates no confirm.
+        if press.from_user_id is None or result.approval.actor_id != str(press.from_user_id):
+            return False
         # The approval is stamped by its own, later clock read (`ShadowApprovalBook.dispatch`
         # runs in a worker thread), so its `acted_at_utc` can sit a few microseconds after the
         # press time. A card is never stamped before the approval it follows (the journal check
