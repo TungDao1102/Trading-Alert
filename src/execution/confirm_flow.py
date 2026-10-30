@@ -116,6 +116,11 @@ _REPLIES_CAP: Final = 64
 _PASS_THROUGH: Final = object()
 
 PLACEMENT_NOT_RECORDED: Final = "Placement: handed to the execution step; no entry recorded yet"
+# Review WR-08: the hook raised, so "handed over" is not known. Said plainly, with the
+# reconciliation words, instead of PLACEMENT_NOT_RECORDED.
+PLACEMENT_HAND_OFF_FAILED: Final = (
+    "Placement: HAND-OFF FAILED; it is not known that anything was sent. Check the journal."
+)
 
 
 class ValidityRule(Protocol):
@@ -499,8 +504,15 @@ class ConfirmFlow:
 
     # ---- final text -------------------------------------------------------------------- #
 
-    def _placement_lines(self, approval_id: str) -> tuple[str, ...]:
-        """What the stored entry intent says; ambiguous or unreadable reads as reconciliation."""
+    def _placement_lines(
+        self, approval_id: str, *, hand_off_failed: bool = False
+    ) -> tuple[str, ...]:
+        """What the stored entry intent says; ambiguous or unreadable reads as reconciliation.
+
+        Without a stored intent the text depends on the hand-off: "handed to the execution step"
+        only when the hook did not raise (review WR-08), else the failure and the reconciliation
+        words.
+        """
         try:
             prior = describe_prior_outcome(self._desk.intent_reader(approval_id))
         except Exception as exc:  # noqa: BLE001 - an unreadable intent is never "rejected"
@@ -509,6 +521,8 @@ class ConfirmFlow:
             )
             prior = PriorOutcome.NEEDS_RECONCILIATION
         if prior is None:
+            if hand_off_failed:
+                return (PLACEMENT_HAND_OFF_FAILED, reconciliation_required_text())
             return (PLACEMENT_NOT_RECORDED,)
         lines = (f"Placement: {PRIOR_OUTCOME_LABEL[prior]}",)
         if prior is PriorOutcome.NEEDS_RECONCILIATION:
@@ -542,7 +556,9 @@ class ConfirmFlow:
                 **common,
                 outcome="CONFIRMED",
                 user_id=entry.approving_user_id,
-                placement_lines=self._placement_lines(entry.approval.approval_id),
+                placement_lines=self._placement_lines(
+                    entry.approval.approval_id, hand_off_failed=entry.hand_off_failed
+                ),
             )
         if entry.state is ConfirmState.CANCELLED:
             return format_live_confirm_final(
@@ -832,6 +848,7 @@ def make_confirm_flow(
 __all__ = [
     "DELIVERY_EDIT",
     "DELIVERY_FALLBACK_SEND",
+    "PLACEMENT_HAND_OFF_FAILED",
     "PLACEMENT_NOT_RECORDED",
     "VALIDITY_RULE_ERROR",
     "ConfirmFlow",

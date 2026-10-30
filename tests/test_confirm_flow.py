@@ -706,6 +706,10 @@ async def test_a_failing_on_confirmed_is_answered_neutrally_and_never_called_twi
     assert "An internal error stopped this tap" in replies(rig)[0]
     assert replies(rig)[0].startswith("Mode: DEMO\n")
     assert replies(rig)[1] == "Mode: DEMO\nAlready confirmed. Nothing changed."
+    # WR-08: the final text never claims a hand-off that is not known to have happened.
+    final = rig.bot.edited[-1].text
+    assert "HAND-OFF FAILED" in final
+    assert "handed to the execution step" not in final
 
 
 async def test_a_failed_final_edit_is_journaled_and_the_outcome_is_sent_as_a_message() -> None:

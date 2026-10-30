@@ -304,6 +304,9 @@ class ConfirmEntry:
     # The CONFIRM is journaled but the reservation step has not completed: a repeated press
     # retries it (idempotent) so the ledger never lacks a journaled reservation.
     reservation_pending: bool = False
+    # The `on_confirmed` hook raised for this CONFIRM (review WR-08): the entry is CONFIRMED and
+    # journaled, but nothing proves the plan was handed over, so a final text must not say so.
+    hand_off_failed: bool = False
 
     @property
     def expires_at_utc(self) -> datetime:
@@ -968,6 +971,10 @@ class ConfirmBook:
                     f"{self._profile.log_namespace}.on_confirmed_failed",
                     error_class=type(exc).__name__,
                 )
+                with self._lock:
+                    for entry in self._entries.values():
+                        if entry.approval.approval_id == item[0].approval_id:
+                            entry.hand_off_failed = True
                 if first_error is None:
                     first_error = exc
         return None if suppress else first_error
