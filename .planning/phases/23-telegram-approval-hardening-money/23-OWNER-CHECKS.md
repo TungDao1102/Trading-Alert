@@ -20,9 +20,9 @@ Evidence label: [DESIGN] (executed tests). The owner-run checks below are NOT_RE
 |----|----------|---------------|----------------|--------|
 | O-1 | Who is on the allow-list `TELEGRAM_AUTHORIZED_USER_IDS`? | one Telegram user id, set by the owner in `.env` (never in the repository); required, no default, empty is refused | `src/adapters/telegram_callbacks.py` (`authorized_user_gate`), `src/paper/runtime_config.py` (`parse_authorized_user_ids`, startup refusal) | OPEN: the owner sets the value on each host |
 | O-2 | Which expiry rule for sibling approval rows (G4-042)? | exclude EXPIRED from `uq_approvals_one_decided_per_plan`; the store refuses EXPIRED on a plan that already has an APPROVED or SKIPPED row | `src/db/alembic/versions/0014_decided_excl_expired.py`, `src/persistence/approvals.py` | ANSWERED 2026-10-26, option (a), owner reply "theo cách bạn recommend" (23-08 SUMMARY); recorded as `docs/DECISIONS.md` D088 and `docs/data/DATA_MODEL.md` section 2.5 |
-| O-3 | Show times in local time (Asia/Ho_Chi_Minh) or in UTC? `docs/DECISIONS.md` D025 names Asia/Ho_Chi_Minh the canonical presentation timezone. | UTC with an explicit suffix in DEMO, LIVE, SIMULATE and the confirm card (D-14); SHADOW alerts keep the UTC and Asia/Ho_Chi_Minh pair; D025 is not edited | `src/adapters/telegram_notify.py` (`format_utc`), `src/paper/shadow.py` (`format_time_pair`) | OPEN: either D025 is amended or the messages gain the local time |
+| O-3 | Show times in local time (Asia/Ho_Chi_Minh) or in UTC? `docs/DECISIONS.md` D025 names Asia/Ho_Chi_Minh the canonical presentation timezone. | the local +07 time first and UTC in brackets in DEMO, LIVE, SIMULATE and the confirm card: `2026-10-30 21:15:00 +07 (2026-10-30 14:15:00 UTC)` (plan 23-14); SHADOW alerts keep the UTC and Asia/Ho_Chi_Minh pair; D025 is not edited | `src/adapters/telegram_notify.py` (`format_presentation_time`), `src/paper/shadow.py` (`format_time_pair`) | ANSWERED 2026-10-30: local +07 with UTC in brackets (satisfies D025 and keeps the UTC day of D033 visible); no tz database, Vietnam has no daylight saving; D025 not edited; implemented in plan 23-14 |
 | O-4 | May a group chat ever be allowed? | never: the chat type must be exactly `private` | `src/adapters/telegram_callbacks.py` (`authorized_user_gate`) | the rule is built as stated; the owner confirms by the G2-014 check |
-| R-1 | Should the SHADOW alert carry the money block? (orchestrator resolution 1) | not built: SHADOW texts are byte-identical to before Phase 23 | `src/paper/shadow.py` (unchanged) | OPEN |
+| R-1 | Should the SHADOW alert carry the money block? (orchestrator resolution 1) | not built: SHADOW texts are byte-identical to before Phase 23 | `src/paper/shadow.py` (unchanged) | ANSWERED 2026-10-30: SHADOW is exempt, the owner accepted the alert without the money block; a SHADOW money block, if ever wanted, is deferred to the Phase 24 composition |
 | R-5 | The Demo rehearsal places a Demo order after ONE tap on APPROVE (D041 says only CONFIRM may do that). | only the keyboard changed (one message, APPROVE and SKIP); the APPROVE-to-placement path of `scripts/demo_rehearsal.py` is unchanged (resolution 5) | `scripts/demo_rehearsal.py` | ANSWERED 2026-10-26 (relayed by the orchestrator), option (c): retire the `far` and `fill` scenarios once Phase 24 provides a composed Demo path, keep `taps`; no code change now. Until then `far` and `fill` are not evidence of the two-step flow |
 | R-7 | D-15 proposed new `RejectionReason` members for the Phase 23 refusals. | plain-string codes instead; the enum keeps 21 members and GLOSSARY 9.1 is unchanged (orchestrator resolution 7) | `src/approval/reason_codes.py`, `docs/GLOSSARY.md` section 9.3 (19 rows) | recorded; the owner may promote the codes to the enum in Phase 24 |
 | Q-TP | What is "profit at a take-profit"? | per leg, gross and net of modeled costs, labelled an estimate (the live leg is floored to the step size, so a real leg can be smaller) | `src/risk/money_at_stake.py` (plan 23-02) | OPEN: confirm the wording |
@@ -31,18 +31,21 @@ Evidence label: [DESIGN] (executed tests). The owner-run checks below are NOT_RE
 | Q-ATT | Do the DEMO and LIVE confirm journal events count in attribution? | not read: `src/paper/attribution.py` knows only the SHADOW names | `src/approval/confirm_core.py` profiles; rows `DEMO_` and `LIVE_` `CONFIRM_ISSUED`, `CONFIRMED`, `CONFIRM_CANCELLED`, `CONFIRM_EXPIRED`, `CONFIRM_REJECTED`, `CONFIRM_NOTICE_FAILED`, `CONFIRM_MESSAGE_EDIT_FAILED` | OPEN: the later consumer (Phase 24 or after) decides |
 | P20-OPS-REMOTE | A remote operator control through Telegram. | deferred to Phase 24 (D-16); the allow-list (plan 23-01) and the confirm core (plan 23-06) are built in a form a Telegram command can reuse | `src/approval/confirm_core.py`, `src/adapters/telegram_callbacks.py` | DEFERRED to Phase 24 |
 
-## Wording left behind on purpose (O-2 answer (a))
+## Wording left behind on purpose (O-2 answer (a)): fixed in plan 23-14
 
-`src/paper/shadow.py` (the `RestartReport` docstring still says one decided approval per plan, and `left_pending` is now only the decided-plan case) and `src/paper/shadow_runtime.py` near line 1121 (a comment that assumes one decided row per plan) were not edited: plan 23-08 prohibited it. A later cleanup should adjust both wordings.
+The `RestartReport` docstring in `src/paper/shadow.py` and the comment near line 1160 of `src/paper/shadow_runtime.py` (formerly near 1121) assumed one decided row per plan. Plan 23-08 did not edit them; plan 23-14 (2026-10-30) rewrote both as comment/docstring-only edits, and the `0014_decided_excl_expired.py` docstring now says O-2 was answered (a) on 2026-10-26 and recorded as D088.
 
-## Failing guard tests found during the phase (not caused by plan 23-13; need a decision on a pinned list)
+## Guard tests found failing during the phase: resolved
 
-Logged in `deferred-items.md` by plan 23-11 and re-run on 2026-10-27, both still fail on HEAD:
+Logged in `deferred-items.md` by plan 23-11. Both pass since commit 1d62e1cb (2026-10-28), re-run on 2026-10-30:
 
-1. `tests/test_no_unratified_defaults.py::test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts` fails on `RETRY_AFTER_CAP_SECONDS: int = 30` in `src/adapters/telegram_notify.py` (plan 23-07): the guard must learn that the constant restates a ratified value, or the constant must be imported instead of restated.
-2. `tests/test_modeled_costs_none_guard.py::test_consumer_audit_is_pinned_and_fails_when_a_new_reader_appears` fails because `build_money_at_stake` in `src/risk/money_at_stake.py` (plan 23-02) reads `sized.modeled_costs_per_unit` and raises `MoneyAtStakeUnavailable`; the pinned consumer list needs the two entries after an audit (the read refuses on None, it never treats None as zero).
+1. `tests/test_no_unratified_defaults.py::test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts`: the constant `RETRY_AFTER_CAP_SECONDS` was renamed `TELEGRAM_RETRY_WAIT_CAP_SECONDS` in `src/adapters/telegram_notify.py`, so it no longer restates a canonical key.
+2. `tests/test_modeled_costs_none_guard.py::test_consumer_audit_is_pinned_and_fails_when_a_new_reader_appears`: the two `money_at_stake` reads of `modeled_costs_per_unit` were audited (the read refuses on None, it never treats None as zero) and pinned.
 
-The orchestrator's full-suite run will report both until the pinned lists are updated.
+## For Phase 24 (composition)
+
+- Compose only through `on_callback`: `dispatch_callback` skips the user gate when `authorized_user_ids` is omitted (a test pins that), so a composition that calls it directly would run without the second, independent gate.
+- Decide whether the SHADOW alert should get a money block (R-1 answered: exempt until then).
 
 ## Requirement status (recorded, not changed)
 
