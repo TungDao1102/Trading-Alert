@@ -549,6 +549,18 @@ async def test_a_stored_money_block_that_disagrees_with_the_plan_never_reaches_t
     assert rig.flow._book.get(short) is None, "no confirm is opened for an inconsistent block"
 
 
+async def test_no_raw_token_appears_in_the_repr_of_the_entry_or_the_request() -> None:
+    """WR-07: the one-time tokens are secrets; a log line or a failure diff must not print them."""
+    rig, short = await approved_rig()
+    entry = rig.flow._book.get(short)
+    assert entry is not None
+    request = rig.desk._requests[short]
+    secrets = [entry.raw_token, request.approve_token, request.skip_token]
+    assert all(len(secret) >= 16 for secret in secrets)
+    text = repr(entry) + repr(request)
+    assert not any(secret in text for secret in secrets)
+
+
 async def test_a_confirm_at_the_plan_expiry_is_refused_and_final() -> None:
     expiry = T0 + timedelta(seconds=30)
     rig, short = await approved_rig(Rig(plan_overrides={"expiry_utc": expiry}))

@@ -40,7 +40,7 @@ import json
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -274,7 +274,12 @@ class ConfirmState(str, Enum):
 
 @dataclass
 class ConfirmEntry:
-    """One issued confirm token and where it stands. Internal state: read it, do not edit it."""
+    """One issued confirm token and where it stands. Internal state: read it, do not edit it.
+
+    The capability is this in-memory entry, looked up by short id; `raw_token` is held but no
+    press carries or compares it (review WR-07). Replay protection is the entry state, never the
+    token text. `raw_token` is a secret and is left out of the generated `__repr__`.
+    """
 
     short_id: str
     approval: Approval
@@ -284,7 +289,8 @@ class ConfirmEntry:
     issued_at_utc: datetime
     ttl_seconds: int
     token_hash: str
-    raw_token: str
+    # Review WR-07: a secret never prints; the generated __repr__ leaves it out.
+    raw_token: str = field(repr=False)
     card_text: str
     state: ConfirmState = ConfirmState.PENDING
     outcome: ConfirmOutcome | None = None

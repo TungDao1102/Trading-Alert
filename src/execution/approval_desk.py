@@ -39,7 +39,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -220,8 +220,9 @@ class _Request:
     skip_id: str
     approve_hash: str
     skip_hash: str
-    approve_token: str
-    skip_token: str
+    # Review WR-07: live one-time capabilities; the generated __repr__ never prints them.
+    approve_token: str = field(repr=False)
+    skip_token: str = field(repr=False)
     message_id: int | None = None
     chat_id: int | str | None = None
     finalized_text: str | None = None

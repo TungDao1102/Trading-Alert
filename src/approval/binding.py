@@ -21,7 +21,7 @@ No Telegram, no Binance SDK, no SQLAlchemy, no Pydantic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -60,7 +60,7 @@ class Callback:
     datetimes. The chat gate runs before any state lookup (D-01).
     """
 
-    raw_token: str
+    raw_token: str = field(repr=False)  # review WR-07: a secret never prints
     chat_id: int
     plan_hash: str
     strategy_version: str
