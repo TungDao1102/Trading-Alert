@@ -393,12 +393,16 @@ class ConfirmFlow:
         short_id = press.parsed.short_id
         if kind is CallbackKind.CONFIRM:
             await self._prefetch_for(press)
+            # Review WR-11: the TTL, the plan expiry and the re-check are judged at the instant
+            # the decision is taken, i.e. after the awaited exchange round trip, never earlier
+            # than the press itself.
+            decided_at = max(press.callback_at_utc, self._clock())
             result = self._book.handle_confirm(
                 short_id=short_id,
                 chat_id=press.chat_id,
                 authorized_chat_id=press.authorized_chat_id,
                 from_user_id=press.from_user_id,
-                now_utc=press.callback_at_utc,
+                now_utc=decided_at,
                 correlation_id=press.correlation_id,
             )
             ok = result.outcome is ConfirmOutcome.CONFIRMED

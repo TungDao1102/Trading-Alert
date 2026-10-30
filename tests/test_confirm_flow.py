@@ -463,6 +463,25 @@ async def test_a_confirm_after_the_ttl_is_refused_and_the_card_becomes_final() -
     assert rig.prefetch_calls == 0, "a doomed CONFIRM reads no exchange data"
 
 
+async def test_the_prefetch_latency_is_charged_against_the_confirm_window() -> None:
+    """WR-11: a tap at second 59 whose prefetch ends at second 64 is judged at second 64."""
+    rig = Rig()
+
+    async def slow_prefetch(signal: Signal, plan: TradePlan) -> None:
+        rig.now = rig.now + timedelta(seconds=5)
+        await rig.prefetch(signal, plan)
+
+    rig.flow = rig.make_flow(prefetch=slow_prefetch)
+    rig, short = await approved_rig(rig)
+    rig.now = T0 + timedelta(seconds=59)
+
+    result = await rig.tap("CNF", short, query_id="q-slow")
+
+    assert not result.ok
+    assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == "CONFIRM_TTL_ELAPSED"
+    assert rig.confirmed == []
+
+
 async def test_a_confirm_by_another_allowed_user_is_refused_and_keeps_the_keyboard() -> None:
     rig, short = await approved_rig()
     rig.now = T0 + timedelta(seconds=10)
