@@ -200,7 +200,7 @@ def test_invariant_2b_the_daily_loss_age_limit_is_the_owner_number_and_required(
 def test_invariant_3_the_rejection_reason_enum_still_has_21_members() -> None:
     from src.domain.enums import RejectionReason
 
-    assert len(RejectionReason) == 21, "Phase 21 adds no rejection reason (D-12)"
+    assert len(RejectionReason) == 23, "Phase 21 adds none (D-12); G3-005 (D-35) made it 23"
 
 
 def test_invariant_4_both_verification_flags_are_false() -> None:

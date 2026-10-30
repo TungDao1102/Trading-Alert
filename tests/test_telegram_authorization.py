@@ -523,4 +523,6 @@ def test_the_new_codes_are_plain_strings_and_the_enum_is_untouched() -> None:
         ALREADY_DECIDED,
         CALLBACK_HANDLER_ERROR,
     } == set(PHASE23_EDGE_CODES)
-    assert len(RejectionReason) == 21
+    assert len(RejectionReason) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )

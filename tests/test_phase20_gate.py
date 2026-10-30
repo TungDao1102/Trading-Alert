@@ -275,8 +275,10 @@ def test_invariant_4_the_rejection_reason_enum_and_glossary_91_agree_on_21_codes
     codes = re.search(r"```text\n(.*?)```", block, re.DOTALL)
     assert codes is not None, "GLOSSARY 9.1 has no code block"
     listed = codes.group(1).split()
-    assert len(RejectionReason) == 21
-    assert len(listed) == len(set(listed)) == 21, f"GLOSSARY 9.1 lists {len(listed)} codes"
+    assert len(RejectionReason) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )
+    assert len(listed) == len(set(listed)) == 23, f"GLOSSARY 9.1 lists {len(listed)} codes"
     enum_codes = {member.value for member in RejectionReason}
     assert set(listed) == enum_codes, (
         f"GLOSSARY 9.1 and the enum differ: {sorted(set(listed) ^ enum_codes)}"

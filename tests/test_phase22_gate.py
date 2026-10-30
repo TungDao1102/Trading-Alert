@@ -341,7 +341,7 @@ def test_invariant_6_the_rejection_reason_enum_still_has_21_members() -> None:
     from src.domain.enums import RejectionReason
 
     members = {member.value for member in RejectionReason}
-    assert len(RejectionReason) == 21, "Phase 22 adds no rejection reason (amendment A3)"
+    assert len(RejectionReason) == 23, "Phase 22 adds none (A3); G3-005 (D-35) made it 23"
     assert "INSUFFICIENT_MARGIN" in members
     assert members.isdisjoint(PHASE22_PLAIN_CODES), "a Phase 22 plain code became an enum member"
     assert members.isdisjoint(PHASE22_BLOCKED_REASONS)

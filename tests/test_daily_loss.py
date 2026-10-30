@@ -560,7 +560,10 @@ def test_fold_has_no_default_for_the_funding_policy() -> None:
 
 
 def test_rejection_reason_vocabulary_is_unchanged_at_21() -> None:
-    assert len(list(RejectionReason)) == 21
+    # name kept for the REQUIREMENT_TESTS tables; Phase 24 moved the size to 23 (G3-005).
+    assert len(list(RejectionReason)) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )
 
 
 # ------------------------------------------- Task 2: latch, alerts, day-open rule

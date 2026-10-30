@@ -598,7 +598,10 @@ def test_invalidation_code_is_distinct_from_the_enum_and_the_enum_is_unchanged()
     from src.domain.enums import RejectionReason
 
     assert pp.PLAN_INVALIDATED_BEFORE_PLACEMENT != RejectionReason.INVALIDATED.value
-    assert len(RejectionReason) == 21  # plan 20-05 added ENTRY_WITHOUT_PROTECTIVE
+    # plan 20-05 added ENTRY_WITHOUT_PROTECTIVE; Phase 24 added NO_FILL and HEALTH_CHECK_FAILED
+    assert len(RejectionReason) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )
 
 
 # --------------------------------------------------------------------------- #

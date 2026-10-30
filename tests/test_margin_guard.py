@@ -1298,7 +1298,9 @@ def test_the_refusal_codes_are_the_plain_strings_of_the_contract() -> None:
 
 
 def test_the_rejection_reason_enum_is_unchanged() -> None:
-    assert len(RejectionReason) == 21
+    assert len(RejectionReason) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )
     assert not {m.value for m in RejectionReason} & {
         MARGIN_MODE_UNSUPPORTED,
         MARGIN_CONFIG_UNVERIFIED,

@@ -243,7 +243,9 @@ def test_glossary_states_the_planner_meanings_without_touching_the_enum_block() 
     assert "min_stop_atr" in text
     block = re.search(r"### 9\.1 Canonical codes\n\n```text\n(.*?)```", text, re.DOTALL)
     assert block is not None
-    assert len(block.group(1).split()) == 21  # plan 20-05 added ENTRY_WITHOUT_PROTECTIVE
+    assert (
+        len(block.group(1).split()) == 23
+    )  # +ENTRY_WITHOUT_PROTECTIVE (20-05), +NO_FILL, +HEALTH_CHECK_FAILED (24-02, G3-005)
 
 
 def test_configuration_documents_the_phase15_keys_and_current_sets() -> None:
