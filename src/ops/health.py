@@ -10,7 +10,7 @@ injected `now_utc` (never the wall clock) that returns a frozen
 `run_health_checks` aggregates the probe results: any FAIL blocks
 enablement (fail-closed per D-04 precedent).
 
-The module is dependency-free: stdlib + `src/domain/journal.py` only.
+The module is dependency-free: stdlib + `src/domain/journal.py` and `src/domain/enums.py` only.
 No Binance SDK, no python-telegram-bot, no SQLAlchemy, no Pydantic, no
 Polars. The Telegram delivery probe consumes a narrow Protocol-typed
 notify surface (mirrors `src/adapters/telegram_notify.py:TelegramBot`
@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
+from src.domain.enums import RejectionReason
 from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
@@ -164,7 +165,7 @@ class HealthVerdict:
     def __post_init__(self) -> None:
         if not isinstance(self.reason_code, str) or self.reason_code == "":
             raise ValueError("reason_code must be a non-empty string")
-        if self.is_no_trade and self.reason_code != "HEALTH_CHECK_FAILED":
+        if self.is_no_trade and self.reason_code != RejectionReason.HEALTH_CHECK_FAILED.value:
             raise ValueError(
                 "HealthVerdict: is_no_trade=True requires reason_code='HEALTH_CHECK_FAILED'"
             )
@@ -400,9 +401,22 @@ def check_rest_error_rate(
     `total_count == 0` (no requests observed in the window) is treated
     as PASS — there is no evidence of errors, and blocking on an empty
     window would be a false positive, not a fail-closed posture.
+
+    `error_count > total_count` is an impossible observation (more errors
+    than requests, so the counters are broken or mixed windows): it is a
+    FAIL result, never a pass and never a rate above 1 (G2-035, IN-07).
+    Negative counts keep raising ValueError (caller programming error).
     """
     if error_count < 0 or total_count < 0:
         raise ValueError("check_rest_error_rate: counts must be >= 0")
+    if error_count > total_count:
+        return _build_result(
+            journal=journal,
+            check_name=CHECK_REST_ERROR_RATE,
+            status=STATUS_FAIL,
+            detail="REST error count exceeds request count; counters are inconsistent",
+            now_utc=now_utc,
+        )
     if total_count == 0:
         return _build_result(
             journal=journal,
@@ -513,7 +527,7 @@ async def check_telegram_delivery(
             detail=f"send_message raised {type(exc).__name__}",
             now_utc=now_utc,
         )
-    if response is None:
+    if response is None or response is False:
         return _build_result(
             journal=journal,
             check_name=CHECK_TELEGRAM_DELIVERY,
@@ -610,7 +624,7 @@ def run_health_checks(*, results: Sequence[HealthCheckResult]) -> HealthVerdict:
     passing = _is_complete_passing_set(results)
     return HealthVerdict(
         is_no_trade=not passing,
-        reason_code="OK" if passing else "HEALTH_CHECK_FAILED",
+        reason_code="OK" if passing else RejectionReason.HEALTH_CHECK_FAILED.value,
         results=tuple(results),
     )
 

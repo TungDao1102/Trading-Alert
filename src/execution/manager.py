@@ -808,7 +808,7 @@ async def execute_approved_plan(
 
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
     enablement_verdict = enablement.guard_placement(
-        plan_hash=approval.trade_plan_id,
+        plan_hash=bound.plan_hash,
     )
     if enablement_verdict.is_no_trade:
         return ExecutionOutcome(
@@ -2064,7 +2064,12 @@ async def attach_protectives_to_fill(
     ):
         return hold("entry, plan snapshot and filters disagree", reason_code=PLAN_SYMBOL_MISMATCH)
     if position_quantity <= Decimal("0"):
-        return AttachOutcome(is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=())
+        return AttachOutcome(
+            is_no_trade=True,
+            reason_code=RejectionReason.NO_FILL.value,
+            sized=None,
+            placed_legs=(),
+        )
     if entry.position_mode != _ONE_WAY_MODE:
         return hold(f"position mode {entry.position_mode} is not supported")
 

@@ -33,11 +33,10 @@ RETIRED_ALIASES: tuple[str, ...] = (
     "DAILY_STOP",
 )
 
-# Plain-string codes emitted outside RejectionReason (GL-05).
+# Plain-string codes emitted outside RejectionReason (GL-05). NO_FILL and HEALTH_CHECK_FAILED
+# left this list when Phase 24 promoted them into the enum (G3-005); GL-03 covers them in 9.1.
 STRING_CODES: tuple[str, ...] = (
     "DISABLED",
-    "NO_FILL",
-    "HEALTH_CHECK_FAILED",
     "EXPIRED",
 )
 

@@ -1,6 +1,6 @@
 """Plain-string reason codes of the Telegram approval edge (Phase 23).
 
-These are NOT `RejectionReason` members: the enum stays at 21 members and GLOSSARY section 9.1
+These are NOT `RejectionReason` members: the enum stays at 23 members and GLOSSARY section 9.1
 equals it (gate GL-03). The codes below are plain strings, listed in GLOSSARY section 9.3 (plan
 23-13), the pattern of `src/execution/pre_placement.py` and `src/approval/binding.py`.
 `DispatchResult.reason_code` accepts `RejectionReason | str | None` for this reason.

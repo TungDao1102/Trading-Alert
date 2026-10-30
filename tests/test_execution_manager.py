@@ -1905,6 +1905,26 @@ async def test_disabled_live_orders_block_placement() -> None:
     assert adapter.calls == []
 
 
+async def test_the_enablement_guard_receives_the_bound_plan_hash_not_the_plan_id() -> None:
+    """G2-035 (D-35), 09-REVIEW IN-06: the guard argument named plan_hash is the plan hash."""
+    from src.execution.enablement import EnablementVerdict
+
+    seen: list[str] = []
+
+    class _RecordingEnablement:
+        def guard_placement(self, *, plan_hash: str) -> EnablementVerdict:
+            seen.append(plan_hash)
+            return EnablementVerdict(is_no_trade=True, reason_code="DISABLED")
+
+    case = _load_input()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, case_input=case, enablement=_RecordingEnablement())
+    assert outcome.reason_code == "DISABLED"
+    assert len(seen) == 1
+    assert len(seen[0]) == 64 and set(seen[0]) <= set("0123456789abcdef")
+    assert seen[0] != _build_approval(case).trade_plan_id
+
+
 async def test_safe_mode_blocks_new_entries_even_when_enabled() -> None:
     """CR-07: SAFE_MODE (e.g. after ENTRY_WITHOUT_PROTECTIVE) blocks the
     next approved plan even though live orders are still enabled."""

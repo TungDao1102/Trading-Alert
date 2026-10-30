@@ -149,7 +149,7 @@ INSUFFICIENT_EDGE
 
 ## 9. Canonical rejection reasons
 
-This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code referenced before Phase 12 (`RejectionReason.X` in `src/`, derived by scan, gate GL-02), the reserved `INSUFFICIENT_MARGIN`, the two Phase 12 cost-guard codes `STOP_TOO_TIGHT` and `COST_TO_RISK_EXCEEDED` (D046), and `ENTRY_WITHOUT_PROTECTIVE`, promoted from the plain-string list in Phase 20 (D-10, D044 item 1). The block in 9.1 equals the `RejectionReason` enum (21 members, gate GL-03). The five synonyms that used to exist as members are retired and recorded in 9.2.
+This section is the source of truth for rejection reason codes (D016, D031, audit F-110). One canonical code per concept: the 17 codes that production code referenced before Phase 12 (`RejectionReason.X` in `src/`, derived by scan, gate GL-02), the reserved `INSUFFICIENT_MARGIN`, the two Phase 12 cost-guard codes `STOP_TOO_TIGHT` and `COST_TO_RISK_EXCEEDED` (D046), `ENTRY_WITHOUT_PROTECTIVE`, promoted from the plain-string list in Phase 20 (D-10, D044 item 1), and `NO_FILL` and `HEALTH_CHECK_FAILED`, promoted from the same list in Phase 24 (G3-005, D-35). The block in 9.1 equals the `RejectionReason` enum (23 members, gate GL-03). The five synonyms that used to exist as members are retired and recorded in 9.2.
 
 ### 9.1 Canonical codes
 
@@ -175,9 +175,13 @@ INSUFFICIENT_MARGIN
 STOP_TOO_TIGHT
 COST_TO_RISK_EXCEEDED
 ENTRY_WITHOUT_PROTECTIVE
+NO_FILL
+HEALTH_CHECK_FAILED
 ```
 
 `ENTRY_WITHOUT_PROTECTIVE` means an entry fill exists without a confirmed protective stop. It was a plain-string code before Phase 20 (D-10, D044 item 1); the string value is unchanged. The same string is also a reconciler divergence kind and a SAFE_MODE entry reason (9.4); those copies stay plain strings because they are divergence kinds and SAFE_MODE reasons, not rejection reasons.
+
+`NO_FILL` means the entry order produced no fill (`src/execution/manager.py`, the no-trade result reason). `HEALTH_CHECK_FAILED` means a health check reported failure, so trading is blocked (`src/ops/health.py`, the result `reason_code`, paired with `OK` on pass). Both were plain strings until Phase 24, promoted there (G3-005, D-35, D044 item 1); the string values are unchanged, so stored rows, golden texts and journal payloads keep their bytes, and both modules now emit them through `RejectionReason.<NAME>.value`.
 
 `INSUFFICIENT_MARGIN` is emitted by the Phase 22 margin guard (`src/risk/margin_check.py` decides it, `src/execution/margin_guard.py` returns it) when the free margin does not cover the margin the plan needs; the code list above is unchanged. No running process composes the guard before Phase 24.
 
@@ -187,7 +191,7 @@ Phase 15 planner meanings (D054, D-27): the planner reuses three existing codes 
 
 ### 9.2 Retired aliases (removed in Phase 12)
 
-These five names were removed from `RejectionReason` and from `tests/test_domain_enums.py` in Phase 12 (D-09, D044 follow-up 1). New code must use the replacement. The table records the removal only: it declares no enum member, and gates GL-01 and GL-03 fail if a retired name re-enters the enum or the 9.1 block. The 9.1 block equals the `RejectionReason` enum (21 members, gate GL-03).
+These five names were removed from `RejectionReason` and from `tests/test_domain_enums.py` in Phase 12 (D-09, D044 follow-up 1). New code must use the replacement. The table records the removal only: it declares no enum member, and gates GL-01 and GL-03 fail if a retired name re-enters the enum or the 9.1 block. The 9.1 block equals the `RejectionReason` enum (23 members, gate GL-03).
 
 | Removed name | Use instead | Removed in |
 |--------------|-------------|------------|
@@ -201,13 +205,11 @@ These five names were removed from `RejectionReason` and from `tests/test_domain
 
 ### 9.3 Plain-string codes emitted outside RejectionReason
 
-Production code also emits the following plain strings as `reason_code` values or outcome labels. They are not `RejectionReason` members. Status for the rejection-style codes: proposed canonical, promote to the enum in the owning phase (Phases 24 and 26; `ENTRY_WITHOUT_PROTECTIVE` was promoted in Phase 20 and now lives in 9.1). Derived from `src/` by reading the emitting code; the list is not exhaustive for divergence kinds. Phase 23 adds its plain codes here instead of new `RejectionReason` members: the enum keeps its 21 members and section 9.1 is unchanged; this deliberately amends the wording of the Phase 23 decision D-15, which had proposed enum members (orchestrator resolution 7).
+Production code also emits the following plain strings as `reason_code` values or outcome labels. They are not `RejectionReason` members. Status for the rejection-style codes: proposed canonical, promote to the enum in the owning phase (Phases 24 and 26; `ENTRY_WITHOUT_PROTECTIVE` was promoted in Phase 20, and `NO_FILL` and `HEALTH_CHECK_FAILED` in Phase 24 (G3-005); all three now live in 9.1). Derived from `src/` by reading the emitting code; the list is not exhaustive for divergence kinds. Phase 23 adds its plain codes here instead of new `RejectionReason` members: the enum kept its 21 members through Phase 23 (it has 23 members since Phase 24 promoted `NO_FILL` and `HEALTH_CHECK_FAILED`, G3-005); this deliberately amends the wording of the Phase 23 decision D-15, which had proposed enum members (orchestrator resolution 7).
 
 | Code | Emitted in | Meaning | Status |
 |------|------------|---------|--------|
 | `DISABLED` | `src/execution/enablement.py` (`_DISABLED`), `src/execution/manager.py` (fallback `reason_code`) | Live order enablement is off, no order placed | proposed canonical, promote in Phase 26 |
-| `NO_FILL` | `src/execution/manager.py` (no-trade result reason) | Entry order produced no fill | proposed canonical, promote in Phase 24 |
-| `HEALTH_CHECK_FAILED` | `src/ops/health.py` (result `reason_code`, paired with `OK` on pass) | A health check reported failure, so trading is blocked | proposed canonical, promote in Phase 24 |
 | `EXPIRED` | `src/paper/journal.py` (paper journal outcome `reason_code`), `src/analytics/lifecycle.py` (`_EXPIRED_REASON`) | Signal or entry expired without a fill; this is a lifecycle outcome label, not a rejection reason (the rejection form is `APPROVAL_EXPIRED` or `STALE_SETUP`) | outcome label, not a rejection reason |
 | `OK` | `src/core/types.py` (`REASON_OK`), `src/ops/health.py` | Feature output valid or health check passed | not a rejection reason |
 | `WARMUP_INSUFFICIENT` | `src/core/types.py` (`REASON_WARMUP_INSUFFICIENT`) | Feature validity reason: not enough closed candles | feature validity string, not a rejection reason |

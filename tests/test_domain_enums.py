@@ -205,7 +205,7 @@ def test_rejection_reason_values_match_glossary_section_9() -> None:
         NOTIONAL_REJECT, UTILIZATION_REJECT, CLUSTER_CAP_REJECT,
         AGGREGATE_CAP_REJECT, MAX_POSITIONS_REJECT, DAILY_STOP_BLOCK,
         STALE_CONSTRAINTS, UNCERTAIN_ACCOUNT_STATE, STOP_TOO_TIGHT,
-        COST_TO_RISK_EXCEEDED, ENTRY_WITHOUT_PROTECTIVE
+        COST_TO_RISK_EXCEEDED, ENTRY_WITHOUT_PROTECTIVE, NO_FILL, HEALTH_CHECK_FAILED
     """
     expected = {
         "NO_TRADE_REGIME",
@@ -232,11 +232,17 @@ def test_rejection_reason_values_match_glossary_section_9() -> None:
         "COST_TO_RISK_EXCEEDED",
         # Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005).
         "ENTRY_WITHOUT_PROTECTIVE",
+        # Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED (G3-005, D-35).
+        "NO_FILL",
+        "HEALTH_CHECK_FAILED",
     }
     actual = {member.value for member in RejectionReason}
     assert actual == expected
     # Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005): 20 -> 21 members.
-    assert len(RejectionReason) == 21
+    # Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED (G3-005, D-35): 21 -> 23 members.
+    assert len(RejectionReason) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )
 
 
 @pytest.mark.parametrize(
@@ -302,14 +308,14 @@ def test_portfolio_verdict_accepts_new_cost_guard_codes(code: str) -> None:
 
 
 def test_glossary_section_9_1_block_equals_enum() -> None:
-    """The GLOSSARY 9.1 text block parses to the same 21 tokens as the enum."""
+    """The GLOSSARY 9.1 text block parses to the same 23 tokens as the enum."""
     lines = (_REPO_ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8").splitlines()
     start = lines.index("### 9.1 Canonical codes")
     fence = "`" * 3
     open_idx = lines.index(fence + "text", start)
     close_idx = lines.index(fence, open_idx + 1)
     tokens = [line.strip() for line in lines[open_idx + 1 : close_idx] if line.strip()]
-    assert len(tokens) == len(set(tokens)) == 21
+    assert len(tokens) == len(set(tokens)) == 23
     assert set(tokens) == {member.value for member in RejectionReason}
 
 

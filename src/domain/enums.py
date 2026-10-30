@@ -120,7 +120,7 @@ class SystemMode(str, Enum):
 
 
 class RejectionReason(str, Enum):
-    """GLOSSARY §9 — Canonical rejection reasons (21 members).
+    """GLOSSARY §9 — Canonical rejection reasons (23 members).
 
     Do not create synonyms such as `Skipped-User`, `USER_SKIPPED`, and
     `SKIPPED_USER` in different modules. Use the canonical enum names
@@ -158,6 +158,11 @@ class RejectionReason(str, Enum):
     # also a reconciler divergence kind and a SAFE_MODE entry reason (GLOSSARY 9.4); the
     # value is unchanged, so every journal row keeps its bytes.
     ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
+    # Phase 24 (G3-005, D-35, D044 item 1): promoted from the GLOSSARY 9.3 plain-string
+    # list. The values are the strings those modules always emitted, so every stored row,
+    # golden text and journal payload keeps its bytes.
+    NO_FILL = "NO_FILL"
+    HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"
 
 
 class DailyState(str, Enum):

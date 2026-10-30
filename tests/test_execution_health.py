@@ -311,12 +311,86 @@ def test_orphaned_orders_probe_fails_on_orphan_protective_divergence() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# G2-035 (D-35), 09-REVIEW IN-07 — impossible counters and a False send result fail closed.
+# --------------------------------------------------------------------------- #
+
+
+def test_rest_error_rate_refuses_more_errors_than_requests_as_a_fail_result() -> None:
+    """IN-07: error_count above total_count is a FAIL result, not a pass, not a rate above 1."""
+    from src.ops.health import check_rest_error_rate
+
+    journal = FakeJournal()
+    result = check_rest_error_rate(
+        error_count=5,
+        total_count=3,
+        max_error_rate=Decimal("2"),
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert result.status == "FAIL"
+    assert result.check_name == "rest_error_rate"
+    assert len(journal.events) == 1
+
+
+def test_rest_error_rate_with_errors_equal_to_requests_keeps_the_rate_result() -> None:
+    """IN-07 boundary: error_count equal to total_count is a rate of 1, judged against the max."""
+    from src.ops.health import check_rest_error_rate
+
+    journal = FakeJournal()
+    over = check_rest_error_rate(
+        error_count=3,
+        total_count=3,
+        max_error_rate=Decimal("0.05"),
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert over.status == "FAIL"
+    assert "exceeds max" in over.detail
+    within = check_rest_error_rate(
+        error_count=3,
+        total_count=3,
+        max_error_rate=Decimal("1"),
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert within.status == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_telegram_delivery_probe_fails_when_the_send_result_is_false() -> None:
+    """IN-07: a False send result is not a delivery."""
+    from src.ops.health import check_telegram_delivery
+
+    result = await check_telegram_delivery(
+        notifier=FakeNotifier(response=False),
+        chat_id=987654,
+        probe_text="health-probe-ping",
+        now_utc=NOW_UTC,
+        journal=FakeJournal(),
+    )
+    assert result.status == "FAIL"
+
+
+def test_health_verdict_reason_code_is_the_enum_value_byte_for_byte() -> None:
+    """G3-005 (D-35): the failing verdict emits RejectionReason.HEALTH_CHECK_FAILED.value."""
+    from src.domain.enums import RejectionReason
+    from src.ops.health import check_ws_connection_state, run_health_checks
+
+    journal = FakeJournal()
+    verdict = run_health_checks(
+        results=[check_ws_connection_state(connected=False, now_utc=NOW_UTC, journal=journal)]
+    )
+    assert verdict.reason_code == RejectionReason.HEALTH_CHECK_FAILED.value
+    assert verdict.reason_code == "HEALTH_CHECK_FAILED"
+
+
+# --------------------------------------------------------------------------- #
 # Beh. 7 — purity: no Binance SDK / PTB / SQLAlchemy / Pydantic / Polars imports.
 # --------------------------------------------------------------------------- #
 
 
 def test_health_module_purity() -> None:
-    """Beh. 7: src/ops/health.py imports stdlib + domain/journal only."""
+    """Beh. 7: src/ops/health.py imports stdlib + domain/journal and domain/enums only."""
     import re
     from pathlib import Path
 

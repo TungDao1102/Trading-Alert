@@ -294,7 +294,7 @@ def test_invariant_5_the_rejection_reason_enum_still_has_21_members() -> None:
     from src.domain.enums import RejectionReason
 
     members = {member.value for member in RejectionReason}
-    assert len(RejectionReason) == 21, "Phase 23 adds no rejection reason (resolution 7)"
+    assert len(RejectionReason) == 23, "Phase 23 adds none (resolution 7); G3-005 (D-35) made it 23"
     assert members.isdisjoint(PHASE23_PLAIN_CODES), "a Phase 23 plain code became an enum member"
 
 
@@ -351,7 +351,27 @@ def test_invariant_5f_glossary_93_states_the_resolution_7_amendment() -> None:
     start = text.index("### 9.3 ")
     introduction = text[start : text.index("| Code | Emitted in", start)]
     assert "Phase 23" in introduction and "RejectionReason" in introduction
-    assert "21 members" in introduction
+    assert "21 members through Phase 23" in introduction
+    assert "23 members since Phase 24" in introduction, "G3-005 (D-35) moved the size to 23"
+
+
+#: Promoted from the 9.3 plain-string list into the enum by Phase 24 (G3-005, D-35).
+PHASE24_PROMOTED = ("NO_FILL", "HEALTH_CHECK_FAILED")
+
+
+def test_invariant_5h_the_two_phase24_promoted_codes_are_enum_rows_of_91_not_93() -> None:
+    from src.domain.enums import RejectionReason
+
+    rows_93 = _glossary_table_rows("### 9.3 ", "### 9.4 ")
+    text = (ROOT / "docs" / "GLOSSARY.md").read_text(encoding="utf-8")
+    block = text[text.index("### 9.1 ") : text.index("### 9.2 ")]
+    fenced = re.search(r"```text\n(.*?)```", block, re.DOTALL)
+    assert fenced is not None
+    listed = set(fenced.group(1).split())
+    for code in PHASE24_PROMOTED:
+        assert code not in rows_93, f"G3-005: {code} must leave GLOSSARY 9.3"
+        assert code in listed, f"G3-005: {code} must be in the GLOSSARY 9.1 block"
+        assert RejectionReason(code).value == code
 
 
 def test_invariant_5g_glossary_91_lists_exactly_the_enum() -> None:
