@@ -367,6 +367,25 @@ def test_issue_refuses_missing_or_mismatching_money_before_any_write() -> None:
     assert rig.stores.approvals == {} and rig.stores.journal == []
 
 
+@pytest.mark.parametrize(
+    "rule",
+    [
+        '{"basis":"CANDLE_CLOSE"}',
+        '{"level":"49500"}',
+        '{"basis":"CANDLE_CLOSE","level":null}',
+        '{"basis":"","level":"49500"}',
+        '{"basis":"CANDLE_CLOSE","level":49500}',
+    ],
+)
+def test_issue_refuses_an_invalidation_rule_without_a_text_basis_and_level(rule: str) -> None:
+    """WR-10: never send an APPROVE request that says 'Invalidation: None at None'."""
+    rig = Rig()
+    rig.plan = make_shadow_plan(rig.signal, invalidation_rule_json=rule)
+    with pytest.raises(ValueError, match="invalidation_rule_json"):
+        rig.issue()
+    assert rig.stores.approvals == {} and rig.stores.journal == []
+
+
 def test_the_second_issue_for_one_signal_is_refused_before_any_write() -> None:
     rig = Rig()
     rig.issue()

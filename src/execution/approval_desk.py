@@ -453,6 +453,11 @@ class ApprovalDesk:
         tp2 = _json_decimal(take_profit, "tp2", "take_profit_json")
         rr = _json_decimal(_json_object(plan.expected_rr_json, "expected_rr_json"), "tp1_rr", "rr")
         rule = _json_object(plan.invalidation_rule_json, "invalidation_rule_json")
+        # Review WR-10: the invalidation line is one of the 12 mandatory fields; a rule without a
+        # text basis and level refuses the request instead of printing "None at None".
+        basis, level = rule.get("basis"), rule.get("level")
+        if not isinstance(basis, str) or not basis or not isinstance(level, str) or not level:
+            raise ValueError("invalidation_rule_json needs a text basis and level")
         # The quantity share of each take-profit comes from the STORED money block that was built
         # for these legs, never from a constant: no execution module imports the backtest
         # (Phase 19 invariant 7). `require_money_consistent` still compares prices and the number
@@ -472,7 +477,7 @@ class ApprovalDesk:
             rr=rr,
             risk_pct=plan.risk_rate,
             expiry_utc=plan.expiry_utc,
-            invalidation=f"{rule.get('basis')} at {rule.get('level')}",
+            invalidation=f"{basis} at {level}",
             exposure_quote=exposure_quote,
             reason_codes=list(reason_codes),
             signal_id=signal.signal_id,
