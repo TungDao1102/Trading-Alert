@@ -893,7 +893,11 @@ class BinanceUsdmAdapter:
             facts = error_facts_from_exception(exc)
             category = classify(facts, call_kind)
             if category in _RATE_LIMIT_CATEGORIES:
-                gate.record(category, facts.retry_after_seconds)
+                gate.record(
+                    category,
+                    facts.retry_after_seconds,
+                    ban_until_epoch_ms=facts.ban_until_epoch_ms,
+                )
             elif category is ExchangeErrorCategory.CLOCK_SKEW and self._on_clock_skew is not None:
                 try:
                     self._on_clock_skew()

@@ -255,7 +255,11 @@ class SdkListenKeyPort:
         else:
             return result
         if category in _GATE_CATEGORIES:
-            self._rest_gate.record(category, facts.retry_after_seconds)
+            self._rest_gate.record(
+                category,
+                facts.retry_after_seconds,
+                ban_until_epoch_ms=facts.ban_until_epoch_ms,
+            )
         raise _translate(category, facts.retry_after_seconds)
 
     async def start(self) -> str:

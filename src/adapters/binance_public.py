@@ -317,7 +317,11 @@ def _record_rate_limit(
     facts = error_facts_from_exception(exc)
     category = classify(facts, call_kind)
     if category in _RATE_LIMIT_CATEGORIES:
-        gate.record(category, facts.retry_after_seconds)
+        gate.record(
+            category,
+            facts.retry_after_seconds,
+            ban_until_epoch_ms=facts.ban_until_epoch_ms,
+        )
 
 
 def _book_levels(raw: object, side: str, symbol: str) -> tuple[tuple[Decimal, Decimal], ...]:

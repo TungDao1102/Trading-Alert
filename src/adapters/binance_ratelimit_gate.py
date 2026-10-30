@@ -20,6 +20,14 @@ decisions/18-DEC-O-18-01.md` and its amendment of 2026-10-16:
 The lengths come from the `RateLimitPolicy` the gate holds, through `rate_limit_decision`
 (`src/domain/exchange_errors.py`): no wait number exists in this module.
 
+D083 (plan 24-03): a 418 answered with code -1003 and no valid Retry-After may carry the ban end
+time the exchange put in the body (`ErrorFacts.ban_until_epoch_ms`, epoch milliseconds, read by
+`src.adapters.binance_errors`). The gate takes it only when it is in the future against the
+injected clock, not later than `now` plus `retry_after_cap_seconds`, and the owner has configured
+`ban_end_clock_margin`; the deadline is then that time plus the margin, stored like any other
+deadline. Every other case keeps the 418 fallback wait. The number is never logged. With no
+margin the feature is off and no number is assumed.
+
 The end of a ban or of a pause proves nothing about an order, a cancel, a fill or a
 protective stop. The gate opening sends no request, replays nothing and emits no recovery
 signal; there is no method that clears a restriction, only the injected clock passing the end
@@ -51,7 +59,7 @@ import enum
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from src.adapters.binance_limits import RateLimitPolicy
@@ -77,6 +85,12 @@ REST_GATE_RECOVERY_REQUIRED = "REST_GATE_RECOVERY_REQUIRED"
 # the value (binance_userdata_supervisor._await_rest_allowed) must not be parked for days.
 _NO_KNOWN_END_SECONDS = 1
 
+# Alert event name handed to `on_alert` when a 418 starts or extends the ban (D083 point 5). The
+# string is `REST_GATE_BAN_ENTERED until_utc=<ISO-8601 deadline>`: the deadline is the gate's own
+# end time (never the parsed number of the body).
+REST_GATE_BAN_ENTERED = "REST_GATE_BAN_ENTERED"
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _ONE_MICROSECOND = timedelta(microseconds=1)
 _MICROSECONDS_PER_SECOND = 1_000_000
 
@@ -232,6 +246,7 @@ class RestRateLimitGate:
         clock: Callable[[], datetime],
         state_store: GateStateStore | None = None,
         on_alert: Callable[[str], None] | None = None,
+        ban_end_clock_margin: timedelta | None = None,
     ) -> None:
         if not isinstance(policy, RateLimitPolicy):
             raise TypeError("policy must be a RateLimitPolicy")
@@ -239,7 +254,13 @@ class RestRateLimitGate:
             raise TypeError("clock must be a callable returning a timezone-aware datetime")
         if on_alert is not None and not callable(on_alert):
             raise TypeError("on_alert must be a callable taking the alert event name")
+        if ban_end_clock_margin is not None:
+            if not isinstance(ban_end_clock_margin, timedelta):
+                raise TypeError("ban_end_clock_margin must be a timedelta or None")
+            if ban_end_clock_margin <= timedelta(0):
+                raise ValueError("ban_end_clock_margin must be positive")
         self._policy = policy
+        self._ban_end_clock_margin = ban_end_clock_margin
         self._clock = clock
         self._state_store = state_store
         self._on_alert = on_alert
@@ -308,10 +329,34 @@ class RestRateLimitGate:
         if paused:
             raise RateLimitPauseActive(remaining)
 
+    def _body_ban_end(
+        self, now: datetime, ban_until_epoch_ms: int | None, retry_after_seconds: int | None
+    ) -> datetime | None:
+        """D083 points 1, 3, 4: the padded ban end from the body, or None for the fallback.
+
+        None when a valid Retry-After exists (it wins), no margin is configured, no number was
+        read, or the time is not in the future or later than `now + retry_after_cap_seconds`.
+        """
+        margin = self._ban_end_clock_margin
+        if margin is None or ban_until_epoch_ms is None or retry_after_seconds is not None:
+            return None
+        parsed = _EPOCH + timedelta(milliseconds=ban_until_epoch_ms)
+        if not now < parsed <= now + timedelta(seconds=self._policy.retry_after_cap_seconds):
+            return None
+        return parsed + margin
+
     def record(
-        self, category: ExchangeErrorCategory, retry_after_seconds: int | None
+        self,
+        category: ExchangeErrorCategory,
+        retry_after_seconds: int | None,
+        *,
+        ban_until_epoch_ms: int | None = None,
     ) -> RateLimitDecision:
-        """Record a classified failure: a 418 extends the ban, a 429 extends the pause."""
+        """Record a classified failure: a 418 extends the ban, a 429 extends the pause.
+
+        `ban_until_epoch_ms` is the D083 body number of a 418 / -1003 (None otherwise); it is
+        ignored for a 429 and whenever a valid Retry-After exists.
+        """
         policy = self._policy
         decision = rate_limit_decision(
             category,
@@ -323,12 +368,16 @@ class RestRateLimitGate:
         if decision.wait_seconds is None:
             return decision
         changed = False
+        ban_entered: datetime | None = None
         with self._lock:
-            end = self._now() + timedelta(seconds=decision.wait_seconds)
+            now = self._now()
+            end = now + timedelta(seconds=decision.wait_seconds)
             if category is ExchangeErrorCategory.IP_BANNED:
+                end = self._body_ban_end(now, ban_until_epoch_ms, retry_after_seconds) or end
                 if self._ban_until is None or end > self._ban_until:
                     self._ban_until = end
                     changed = True
+                    ban_entered = end
             elif category is ExchangeErrorCategory.RATE_LIMITED:
                 if self._pause_until is None or end > self._pause_until:
                     self._pause_until = end
@@ -337,6 +386,8 @@ class RestRateLimitGate:
             self._persist()
         else:
             self._retry_failed_save()
+        if ban_entered is not None:
+            self._alert(f"{REST_GATE_BAN_ENTERED} until_utc={ban_entered.isoformat()}")
         return decision
 
     def restriction(self) -> GateRestriction | None:
@@ -458,10 +509,12 @@ class RestRateLimitGate:
                 policy.no_retry_after_wait_429_seconds,
             )
         )
-        return any(
-            deadline is not None and deadline > latest
-            for deadline in (record.ban_until_utc, record.pause_until_utc)
-        )
+        # D083: a padded body ban end may lie the owner's margin beyond the cap; the margin is the
+        # only allowance and exists only when the owner configured it.
+        margin = self._ban_end_clock_margin or timedelta(0)
+        ban = record.ban_until_utc
+        pause = record.pause_until_utc
+        return (ban is not None and ban > latest + margin) or (pause is not None and pause > latest)
 
     def _alert(self, event: str) -> None:
         """Tell the injected hook; a failing hook never changes the restriction."""
@@ -523,6 +576,7 @@ __all__ = [
     "GATE_STATE_UNKNOWN",
     "IP_BAN_418",
     "RATE_LIMIT_PAUSE_429",
+    "REST_GATE_BAN_ENTERED",
     "REST_GATE_RECOVERY_REQUIRED",
     "GateNotRestored",
     "GateRecoveryStatus",

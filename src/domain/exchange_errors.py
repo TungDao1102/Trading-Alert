@@ -112,11 +112,17 @@ class PreSendRefusal(Exception):  # noqa: N818 - a refusal, not an error of the 
 
 @dataclass(frozen=True, slots=True)
 class ErrorFacts:
-    """The only facts classification may use: class, int body code, Retry-After seconds."""
+    """The only facts classification may use: class, int body code, Retry-After seconds.
+
+    `ban_until_epoch_ms` is NOT a classification fact: it is the one number D083 lets the REST
+    gate take from a 418 / -1003 body (epoch milliseconds, 13 digits), set only by the one
+    function that reads it (`src.adapters.binance_errors`). `classify` never looks at it.
+    """
 
     http_class: HttpClass
     code: int | None
     retry_after_seconds: int | None
+    ban_until_epoch_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.http_class, HttpClass):
@@ -127,6 +133,19 @@ class ErrorFacts:
             not _is_strict_int(self.retry_after_seconds) or self.retry_after_seconds < 0
         ):
             raise ValueError("retry_after_seconds must be a non-negative int (not a bool) or None")
+        if self.ban_until_epoch_ms is not None:
+            if not _is_strict_int(self.ban_until_epoch_ms):
+                raise TypeError("ban_until_epoch_ms must be an int (not a bool) or None")
+            if not _BAN_UNTIL_MIN_MS <= self.ban_until_epoch_ms <= _BAN_UNTIL_MAX_MS:
+                raise ValueError("ban_until_epoch_ms must have exactly 13 digits")
+            if self.http_class is not HttpClass.BANNED_418 or self.code != _CODE_TOO_MANY_REQUESTS:
+                raise ValueError("ban_until_epoch_ms is only valid for an HTTP 418 with code -1003")
+
+
+# D083: the ban end of a 418 / -1003 body is epoch milliseconds with exactly 13 digits.
+_BAN_UNTIL_MIN_MS = 1_000_000_000_000
+_BAN_UNTIL_MAX_MS = 9_999_999_999_999
+_CODE_TOO_MANY_REQUESTS = -1003
 
 
 # documented: on the Binance error-code page (the 2026-10-16 re-read, the 2026-10-17 re-read

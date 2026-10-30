@@ -792,7 +792,11 @@ class BinanceProbeAdapter:
         category = classify(facts, call_kind)
         self._note_rate_limit(category)
         if record_in_gate and category in _RATE_LIMIT_REASONS:
-            self._rest_gate.record(category, facts.retry_after_seconds)
+            self._rest_gate.record(
+                category,
+                facts.retry_after_seconds,
+                ban_until_epoch_ms=facts.ban_until_epoch_ms,
+            )
         return ProbeObservation(
             operation=operation,
             ok=False,

@@ -131,10 +131,28 @@ def test_taxonomy_is_pure_stdlib_no_float_no_clock() -> None:
 
 
 def test_normalizer_never_reads_message_text() -> None:
-    """`str(exc)`, `exc.args`, `error_message` and `repr` never appear in the normalizer."""
+    """`str(exc)`, `exc.args`, `error_message` and `repr` never appear in the normalizer.
+
+    The single exception is D083 item 2: the string constant ``"error_message"`` (the one
+    ``getattr`` read of the 418 / -1003 ban end) inside `_ban_until_epoch_ms` and nowhere else;
+    every other form stays an offender even inside that function.
+    """
     tree = ast.parse(NORMALIZER.read_text(encoding="utf-8"))
+    d083 = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_ban_until_epoch_ms"
+    ]
+    assert len(d083) == 1, "the D083 function is missing or duplicated"
+    permitted = {
+        id(node)
+        for node in ast.walk(d083[0])
+        if isinstance(node, ast.Constant) and node.value == "error_message"
+    }
     offenders: list[tuple[int, str]] = []
     for node in ast.walk(tree):
+        if id(node) in permitted:
+            continue
         if isinstance(node, ast.Attribute) and node.attr in {"args", "error_message", "msg"}:
             offenders.append((node.lineno, node.attr))
         if (
