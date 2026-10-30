@@ -376,16 +376,17 @@ def dispatch_callback(
     save_atomic: SaveAtomic,
     now_utc: datetime | None = None,
     binding_context: dict[str, Any] | None = None,
-    from_user_id: int | None = None,
-    chat_type: str | None = None,
-    authorized_user_ids: frozenset[int] | None = None,
+    from_user_id: int | None,
+    chat_type: str | None,
+    authorized_user_ids: frozenset[int],
 ) -> DispatchResult:
     """Dispatch a parsed callback to the approval core.
 
     Phase 23 (D-01, D-02, D-03): right after the chat gate and before the receipt, a press is
-    checked by `authorized_user_gate` when `authorized_user_ids` is given. `on_callback` always
-    passes it (and refuses by itself first); only direct library callers omit it, which skips
-    this step. `from_user_id` also becomes the `actor_id` of a decided approval.
+    checked by `authorized_user_gate`. The three keywords `from_user_id`, `chat_type` and
+    `authorized_user_ids` are REQUIRED (review WR-01): there is no way to skip the user gate, and
+    a missing or invalid allow-list raises `ValueError` before any decision (never allow-all).
+    `from_user_id` also becomes the `actor_id` of a decided approval.
 
     Per D-02: the order is fixed and never reordered.
       1. Strict parse (already done by the caller — we receive a
@@ -434,34 +435,34 @@ def dispatch_callback(
             reason_code=RejectionReason.INVALIDATED,
         )
 
-    # Gate 2b (Phase 23): the user and chat-type gate, still BEFORE any state lookup.
-    if authorized_user_ids is not None:
-        user_refusal = authorized_user_gate(
-            from_user_id=from_user_id,
-            chat_type=chat_type,
-            authorized_user_ids=authorized_user_ids,
-        )
-        if user_refusal is not None:
-            journal_receipt(
-                _build_user_reject_receipt(
-                    parsed=parsed,
-                    callback_chat_id=callback_chat_id,
-                    from_user_id=from_user_id,
-                    chat_type=chat_type,
-                    reason=user_refusal,
-                    callback_at_utc=callback_at_utc,
-                    correlation_id=correlation_id,
-                )
-            )
-            _journal_outcome(
-                journal_receipt,
+    # Gate 2b (Phase 23): the user and chat-type gate, still BEFORE any state lookup. Always
+    # runs: `authorized_user_gate` raises ValueError on a missing or empty allow-list.
+    user_refusal = authorized_user_gate(
+        from_user_id=from_user_id,
+        chat_type=chat_type,
+        authorized_user_ids=authorized_user_ids,
+    )
+    if user_refusal is not None:
+        journal_receipt(
+            _build_user_reject_receipt(
                 parsed=parsed,
-                ok=False,
-                reason_code=user_refusal,
+                callback_chat_id=callback_chat_id,
+                from_user_id=from_user_id,
+                chat_type=chat_type,
+                reason=user_refusal,
                 callback_at_utc=callback_at_utc,
                 correlation_id=correlation_id,
             )
-            return DispatchResult(ok=False, kind=parsed.kind, reason_code=user_refusal)
+        )
+        _journal_outcome(
+            journal_receipt,
+            parsed=parsed,
+            ok=False,
+            reason_code=user_refusal,
+            callback_at_utc=callback_at_utc,
+            correlation_id=correlation_id,
+        )
+        return DispatchResult(ok=False, kind=parsed.kind, reason_code=user_refusal)
 
     # Gate 3: journal-first receipt (raw, BEFORE any state lookup).
     receipt = _build_callback_receipt(
@@ -1197,10 +1198,19 @@ async def _answer_press(
     correlation_id: str,
 ) -> DispatchResult:
     """The gates, the dispatch and the reply of one press (run by `on_callback`)."""
+    from_user = getattr(query, "from_user", None)
+    from_user_id = getattr(from_user, "id", None)
+    typed_user_id = (
+        from_user_id
+        if isinstance(from_user_id, int) and not isinstance(from_user_id, bool)
+        else None
+    )
     if not authorized_chat_gate(
         callback_chat_id=callback_chat_id,
         authorized_chat_id=authorized_chat_id,
     ):
+        # The dispatcher journals the chat refusal; it still needs the user-gate keywords
+        # (review WR-01: they are mandatory, no call path may omit them).
         result = await _dispatched(
             dispatch,
             parsed,
@@ -1210,6 +1220,9 @@ async def _answer_press(
             raw_token="",
             correlation_id=correlation_id,
             binding_context=None,
+            from_user_id=typed_user_id,
+            chat_type=chat_type,
+            authorized_user_ids=authorized_user_ids,
         )
 
         if reply_text_fn is not None:
@@ -1218,14 +1231,6 @@ async def _answer_press(
                 await reply_text_fn(int(chat_id), "Rejected")
 
         return result
-
-    from_user = getattr(query, "from_user", None)
-    from_user_id = getattr(from_user, "id", None)
-    typed_user_id = (
-        from_user_id
-        if isinstance(from_user_id, int) and not isinstance(from_user_id, bool)
-        else None
-    )
 
     # Phase 23 (D-01, D-02): the user and chat-type gate. It runs before CallbackPress, the
     # confirm handler and any lookup. `on_callback` builds its own refusal, so the gate holds even

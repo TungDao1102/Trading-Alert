@@ -523,7 +523,13 @@ class ShadowApprovalBook:
         return record
 
     def dispatch(self, parsed: ParsedCallback, **kwargs: Any) -> DispatchResult:
-        """`dispatch_callback` with the right token per button, an actor stamp and journaling."""
+        """`dispatch_callback` with the right token per button, an actor stamp and journaling.
+
+        The user gate keywords are mandatory (review WR-01): a call without `authorized_user_ids`
+        is refused before any lookup or write.
+        """
+        if kwargs.get("authorized_user_ids") is None:
+            raise ValueError("authorized_user_ids is required")
         now = self._clock()
         context: dict[str, Any] | None = kwargs.get("binding_context")
         raw_token: str = kwargs.get("raw_token", "")

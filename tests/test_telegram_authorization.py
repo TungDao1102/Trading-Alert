@@ -54,6 +54,7 @@ from tests.shadow_fakes import (
     USER_ID,
     make_callback_update,
 )
+from tests.support.press_identity import OWNER_PRESS
 
 NOW = datetime(2026, 10, 25, 9, 0, tzinfo=UTC)
 EXPIRY = NOW + timedelta(hours=1)
@@ -339,10 +340,8 @@ async def test_an_allowed_press_is_decided_with_the_presser_as_actor_and_replay_
 # --------------------------------------------------------------------------- #
 
 
-def test_dispatch_without_an_allow_list_skips_the_user_gate() -> None:
-    """Only direct library callers omit the allow-list; `on_callback` always passes it."""
-    journal: list[Any] = []
-    result = dispatch_callback(
+def _direct_dispatch(journal: list[Any], **gate: Any) -> DispatchResult:
+    return dispatch_callback(
         ParsedCallback(raw="APR:" + SHORT_ID, kind=CallbackKind.APPROVE, short_id=SHORT_ID),
         callback_chat_id=CHAT_ID,
         authorized_chat_id=CHAT_ID,
@@ -355,8 +354,34 @@ def test_dispatch_without_an_allow_list_skips_the_user_gate() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=None,
+        **gate,
     )
+
+
+def test_dispatch_has_no_way_to_skip_the_user_gate() -> None:
+    """WR-01: the three user-gate keywords are required, an allow-list is never optional."""
+    journal: list[Any] = []
+    with pytest.raises(TypeError):
+        _direct_dispatch(journal)
+    with pytest.raises(ValueError, match="authorized_user_ids"):
+        _direct_dispatch(
+            journal, from_user_id=USER_ID, chat_type="private", authorized_user_ids=None
+        )
+    with pytest.raises(ValueError, match="authorized_user_ids"):
+        _direct_dispatch(
+            journal, from_user_id=USER_ID, chat_type="private", authorized_user_ids=frozenset()
+        )
+    assert journal == []
+
+
+def test_dispatch_with_an_allow_list_still_runs_the_gate_and_the_lookup() -> None:
+    journal: list[Any] = []
+    result = _direct_dispatch(journal, **OWNER_PRESS)
     assert result.reason_code == RejectionReason.INVALIDATED
+    refused = _direct_dispatch(
+        journal, from_user_id=USER_ID + 1, chat_type="private", authorized_user_ids=ALLOW
+    )
+    assert refused.reason_code == USER_NOT_AUTHORIZED
 
 
 def test_a_store_failure_is_reported_with_its_own_code() -> None:

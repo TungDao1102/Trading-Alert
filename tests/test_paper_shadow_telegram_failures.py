@@ -44,6 +44,7 @@ from tests.shadow_fakes import (
     keyboard_buttons,
     make_callback_update,
 )
+from tests.support.press_identity import OWNER_PRESS
 from tests.test_paper_shadow_confirm import T_PRESS, Harness, payload
 
 LATE = T_PRESS + timedelta(hours=1)
@@ -226,6 +227,7 @@ def approve_then_crash(h: Harness, apr: str) -> str:
         raw_token="",
         correlation_id="cbq:crash",
         binding_context=h.book.resolve(parsed.short_id),
+        **OWNER_PRESS,
     )
     assert result.ok is True
     return parsed.short_id

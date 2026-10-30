@@ -40,6 +40,7 @@ from tests.shadow_fakes import (
     make_shadow_plan,
     make_shadow_signal,
 )
+from tests.support.press_identity import OWNER_PRESS
 
 REASONS = ["SETUP_DETECTED"]
 T_CALLBACK = T0 + timedelta(minutes=7)
@@ -224,6 +225,7 @@ async def test_approve_callback_moves_approval_to_approved_with_timestamps() -> 
         raw_token=context["raw_token"],
         correlation_id="cbq:approve-1",
         binding_context=context,
+        **OWNER_PRESS,
     )
 
     assert result.ok is True
@@ -259,6 +261,7 @@ async def test_the_resolve_context_works_with_the_stock_dispatch_callback() -> N
         save_atomic=stores.save_atomic,
         now_utc=T_CALLBACK,
         binding_context=context,
+        **OWNER_PRESS,
     )
 
     assert result.ok is True

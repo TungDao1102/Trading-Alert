@@ -67,6 +67,8 @@ from src.reconcile.compare import (
 from src.reconcile.safe_mode import ExitReadiness, SafeModeController, SafeModeVerdict
 from src.reconcile.sweeper import OrphanSweeper
 
+from tests.support.press_identity import OWNER_PRESS
+
 # --------------------------------------------------------------------------- #
 # Shared fixtures / helpers.
 # --------------------------------------------------------------------------- #
@@ -315,6 +317,7 @@ def test_cr01_dispatch_skip_press_does_not_approve() -> None:
         save_atomic=lambda approval, mapping: saved.append(approval),
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     # The mapping short-id check fires first here (signal differs), but the
     # outcome must still be a fail-closed INVALIDATED with no state change.
@@ -538,6 +541,7 @@ def test_wr03_unknown_short_id_returns_invalidated() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is False
     assert result.reason_code == RejectionReason.INVALIDATED
@@ -560,6 +564,7 @@ def test_wr03_missing_binding_context_returns_invalidated() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=None,
+        **OWNER_PRESS,
     )
     assert result.ok is False
     assert result.reason_code == RejectionReason.INVALIDATED
@@ -592,6 +597,7 @@ def test_wr04_success_path_journals_received_and_resolved() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is True
     types = _event_types(journal)
@@ -616,6 +622,7 @@ def test_wr04_reject_path_journals_received_and_rejected() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is False
     types = _event_types(journal)
@@ -656,6 +663,7 @@ def test_wr05_divergent_mapping_short_id_is_rejected() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is False
     assert result.reason_code == RejectionReason.INVALIDATED
@@ -720,6 +728,7 @@ def test_wr06_dispatch_defaults_to_server_time() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=None,
         binding_context=_binding_context(expiry=far_expiry),
+        **OWNER_PRESS,
     )
     assert result.ok is True
 

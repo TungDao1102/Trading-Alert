@@ -61,6 +61,7 @@ from tests.shadow_fakes import (
     make_shadow_plan,
     make_shadow_signal,
 )
+from tests.support.press_identity import OWNER_PRESS
 
 T_PRESS = T0 + timedelta(minutes=7)
 
@@ -104,6 +105,7 @@ class Harness:
             raw_token="",
             correlation_id=f"cbq:{query}",
             binding_context=self.book.resolve(parsed.short_id),
+            **OWNER_PRESS,
         )
 
     def buttons(self, index: int = -1) -> tuple[str, str]:

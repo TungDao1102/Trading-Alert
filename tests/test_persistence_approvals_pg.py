@@ -74,6 +74,7 @@ from tests.support.pg_rows import (
     make_plan,
     make_signal,
 )
+from tests.support.press_identity import OWNER_PRESS
 
 ONE_DECIDED = "uq_approvals_one_decided_per_plan"
 CHAT_ID = 4242
@@ -723,6 +724,7 @@ def test_dispatch_callback_resolves_an_approve_end_to_end(
             "parameter_set_hash": PARAM_HASH,
             "expiry_utc": T1,
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is True

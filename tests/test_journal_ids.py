@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 from src.domain import journal as journal_module
 
+from tests.support.press_identity import OWNER_PRESS
+
 NOW = datetime(2026, 9, 19, 13, 0, 0, tzinfo=UTC)
 
 
@@ -271,6 +273,7 @@ def _dispatch(
         lookup_by_short_id=lambda short_id: None,
         lookup_by_token_hash=lambda token_hash: None,
         save_atomic=lambda approval, mapping: None,
+        **OWNER_PRESS,
     )
     return events
 

@@ -32,6 +32,8 @@ from typing import Any
 
 import pytest
 
+from tests.support.press_identity import OWNER_PRESS
+
 # --------------------------------------------------------------------------- #
 # Helpers.
 # --------------------------------------------------------------------------- #
@@ -603,6 +605,7 @@ def test_dispatch_callback_chat_gate_runs_before_state_lookup() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        **OWNER_PRESS,
     )
 
     assert result.ok is False
@@ -662,6 +665,7 @@ def test_dispatch_callback_journal_first_receipt_before_resolve() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        **OWNER_PRESS,
     )
 
     # The journal receipt ran BEFORE the short-id lookup.
@@ -716,6 +720,7 @@ def test_dispatch_callback_simulate_recorded_does_not_advance_state() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        **OWNER_PRESS,
     )
 
     # The receipt and the RESOLVED outcome were journaled, but no
@@ -809,6 +814,7 @@ def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
             "parameter_set_hash": parameter_set_hash,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is True
@@ -907,6 +913,7 @@ def test_dispatch_callback_replay_returns_existing_approval() -> None:
             "parameter_set_hash": "1" * 64,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     # Replay returns the existing approval without a new save.
@@ -990,6 +997,7 @@ def test_dispatch_callback_skip_on_approve_plan_invalidates() -> None:
             "parameter_set_hash": "1" * 64,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is False
@@ -1078,6 +1086,7 @@ def test_dispatch_callback_binding_gate_failure_returns_reason_code() -> None:
             "parameter_set_hash": "1" * 64,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is False
