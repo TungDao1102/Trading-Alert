@@ -1319,10 +1319,65 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 36 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 24 to break down)
+
+**Wave 1**
+- [ ] 24-01-PLAN.md - Owner decision packet Q1..Q16 (one-way doors: process boundary, StoreExecutor, migration 0015) and the limits checkpoint with recommendations (D-01, D-10, D-12, D-25, O-1..O-7) *(checkpoint: owner decision)*
+- [ ] 24-02-PLAN.md - G3-005 enum promotion (NO_FILL, HEALTH_CHECK_FAILED) and G2-035 triage (D-35)
+- [ ] 24-03-PLAN.md - D083 ban-end parsing with the optional clock-margin key (D-15, P20-GATE-WIRING)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 24-04-PLAN.md - Tracer: CONFIRM -> one place_entry -> stream fill -> REST-confirmed stop; Q5 and import guards for src/live (D-01, D-04, D-05, D-17)
+- [ ] 24-05-PLAN.md - StoreExecutor seam and the paper expire_due move (D-25, G4-040, P16R-03)
+- [ ] 24-07-PLAN.md - Migration 0015: exchange event time, monotonic updates, update_position_snapshot (D-10, G4-043)
+- [ ] 24-08-PLAN.md - Mode-scoped approved-approvals reader so SHADOW and DEMO share one database (OQ-6)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 24-06-PLAN.md - Owner limit values written with provenance, relationship test, DECISIONS row (D-12, T-06)
+- [ ] 24-09-PLAN.md - SHADOW money block (D-19, P23-R1)
+- [ ] 24-10-PLAN.md - Scheduler primitive and cadences from the limits (D-11, D-12)
+- [ ] 24-11-PLAN.md - Live config, mode, refusals, CLI verbs, OPS-04 diagnostic output (D-02, D-03, D-31)
+- [ ] 24-12-PLAN.md - Exchange composition: one durable REST gate, drift-guarded adapter (D-06, D-15)
+- [ ] 24-13-PLAN.md - Alert path and the T-05 producers (D-07)
+- [ ] 24-14-PLAN.md - Approval request sender, signal source, second-plan refusal, D028 chain (D-18, OQ-2)
+- [ ] 24-15-PLAN.md - Commission refresh and Phase 12 IN-01/IN-05 (D-22, G3-008, G3-014)
+- [ ] 24-16-PLAN.md - Live risk-input producer, CLOSE_POSITION liquidation watch, real-data TP placement (D-21, D-24 per D085)
+- [ ] 24-17-PLAN.md - Telegram runner through on_callback, confirm and dispatch off the loop (D-17, R-2)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 24-18-PLAN.md - User-data stream to protection with the fill fan-out (D-14)
+- [ ] 24-19-PLAN.md - Stream persistence, feed source, divergence queue (D-10 writers, D-14, G4-034)
+- [ ] 24-20-PLAN.md - Reconcile loop, sweeper, UNKNOWN resolver composition; SAFE_MODE spill (EXEC-02)
+- [ ] 24-21-PLAN.md - Scheduled cancel at plan expiry and the criterion-5 Demo findings (D-13, D-34)
+- [ ] 24-22-PLAN.md - Health producers, D056 DEGRADED rows, D058 mark gate, DEMO enable and kill gate (D-26, D-27, D-28)
+- [ ] 24-23-PLAN.md - Telegram operator commands and the fake-level SAFE_MODE drill (R-4, OQ-5)
+- [ ] 24-24-PLAN.md - Heartbeat --target live with its own check and units (D-30)
+- [ ] 24-25-PLAN.md - Image carries the limits files and a revision stamp (R-6, OPS-04)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 24-26-PLAN.md - Start sequence D-08 and restart rehydrate (OPS-03, G4-029, D-09)
+- [ ] 24-30-PLAN.md - Env split, part 1: Binance and live-bot names only in the live env file (D-29, WR-06)
+- [ ] 24-34-PLAN.md - RECONCILED_ABSENT notification, coordinator cancel lag rule, G2-019 proof (D-34, D-35)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 24-27-PLAN.md - LiveWiring assembly, the D-05 wiring gate, run_admitted and shutdown (D-04, D-05)
+- [ ] 24-36-PLAN.md - Env split, part 2: paper and backup files, scripts, cutover and drills re-run (D-29)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 24-28-PLAN.md - Replay and restart matrix on fakes and PostgreSQL (D-09, D-20, EXEC-03)
+- [ ] 24-29-PLAN.md - Demo smoke script over the composed process (D-33, D-16, D-22, D-23, D-34)
+- [ ] 24-35-PLAN.md - Compose live service with probe and hold (D-01, D-03, O-2)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 24-31-PLAN.md - DECISIONS rows, RUNBOOK, TELEGRAM, DATA_MODEL, AGENTS.md (O-7)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 24-32-PLAN.md - Phase 24 gate, 24-DEFERRED register with every inherited item, validation statuses (D-35)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 24-33-PLAN.md - Owner session: VPS, Demo key IP whitelist, second bot, heartbeat, Demo smoke --execute, G2-014 (D-32, D-33) *(checkpoint: owner run)*
 
 ### Phase 25: Binance Demo Integration Test Campaign
 
