@@ -1157,8 +1157,9 @@ class ShadowCoordinator:
         if approve is not None and approve.status is ApprovalResult.APPROVED:
             return self._approved_records(plan, approve, assemble)
         if any(row is not None and row.status is ApprovalResult.EXPIRED for row in (approve, skip)):
-            # The restart sweep decides ONE row of a plan EXPIRED (the database allows one decided
-            # approval per plan); the sibling stays PENDING with a token nobody holds any more.
+            # The restart sweep decides every PENDING row of an undecided plan EXPIRED (EXPIRED
+            # rows are outside the one-decided-per-plan index since Alembic 0014, D088); a plan
+            # with an APPROVED or SKIPPED row was answered by the branches above.
             return assemble(ShadowOutcome(approval_rejection_reason=REASON_RUNTIME_RESTART))
         for row in (approve, skip):
             if row is not None and any(

@@ -8,7 +8,7 @@ The restart sweep (`invalidate_pending_on_restart`) decides each PENDING row EXP
 second sibling violated `uq_approvals_one_decided_per_plan` (predicate `status <> 'PENDING'`):
 it was recorded LEFT_PENDING_SIBLING_DECIDED and kept a token nobody holds.
 
-Change (D-16 default of OWNER-OPEN O-2): the index is dropped and recreated, still unique on
+Change (D-16, owner item O-2 answered (a)): the index is dropped and recreated, still unique on
 `trade_plan_id`, with the predicate `status NOT IN ('PENDING','EXPIRED')`. At most one
 APPROVED-or-SKIPPED row per plan stays enforced by the index; any number of EXPIRED rows may
 exist. Nothing else changes: no column, enum or CHECK.
@@ -19,7 +19,8 @@ EXPIRED decision on a plan that already has an APPROVED or SKIPPED row
 reservation of an APPROVED plan is never released by its sibling, and the SHADOW restart sweep
 keeps its LEFT_PENDING_SIBLING_DECIDED outcome for decided plans.
 
-Status: pending owner decision O-2 (plan 23-08 checkpoint); not to be merged before the answer.
+Status: owner item O-2 was answered (a) on 2026-10-26 and the rule is recorded as docs/DECISIONS.md
+D088 (docs/data/DATA_MODEL.md section 2.5).
 
 Downgrade: counts the plans with more than one non-PENDING approval and raises RuntimeError
 naming the count when it is above zero (the old index could not be rebuilt over that data, and

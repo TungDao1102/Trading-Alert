@@ -944,9 +944,10 @@ def make_shadow_reply_fn(
 class RestartReport:
     """Approvals decided EXPIRED by the sweep, and those left PENDING.
 
-    PostgreSQL allows ONE decided approval per plan, so the sibling of an expired approval
-    cannot be decided; it stays PENDING with a token nobody holds any more, which makes it
-    undecidable.
+    Since Alembic 0014 (D088, owner item O-2 answered (a)) EXPIRED rows are outside the
+    one-decided-approval-per-plan index, so both siblings of an undecided plan expire. Only the
+    sibling of a plan that already has an APPROVED or SKIPPED row is left PENDING (the store
+    refuses to expire it); `left_pending` holds exactly those.
     """
 
     expired: list[Approval]
