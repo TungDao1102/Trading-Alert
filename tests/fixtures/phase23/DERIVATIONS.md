@@ -92,7 +92,7 @@ Golden texts under `messages/` are produced by `_messages_section()` of
 `scripts/gen_phase23_fixtures.py`, never typed. The inputs are the plan 23-02 LONG fixture
 (`tests/test_money_at_stake.py`): entry 50100 (adverse edge of the entry zone 50000-50100), stop
 49500, take-profits 51000 and 52000 with fractions 0.5 and 0.5, quantity 0.08, leverage 5, equity
-800 USDT read at 2026-10-09 03:00:00 UTC, fee 0.0005 and slippage 0.0002 per side (0.0007 per leg
+800 USDT read at 2026-10-09 03:00:00 UTC (10:00:00 +07), fee 0.0005 and slippage 0.0002 per side (0.0007 per leg
 and price). The message layer formats the stored values only (`format(value, "f")`); the figures
 below are the independent derivation of what the risk layer stored.
 
@@ -103,19 +103,19 @@ below are the independent derivation of what the risk layer stored.
 | `Loss at SL: 48.00 USDT gross, 53.5776 USDT net` | gross = 0.08 x (50100 - 49500) = 48.00; net = the sizing result's `realized_risk` = 0.08 x (600 + (50100 + 49500) x 0.0007) = 0.08 x 669.72 = 53.5776 |
 | `Profit at TP1 (0.5 of quantity): 36.000 gross, 33.1692000 net` | leg 0.08 x 0.5 = 0.040; gross = 0.040 x (51000 - 50100) = 36.000; cost = 0.040 x (50100 + 51000) x 0.0007 = 2.8308000; net = 36.000 - 2.8308000 = 33.1692000 |
 | `Profit at TP2 (0.5 of quantity): 76.000 gross, 73.1412000 net` | leg 0.040; gross = 0.040 x (52000 - 50100) = 76.000; cost = 0.040 x (50100 + 52000) x 0.0007 = 2.8588000; net = 76.000 - 2.8588000 = 73.1412000 |
-| `Equity used: 800 USDT (ACCOUNT_LIVE:..., observed 2026-10-09 03:00:00 UTC)` | the equity reading is an input (800), with its source label and observation time |
-| `Detected:` / `Expiry:` | 2026-10-09 03:00:00 UTC and detected + 4 hours = 2026-10-09 07:00:00 UTC, shown by `format_utc` with the explicit suffix |
+| `Equity used: 800 USDT (ACCOUNT_LIVE:..., observed 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC))` | the equity reading is an input (800), with its source label and observation time, shown as local +07 with UTC in brackets |
+| `Detected:` / `Expiry:` | 2026-10-09 03:00:00 UTC and detected + 4 hours = 2026-10-09 07:00:00 UTC, shown by `format_presentation_time` as `2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)` and `2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)` (UTC + 7 hours, no daylight saving) |
 
 Trailing zeros in the figures (`36.000`, `33.1692000`) are the exponent the stored Decimal keeps;
 the renderer writes every digit and never rounds (D-13).
 
-Files: `approve_base.txt` (`format_approve`: no mode line, no money, times in UTC),
+Files: `approve_base.txt` (`format_approve`: no mode line, no money, times local +07 with UTC in brackets),
 `approve_request_demo.txt` and `approve_request_live.txt` (`format_approval_request`, `Mode:
 DEMO` / `Mode: LIVE`), `simulate.txt` (`format_simulate`: the same quantity line and money block as the request,
-times in UTC, no mode line; a payload without money is a FAILED outcome with zero attempts). None names
-Asia/Ho_Chi_Minh: D-14 shows these messages in UTC with an explicit suffix. docs/DECISIONS.md D025
-names Asia/Ho_Chi_Minh the presentation zone; the conflict is owner item O-3 (open) and D025 is
-not edited here. SHADOW texts keep their UTC + Asia/Ho_Chi_Minh pairs.
+times local +07 with UTC in brackets, no mode line; a payload without money is a FAILED outcome with zero attempts). None names
+Asia/Ho_Chi_Minh: since the owner's answer to O-3 (2026-10-30) D-14 shows these messages as the
+local `+07` time with UTC in brackets, which satisfies docs/DECISIONS.md D025 (D025 is not edited).
+SHADOW texts keep their UTC + Asia/Ho_Chi_Minh pairs.
 
 ## Confirm card (plan 23-12)
 
@@ -136,12 +136,12 @@ stored `MoneyAtStake` value written with `format(value, "f")`.
 | `Notional: 4008.00 USDT` | stored `money.notional` = 0.08 x 50100 (see Messages) |
 | `Loss at SL: 48.00 USDT gross, 53.5776 USDT net of modeled costs` | stored `money.loss_at_stop_gross` and `money.loss_at_stop_net` (see Messages) |
 | `Mark price: 50050 (entry 50100, SL 49500)` | the mark input (a fixed 50050 here; in the flow the injected `mark_price(symbol)` read at issue); entry and SL are the stored `money.entry_price` and `money.stop_loss_price`. A missing mark reads `unavailable`, never a number |
-| `Remaining validity: 14400 s to the plan expiry 2026-10-09 07:00:00 UTC; placement check: passes` | seconds = plan expiry 07:00:00 - issue time 03:00:00 = 4 h = 14400 s. The verdict is the code returned by the injected validity rule, here `check_remaining_validity` (`src/execution/pre_placement.py`): the remaining time to the floored `goodTillDate` second must exceed the owner minimum (600) and `GTD_MIN_AHEAD_SECONDS` (600) plus the margin (2 s); 14400 s does, so no code is returned and the card says `passes`. With a code it reads `refused (<CODE>)`: `LIMITS_NOT_CONFIGURED` when the owner minimum is None (the card never prints a minimum it was not given), `VALIDITY_TOO_SHORT` when the time is not enough |
-| `Confirm until 2026-10-09 03:01:00 UTC (60 s window)` | issue time + the confirm window of D041 (60 s) |
-| `CONFIRMED by user 777001 at 2026-10-09 03:00:30 UTC` | the approving user id bound at APPROVE and the stored CONFIRM instant (30 s after issue) |
+| `Remaining validity: 14400 s to the plan expiry 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC); placement check: passes` | seconds = plan expiry 07:00:00 - issue time 03:00:00 = 4 h = 14400 s. The verdict is the code returned by the injected validity rule, here `check_remaining_validity` (`src/execution/pre_placement.py`): the remaining time to the floored `goodTillDate` second must exceed the owner minimum (600) and `GTD_MIN_AHEAD_SECONDS` (600) plus the margin (2 s); 14400 s does, so no code is returned and the card says `passes`. With a code it reads `refused (<CODE>)`: `LIMITS_NOT_CONFIGURED` when the owner minimum is None (the card never prints a minimum it was not given), `VALIDITY_TOO_SHORT` when the time is not enough |
+| `Confirm until 2026-10-09 10:01:00 +07 (2026-10-09 03:01:00 UTC) (60 s window)` | issue time + the confirm window of D041 (60 s) |
+| `CONFIRMED by user 777001 at 2026-10-09 10:00:30 +07 (2026-10-09 03:00:30 UTC)` | the approving user id bound at APPROVE and the stored CONFIRM instant (30 s after issue) |
 | `Placement: handed to the execution step; no entry recorded yet` | no ENTRY intent is stored for the approval (the intent reader returned None); with an intent the line is `Placement: already executed` (ACKED), `Placement: needs reconciliation` plus the reconciliation wording (UNKNOWN, SENT, INTENDED) or `Placement: rejected` (REJECTED); an ambiguous result is never shown as rejected (Q5) |
-| `EXPIRED at 2026-10-09 03:01:01 UTC: no confirmation was taken (CONFIRM_TTL_ELAPSED); nothing was placed` | the sweep at issue + 61 s expires the confirm with the core reason `CONFIRM_TTL_ELAPSED` (the window is inclusive at 60 s) |
+| `EXPIRED at 2026-10-09 10:01:01 +07 (2026-10-09 03:01:01 UTC): no confirmation was taken (CONFIRM_TTL_ELAPSED); nothing was placed` | the sweep at issue + 61 s expires the confirm with the core reason `CONFIRM_TTL_ELAPSED` (the window is inclusive at 60 s) |
 
 The other final texts (`CANCELLED by user ... ; nothing was placed`, `REFUSED at ...: <CODE>; nothing
-was placed`) use the same head and are covered by `tests/test_confirm_flow.py`. All times are UTC
-with the suffix (D-14); the open item O-3 (D025) is unchanged.
+was placed`) use the same head and are covered by `tests/test_confirm_flow.py`. All times are the
+local `+07` time with UTC in brackets (D-14; owner O-3 answered 2026-10-30).

@@ -4,5 +4,5 @@ Quantity: 0.08
 Notional: 4008.00 USDT
 Loss at SL: 48.00 USDT gross, 53.5776 USDT net of modeled costs
 Mark price: 50050 (entry 50100, SL 49500)
-Remaining validity: 14400 s to the plan expiry 2026-10-09 07:00:00 UTC; placement check: passes
-Confirm until 2026-10-09 03:01:00 UTC (60 s window)
+Remaining validity: 14400 s to the plan expiry 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC); placement check: passes
+Confirm until 2026-10-09 10:01:00 +07 (2026-10-09 03:01:00 UTC) (60 s window)

@@ -18,7 +18,7 @@ from src.adapters.telegram_callbacks import DispatchResult, on_callback
 from src.adapters.telegram_notify import (
     build_decision_keyboard,
     format_approval_request,
-    format_utc,
+    format_presentation_time,
 )
 from src.approval.confirm_core import (
     DEMO_CONFIRM_PROFILE,
@@ -72,7 +72,7 @@ from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 
 D = Decimal
 PRESS_AT = T0 + timedelta(minutes=5)
-ACTED = "2026-10-09 03:05:00 UTC"
+ACTED = "2026-10-09 10:05:00 +07 (2026-10-09 03:05:00 UTC)"
 
 
 def make_desk_money(**overrides: Any) -> MoneyAtStake:
@@ -546,7 +546,7 @@ async def test_a_tap_after_expiry_on_a_pending_request_finalizes_it_as_expired()
 
     assert texts(rig.bot)[-1] == "Mode: DEMO\nRefused: APPROVAL_EXPIRED. Nothing changed."
     (edit,) = rig.bot.edited
-    expiry = format_utc(rig.plan.expiry_utc)
+    expiry = format_presentation_time(rig.plan.expiry_utc)
     assert edit.text == (
         f"{issued.text}\nEXPIRED: the plan expired at {expiry}; no decision was taken."
     )
@@ -590,7 +590,8 @@ async def test_the_expiry_sweep_finalizes_untapped_requests_once_and_writes_no_r
     assert done == [issued.mapping.short_id] and again == []
     (edit,) = rig.bot.edited
     assert edit.text.endswith(
-        f"EXPIRED: the plan expired at {format_utc(rig.plan.expiry_utc)}; no decision was taken."
+        "EXPIRED: the plan expired at "
+        f"{format_presentation_time(rig.plan.expiry_utc)}; no decision was taken."
     )
     assert edit.reply_markup.inline_keyboard == ()
     assert rig.stores.approvals == rows_before

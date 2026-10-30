@@ -92,8 +92,8 @@ def test_format_approve_renders_all_12_aprv01_fields() -> None:
     assert "101.50" in text and "103.00" in text  # 6. TP(s)
     assert "2.0" in text  # 7. R:R
     assert "0.005" in text  # 8. risk percentage
-    # 9. expiry: UTC with an explicit suffix since Phase 23 (D-14), no ISO text, no local zone.
-    assert "Expiry: 2026-09-19 13:00:00 UTC" in text
+    # 9. expiry: local +07 with UTC in brackets since Phase 23 (D-14, O-3), no ISO text.
+    assert "Expiry: 2026-09-19 20:00:00 +07 (2026-09-19 13:00:00 UTC)" in text
     assert "CANDLE_CLOSE < 99.50" in text  # 10. invalidation
     assert "50.00" in text  # 11. current exposure
     assert "SETUP_DETECTED" in text  # 12. reason codes
@@ -1247,15 +1247,15 @@ def test_request_lines_follow_the_d13_order_with_utc_times() -> None:
     ]
     assert heads[0].startswith("APPROVE BTCUSDT LONG")
     assert heads[1 : 1 + len(expected_order)] == expected_order
-    assert lines[3] == "Detected: 2026-10-09 03:00:00 UTC"
+    assert lines[3] == "Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)"
     assert "Asia/Ho_Chi_Minh" not in "\n".join(lines)
-    assert "Expiry: 2026-10-09 07:00:00 UTC" in lines
+    assert "Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)" in lines
     assert (
         "Margin: 801.60 USDT at 5x leverage (PLAN_CONSTRAINT_SNAPSHOT:verified_leverage)" in lines
     )
     assert (
         "Equity used: 800 USDT (ACCOUNT_LIVE:min(totalWalletBalance,totalMarginBalance), "
-        "observed 2026-10-09 03:00:00 UTC)" in lines
+        "observed 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC))" in lines
     )
 
 
@@ -1279,8 +1279,8 @@ def test_format_approve_has_utc_times_and_no_display_note() -> None:
     text = format_approve(**_generator().approve_fields())
 
     assert text + "\n" == _golden("approve_base.txt")
-    assert "Detected: 2026-10-09 03:00:00 UTC\n" in text
-    assert "Expiry: 2026-10-09 07:00:00 UTC\n" in text
+    assert "Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)\n" in text
+    assert "Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)\n" in text
     assert "Display:" not in text and "Asia/Ho_Chi_Minh" not in text
 
 

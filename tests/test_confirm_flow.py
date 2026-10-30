@@ -67,7 +67,7 @@ from tests.shadow_fakes import (
 from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
 
 D = Decimal
-PLAN_EXPIRY_TEXT = "2026-10-09 07:00:00 UTC"
+PLAN_EXPIRY_TEXT = "2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)"
 
 # The card of the 23-02 LONG fixture, issued at T0 with a mark of 50050 and a 600 s minimum. Every
 # amount is the stored value; the golden file of the generator carries the same text (Task 3).
@@ -81,7 +81,7 @@ DEMO_CARD = "\n".join(
         "Mark price: 50050 (entry 50100, SL 49500)",
         f"Remaining validity: 14400 s to the plan expiry {PLAN_EXPIRY_TEXT}; "
         "placement check: passes",
-        "Confirm until 2026-10-09 03:01:00 UTC (60 s window)",
+        "Confirm until 2026-10-09 10:01:00 +07 (2026-10-09 03:01:00 UTC) (60 s window)",
     ]
 )
 
@@ -335,7 +335,10 @@ async def test_confirm_by_the_approving_user_reaches_on_confirmed_once_and_final
     assert final.message_id == 1
     assert final.reply_markup.inline_keyboard == ()
     assert final.text.splitlines()[:5] == DEMO_CARD.splitlines()[:5]
-    assert "CONFIRMED by user 777001 at 2026-10-09 03:00:30 UTC" in final.text
+    assert (
+        "CONFIRMED by user 777001 at 2026-10-09 10:00:30 +07 (2026-10-09 03:00:30 UTC)"
+        in final.text
+    )
     assert "Placement: handed to the execution step; no entry recorded yet" in final.text
     assert len(rig.bot.sent) == 1, "a fresh CONFIRM sends no extra message"
 
@@ -451,7 +454,8 @@ async def test_a_confirm_after_the_ttl_is_refused_and_the_card_becomes_final() -
     ]
     assert_final(
         rig,
-        contains="EXPIRED at 2026-10-09 03:01:00 UTC: no confirmation was taken "
+        contains="EXPIRED at 2026-10-09 10:01:00 +07 (2026-10-09 03:01:00 UTC)"
+        ": no confirmation was taken "
         "(CONFIRM_TTL_ELAPSED); nothing was placed",
     )
     assert rig.confirmed == []
@@ -502,7 +506,10 @@ async def test_a_confirm_at_the_plan_expiry_is_refused_and_final() -> None:
     assert replies(rig) == [
         "Mode: DEMO\nRefused: APPROVAL_EXPIRED. The plan has expired. Nothing was placed."
     ]
-    assert_final(rig, contains="REFUSED at 2026-10-09 03:00:30 UTC: APPROVAL_EXPIRED")
+    assert_final(
+        rig,
+        contains="REFUSED at 2026-10-09 10:00:30 +07 (2026-10-09 03:00:30 UTC): APPROVAL_EXPIRED",
+    )
     assert rig.confirmed == [] and rig.prefetch_calls == 0
 
 
@@ -539,7 +546,9 @@ async def test_a_failed_recheck_refuses_with_its_code_and_places_nothing(
     assert not result.ok
     assert payload_of(rig, "DEMO_CONFIRM_EXPIRED")["reason"] == code
     assert replies(rig) == [f"Mode: DEMO\nRefused: {code}. Nothing was placed."]
-    assert_final(rig, contains=f"REFUSED at 2026-10-09 03:00:10 UTC: {code}")
+    assert_final(
+        rig, contains=f"REFUSED at 2026-10-09 10:00:10 +07 (2026-10-09 03:00:10 UTC): {code}"
+    )
     assert rig.confirmed == []
     assert rig.prefetch_calls == 1
 
@@ -553,7 +562,9 @@ async def test_cancel_journals_the_user_and_the_card_says_nothing_was_placed() -
     assert result.ok
     assert payload_of(rig, "DEMO_CONFIRM_CANCELLED")["approving_user_id"] == "777001"
     assert_final(
-        rig, contains="CANCELLED by user 777001 at 2026-10-09 03:00:10 UTC; nothing was placed"
+        rig,
+        contains="CANCELLED by user 777001 at 2026-10-09 10:00:10 +07 (2026-10-09 03:00:10 UTC)"
+        "; nothing was placed",
     )
     assert replies(rig) == []
     assert rig.confirmed == [] and rig.prefetch_calls == 0
@@ -643,7 +654,7 @@ async def test_a_failed_final_edit_is_journaled_and_the_outcome_is_sent_as_a_mes
     assert failure["kind"] == "REJECTED" and failure["trigger"] == "CONFIRM"
     (notice,) = replies(rig)
     assert notice.startswith("CONFIRM BTCUSDT LONG\nMode: DEMO")
-    assert "CONFIRMED by user 777001 at 2026-10-09 03:00:10 UTC" in notice
+    assert "CONFIRMED by user 777001 at 2026-10-09 10:00:10 +07 (2026-10-09 03:00:10 UTC)" in notice
 
 
 # --------------------------------------------------------------------------- #
@@ -699,7 +710,8 @@ async def test_no_card_at_all_expires_the_confirm_notifies_and_makes_the_request
     assert rig.confirmed == []
     assert_final(
         rig,
-        contains="EXPIRED at 2026-10-09 03:00:00 UTC: no confirmation was taken "
+        contains="EXPIRED at 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)"
+        ": no confirmation was taken "
         "(CARD_DELIVERY_FAILED); nothing was placed",
     )
     (notice,) = replies(rig)
@@ -745,7 +757,8 @@ async def test_the_ttl_sweep_expires_the_card_once_and_makes_it_final() -> None:
     assert len(rig.bot.edited) == issued_card_edits + 1, "one final edit, none for the second sweep"
     assert_final(
         rig,
-        contains="EXPIRED at 2026-10-09 03:01:01 UTC: no confirmation was taken "
+        contains="EXPIRED at 2026-10-09 10:01:01 +07 (2026-10-09 03:01:01 UTC)"
+        ": no confirmation was taken "
         "(CONFIRM_TTL_ELAPSED); nothing was placed",
     )
     assert rig.confirmed == []
@@ -795,7 +808,8 @@ async def test_the_card_shows_the_gate_verdict_for_a_plan_that_is_too_short_live
     card = rig.bot.edited[0].text
 
     assert (
-        "Remaining validity: 300 s to the plan expiry 2026-10-09 03:05:00 UTC; "
+        "Remaining validity: 300 s to the plan expiry "
+        "2026-10-09 10:05:00 +07 (2026-10-09 03:05:00 UTC); "
         "placement check: refused (VALIDITY_TOO_SHORT)" in card
     )
     # The recheck of the CONFIRM applies the same rule: the press is refused with the same code.

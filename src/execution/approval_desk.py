@@ -19,7 +19,7 @@ What it does:
     press is dispatched with the token of the button, and the desk keeps a record of what the
     press amounted to (`DeskDecisionRecord`) for the reply and the final edit.
   - `reply_fn` / `finalize_hook`: truthful answers for every tap, and the request message made
-    final (decision, actor and UTC time, keyboard removed in the same edit). A redelivered APPROVE
+    final (decision, actor and time, keyboard removed in the same edit). A redelivered APPROVE
     after the plan expired is answered from the stored entry intent (G4-032).
   - `finalize_expired_requests`: an untapped request whose plan expired becomes a final EXPIRED
     message. It writes no approval row (the expiry policy of the rows is Phase 24's, O-2).
@@ -62,7 +62,7 @@ from src.adapters.telegram_notify import (
     build_decision_keyboard,
     finalize_decided_message,
     format_approval_request,
-    format_utc,
+    format_presentation_time,
     send_text_bounded,
 )
 from src.approval.confirm_core import (
@@ -759,7 +759,11 @@ class ApprovalDesk:
     def _decision_line(self, approval: Approval) -> str:
         actor = approval.actor_id
         who = f"user {actor}" if actor else "an unrecorded user"
-        when = "" if approval.acted_at_utc is None else f" at {format_utc(approval.acted_at_utc)}"
+        when = (
+            ""
+            if approval.acted_at_utc is None
+            else f" at {format_presentation_time(approval.acted_at_utc)}"
+        )
         return f"Decision: {approval.status.value} by {who}{when}"
 
     def _state_text(
@@ -781,7 +785,7 @@ class ApprovalDesk:
             row is not None and row.status is ApprovalResult.EXPIRED for row in rows
         ):
             return (
-                f"{request.text}\nEXPIRED: the plan expired at {format_utc(expiry)}; "
+                f"{request.text}\nEXPIRED: the plan expired at {format_presentation_time(expiry)}; "
                 "no decision was taken."
             )
         if refused_code is not None:
@@ -832,11 +836,12 @@ class ApprovalDesk:
     ) -> FinalizeHook:
         """The `finalize_message` hook: the request message becomes final once nothing can follow.
 
-        The final text is the request text plus one `Decision:` line (status, actor, UTC time of
-        the STORED row), or the EXPIRED line, with the keyboard removed in the same edit. A
-        transient refusal (store failure, handler error) keeps the keyboard. A short id the desk
-        does not know (a restart lost it) loses its keyboard only. The same final text is not
-        edited twice. A failed edit is journaled and logged; it never changes a decision.
+        The final text is the request text plus one `Decision:` line (status, actor, the local +07
+        time with UTC in brackets of the STORED row), or the EXPIRED line, with the keyboard
+        removed in the same edit. A transient refusal (store failure, handler error) keeps the
+        keyboard. A short id the desk does not know (a restart lost it) loses its keyboard only.
+        The same final text is not edited twice. A failed edit is journaled and logged; it never
+        changes a decision.
         """
 
         async def hook(press: CallbackPress, result: DispatchResult) -> None:

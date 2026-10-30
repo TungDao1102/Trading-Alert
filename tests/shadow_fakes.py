@@ -45,6 +45,8 @@ OTHER_CHAT_ID = 9999
 _STAMP = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
 _PAIR = re.compile(rf"({_STAMP}) UTC \(({_STAMP}) Asia/Ho_Chi_Minh\)")
 _UTC_STAMP = re.compile(rf"{_STAMP} UTC")
+_STAMP_RE = re.compile(_STAMP)
+_LOCAL_PAIR = re.compile(rf"({_STAMP}) \+07 \(({_STAMP}) UTC\)")
 _FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -255,16 +257,22 @@ _LIVE_MODES = frozenset({"DEMO", "LIVE"})
 
 
 def assert_live_text(text: str, mode: str) -> None:
-    """Fail unless a DEMO or LIVE `text` names its mode and shows every time as UTC only.
+    """Fail unless a DEMO or LIVE `text` names its mode and shows every time as local +07 + UTC.
 
     The Phase 23 DEMO/LIVE messages (plans 23-11, 23-12) carry `Mode: <mode>`, never the SHADOW
-    label, and show times in UTC with no Asia/Ho_Chi_Minh display pair (D-18).
+    label, and show every time as `<local> +07 (<utc> UTC)` (D-14, owner O-3 answered 2026-10-30):
+    the local time is exactly seven hours after the bracketed UTC one. They carry no
+    Asia/Ho_Chi_Minh display pair (D-18).
     """
     assert mode in _LIVE_MODES, f"unknown live mode: {mode!r}"
     assert f"Mode: {mode}" in text, f"mode missing: {text!r}"
     assert "Asia/Ho_Chi_Minh" not in text, f"a Ho Chi Minh time in a {mode} text: {text!r}"
-    for match in re.finditer(_STAMP, text):
-        assert text[match.end() : match.end() + 4] == " UTC", f"a time without UTC: {text!r}"
+    pairs = _LOCAL_PAIR.findall(text)
+    assert len(_STAMP_RE.findall(text)) == 2 * len(pairs), f"a time without its pair: {text!r}"
+    for local_text, utc_text in pairs:
+        local = datetime.strptime(local_text, _FORMAT)
+        utc = datetime.strptime(utc_text, _FORMAT)
+        assert local - utc == timedelta(hours=7), f"not UTC+7: {local_text} / {utc_text}"
 
 
 class FakeBot:

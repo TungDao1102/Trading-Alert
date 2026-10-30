@@ -73,9 +73,9 @@ def test_format_simulate_renders_all_12_aprv01_fields() -> None:
     assert "101.50" in text and "103.00" in text  # 6. TP(s)
     assert "2.0" in text  # 7. R:R
     assert "0.005" in text  # 8. risk percentage
-    # 9. expiry: UTC with an explicit suffix since Phase 23 (D-14), no ISO text, no local zone.
-    assert "Expiry: 2026-09-19 13:00:00 UTC" in text
-    assert "Detected: 2026-09-19 09:00:00 UTC" in text
+    # 9. expiry: local +07 with UTC in brackets since Phase 23 (D-14, O-3), no ISO text.
+    assert "Expiry: 2026-09-19 20:00:00 +07 (2026-09-19 13:00:00 UTC)" in text
+    assert "Detected: 2026-09-19 16:00:00 +07 (2026-09-19 09:00:00 UTC)" in text
     assert "Display:" not in text and "Asia/Ho_Chi_Minh" not in text
     assert "CANDLE_CLOSE < 99.50" in text  # 10. invalidation
     assert "50.00" in text  # 11. current exposure
@@ -297,8 +297,8 @@ def test_format_simulate_equals_the_generated_golden() -> None:
     assert text + "\n" == _golden_simulate()
     lines = text.split("\n")
     assert lines[0] == "SIMULATE BTCUSDT LONG TREND_PULLBACK_LONG"
-    assert "Detected: 2026-10-09 03:00:00 UTC" in lines
-    assert "Expiry: 2026-10-09 07:00:00 UTC" in lines
+    assert "Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)" in lines
+    assert "Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)" in lines
     assert "Quantity: 0.08" in lines
     assert lines.index("Quantity: 0.08") == lines.index("Notional: 4008.00 USDT") - 1
     assert "Asia/Ho_Chi_Minh" not in text and "Display:" not in text

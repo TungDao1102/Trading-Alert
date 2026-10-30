@@ -58,7 +58,7 @@ from tenacity import (
 from src.adapters.telegram_notify import (
     TelegramBot,
     build_simulate_keyboard,
-    format_utc,
+    format_presentation_time,
     render_money_block,
     require_money_consistent,
     send_simulate,
@@ -149,8 +149,9 @@ def format_simulate(
     fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
     percentage, expiry, invalidation, current exposure, reason codes).
     All Decimal values are formatted via `str()` preserving full
-    precision (D-12). Since Phase 23 (D-14) the two times are shown as
-    `YYYY-MM-DD HH:MM:SS UTC` (`format_utc`), the message carries no
+    precision (D-12). Since Phase 23 (D-14, owner O-3 answered 2026-10-30) the two
+    times are shown as `YYYY-MM-DD HH:MM:SS +07 (YYYY-MM-DD HH:MM:SS UTC)`
+    (`format_presentation_time`), the message carries no
     display-zone note, and it carries the `Quantity:` line and the money block
     (`render_money_block`, D-13) exactly as the DEMO/LIVE request does. The money
     must agree with the quantity, stop and take-profits (ValueError otherwise).
@@ -197,7 +198,7 @@ def format_simulate(
     return (
         f"SIMULATE {symbol} {direction} {setup}\n"
         f"Signal: {signal_id}\n"
-        f"Detected: {format_utc(detected_at_utc)}\n"
+        f"Detected: {format_presentation_time(detected_at_utc)}\n"
         f"Entry: {entry_min}–{entry_max}\n"
         f"Quantity: {format(approved_quantity, 'f')}\n"
         f"{money_lines}\n"
@@ -205,7 +206,7 @@ def format_simulate(
         f"TPs:\n{tp_lines}\n"
         f"R:R: {rr}\n"
         f"Risk: {risk_pct}\n"
-        f"Expiry: {format_utc(expiry_utc)}\n"
+        f"Expiry: {format_presentation_time(expiry_utc)}\n"
         f"Invalidation: {invalidation}\n"
         f"Exposure: {exposure_quote} quote\n"
         f"Reasons: {reasons}"

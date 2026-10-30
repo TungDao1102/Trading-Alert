@@ -13,8 +13,9 @@ This file asserts, against the real tree and without any network or live evidenc
   confirm core imports nothing order-capable, Telegram-facing or from `src.paper`; the desk and
   the flow import no `src.execution.manager`, no Binance adapter and never name
   `execute_approved_plan` (the only seam to placement is the injected `on_confirmed`);
-- messages (D-14): no generated DEMO/LIVE/SIMULATE golden carries `Asia/Ho_Chi_Minh` or a
-  `Display:` line, while the SHADOW time pair still carries it;
+- messages (D-14, owner O-3 answered 2026-10-30): every generated DEMO/LIVE/SIMULATE/card golden
+  shows its times as the local `+07` time with UTC in brackets and carries no `Display:` line and
+  no zone name, while the SHADOW time pair (UTC plus `Asia/Ho_Chi_Minh`) is unchanged;
 - the migration head is `0014_decided_excl_expired` (D-16, the owner's O-2 answer (a));
 - live placement is still disabled (`LiveEnablementController` default);
 - each Phase 23 requirement has its named automated tests, resolved with `ast` and never imported
@@ -392,7 +393,7 @@ def _load_generator() -> ModuleType:
     return module
 
 
-def test_invariant_7_generated_messages_carry_no_display_zone_note() -> None:
+def test_invariant_7_generated_messages_show_local_plus7_time_with_utc_in_brackets() -> None:
     rendered = _load_generator().render_all()
     messages = {key: text for key, text in rendered.items() if key.startswith("messages/")}
     for expected in (
@@ -406,7 +407,12 @@ def test_invariant_7_generated_messages_carry_no_display_zone_note() -> None:
     for key, text in messages.items():
         assert "Asia/Ho_Chi_Minh" not in text, f"{key} names Asia/Ho_Chi_Minh"
         assert "Display:" not in text, f"{key} carries a Display line"
-        assert " UTC" in text, f"{key} shows no explicit UTC suffix"
+        assert " +07 (" in text, f"{key} shows no local +07 time"
+        assert " UTC)" in text, f"{key} shows no UTC time in brackets"
+        # Every time is a local/UTC pair: the stamps come in twos.
+        stamps = re.findall(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", text)
+        pairs = re.findall(r" \+07 \(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\)", text)
+        assert len(stamps) == 2 * len(pairs), f"{key} has a time that is not a +07/UTC pair"
 
 
 def test_invariant_7b_the_shadow_time_pair_still_carries_both_zones() -> None:
@@ -569,6 +575,7 @@ def test_invariant_9_telegram_md_documents_the_gate_and_the_token_trust_model() 
         "Asia/Ho_Chi_Minh",
         "D025",
         "O-3",
+        "+07",
         "ALREADY_DECIDED",
         "on_confirmed",
         "needs reconciliation",

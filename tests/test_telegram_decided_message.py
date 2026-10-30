@@ -61,7 +61,7 @@ PARAM_HASH = "1" * 64
 SIGNAL_ID = "sig_dec_" + "0" * 56
 SHORT_ID = derive_short_id(SIGNAL_ID)
 ALLOW = frozenset({USER_ID})
-FINAL_TEXT = "FINAL\nMode: DEMO\nDecided at 2026-10-25 09:00:00 UTC"
+FINAL_TEXT = "FINAL\nMode: DEMO\nDecided at 2026-10-25 16:00:00 +07 (2026-10-25 09:00:00 UTC)"
 MESSAGE_ID = 7
 
 
@@ -330,6 +330,19 @@ async def test_the_live_fake_bot_refuses_a_shadow_pair_and_a_missing_mode() -> N
         )
     with pytest.raises(AssertionError):
         await bot.send_message(chat_id=CHAT_ID, text="Mode: DEMO\n2026-10-25 09:00:00")
+    # A DEMO/LIVE time is the local +07 time with UTC in brackets (owner O-3, 2026-10-30): a
+    # UTC-only time and a wrong offset are refused, the right pair is accepted.
+    with pytest.raises(AssertionError):
+        await bot.send_message(chat_id=CHAT_ID, text="Mode: DEMO\n2026-10-25 09:00:00 UTC")
+    with pytest.raises(AssertionError):
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text="Mode: DEMO\n2026-10-25 15:00:00 +07 (2026-10-25 09:00:00 UTC)",
+        )
+    await bot.send_message(
+        chat_id=CHAT_ID,
+        text="Mode: DEMO\n2026-10-25 16:00:00 +07 (2026-10-25 09:00:00 UTC)",
+    )
 
 
 async def test_a_markup_edit_is_not_a_text_edit_and_not_traced() -> None:

@@ -34,7 +34,7 @@ import math
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -624,17 +624,31 @@ async def finalize_decided_message(
 # --------------------------------------------------------------------------- #
 
 
-def format_utc(instant: datetime) -> str:
-    """Show an instant as `YYYY-MM-DD HH:MM:SS UTC` (Phase 23, D-14; owner item O-3 is open).
+# Vietnam (Asia/Ho_Chi_Minh, docs/DECISIONS.md D025) has no daylight saving, so a fixed +07
+# offset is exact and no tz database is needed. The zone is used only to present an instant;
+# nothing stored or compared is ever converted to it.
+_PRESENTATION_ZONE = timezone(timedelta(hours=7))
+_PRESENTATION_SUFFIX = "+07"
+_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-    The suffix is explicit so no reader has to guess the zone. A naive instant is refused; an
-    aware one in another zone is converted to UTC first.
+
+def format_presentation_time(instant: datetime) -> str:
+    """Show an instant as `YYYY-MM-DD HH:MM:SS +07 (YYYY-MM-DD HH:MM:SS UTC)`.
+
+    Owner decision O-3 (2026-10-30): the local Vietnam time is the main time (D025 and
+    docs/01_ENGINEERING_PRINCIPLES.md section 8: persist UTC, convert only in presentation) and
+    the UTC instant stays in brackets, the day the daily-loss rule counts in (D033). The suffixes
+    are explicit so no reader has to guess a zone. A naive instant is refused (ValueError), a
+    non-datetime is refused (TypeError); an aware one in any zone is converted. The instant is an
+    argument: this function reads no clock.
     """
     if not isinstance(instant, datetime):
         raise TypeError(f"instant must be datetime, got {type(instant).__name__}")
     if instant.tzinfo is None:
         raise ValueError("instant must be UTC-aware, got naive datetime")
-    return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+    local = instant.astimezone(_PRESENTATION_ZONE).strftime(_TIME_FORMAT)
+    utc = instant.astimezone(UTC).strftime(_TIME_FORMAT)
+    return f"{local} {_PRESENTATION_SUFFIX} ({utc} UTC)"
 
 
 def _approve_lines(
@@ -724,7 +738,7 @@ def _approve_lines(
         f"APPROVE {symbol} {direction} {setup}",
         *mode_lines,
         f"Signal: {signal_id}",
-        f"Detected: {format_utc(detected_at_utc)}",
+        f"Detected: {format_presentation_time(detected_at_utc)}",
         f"Entry: {entry_min}–{entry_max}",
         f"Quantity: {format(approved_quantity, 'f')}",
         *money_lines,
@@ -733,7 +747,7 @@ def _approve_lines(
         *tp_lines,
         f"R:R: {rr}",
         f"Risk: {risk_pct}",
-        f"Expiry: {format_utc(expiry_utc)}",
+        f"Expiry: {format_presentation_time(expiry_utc)}",
         f"Invalidation: {invalidation}",
         f"Exposure: {exposure_quote} quote",
         f"Reasons: {reasons}",
@@ -765,12 +779,13 @@ def format_approve(
     fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
     percentage, expiry, invalidation, current exposure, reason codes).
     All Decimal values are formatted via `str()` preserving full
-    precision (D-12). Since Phase 23 (D-14) the two times are shown as
-    `YYYY-MM-DD HH:MM:SS UTC` with an explicit suffix and the message
-    carries no display-zone note (owner item O-3 is open; docs/DECISIONS.md
-    D025 names Asia/Ho_Chi_Minh as the presentation zone, which this text does
-    not use). The SHADOW alert strips the `Detected:` and `Expiry:` lines and
-    shows its own pairs, so SHADOW text is unchanged.
+    precision (D-12). Since Phase 23 (D-14, owner O-3 answered 2026-10-30) the two
+    times are shown by `format_presentation_time` as the local time with an
+    explicit `+07` suffix and UTC in brackets
+    (`YYYY-MM-DD HH:MM:SS +07 (YYYY-MM-DD HH:MM:SS UTC)`, which satisfies
+    docs/DECISIONS.md D025), and the message carries no display-zone note. The
+    SHADOW alert strips the `Detected:` and `Expiry:` lines and shows its own
+    pairs, so SHADOW text is unchanged.
 
     The text is byte-stable: same inputs produce the same output
     (D-02 determinism). The format is a multi-line string with one
@@ -838,7 +853,7 @@ def render_money_block(money: MoneyAtStake) -> tuple[str, ...]:
 
     Every amount is the stored Decimal written with `format(value, "f")`: no multiplication, no
     rounding, no exponent notation, no cost call. The quote asset is named on every amount and
-    the time is shown through `format_utc`.
+    the time is shown through `format_presentation_time`.
     """
     stored = _money_or_refuse(money)
     asset = stored.quote_asset
@@ -856,7 +871,7 @@ def render_money_block(money: MoneyAtStake) -> tuple[str, ...]:
         f"{format(stored.loss_at_stop_net, 'f')} {asset} net of modeled costs",
         *profit_lines,
         f"Equity used: {format(stored.equity, 'f')} {asset} ({stored.equity_source}, "
-        f"observed {format_utc(stored.equity_observed_at_utc)})",
+        f"observed {format_presentation_time(stored.equity_observed_at_utc)})",
     )
 
 
@@ -968,8 +983,9 @@ def format_approval_request(
 #
 # The card replaces the request after APPROVE: it names what CONFIRM would hand to the execution
 # step. Every amount is the STORED `MoneyAtStake` value written with `format(value, "f")`: nothing
-# is multiplied or rounded here. Times are UTC with the suffix (D-14). The validity line carries
-# the verdict of the placement gate's own rule, handed in as a code (None = passes).
+# is multiplied or rounded here. Times are the local +07 time with UTC in brackets (D-14, O-3). The
+# validity line carries the verdict of the placement gate's own rule, handed in as a code (None =
+# passes).
 # --------------------------------------------------------------------------- #
 
 LiveConfirmOutcome = Literal["CONFIRMED", "CANCELLED", "EXPIRED", "REFUSED"]
@@ -1025,8 +1041,8 @@ def format_live_confirm_card(
     stored = _money_or_refuse(money)
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
         raise ValueError(f"ttl_seconds must be a positive integer, got {ttl_seconds!r}")
-    expiry_text = format_utc(plan_expiry_utc)
-    until_text = format_utc(now_utc + timedelta(seconds=ttl_seconds))
+    expiry_text = format_presentation_time(plan_expiry_utc)
+    until_text = format_presentation_time(now_utc + timedelta(seconds=ttl_seconds))
     if mark_price is None:
         mark_text = "unavailable"
     elif isinstance(mark_price, Decimal) and mark_price.is_finite():
@@ -1072,7 +1088,7 @@ def format_live_confirm_final(
     if outcome not in _LIVE_CONFIRM_OUTCOMES:
         raise ValueError(f"unknown confirm outcome {outcome!r}")
     head = _live_confirm_head(mode_label=mode_label, symbol=symbol, side=side, money=money)
-    when = format_utc(at_utc)
+    when = format_presentation_time(at_utc)
     lines: list[str]
     if outcome in ("CONFIRMED", "CANCELLED"):
         if user_id is None or user_id == "":
@@ -1123,7 +1139,7 @@ __all__ = [
     "format_approve",
     "format_live_confirm_card",
     "format_live_confirm_final",
-    "format_utc",
+    "format_presentation_time",
     "send_simulate",
     "render_money_block",
     "require_money_consistent",

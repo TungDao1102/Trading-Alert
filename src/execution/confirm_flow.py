@@ -58,7 +58,7 @@ from src.adapters.telegram_notify import (
     finalize_decided_message,
     format_live_confirm_card,
     format_live_confirm_final,
-    format_utc,
+    format_presentation_time,
     send_text_bounded,
 )
 from src.approval.confirm_core import (
@@ -361,7 +361,7 @@ class ConfirmFlow:
             f"Mode: {self._mode}\n"
             f"The confirmation card for {entry.signal.symbol} {entry.signal.direction} could not "
             f"be delivered ({failure.kind.value}). Nothing was placed. The plan expires at "
-            f"{format_utc(entry.plan.expiry_utc)}."
+            f"{format_presentation_time(entry.plan.expiry_utc)}."
         )
         outcome = await send_text_bounded(self._bot, chat_id, notice_text, sleep=self._sleep)
         if outcome.failure is not None:
