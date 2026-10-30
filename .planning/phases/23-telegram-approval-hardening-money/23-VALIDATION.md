@@ -1,7 +1,7 @@
 ---
 phase: "23"
 slug: "telegram-approval-hardening-money"
-status: complete
+status: validated
 nyquist_compliant: true
 wave_0_complete: true
 created: "2026-10-25"
@@ -76,3 +76,13 @@ Filled by the planner from the research map (APRV-01, APRV-02, PAPER-02; decisio
 - [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** signed off 2026-10-27 from the plan SUMMARY files and the plan 23-13 run. Two guard tests outside this map (`tests/test_no_unratified_defaults.py` and `tests/test_modeled_costs_none_guard.py`, from plans 23-07 and 23-02) failed when this map was signed off; both pass since commit 1d62e1cb (constant renamed `TELEGRAM_RETRY_WAIT_CAP_SECONDS`; the two `money_at_stake` reads of `modeled_costs_per_unit` audited and pinned), see `23-OWNER-CHECKS.md`. Owner items O-3 and R-1 were answered on 2026-10-30 (plan 23-14).
+
+## Validation Audit 2026-10-30
+
+| Metric | Count |
+|---|---|
+| Gaps found | 0 |
+| Resolved | 0 |
+| Escalated | 0 |
+
+Re-audited 2026-10-30 after review fixes WR-01..WR-11 and plan 23-14: all 35 mapped test files run green under TRADING_CI_STRICT=1 (PostgreSQL files not skipped). The fixes added tests in the same files, no new gap. Manual-only rows unchanged.
