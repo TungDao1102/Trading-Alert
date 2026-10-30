@@ -97,6 +97,23 @@ All decisions below are the recommended option chosen in `--auto` mode. Every Bi
 
 </owner_open>
 
+<research_reconciliation>
+## Research reconciliation (2026-10-30, from 24-RESEARCH.md; verified against docs/DECISIONS.md)
+
+Where this section and a decision above disagree, this section wins. These are recommended defaults, still overridable by the owner.
+
+- **R-1 (supersedes D-12 values, D-23, D-24):** D084, D085, D086 and D087 already fix equity age (15000 ms), bracket age, headroom, daily-loss age, target leverage 5 ISOLATED, liquidation buffer 300 bps, `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED` True, and `CLOSE_POSITION` for a failed post-fill liquidation check. `LIVE_NET_PNL_SEMANTICS_VERIFIED` stays False until the Phase 26 canary (D086). Composition passes these; it does not re-ask them. Only the keys still `NOT_CONFIGURED` (listed in 24-RESEARCH "Limit keys") stay owner-open (O-1).
+- **R-2 (refines D-17):** `on_confirmed` is a synchronous hook and cannot await `execute_approved_plan`; it also gets no raw approval token. Build an `ExecutionService` that schedules the async placement from the hook (`run_coroutine_threadsafe` if the confirm core runs on a worker thread) and add the token accessor to `ApprovalDesk`. Still exactly one `place_entry` per approval.
+- **R-3 (refines D-28):** DEMO enablement is an in-process `enable()` after the start sequence, as the rehearsal does; the health probes that describe a market feed the live process does not own are fed by a live-process feed source or scoped out by an explicit DEMO rule (owner-confirm, OQ-3).
+- **R-4 (adds to D-33):** SAFE_MODE operator exit cannot be a separate CLI; it is an in-process Telegram command channel (owner-confirmed 2026-10-23). Minimal operator commands are in scope (OQ-5).
+- **R-5 (adds):** Signal/TradePlan source for the live process (OQ-2), a second Telegram bot token for DEMO (one getUpdates consumer per token, OQ-4), and one database per confirm mode (OQ-6) are owner checkpoints; the planner proposes a recommended default for each and gates the dependent tasks behind a checkpoint.
+- **R-6 (adds to D-29, D-31):** deployment fixes are in scope: copy `config/execution` and `config/binance` into the image, and a build-time revision stamp for OPS-04 (`.git` is dockerignored).
+- **R-7 (refines D-10):** Order, Fill and Position repositories already exist (Phase 17); new work is the event-time column with a monotonic guard, `update_position_snapshot`, production writers; next migration is 0015, next DECISIONS id D089.
+- **R-8 (refines D-30):** heartbeat stays one external check per target; add `--target live` rather than a single multiplexed sender.
+- **R-9:** tests that will break and must be amended in the same plans: `test_phase18_gate` invariants 2 and 5, `test_paper_shadow_isolation` (forces `StoreExecutor` into `src/ops`), `test_deploy_compose`, `test_deploy_images`.
+
+</research_reconciliation>
+
 <canonical_refs>
 ## Canonical References
 
