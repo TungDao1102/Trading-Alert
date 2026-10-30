@@ -57,7 +57,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 20: Reconcile + SAFE_MODE Hardening + Alerts** - No blind spots, the protective of a resting entry is never an orphan, a never-confirmed stop is re-placed or the exposure closed, a confirmed-then-lost stop is closed (D034, D077), durable SAFE_MODE, operational alerts
 - [ ] **Phase 21: Account Equity + Daily Loss from Binance** - Binance-canonical equity and D033 daily-loss state (was Phase 12)
 - [ ] **Phase 22: Leverage, Margin + Liquidation Guard** - ISOLATED, 5x cap, liquidation beyond SL, available margin incl. resting entries (was Phases 13 + 14)
-- [ ] **Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts** - User-id auth, working SKIP, APPROVE→CONFIRM card (D041), keyboard removal, $ amounts (was Phase 16)
+- [x] **Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts** - User-id auth, working SKIP, APPROVE→CONFIRM card (D041), keyboard removal, $ amounts (was Phase 16) (executed 2026-10-30; verification passed with R-1 override; owner live checks A1, G2-014, A2 open; library level, composed in Phase 24)
 - [ ] **Phase 24: Live Runtime Composition + Demo Rehearsal** - Wire APPROVE→execute, bot runner, schedulers, live risk inputs; end-to-end on Binance Demo Trading
 - [ ] **Phase 25: Binance Demo Integration Test Campaign** - Automated failure-scenario suite on Binance Demo, APPROVE+CONFIRM→demo orders, multi-week demo soak (D040)
 - [ ] **Phase 26: Go-Live Readiness Gate** - Affirmative enablement gate, verification closure, real backups, CI, mainnet read-only check + small canary (D040)
@@ -1462,7 +1462,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 20. Reconcile + SAFE_MODE Hardening + Alerts | 31/31 | Executed, human_needed | 2026-10-23 |
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
-| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 12/13 | In Progress|  |
+| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
 | 24. Live Runtime Composition + Demo Rehearsal | 0/TBD | Not started | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
