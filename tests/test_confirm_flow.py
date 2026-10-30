@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -47,6 +47,7 @@ from src.execution.confirm_recheck import (
 from src.execution.intent_store import IntentRecord
 from src.execution.pre_placement import PrePlacementInputs, check_remaining_validity
 from src.ops.alert_wording import reconciliation_required_text
+from src.risk.money_at_stake import money_canonical_json, parse_money_json
 from telegram.error import BadRequest, Forbidden, RetryAfter
 
 from tests.shadow_fakes import (
@@ -523,6 +524,29 @@ async def test_a_replayed_approve_by_another_user_never_becomes_the_approving_us
     await rig.approve(short, query_id="q-apr-2")
     entry = rig.flow._book.get(short)
     assert entry is not None and entry.approving_user_id == USER_ID
+
+
+async def test_a_stored_money_block_that_disagrees_with_the_plan_never_reaches_the_card() -> None:
+    """WR-04: the card re-runs the F-015 consistency check against the plan before rendering."""
+    rig = Rig()
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    (apr_hash, stored) = next(
+        (h, a) for h, a in rig.stores.approvals.items() if a.action is ApprovalAction.APPROVE
+    )
+    assert stored.money_json is not None
+    tampered = replace(
+        parse_money_json(stored.money_json),
+        stop_loss_price=parse_money_json(stored.money_json).stop_loss_price - Decimal("1"),
+    )
+    rig.stores.approvals[apr_hash] = replace(stored, money_json=money_canonical_json(tampered))
+
+    await rig.approve(short)
+
+    assert not any("Mode: DEMO" in e.text and "CONFIRM" in e.text for e in rig.bot.edited)
+    assert rig.bot.edited == [] or all(e.text != DEMO_CARD for e in rig.bot.edited)
+    assert rig.confirmed == [] and rig.prefetch_calls == 0
+    assert rig.flow._book.get(short) is None, "no confirm is opened for an inconsistent block"
 
 
 async def test_a_confirm_at_the_plan_expiry_is_refused_and_final() -> None:

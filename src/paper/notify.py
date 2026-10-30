@@ -187,6 +187,8 @@ def format_simulate(
         money,
         direction=direction,
         approved_quantity=approved_quantity,
+        entry_min=entry_min,
+        entry_max=entry_max,
         stop_loss=stop_loss,
         take_profits=take_profits,
     )

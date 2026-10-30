@@ -880,6 +880,8 @@ def require_money_consistent(
     *,
     direction: str,
     approved_quantity: Decimal,
+    entry_min: Decimal,
+    entry_max: Decimal,
     stop_loss: Decimal,
     take_profits: list[tuple[Decimal, Decimal]],
 ) -> None:
@@ -887,11 +889,17 @@ def require_money_consistent(
 
     The money block is stored with the approval; the message fields come from the same plan. A
     difference means one of them is not the plan the operator would approve (F-015), so the
-    message is never rendered.
+    message is never rendered. The entry price of the block must lie inside the plan's entry zone
+    (review WR-04).
     """
     stored = _money_or_refuse(money)
     if stored.side != direction:
         raise ValueError(f"money.side {stored.side!r} differs from direction {direction!r}")
+    if not entry_min <= stored.entry_price <= entry_max:
+        raise ValueError(
+            f"money.entry_price {stored.entry_price} is outside the entry zone "
+            f"{entry_min}-{entry_max}"
+        )
     if stored.quantity != approved_quantity:
         raise ValueError(
             f"money.quantity {stored.quantity} differs from approved_quantity {approved_quantity}"
@@ -951,6 +959,8 @@ def format_approval_request(
         money,
         direction=direction,
         approved_quantity=approved_quantity,
+        entry_min=entry_min,
+        entry_max=entry_max,
         stop_loss=stop_loss,
         take_profits=take_profits,
     )

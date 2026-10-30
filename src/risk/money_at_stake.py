@@ -221,6 +221,16 @@ class MoneyAtStake:
             self.stop_loss_price,
             [leg.price for leg in self.take_profits],
         )
+        # Review WR-04: the amounts agree with each other, so a stored block cannot show a
+        # notional or leg quantities that the quantity and entry price do not produce. Same
+        # context as `build_money_at_stake` (38 digits, truncating).
+        with localcontext() as ctx:
+            ctx.prec = _PRECISION
+            ctx.rounding = ROUND_DOWN
+            if self.notional != self.quantity * self.entry_price:
+                raise ValueError("notional must equal quantity x entry_price")
+            if sum((leg.leg_quantity for leg in self.take_profits), _ZERO) != self.quantity:
+                raise ValueError("take-profit leg quantities must sum to the quantity")
 
 
 def _side_text(side: object) -> str:

@@ -218,7 +218,7 @@ class ConfirmFlow:
         now_utc: datetime,
         ttl_seconds: int,
     ) -> str:
-        money = self._desk.money_for(plan.trade_plan_id)
+        money = self._desk.checked_money_for(signal, plan)
         if money is None:
             raise MoneyAtStakeUnavailable("money", "no stored money for the card")
         return format_live_confirm_card(
@@ -517,8 +517,18 @@ class ConfirmFlow:
 
     def _final_text(self, entry: ConfirmEntry) -> str | None:
         """The final text of a decided card from the STORED state, or None without stored money."""
-        money: MoneyAtStake | None = self._desk.money_for(entry.plan.trade_plan_id)
-        if money is None or entry.state is ConfirmState.PENDING:
+        if entry.state is ConfirmState.PENDING:
+            return None
+        try:
+            money: MoneyAtStake | None = self._desk.checked_money_for(entry.signal, entry.plan)
+        except ValueError as exc:
+            # A stored block that disagrees with the plan is never shown (review WR-04).
+            log.error(
+                f"{self._profile.log_namespace}.stored_money_inconsistent",
+                error_class=type(exc).__name__,
+            )
+            return None
+        if money is None:
             return None
         common: dict[str, Any] = {
             "mode_label": self._mode,

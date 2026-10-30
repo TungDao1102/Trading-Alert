@@ -1419,6 +1419,8 @@ def test_request_without_money_is_refused_naming_the_reason() -> None:
         ({"take_profits": [(_TP1_PRICE + 1, _HALF), (_TP2_PRICE, _HALF)]}, "TP1 price"),
         ({"take_profits": [(_TP1_PRICE, _HALF), (_TP2_PRICE, Decimal("0.4"))]}, "TP2 fraction"),
         ({"take_profits": [(Decimal("51000"), Decimal("1"))]}, "take_profits"),
+        ({"entry_max": Decimal("50000")}, "outside the entry zone"),
+        ({"entry_min": Decimal("50200"), "entry_max": Decimal("50300")}, "outside the entry zone"),
     ],
 )
 def test_request_whose_money_disagrees_with_the_message_is_refused(
@@ -1439,18 +1441,20 @@ def test_request_refuses_any_label_but_demo_and_live(label: str) -> None:
 
 
 def test_money_block_prints_plain_fixed_point_and_never_rounds() -> None:
-    from dataclasses import replace
+    import copy
 
     from src.adapters.telegram_notify import render_money_block
 
-    money = _request_kwargs()["money"]
-    odd = replace(
-        money,
-        notional=Decimal("1E+2"),
-        loss_at_stop_gross=Decimal("0.100"),
-        loss_at_stop_net=Decimal("0.1000001"),
-        equity=Decimal("1E-7"),
-    )
+    # The odd amounts are set on a copy, past `MoneyAtStake.__post_init__` (WR-04 made it check
+    # notional = quantity x entry): this test is about how the stored Decimals are PRINTED.
+    odd = copy.copy(_request_kwargs()["money"])
+    for name, value in (
+        ("notional", Decimal("1E+2")),
+        ("loss_at_stop_gross", Decimal("0.100")),
+        ("loss_at_stop_net", Decimal("0.1000001")),
+        ("equity", Decimal("1E-7")),
+    ):
+        object.__setattr__(odd, name, value)
 
     lines = render_money_block(odd)
 

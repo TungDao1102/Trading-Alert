@@ -123,6 +123,19 @@ def test_long_plan_money_is_recomputed_independently() -> None:
     assert money.leverage_source == LEVERAGE_SOURCE_CONSTRAINT_SNAPSHOT
 
 
+def test_the_block_refuses_a_notional_that_the_quantity_and_entry_do_not_produce() -> None:
+    money = _build_long()
+    with pytest.raises(ValueError, match="notional"):
+        replace(money, notional=money.notional + D("1"))
+
+
+def test_the_block_refuses_leg_quantities_that_do_not_sum_to_the_quantity() -> None:
+    money = _build_long()
+    first, second = money.take_profits
+    with pytest.raises(ValueError, match="leg quantities"):
+        replace(money, take_profits=(first, replace(second, leg_quantity=first.leg_quantity / 2)))
+
+
 def test_canonical_json_shape_and_round_trip_byte_for_byte() -> None:
     money = _build_long()
     text = money_canonical_json(money)

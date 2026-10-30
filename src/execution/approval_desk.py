@@ -63,6 +63,7 @@ from src.adapters.telegram_notify import (
     finalize_decided_message,
     format_approval_request,
     format_presentation_time,
+    require_money_consistent,
     send_text_bounded,
 )
 from src.approval.confirm_core import (
@@ -592,6 +593,36 @@ class ApprovalDesk:
         if stored is None or stored.money_json is None:
             return None
         return parse_money_json(stored.money_json)
+
+    def checked_money_for(self, signal: Signal, plan: TradePlan) -> MoneyAtStake | None:
+        """`money_for` re-checked against the plan and the quantity that CONFIRM will place.
+
+        Review WR-04: F-015 ("message and card cannot disagree") was enforced at issue time only.
+        The card and the final texts are built later from the stored block, so the same
+        `require_money_consistent` runs again here, against the plan's own stop, take-profit
+        prices, entry zone and `quantity_after_rounding`. None when no block is stored; a
+        ValueError (never a rendered card) when the stored block disagrees with the plan.
+        """
+        money = self.money_for(plan.trade_plan_id)
+        if money is None:
+            return None
+        take_profit = _json_object(plan.take_profit_json, "take_profit_json")
+        tp1 = _json_decimal(take_profit, "tp1", "take_profit_json")
+        tp2 = _json_decimal(take_profit, "tp2", "take_profit_json")
+        if len(money.take_profits) != 2:
+            raise MoneyAtStakeUnavailable("take_profits", "the money block needs the two TP legs")
+        require_money_consistent(
+            money,
+            direction=signal.direction,
+            approved_quantity=plan.quantity_after_rounding,
+            entry_min=plan.entry_min_price,
+            entry_max=plan.entry_max_price,
+            stop_loss=plan.stop_loss_price,
+            take_profits=list(
+                zip((tp1, tp2), [leg.fraction for leg in money.take_profits], strict=True)
+            ),
+        )
+        return money
 
     def request_text(self, short_id: str) -> str | None:
         """The text of the request message as sent (memory only), or None."""
