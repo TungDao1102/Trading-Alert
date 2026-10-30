@@ -34,7 +34,12 @@ class PriorOutcome(str, Enum):
 
 
 PRIOR_OUTCOME_LABEL: dict[PriorOutcome, str] = {
-    PriorOutcome.ALREADY_EXECUTED: "already executed",
+    # ACKED means the exchange acknowledged the entry order. Since Phase 19 the entry is a GTD
+    # LIMIT that may rest, fill partly or expire unfilled, so it is never called "executed"
+    # (review WR-09).
+    PriorOutcome.ALREADY_EXECUTED: (
+        "already placed (acknowledged by the exchange; fill state is in the journal)"
+    ),
     PriorOutcome.NEEDS_RECONCILIATION: "needs reconciliation",
     PriorOutcome.REJECTED: "rejected",
 }

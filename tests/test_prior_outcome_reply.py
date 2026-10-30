@@ -105,7 +105,9 @@ def test_ambiguous_is_never_rejected(status: ExecutionIntentStatus) -> None:
 
 def test_labels() -> None:
     assert set(PRIOR_OUTCOME_LABEL) == set(PriorOutcome)
-    assert PRIOR_OUTCOME_LABEL[PriorOutcome.ALREADY_EXECUTED] == "already executed"
+    assert PRIOR_OUTCOME_LABEL[PriorOutcome.ALREADY_EXECUTED] == (
+        "already placed (acknowledged by the exchange; fill state is in the journal)"
+    )
     assert PRIOR_OUTCOME_LABEL[PriorOutcome.NEEDS_RECONCILIATION] == "needs reconciliation"
     assert PRIOR_OUTCOME_LABEL[PriorOutcome.REJECTED] == "rejected"
     for outcome, label in PRIOR_OUTCOME_LABEL.items():

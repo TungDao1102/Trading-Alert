@@ -347,7 +347,7 @@ async def test_confirm_by_the_approving_user_reaches_on_confirmed_once_and_final
 @pytest.mark.parametrize(
     ("status", "label"),
     [
-        (ExecutionIntentStatus.ACKED, "already executed"),
+        (ExecutionIntentStatus.ACKED, "already placed (acknowledged by the exchange"),
         (ExecutionIntentStatus.UNKNOWN, "needs reconciliation"),
         (ExecutionIntentStatus.SENT, "needs reconciliation"),
         (ExecutionIntentStatus.INTENDED, "needs reconciliation"),

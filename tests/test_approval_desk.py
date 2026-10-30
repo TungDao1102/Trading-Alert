@@ -457,7 +457,7 @@ async def test_a_confirmation_attached_desk_does_not_claim_a_missing_handler() -
 @pytest.mark.parametrize(
     ("status", "needle"),
     [
-        (ExecutionIntentStatus.ACKED, "already executed"),
+        (ExecutionIntentStatus.ACKED, "already placed (acknowledged by the exchange"),
         (ExecutionIntentStatus.UNKNOWN, "needs reconciliation"),
         (ExecutionIntentStatus.SENT, "needs reconciliation"),
         (ExecutionIntentStatus.INTENDED, "needs reconciliation"),
