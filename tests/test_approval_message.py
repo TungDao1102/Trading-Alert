@@ -1284,16 +1284,55 @@ def test_format_approve_has_utc_times_and_no_display_note() -> None:
     assert "Display:" not in text and "Asia/Ho_Chi_Minh" not in text
 
 
-def test_format_utc_has_an_explicit_suffix_and_refuses_a_naive_time() -> None:
+def test_format_presentation_time_is_local_plus7_with_utc_in_brackets() -> None:
+    """Owner O-3 (2026-10-30): the local Vietnam time is the main time, UTC is in brackets."""
     from datetime import timedelta, timezone
 
-    from src.adapters.telegram_notify import format_utc
+    from src.adapters.telegram_notify import format_presentation_time
 
-    assert format_utc(datetime(2026, 10, 9, 3, 0, 0, tzinfo=UTC)) == "2026-10-09 03:00:00 UTC"
+    assert (
+        format_presentation_time(datetime(2026, 10, 30, 14, 15, 0, tzinfo=UTC))
+        == "2026-10-30 21:15:00 +07 (2026-10-30 14:15:00 UTC)"
+    )
+    # An aware instant in another zone is converted: 10:00 +07 is 03:00 UTC.
     plus7 = timezone(timedelta(hours=7))
-    assert format_utc(datetime(2026, 10, 9, 10, 0, 0, tzinfo=plus7)) == "2026-10-09 03:00:00 UTC"
+    assert (
+        format_presentation_time(datetime(2026, 10, 9, 10, 0, 0, tzinfo=plus7))
+        == "2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)"
+    )
+    minus5 = timezone(timedelta(hours=-5))
+    assert (
+        format_presentation_time(datetime(2026, 10, 9, 0, 0, 0, tzinfo=minus5))
+        == "2026-10-09 12:00:00 +07 (2026-10-09 05:00:00 UTC)"
+    )
+
+
+def test_format_presentation_time_crosses_midnight_in_both_directions() -> None:
+    from src.adapters.telegram_notify import format_presentation_time
+
+    # 20:30 UTC is already the next local day (03:30 +07).
+    assert (
+        format_presentation_time(datetime(2026, 10, 30, 20, 30, 0, tzinfo=UTC))
+        == "2026-10-31 03:30:00 +07 (2026-10-30 20:30:00 UTC)"
+    )
+    # 16:59:59 UTC is 23:59:59 local, 17:00:00 UTC is the next local day.
+    assert (
+        format_presentation_time(datetime(2026, 12, 31, 16, 59, 59, tzinfo=UTC))
+        == "2026-12-31 23:59:59 +07 (2026-12-31 16:59:59 UTC)"
+    )
+    assert (
+        format_presentation_time(datetime(2026, 12, 31, 17, 0, 0, tzinfo=UTC))
+        == "2027-01-01 00:00:00 +07 (2026-12-31 17:00:00 UTC)"
+    )
+
+
+def test_format_presentation_time_refuses_a_naive_time_and_a_non_datetime() -> None:
+    from src.adapters.telegram_notify import format_presentation_time
+
     with pytest.raises(ValueError, match="UTC-aware"):
-        format_utc(datetime(2026, 10, 9, 3, 0, 0))
+        format_presentation_time(datetime(2026, 10, 9, 3, 0, 0))
+    with pytest.raises(TypeError):
+        format_presentation_time("2026-10-09 03:00:00")  # type: ignore[arg-type]
 
 
 def test_no_golden_message_names_the_local_zone() -> None:
