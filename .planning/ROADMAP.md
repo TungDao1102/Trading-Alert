@@ -1319,7 +1319,7 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 12/36 plans executed
+**Plans:** 17/36 plans executed
 
 Plans:
 
@@ -1340,11 +1340,11 @@ Plans:
 - [x] 24-10-PLAN.md - Scheduler primitive and cadences from the limits (D-11, D-12)
 - [x] 24-11-PLAN.md - Live config, mode, refusals, CLI verbs, OPS-04 diagnostic output (D-02, D-03, D-31)
 - [x] 24-12-PLAN.md - Exchange composition: one durable REST gate, drift-guarded adapter (D-06, D-15)
-- [ ] 24-13-PLAN.md - Alert path and the T-05 producers (D-07)
-- [ ] 24-14-PLAN.md - Approval request sender, signal source, second-plan refusal, D028 chain (D-18, OQ-2)
-- [ ] 24-15-PLAN.md - Commission refresh and Phase 12 IN-01/IN-05 (D-22, G3-008, G3-014)
-- [ ] 24-16-PLAN.md - Live risk-input producer, CLOSE_POSITION liquidation watch, real-data TP placement (D-21, D-24 per D085)
-- [ ] 24-17-PLAN.md - Telegram runner through on_callback, confirm and dispatch off the loop (D-17, R-2)
+- [x] 24-13-PLAN.md - Alert path and the T-05 producers (D-07)
+- [x] 24-14-PLAN.md - Approval request sender, signal source, second-plan refusal, D028 chain (D-18, OQ-2)
+- [x] 24-15-PLAN.md - Commission refresh and Phase 12 IN-01/IN-05 (D-22, G3-008, G3-014)
+- [x] 24-16-PLAN.md - Live risk-input producer, CLOSE_POSITION liquidation watch, real-data TP placement (D-21, D-24 per D085)
+- [x] 24-17-PLAN.md - Telegram runner through on_callback, confirm and dispatch off the loop (D-17, R-2)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 24-18-PLAN.md - User-data stream to protection with the fill fan-out (D-14)
@@ -1518,7 +1518,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
-| 24. Live Runtime Composition + Demo Rehearsal | 12/36 | In Progress | - |
+| 24. Live Runtime Composition + Demo Rehearsal | 17/36 | In Progress | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
