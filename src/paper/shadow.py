@@ -2,7 +2,7 @@
 
 SHADOW means a signal becomes a labelled Telegram alert with functional APPROVE and SKIP
 buttons, and the human decision is journaled with measured timestamps. SHADOW NEVER places an
-order (D040): this module imports nothing from `src.execution` and nothing from `telegram`
+order (D040): this module imports nothing from the execution package and nothing from `telegram`
 (python-telegram-bot stays behind `src/adapters/telegram_notify.py`).
 
 What lives here:
@@ -67,6 +67,9 @@ from src.adapters.telegram_notify import (
     TelegramTextBot,
     build_shadow_decision_keyboard,
     format_approve,
+    format_presentation_time,
+    render_money_block,
+    require_money_consistent,
     send_text,
 )
 from src.approval.confirm_core import ConfirmOutcome, ConfirmRecord
@@ -86,6 +89,14 @@ from src.paper.notify import (
     NOTIFY_WAIT_MAX_SECONDS,
     NOTIFY_WAIT_MULTIPLIER_SECONDS,
 )
+from src.risk.cost_rates import CostRates
+from src.risk.money_at_stake import (
+    MoneyAtStake,
+    MoneyAtStakeUnavailable,
+    build_money_at_stake,
+    money_canonical_json,
+)
+from src.risk.types import SizedResult
 
 log = structlog.get_logger()
 
@@ -104,6 +115,19 @@ ALERT_CORRELATION_PREFIX: Final = "shadow-alert:"
 REASON_RUNTIME_RESTART: Final = "RUNTIME_RESTART"
 
 _CONTEXT_SKIP_TOKEN: Final = "skip_raw_token"
+
+# SHADOW alert text versions (plan 24-09, owner answer Q10 at 24-01, 2026-10-31; CONTEXT D-19,
+# ROADMAP P23-R1). A Phase 16 soak is running and its evidence pins the SHADOW alert text, so the
+# money block is a NEW text version and the old text is kept byte for byte:
+#   - SHADOW_TEXT_V1: the alert without money rows; the approval rows carry no `money_json`.
+#   - SHADOW_TEXT_V2: the same alert plus the money rows of the DEMO request card (notional,
+#     margin, loss at SL, profit per TP, equity used); both approval rows carry `money_json`.
+# The version is chosen once, when the `ShadowApprovalBook` is constructed. V1 stays the default
+# so no existing caller (and no running soak) changes text by accident.
+SHADOW_TEXT_V1: Final = "shadow-text/1"
+SHADOW_TEXT_V2: Final = "shadow-text/2"
+SHADOW_TEXT_VERSIONS: Final[frozenset[str]] = frozenset({SHADOW_TEXT_V1, SHADOW_TEXT_V2})
+DEFAULT_SHADOW_TEXT_VERSION: Final = SHADOW_TEXT_V1
 
 
 # --------------------------------------------------------------------------- #
@@ -325,6 +349,99 @@ def _json_decimal(payload: Mapping[str, Any], key: str, field: str) -> Decimal:
     return value
 
 
+def _shadow_money_lines(money: MoneyAtStake) -> list[str]:
+    """The DEMO money rows, with the one time in the SHADOW pair format (UTC and Ho Chi Minh).
+
+    Every SHADOW text shows each time in UTC and Asia/Ho_Chi_Minh (`render_shadow_message`), so the
+    `observed` time of the `Equity used:` row is written by `format_time_pair`; every amount and
+    every other word is the DEMO renderer's (`render_money_block`).
+    """
+    demo_time = format_presentation_time(money.equity_observed_at_utc)
+    lines = list(render_money_block(money))
+    pair = format_time_pair(money.equity_observed_at_utc)
+    swapped = [line.replace(demo_time, pair) for line in lines]
+    if swapped == lines:
+        raise RuntimeError("render_money_block no longer shows the equity observation time")
+    return swapped
+
+
+def _require_text_version(text_version: str) -> None:
+    if text_version not in SHADOW_TEXT_VERSIONS:
+        raise ValueError(f"unknown SHADOW text version {text_version!r}")
+
+
+def _plan_take_profits(plan: TradePlan) -> list[tuple[Decimal, Decimal]]:
+    """The plan's two take-profits as `(price, fraction of quantity)`, in plan order."""
+    take_profit = _json_object(plan.take_profit_json, "take_profit_json")
+    tp1 = _json_decimal(take_profit, "tp1", "take_profit_json")
+    tp2 = _json_decimal(take_profit, "tp2", "take_profit_json")
+    return [(tp1, TP1_QUANTITY_FRACTION), (tp2, Decimal(1) - TP1_QUANTITY_FRACTION)]
+
+
+def build_shadow_money(
+    *,
+    signal: Signal,
+    plan: TradePlan,
+    sized: SizedResult,
+    cost_rates: CostRates,
+    leverage: int | None,
+    leverage_source: str,
+    equity: Decimal | None,
+    equity_source: str,
+    equity_observed_at_utc: datetime | None,
+) -> MoneyAtStake:
+    """The money block of a SHADOW plan, from the SAME `SizedResult` that sized it (F-015).
+
+    The side comes from the signal, the stop and the take-profit prices from the plan, the
+    quantity, entry price and net loss from `sized`; nothing is recomputed outside
+    `build_money_at_stake`. A missing input raises `MoneyAtStakeUnavailable` (nothing partial).
+    """
+    return build_money_at_stake(
+        side=signal.direction,
+        sized=sized,
+        stop_loss_price=plan.stop_loss_price,
+        take_profits=_plan_take_profits(plan),
+        cost_rates=cost_rates,
+        leverage=leverage,
+        leverage_source=leverage_source,
+        equity=equity,
+        equity_source=equity_source,
+        equity_observed_at_utc=equity_observed_at_utc,
+    )
+
+
+def _require_money_for_version(
+    *,
+    signal: Signal,
+    plan: TradePlan,
+    money: MoneyAtStake | None,
+    text_version: str,
+) -> MoneyAtStake | None:
+    """Check `money` against the text version and the plan; return what must be shown/stored.
+
+    V1 carries no money (a block handed in is a caller error, never silently dropped). V2 needs a
+    block that agrees with the plan (same checks as the DEMO request); a missing block raises
+    `MoneyAtStakeUnavailable` before anything is stored or sent.
+    """
+    _require_text_version(text_version)
+    if text_version == SHADOW_TEXT_V1:
+        if money is not None:
+            raise ValueError(f"money is shown only by {SHADOW_TEXT_V2}, not by {SHADOW_TEXT_V1}")
+        return None
+    if money is None:
+        raise MoneyAtStakeUnavailable("money")
+    require_money_consistent(
+        money,
+        direction=signal.direction,
+        approved_quantity=plan.quantity_after_rounding,
+        entry_min=plan.entry_min_price,
+        entry_max=plan.entry_max_price,
+        stop_loss=plan.stop_loss_price,
+        take_profits=_plan_take_profits(plan),
+    )
+    return money
+
+
 def format_shadow_alert(
     *,
     signal: Signal,
@@ -333,6 +450,8 @@ def format_shadow_alert(
     now_utc: datetime,
     exposure_quote: Decimal,
     reason_codes: Sequence[str],
+    money: MoneyAtStake | None = None,
+    text_version: str = DEFAULT_SHADOW_TEXT_VERSION,
 ) -> str:
     """The SHADOW alert: the 12 APRV-01 fields (via `format_approve`) in the SHADOW envelope.
 
@@ -344,11 +463,18 @@ def format_shadow_alert(
     `ShadowApprovalBook.issue` stores as `approved_quantity` on both rows. A plan whose
     quantity is not above zero is refused here (ValueError), before anything is stored
     or sent.
+
+    `text_version` (plan 24-09, owner Q10): `SHADOW_TEXT_V1` is the text of the Phase 16 soak,
+    unchanged. `SHADOW_TEXT_V2` adds the money rows (`render_money_block`, the DEMO wording)
+    directly after the `Quantity:` line; it requires `money` (the block stored on the approval
+    rows), which must agree with the plan, or the alert is refused (`MoneyAtStakeUnavailable`
+    for a missing block, ValueError for a disagreement).
     """
     require_shadow(mode)
-    take_profit = _json_object(plan.take_profit_json, "take_profit_json")
-    tp1 = _json_decimal(take_profit, "tp1", "take_profit_json")
-    tp2 = _json_decimal(take_profit, "tp2", "take_profit_json")
+    shown_money = _require_money_for_version(
+        signal=signal, plan=plan, money=money, text_version=text_version
+    )
+    take_profits = _plan_take_profits(plan)
     rr = _json_decimal(_json_object(plan.expected_rr_json, "expected_rr_json"), "tp1_rr", "rr")
     rule = _json_object(plan.invalidation_rule_json, "invalidation_rule_json")
     invalidation = f"{rule.get('basis')} at {rule.get('level')}"
@@ -359,7 +485,7 @@ def format_shadow_alert(
         entry_min=plan.entry_min_price,
         entry_max=plan.entry_max_price,
         stop_loss=plan.stop_loss_price,
-        take_profits=[(tp1, TP1_QUANTITY_FRACTION), (tp2, Decimal(1) - TP1_QUANTITY_FRACTION)],
+        take_profits=take_profits,
         rr=rr,
         risk_pct=plan.risk_rate,
         expiry_utc=plan.expiry_utc,
@@ -374,6 +500,11 @@ def format_shadow_alert(
     body_lines = [line for line in all_lines if not line.startswith(("Detected: ", "Expiry: "))]
     if len(all_lines) - len(body_lines) != 2:
         raise RuntimeError("format_approve no longer has the Detected/Expiry lines")
+    if shown_money is not None:
+        quantity_at = [i for i, line in enumerate(body_lines) if line.startswith("Quantity: ")]
+        if len(quantity_at) != 1:
+            raise RuntimeError("format_approve no longer has exactly one Quantity line")
+        body_lines[quantity_at[0] + 1 : quantity_at[0] + 1] = _shadow_money_lines(shown_money)
     return render_shadow_message(
         ShadowMessageKind.ALERT,
         mode=mode,
@@ -450,21 +581,51 @@ class ShadowApprovalBook:
     argument. Raw tokens never reach PostgreSQL, the journal or any message (T-16-10).
     """
 
-    def __init__(self, stores: ShadowStores, *, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        stores: ShadowStores,
+        *,
+        clock: Callable[[], datetime],
+        text_version: str = DEFAULT_SHADOW_TEXT_VERSION,
+    ) -> None:
+        _require_text_version(text_version)
         self._stores = stores
         self._clock = clock
+        self._text_version = text_version
         self._contexts: dict[str, dict[str, Any]] = {}
         self._plans: dict[str, tuple[Signal, TradePlan]] = {}
         self._last: DecisionRecord | None = None
 
-    def issue(self, *, signal: Signal, plan: TradePlan, now_utc: datetime) -> IssuedApprovals:
+    @property
+    def text_version(self) -> str:
+        """The SHADOW alert text version this book issues for (chosen at construction)."""
+        return self._text_version
+
+    def issue(
+        self,
+        *,
+        signal: Signal,
+        plan: TradePlan,
+        now_utc: datetime,
+        money: MoneyAtStake | None = None,
+    ) -> IssuedApprovals:
         """Build the PENDING APPROVE and SKIP approvals and the short-id mapping.
 
         Both rows carry `approved_quantity` = the plan's `quantity_after_rounding` (D078,
         19-REVIEW WR-01), the figure the SHADOW alert and
         `render_confirm_card` show. The SKIP row's value is never read; the two rows of one
         request stay identical.
+
+        With `SHADOW_TEXT_V2` (plan 24-09, D-19, P23-R1) both rows also carry the same
+        `money_json`, the canonical JSON of the block built from the pipeline output that sized
+        the plan (`build_shadow_money`), never recomputed. A missing or disagreeing block is
+        refused here, before any token is issued. With `SHADOW_TEXT_V1` a block is refused
+        (ValueError) and the rows carry no `money_json`, as before.
         """
+        shown_money = _require_money_for_version(
+            signal=signal, plan=plan, money=money, text_version=self._text_version
+        )
+        money_json = None if shown_money is None else money_canonical_json(shown_money)
         approve_token = issue_one_time_token()
         skip_token = issue_one_time_token()
 
@@ -480,6 +641,7 @@ class ShadowApprovalBook:
                 requested_at_utc=now_utc,
                 request_hash=plan.plan_hash,
                 approved_quantity=plan.quantity_after_rounding,
+                money_json=money_json,
             )
 
         mapping = make_short_id_mapping(
@@ -779,8 +941,13 @@ async def send_shadow_alert(
     reason_codes: Sequence[str],
     now_utc: datetime,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    money: MoneyAtStake | None = None,
 ) -> ShadowSendOutcome:
     """Persist the parents and PENDING approvals, journal, then send the labelled alert.
+
+    The alert text version is the book's (`ShadowApprovalBook.text_version`). With
+    `SHADOW_TEXT_V2` the `money` block (`build_shadow_money`) is shown on the alert and stored on
+    both rows; a missing block refuses the alert before anything is stored or sent.
 
     Order: parents first (signal, plan, both approvals, the short-id mapping), the journal row
     next, the send last. A send failure is journaled with its classified kind and approves
@@ -794,9 +961,11 @@ async def send_shadow_alert(
         now_utc=now_utc,
         exposure_quote=exposure_quote,
         reason_codes=reason_codes,
+        money=money,
+        text_version=book.text_version,
     )
     keyboard = build_shadow_decision_keyboard(signal.signal_id)
-    issued = book.issue(signal=signal, plan=plan, now_utc=now_utc)
+    issued = book.issue(signal=signal, plan=plan, now_utc=now_utc, money=money)
     short_id = issued.mapping.short_id
 
     stores.insert_signal(signal)
@@ -1015,8 +1184,12 @@ def invalidate_pending_on_restart(stores: ShadowStores, now_utc: datetime) -> Re
 
 
 __all__ = [
+    "DEFAULT_SHADOW_TEXT_VERSION",
     "DISPLAY_ZONE",
     "SHADOW_LABEL",
+    "SHADOW_TEXT_V1",
+    "SHADOW_TEXT_V2",
+    "SHADOW_TEXT_VERSIONS",
     "ConfirmCardFields",
     "ConfirmOutcome",
     "ConfirmRecord",
@@ -1034,6 +1207,7 @@ __all__ = [
     "ShadowMessageKind",
     "ShadowSendOutcome",
     "ShadowStores",
+    "build_shadow_money",
     "format_shadow_alert",
     "approval_id_for",
     "format_time_pair",
