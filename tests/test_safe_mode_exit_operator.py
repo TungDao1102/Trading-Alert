@@ -1067,13 +1067,14 @@ def test_tick_recovery_and_alerts_never_call_exit_safe_mode(relative: str) -> No
 
 
 def test_only_the_operator_path_calls_exit() -> None:
-    """Across all of src, the only caller of exit_safe_mode is the restore drill."""
+    """Across all of src, the callers of exit_safe_mode are the restore drill and the Telegram
+    operator command (plan 24-23, which gates it on the Phase 23 allow-list and a confirm)."""
     callers = {
         path.relative_to(REPO_ROOT).as_posix()
         for path in (REPO_ROOT / "src").rglob("*.py")
         if _calls_of_exit_safe_mode(path)
     }
-    assert callers == {"src/ops/drills.py"}
+    assert callers == {"src/ops/drills.py", "src/live/operator.py"}
 
 
 def test_safe_mode_module_imports_nothing_from_persistence_or_execution() -> None:
