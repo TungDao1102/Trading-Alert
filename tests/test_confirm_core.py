@@ -792,3 +792,82 @@ def test_the_hook_is_the_only_seam_a_book_without_a_hook_confirms_and_places_not
     result = rig.confirm(rig.issue())
     assert result.outcome is ConfirmOutcome.CONFIRMED
     assert rig.hook_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-08 (OQ-6, C-7): a mode-scoped approved-approvals reader, so a DEMO sweep never acts on a
+# SHADOW approval and a SHADOW sweep never acts on a DEMO one when they share one database.
+# --------------------------------------------------------------------------- #
+
+LATE = T_ISSUE + timedelta(seconds=TTL + 1)
+
+
+def _shared_rigs() -> tuple[InMemoryShadowStores, CoreRig, CoreRig]:
+    """One database (shared data), a SHADOW-scoped view with its book and a DEMO-scoped one."""
+    database = InMemoryShadowStores()
+    shadow = CoreRig(SHADOW_CONFIRM_PROFILE, stores=database.scoped("SHADOW"))
+    demo = CoreRig(DEMO_CONFIRM_PROFILE, stores=database.scoped("DEMO"))
+    return database, shadow, demo
+
+
+def test_a_demo_sweep_over_a_shadow_approval_leaves_it_untouched_and_journals_nothing() -> None:
+    database, shadow, demo = _shared_rigs()
+    shadow.approved(1)  # an APPROVED SHADOW approval with no card yet
+
+    assert demo.book.expire_on_restart(T_ISSUE + timedelta(seconds=5)) == []
+    assert database.journal == []
+    confirm_core.assert_no_stranded_approvals(demo.stores, LATE, profile=DEMO_CONFIRM_PROFILE)
+    # The approval is still the SHADOW process's own to judge.
+    with pytest.raises(confirm_core.StrandedApprovals):
+        confirm_core.assert_no_stranded_approvals(
+            shadow.stores, LATE, profile=SHADOW_CONFIRM_PROFILE
+        )
+
+
+def test_a_shadow_sweep_over_a_demo_approval_leaves_it_untouched_and_journals_nothing() -> None:
+    database, shadow, demo = _shared_rigs()
+    demo.approved(2)
+
+    assert shadow.book.expire_on_restart(T_ISSUE + timedelta(seconds=5)) == []
+    assert database.journal == []
+    confirm_core.assert_no_stranded_approvals(shadow.stores, LATE, profile=SHADOW_CONFIRM_PROFILE)
+    with pytest.raises(confirm_core.StrandedApprovals):
+        confirm_core.assert_no_stranded_approvals(demo.stores, LATE, profile=DEMO_CONFIRM_PROFILE)
+
+
+def test_each_sweep_still_expires_the_approvals_of_its_own_mode() -> None:
+    database, shadow, demo = _shared_rigs()
+    shadow.approved(1)
+    demo.approved(2)
+
+    assert demo.book.expire_on_restart(T_ISSUE + timedelta(seconds=5)) == ["apr-2"]
+    assert [e.event_type for e in database.journal] == ["DEMO_CONFIRM_EXPIRED"]
+    assert shadow.book.expire_on_restart(T_ISSUE + timedelta(seconds=6)) == ["apr-1"]
+    assert [e.event_type for e in database.journal] == [
+        "DEMO_CONFIRM_EXPIRED",
+        "SHADOW_CONFIRM_EXPIRED",
+    ]
+
+
+def test_an_unmarked_approval_is_a_shadow_approval_and_never_a_demo_or_live_one() -> None:
+    database = InMemoryShadowStores()  # unscoped: writes no marker, like every pre-24-08 row
+    CoreRig(SHADOW_CONFIRM_PROFILE, stores=database).approved(1)
+
+    assert [a.approval_id for a in database.scoped("SHADOW").list_approved_approvals()] == ["apr-1"]
+    assert database.scoped("DEMO").list_approved_approvals() == []
+    assert database.scoped("LIVE").list_approved_approvals() == []
+    assert [a.approval_id for a in database.scoped(None).list_approved_approvals()] == ["apr-1"]
+
+
+def test_a_scope_outside_the_three_modes_is_refused_by_both_stores() -> None:
+    from typing import cast
+
+    from src.persistence.shadow_stores import CONFIRM_MODES, PgShadowStores
+
+    with pytest.raises(ValueError, match="confirm_mode"):
+        InMemoryShadowStores(confirm_mode="PAPER")
+    with pytest.raises(ValueError, match="confirm_mode"):
+        PgShadowStores(cast(Any, None), confirm_mode="paper")
+    assert CONFIRM_MODES == tuple(
+        p.mode_label for p in (SHADOW_CONFIRM_PROFILE, DEMO_CONFIRM_PROFILE, LIVE_CONFIRM_PROFILE)
+    )
