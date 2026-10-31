@@ -94,7 +94,7 @@ def test_the_alert_event_is_in_the_closed_ops05_contract_as_high() -> None:
     assert ALERT_EVENTS[STALE_EVENT] is AlertSeverity.HIGH
 
 
-def test_the_grace_key_is_an_owner_key_that_is_unset_in_the_committed_file() -> None:
+def test_the_grace_key_is_an_owner_key_that_is_set_in_the_committed_file() -> None:
     from pathlib import Path
 
     from src.execution.execution_limits import load_execution_limits
@@ -102,8 +102,9 @@ def test_the_grace_key_is_an_owner_key_that_is_unset_in_the_committed_file() -> 
     root = Path(__file__).resolve().parents[1]
     limits = load_execution_limits(root / "config" / "execution" / "execution-limits-v1.toml")
 
-    assert limits.reconcile_entry_stale_grace_ms is None
-    assert "reconcile.entry_stale_grace_ms" in limits.unset_alert_only_keys()
+    # DECISIONS D089 (owner answer 2026-10-31): 900000 ms, provenance DECISION.
+    assert limits.reconcile_entry_stale_grace_ms == 900000
+    assert "reconcile.entry_stale_grace_ms" not in limits.unset_alert_only_keys()
     # The alert-only key never keeps the live path refused on its own account.
     assert "reconcile.entry_stale_grace_ms" not in limits.unset_keys()
 

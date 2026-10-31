@@ -19,8 +19,11 @@
 #   account.max_equity_age_ms                  Phase 21, D-03 (F-012): maximum age of the account equity reading used for live sizing, the daily-loss base and the reservation gate
 #   account.max_daily_loss_age_ms              Phase 21 review WR-05: maximum age of a known daily loss, counted from the backfill that made it known (owner answer 2026-10-25, DECISIONS D087)
 #   rest_gate.ban_end_clock_margin_ms          Plan 24-03, D083 item 4 (OPTIONAL): clock-difference margin added to the ban end time read from a 418 / -1003 body
-# Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
-# (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED, except
+# A value is the string NOT_CONFIGURED until the owner fills it (OWNER-OPEN O-04). Set so far:
+# the account keys (D084, D087), the margin keys (D085) and, by DECISIONS D089 (Phase 24, plan
+# 24-06, owner answer 2026-10-31), every other key except stale_feed.max_user_data_silence_ms
+# (not answered: no number is invented) and rest_gate.ban_end_clock_margin_ms (optional, stays
+# unset). Setting values does not enable live placement (LIVE_ORDERS_DISABLED stays). The live path refuses while any key is NOT_CONFIGURED, except
 # reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
 # stale-entry check is skipped (and says so) and nothing else changes, and
 # rest_gate.ban_end_clock_margin_ms: it only refines the 418 ban wait, so while it is NOT_CONFIGURED
@@ -30,29 +33,29 @@
 # separate, sha256-pinned file and is not edited.
 
 [protection]
-max_unprotected_ms = "NOT_CONFIGURED"
-entry_terminal_timeout_ms = "NOT_CONFIGURED"
-entry_unknown_grace_ms = "NOT_CONFIGURED"
-emergency_close_poll_timeout_ms = "NOT_CONFIGURED"
+max_unprotected_ms = 180000
+entry_terminal_timeout_ms = 900000
+entry_unknown_grace_ms = 1800000
+emergency_close_poll_timeout_ms = 30000
 
 [pre_placement]
-min_remaining_validity_seconds = "NOT_CONFIGURED"
-max_mark_price_age_ms = "NOT_CONFIGURED"
-max_last_price_age_ms = "NOT_CONFIGURED"
+min_remaining_validity_seconds = 900
+max_mark_price_age_ms = 5000
+max_last_price_age_ms = 5000
 
 [reconcile]
-tick_interval_ms = "NOT_CONFIGURED"
-entry_unknown_probe_count = "NOT_CONFIGURED"
-entry_unknown_probe_interval_ms = "NOT_CONFIGURED"
-lot_filter_refresh_interval_ms = "NOT_CONFIGURED"
-entry_stale_grace_ms = "NOT_CONFIGURED"
+tick_interval_ms = 15000
+entry_unknown_probe_count = 3
+entry_unknown_probe_interval_ms = 5000
+lot_filter_refresh_interval_ms = 3600000
+entry_stale_grace_ms = 900000
 
 [stale_feed]
-max_mark_price_age_ms = "NOT_CONFIGURED"
+max_mark_price_age_ms = 60000
 max_user_data_silence_ms = "NOT_CONFIGURED"
 
 [alerts]
-dedupe_window_ms = "NOT_CONFIGURED"
+dedupe_window_ms = 300000
 
 [account]
 max_equity_age_ms = 15000
@@ -67,29 +70,29 @@ headroom_bps = 1000
 ban_end_clock_margin_ms = "NOT_CONFIGURED"
 
 [provenance.protection]
-max_unprotected_ms = "NOT_CONFIGURED"
-entry_terminal_timeout_ms = "NOT_CONFIGURED"
-entry_unknown_grace_ms = "NOT_CONFIGURED"
-emergency_close_poll_timeout_ms = "NOT_CONFIGURED"
+max_unprotected_ms = "DECISION"
+entry_terminal_timeout_ms = "DECISION"
+entry_unknown_grace_ms = "DECISION"
+emergency_close_poll_timeout_ms = "DECISION"
 
 [provenance.pre_placement]
-min_remaining_validity_seconds = "NOT_CONFIGURED"
-max_mark_price_age_ms = "NOT_CONFIGURED"
-max_last_price_age_ms = "NOT_CONFIGURED"
+min_remaining_validity_seconds = "DECISION"
+max_mark_price_age_ms = "DECISION"
+max_last_price_age_ms = "DECISION"
 
 [provenance.reconcile]
-tick_interval_ms = "NOT_CONFIGURED"
-entry_unknown_probe_count = "NOT_CONFIGURED"
-entry_unknown_probe_interval_ms = "NOT_CONFIGURED"
-lot_filter_refresh_interval_ms = "NOT_CONFIGURED"
-entry_stale_grace_ms = "NOT_CONFIGURED"
+tick_interval_ms = "DECISION"
+entry_unknown_probe_count = "DECISION"
+entry_unknown_probe_interval_ms = "DECISION"
+lot_filter_refresh_interval_ms = "DECISION"
+entry_stale_grace_ms = "DECISION"
 
 [provenance.stale_feed]
-max_mark_price_age_ms = "NOT_CONFIGURED"
+max_mark_price_age_ms = "DECISION"
 max_user_data_silence_ms = "NOT_CONFIGURED"
 
 [provenance.alerts]
-dedupe_window_ms = "NOT_CONFIGURED"
+dedupe_window_ms = "DECISION"
 
 [provenance.account]
 max_equity_age_ms = "DECISION"

@@ -220,10 +220,12 @@ PHASE20_LIMIT_KEYS: tuple[str, ...] = (
     "stale_feed.max_user_data_silence_ms",
     "alerts.dedupe_window_ms",
 )
+# DECISIONS D089: the owner did not answer this one, so the shipped file keeps it NOT_CONFIGURED.
+UNANSWERED_PHASE20_KEY = "stale_feed.max_user_data_silence_ms"
 EXECUTION_LIMITS_FILE = ROOT / "config" / "execution" / "execution-limits-v1.toml"
 
 
-def test_invariant_3_every_new_limit_key_is_not_configured_and_guarded() -> None:
+def test_invariant_3_every_new_limit_key_is_decided_or_unset_and_guarded() -> None:
     from src.execution.execution_limits import (
         EXECUTION_LIMIT_FIELDS,
         EXECUTION_LIMIT_KEYS,
@@ -245,8 +247,11 @@ def test_invariant_3_every_new_limit_key_is_not_configured_and_guarded() -> None
         section, key = dotted.split(".")
         value = document[section][key]
         label = document["provenance"][section][key]
-        if value != NOT_CONFIGURED_WORD or label != NOT_CONFIGURED_WORD:
-            problems.append(f"{dotted}: value {value!r} label {label!r} (the owner sets it)")
+        if dotted == UNANSWERED_PHASE20_KEY:
+            if value != NOT_CONFIGURED_WORD or label != NOT_CONFIGURED_WORD:
+                problems.append(f"{dotted}: value {value!r} label {label!r} (not answered)")
+        elif not isinstance(value, int) or isinstance(value, bool) or label != "DECISION":
+            problems.append(f"{dotted}: value {value!r} label {label!r} (D089 sets it)")
         field = EXECUTION_LIMIT_FIELDS.get(dotted)
         if field is None:
             problems.append(f"{dotted}: no ExecutionLimits field")
@@ -255,10 +260,11 @@ def test_invariant_3_every_new_limit_key_is_not_configured_and_guarded() -> None
             if guarded not in unratified.GUARDED_NAMES:
                 problems.append(f"{dotted}: {guarded!r} is not in the unratified-default guard")
     assert problems == [], f"Phase 20 limit keys: {problems}"
-    # The shipped file loads, and every key still reads as unset.
+    # The shipped file loads: DECISIONS D089 (owner answer 2026-10-31) set every key but one.
     limits = load_execution_limits(EXECUTION_LIMITS_FILE)
     for dotted in PHASE20_LIMIT_KEYS:
-        assert getattr(limits, EXECUTION_LIMIT_FIELDS[dotted]) is None, dotted
+        loaded = getattr(limits, EXECUTION_LIMIT_FIELDS[dotted])
+        assert (loaded is None) == (dotted == UNANSWERED_PHASE20_KEY), dotted
     assert unratified.ALLOW_LIST == {}
 
 
