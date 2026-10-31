@@ -533,6 +533,17 @@ def test_invariant_13_nothing_in_src_writes_required_margin() -> None:
         f"a Phase 24 composition appeared; update this gate and 22-DEFERRED.md on purpose: "
         f"{offenders}"
     )
+    producer = (ROOT / "src" / "live" / "risk_inputs.py").read_text(encoding="utf-8")
+    assert "LiquidationFailurePolicy.CLOSE_POSITION" in producer, (
+        "D085 O-4: the policy is CLOSE_POSITION"
+    )
+
+
+# Plan 24-16 (Phase 24) builds the watch with the owner policy CLOSE_POSITION (D085 O-4) in the
+# live risk-input producer; no production code passes it to a coordinator until plan 24-27.
+LIQUIDATION_WATCH_BUILDERS = frozenset(
+    {"src/execution/liquidation_watch.py", "src/live/risk_inputs.py"}
+)
 
 
 def test_invariant_14_nothing_passes_liquidation_watch_to_a_coordinator_yet() -> None:
@@ -548,7 +559,7 @@ def test_invariant_14_nothing_passes_liquidation_watch_to_a_coordinator_yet() ->
                 if any(keyword.arg == "liquidation_watch" for keyword in call.keywords):
                     offenders.append(f"{relative}:{call.lineno} passes liquidation_watch")
                 if _call_name(call) == "LiquidationWatch" and (
-                    relative != "src/execution/liquidation_watch.py"
+                    relative not in LIQUIDATION_WATCH_BUILDERS
                 ):
                     offenders.append(f"{relative}:{call.lineno} builds a LiquidationWatch")
     assert offenders == [], (
