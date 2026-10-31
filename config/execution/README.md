@@ -120,3 +120,29 @@ about the live path refusing covers the nineteen required keys, `account.max_equ
 A value for any of the nineteen keys is the owner's number (OWNER-OPEN O-04, decision O-G): setting
 one needs a DECISIONS row and the provenance label `DECISION`. Until then each stays
 `NOT_CONFIGURED` and the live path refuses, naming the key.
+
+## Values set by DECISIONS D089 (Phase 24, plan 24-06; OWNER-OPEN O-1)
+
+The owner answered the 24-01 limits checkpoint on 2026-10-31 ("theo recommend của bạn hết đi, nếu có chỗ nào khó quyết, hãy thông báo với tôi") and DECISIONS D089 records the numbers. Each row is the value in `execution-limits-v1.toml` with provenance `DECISION`. The code carries no default for any of them. Setting them does not enable live placement (`LIVE_ORDERS_DISABLED` stays). `tests/test_live_limits_relationships.py` fails, naming the keys, when an edit breaks a relationship between them.
+
+| Key | Value | Unit | Row |
+|---|---|---|---|
+| `protection.max_unprotected_ms` | 180000 | ms | D089 |
+| `protection.entry_terminal_timeout_ms` | 900000 | ms | D089 |
+| `protection.entry_unknown_grace_ms` | 1800000 | ms | D089 |
+| `protection.emergency_close_poll_timeout_ms` | 30000 | ms | D089 |
+| `pre_placement.min_remaining_validity_seconds` | 900 | s | D089 |
+| `pre_placement.max_mark_price_age_ms` | 5000 | ms | D089 |
+| `pre_placement.max_last_price_age_ms` | 5000 | ms | D089 |
+| `reconcile.tick_interval_ms` | 15000 | ms | D089 |
+| `reconcile.entry_unknown_probe_count` | 3 | count | D089 |
+| `reconcile.entry_unknown_probe_interval_ms` | 5000 | ms | D089 |
+| `reconcile.lot_filter_refresh_interval_ms` | 3600000 | ms | D089 |
+| `reconcile.entry_stale_grace_ms` (alert only) | 900000 | ms | D089 |
+| `stale_feed.max_mark_price_age_ms` | 60000 | ms | D089 |
+| `alerts.dedupe_window_ms` | 300000 | ms | D089 |
+
+Still `NOT_CONFIGURED`, on purpose:
+
+- `stale_feed.max_user_data_silence_ms` - REQUIRED and not answered. The official user-data-streams page states no server ping interval, so no recommendation and no number exist; the owner chooses it from the ping and pong times a Demo run observes. The live path keeps refusing, naming this key, until then.
+- `rest_gate.ban_end_clock_margin_ms` - optional (D083 item 4); the owner left it unset until a real Futures 418 body has been seen.
