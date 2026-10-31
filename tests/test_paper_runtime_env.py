@@ -174,3 +174,26 @@ def test_unrelated_variable_is_never_logged(capsys: pytest.CaptureFixture[str]) 
     captured = capsys.readouterr()
     assert "leak-me-please" not in captured.out + captured.err
     assert "UNRELATED_THING" not in captured.out + captured.err
+
+
+def test_the_runtime_and_the_rehearsal_build_shadow_scoped_stores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 24-08: the SHADOW process lists SHADOW approvals only (C-7, OQ-6)."""
+    from scripts import shadow_rehearsal
+    from sqlalchemy import create_engine
+    from src.persistence import engine as engine_module
+
+    # `make_sync_engine` probes the database; an unconnected engine is enough to read the scope.
+    monkeypatch.setattr(
+        engine_module,
+        "make_sync_engine",
+        lambda url: create_engine("postgresql+psycopg://user@localhost/none_test"),
+    )
+
+    assert runtime._pg_shadow_stores("postgresql+psycopg://x/y").confirm_mode == "SHADOW"
+    stores, dispose = shadow_rehearsal._pg_stores("postgresql+psycopg://x/y")
+    try:
+        assert stores.confirm_mode == "SHADOW"  # type: ignore[attr-defined]
+    finally:
+        dispose()

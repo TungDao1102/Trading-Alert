@@ -500,7 +500,9 @@ def _pg_shadow_stores(url: str) -> Any:
     from src.persistence.shadow_stores import PgShadowStores
     from src.persistence.uow import OperationalDatabase
 
-    return PgShadowStores(OperationalDatabase(make_sync_engine(url)))
+    # Mode-scoped (plan 24-08): this process sweeps SHADOW approvals only, so a DEMO process on
+    # the same database never sees them and this one never sees a DEMO approval.
+    return PgShadowStores(OperationalDatabase(make_sync_engine(url)), confirm_mode="SHADOW")
 
 
 def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
