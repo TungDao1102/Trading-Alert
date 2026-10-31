@@ -221,7 +221,7 @@ PHASE20_LIMIT_KEYS: tuple[str, ...] = (
     "alerts.dedupe_window_ms",
 )
 # DECISIONS D089: the owner did not answer this one, so the shipped file keeps it NOT_CONFIGURED.
-UNANSWERED_PHASE20_KEY = "stale_feed.max_user_data_silence_ms"
+UNANSWERED_PHASE20_KEY: str | None = None  # D091 answered key 14, the last one
 EXECUTION_LIMITS_FILE = ROOT / "config" / "execution" / "execution-limits-v1.toml"
 
 
@@ -419,6 +419,7 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "D088",
         "D089",
         "D090",
+        "D091",
     ], (
         f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
         "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
@@ -426,7 +427,8 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "2026-10-25 wrote D087 (Phase 21 WR-08 and WR-05); the owner answer of 2026-10-26 "
         "wrote D088 (Phase 23 O-2, the G4-042 expiry rule); the owner answer of 2026-10-31 "
         "wrote D089 (Phase 24 execution limit values, plan 24-06); the assistant proposed "
-        "D090 (Phase 24 REST gate alert events, plan 24-13)"
+        "D090 (Phase 24 REST gate alert events, plan 24-13); the owner answer of 2026-10-31 "
+        "wrote D091 (key 14 and two live-health bounds)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:

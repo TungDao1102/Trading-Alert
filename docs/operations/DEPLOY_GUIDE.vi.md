@@ -1869,6 +1869,74 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 
 **Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đổi chu kỳ khác giá trị đã ghi trong `16-DEC-HUNG-RUNTIME` mà không có quyết định mới của chủ dự án.
 
+### Thẻ lệnh: deploy/systemd/trading-live-heartbeat.service
+
+> - **Để làm gì:** Đơn vị systemd chạy `deploy/heartbeat.sh --target live` một lần mỗi khi timer kích hoạt: dò độ sống của tiến trình live trong stack chính rồi gửi một ping tới check riêng của live.
+> - **Giải quyết vấn đề gì:** Một tiến trình live bị giữ sau từ chối, một vòng lặp sự kiện treo hay một dấu thời gian độ sống quá cũ phải làm check riêng im đi, tách khỏi heartbeat của collector và của paper.
+> - **Mức quan trọng:** **BẮT BUỘC** trước khi chạy live thật (kế hoạch 24-24, câu trả lời Q11: mỗi tiến trình một check bên ngoài; RUNBOOK 11.9).
+
+**Mục đích:** unit oneshot chạy `deploy/heartbeat.sh --target live` bằng user `trading`. Một lần chạy gọi đầu dò chỉ-đọc `python -m src.live.runtime --liveness` trong service `live` của stack chính, rồi chỉ gửi ping thành công khi đầu dò thoát 0. URL ping của live là bí mật riêng, không bao giờ là URL của collector hay của paper: tệp root-only riêng, credential systemd `heartbeat-live-url`. Unit không phụ thuộc, không khởi động lại và không chạm vào tiến trình live.
+
+**Khi nào chạy:** không chạy tay. Cài một lần sau khi đã cất URL, với chu kỳ 60 giây (check 60 giây và thời gian ân hạn 120 giây đặt trong bảng điều khiển của healthchecks.io, không đặt trong repository).
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** cất URL, cài, rồi xem trạng thái và nhật ký:
+
+```bash
+sudo deploy/heartbeat.sh --target live --set-url
+```
+
+```bash
+sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60
+```
+
+```bash
+systemctl status trading-live-heartbeat
+```
+
+```bash
+journalctl -u trading-live-heartbeat
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước việc cài bằng `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run`.
+
+**Dấu hiệu thành công:** `journalctl -u trading-live-heartbeat` có dòng `heartbeat: success ping delivered` và không chứa URL nào; check của live trong bảng điều khiển ghi ping `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** như `deploy/heartbeat.sh`: 0 đầu dò qua và ping đã gửi, 1 đầu dò không qua (live bị giữ hoặc dấu độ sống cũ), 2 lỗi cách dùng, 3 đầu dò qua nhưng ping không tới, 4 nguồn URL thiếu hoặc sai.
+
+**Khi lỗi:** mã 1: đọc nhật ký của service `live`; mã 4: chạy lại `sudo deploy/heartbeat.sh --target live --set-url`. Trên máy thật có thể cần `--profile live` hoặc `COMPOSE_PROFILES=live` `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** dùng chung URL ping với collector hay paper; sửa tay bản đã cài trong `/etc/systemd/system`; đưa URL vào repository, nhật ký hay cuộc trò chuyện (URL đi vào qua stdin).
+
+### Thẻ lệnh: deploy/systemd/trading-live-heartbeat.timer
+
+> - **Để làm gì:** Hẹn giờ gọi `trading-live-heartbeat.service` theo chu kỳ bạn đặt khi cài, tính từ lúc máy khởi động và từ lần chạy trước.
+> - **Giải quyết vấn đề gì:** Tín hiệu đều đặn để check riêng của live phát hiện khi tiến trình live ngừng sống; không chạy bù và không trễ ngẫu nhiên nên một lần tắt máy không bị che bằng một ping bù.
+> - **Mức quan trọng:** **BẮT BUỘC** trước khi chạy live thật (kế hoạch 24-24; RUNBOOK 11.9).
+
+**Mục đích:** timer kích hoạt `trading-live-heartbeat.service` sau mỗi chu kỳ đã truyền cho `--interval-seconds` (đề xuất 60 giây), kể từ lúc khởi động (`OnBootSec`) và kể từ lần chạy trước (`OnUnitActiveSec`).
+
+**Khi nào chạy:** không chạy tay; được cài và bật bởi `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60`. Cố ý không có `Persistent` và không có `RandomizedDelaySec`.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:**
+
+```bash
+systemctl list-timers trading-live-heartbeat.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-live-heartbeat.timer` liệt kê timer với thời điểm kích hoạt kế tiếp.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Việc timer kích hoạt đúng chu kỳ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đặt chu kỳ ping dài hơn chu kỳ của check ở dịch vụ bên ngoài.
+
 Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `deploy/systemd/trading-soak-paper-heartbeat.service`, `deploy/systemd/trading-soak-paper-heartbeat.timer`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-HUNG-RUNTIME.md`
 
 ## 9. Lộ trình SHADOW, DEMO, CANARY, LIVE
@@ -2458,6 +2526,10 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | đầu dò độ sống của paper (`--liveness`) | `[MÁY EC2]` | `deploy/heartbeat.sh --target paper --dry-run` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-soak-paper-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-soak-paper-heartbeat` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-soak-paper-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-paper-heartbeat.timer` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat riêng của live, cất URL (`--target live`, `--set-url`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target live --set-url` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat riêng của live, cài timer (`--target live`, `--install-timer`, `--interval-seconds`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-live-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-live-heartbeat` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-live-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-live-heartbeat.timer` | thẻ `deploy/systemd/trading-live-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Nghiệm thu và kiểm tra hồ sơ
 

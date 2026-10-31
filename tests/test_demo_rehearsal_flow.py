@@ -1698,12 +1698,24 @@ def test_the_read_passthroughs_are_allowed_in_dry_run_and_bind_the_real_signatur
     assert ctx.guarded.mutating_attempts == 0
 
 
+def _committed_limits_with_key_14_unset() -> ExecutionLimits:
+    """The committed file is complete since D091; clear key 14 to exercise the refusal."""
+    from dataclasses import replace
+
+    from src.execution.execution_limits import load_execution_limits
+
+    committed = load_execution_limits(
+        Path(__file__).resolve().parents[1] / "config" / "execution" / "execution-limits-v1.toml"
+    )
+    return replace(committed, stale_feed_max_user_data_silence_ms=None)
+
+
 async def test_committed_not_configured_limits_abort_before_any_mutation() -> None:
     """D-07 / D-13 / T-19-34: the committed file has no value, so the run stops honestly."""
     adapter = FakeDemoAdapter()
     channel = FakeApprovalChannel(script=approve_script())
     ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE, scenario="far")
-    ctx.execution_limits = None  # the default: load the committed config/execution file
+    ctx.execution_limits = _committed_limits_with_key_14_unset()
     with pytest.raises(dr.RehearsalAbort, match="LIMITS_NOT_CONFIGURED"):
         await dr.run_rehearsal(ctx)
     assert ctx.guarded.mutating_attempts == 0
@@ -1711,16 +1723,7 @@ async def test_committed_not_configured_limits_abort_before_any_mutation() -> No
     failed = [s for s in ctx.recorder.steps if s["name"] == "execution_limits"]
     assert failed and failed[-1]["status"] == dr.STEP_FAILED
     assert "LIMITS_NOT_CONFIGURED" in failed[-1]["detail"]
-    for key in (
-        "protection.max_unprotected_ms",
-        "protection.entry_terminal_timeout_ms",
-        "protection.entry_unknown_grace_ms",
-        "protection.emergency_close_poll_timeout_ms",
-        "pre_placement.min_remaining_validity_seconds",
-        "pre_placement.max_mark_price_age_ms",
-        "pre_placement.max_last_price_age_ms",
-    ):
-        assert key in failed[-1]["detail"]
+    assert "stale_feed.max_user_data_silence_ms" in failed[-1]["detail"]
     # nothing else ran: no approval was requested, no channel opened
     assert channel.opened is False
     assert channel.sent == []
@@ -1731,7 +1734,10 @@ def test_committed_limits_end_the_main_run_as_aborted_no_order(
     tmp_path: Path, scenario: str
 ) -> None:
     code, data, adapter, chan = run_flow(
-        tmp_path, scenario=scenario, execute=True, committed_limits=True
+        tmp_path,
+        scenario=scenario,
+        execute=True,
+        execution_limits=_committed_limits_with_key_14_unset(),
     )
     assert code == dr.EXIT_ABORTED
     assert data["outcome"] == "ABORTED_NO_ORDER"

@@ -163,8 +163,8 @@ def test_invariant_2_the_equity_age_limit_is_the_owner_number_and_required() -> 
     limits = load_execution_limits(EXECUTION_LIMITS_FILE)
     assert limits.account_max_equity_age_ms == 15000
     assert EQUITY_AGE_KEY not in limits.unset_keys()
-    # Setting this key does not open the live path: other required keys stay NOT_CONFIGURED.
-    assert limits.unset_keys(), "the live path must still refuse while other keys are unset"
+    # D091 set the last required key: the file is complete (the D083 margin stays optional).
+    assert limits.unset_keys() == ()
     assert NOT_CONFIGURED_WORD in EXECUTION_LIMITS_FILE.read_text(encoding="utf-8")
     decisions = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
     assert any(
@@ -189,7 +189,7 @@ def test_invariant_2b_the_daily_loss_age_limit_is_the_owner_number_and_required(
     limits = load_execution_limits(EXECUTION_LIMITS_FILE)
     assert limits.account_max_daily_loss_age_ms == 300000
     assert DAILY_LOSS_AGE_KEY not in limits.unset_keys()
-    assert limits.unset_keys(), "the live path must still refuse while other keys are unset"
+    assert limits.unset_keys() == ()  # D091
 
 
 # --------------------------------------------------------------------------- #

@@ -72,7 +72,7 @@ MARGIN_DECIDED = {
 # The required keys the committed file leaves unset, in file order: since DECISIONS D089 (owner
 # answer 2026-10-31) only the user-data silence bound, which the owner did not answer. The equity
 # age is set by D084, the three margin keys by D085, the daily-loss age by D087.
-COMMITTED_UNSET = ("stale_feed.max_user_data_silence_ms",)
+COMMITTED_UNSET: tuple[str, ...] = ()  # D091 set the last one (key 14)
 # The numbers the owner set for the other Phase 19 and Phase 20 keys (DECISIONS D089, 2026-10-31),
 # provenance DECISION; `reconcile.entry_stale_grace_ms` is the alert-only one.
 D089_DECIDED = {
@@ -89,6 +89,7 @@ D089_DECIDED = {
     "reconcile.lot_filter_refresh_interval_ms": 3600000,
     "reconcile.entry_stale_grace_ms": 900000,
     "stale_feed.max_mark_price_age_ms": 60000,
+    "stale_feed.max_user_data_silence_ms": 420000,  # D091, from the Demo silence probe
     "alerts.dedupe_window_ms": 300000,
 }
 # Every required key in file order, the equity age included.
@@ -128,7 +129,6 @@ def test_the_real_file_loads_with_the_owner_numbers_and_one_required_key_unset()
     limits = el.load_execution_limits(LIMITS_FILE)
     for dotted, value in D089_DECIDED.items():
         assert getattr(limits, el.EXECUTION_LIMIT_FIELDS[dotted]) == value, dotted  # D089
-    assert limits.stale_feed_max_user_data_silence_ms is None  # not answered, no number invented
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS
     assert limits.account_max_daily_loss_age_ms == DAILY_LOSS_AGE_DECIDED_MS  # D087
     assert limits.unset_keys() == COMMITTED_UNSET
@@ -136,24 +136,27 @@ def test_the_real_file_loads_with_the_owner_numbers_and_one_required_key_unset()
         assert getattr(limits, field_name) == MARGIN_DECIDED[dotted], field_name  # D085
 
 
-def test_require_live_ready_refuses_naming_every_key() -> None:
+def test_the_committed_file_is_live_ready_since_d091() -> None:
     limits = el.load_execution_limits(LIMITS_FILE)
+    limits.require_live_ready()  # no key is NOT_CONFIGURED any more (D091 set key 14)
+    assert limits.unset_keys() == ()
+
+
+def test_require_live_ready_refuses_naming_every_key() -> None:
+    key = "stale_feed.max_user_data_silence_ms"
+    limits = el.load_execution_limits(LIMITS_FILE)
+    from dataclasses import replace
+
+    unset = replace(limits, stale_feed_max_user_data_silence_ms=None)
     try:
-        limits.require_live_ready()
+        unset.require_live_ready()
     except el.ExecutionLimitsNotConfigured as exc:
-        assert exc.keys == COMMITTED_UNSET
+        assert exc.keys == (key,)
         message = str(exc)
-        for key in COMMITTED_UNSET:
-            assert key in message
+        assert key in message
         assert str(ROOT) not in message
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
-        assert "stale_feed.max_user_data_silence_ms" in message
-        # The dotted names still unset come in file order: since D089 only the user-data silence
-        # bound (account.max_equity_age_ms was set by D084, the three margin keys by D085).
-        assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
-            COMMITTED_UNSET
-        )
     else:  # pragma: no cover - the assertion above must run
         raise AssertionError("require_live_ready did not refuse")
 
@@ -504,7 +507,7 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # minus 6 = 30; the D083 clock margin (plan 24-03) adds a value and a label: 32. D089 (plan
     # 24-06) sets 14 more keys, a value and a label each: 32 - 28 = 4 (the user-data silence bound
     # and the D083 clock margin, each a value and a label).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 4
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 2  # D091 set key 14: only the D083 margin
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -786,15 +789,12 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS  # DECISIONS D084
     assert _ACCOUNT_KEY not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
-    assert len(limits.unset_keys()) == 1  # D089: only the user-data silence bound
+    assert len(limits.unset_keys()) == 0  # D091 set the last one
     assert limits.unset_alert_only_keys() == ()  # D089 set the stale-entry grace
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
-    # Setting this key (and, since D085, the three margin keys) does not open the live path:
-    # one required key stays unset (D089).
-    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
-        limits.require_live_ready()
-    assert _ACCOUNT_KEY not in info.value.keys
-    assert not any(character.isdigit() for character in str(info.value))
+    # Since D091 every required key is set, so the file is live-ready (LIVE_ORDERS_DISABLED still
+    # blocks real orders).
+    limits.require_live_ready()
 
 
 def test_the_account_section_precedes_margin_and_has_the_prefixed_field() -> None:
@@ -909,11 +909,15 @@ def test_the_committed_file_holds_the_margin_keys_set_with_the_decision_label() 
 
 
 def test_require_live_ready_still_refuses_and_no_longer_names_the_margin_keys() -> None:
-    # D085 set the three margin keys; fourteen other required keys keep the live path refused.
-    limits = el.load_execution_limits(LIMITS_FILE)
+    # D085 set the three margin keys; D091 set the last other key. A cleared key refuses again.
+    from dataclasses import replace
+
+    limits = replace(
+        el.load_execution_limits(LIMITS_FILE), stale_feed_max_user_data_silence_ms=None
+    )
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
-    assert len(info.value.keys) == 1  # D089: only the user-data silence bound is unset
+    assert len(info.value.keys) == 1  # only the cleared key
     for dotted in MARGIN_KEYS:
         assert dotted not in info.value.keys
         assert dotted not in str(info.value)
@@ -1034,7 +1038,11 @@ def test_the_committed_file_leaves_the_ban_end_margin_unset_and_labelled_not_con
 
 
 def test_require_live_ready_never_names_the_ban_end_margin() -> None:
-    limits = el.load_execution_limits(LIMITS_FILE)
+    from dataclasses import replace
+
+    limits = replace(
+        el.load_execution_limits(LIMITS_FILE), stale_feed_max_user_data_silence_ms=None
+    )
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
     assert BAN_END_MARGIN_KEY not in info.value.keys

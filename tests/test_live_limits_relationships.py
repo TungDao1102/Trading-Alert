@@ -224,13 +224,11 @@ def test_an_unset_relationship_key_is_itself_a_violation(binance: BinanceLimits)
     ]
 
 
-def test_the_user_data_silence_key_has_no_number_and_the_d083_margin_stays_unset() -> None:
-    """Owner 2026-10-31: key 14 is not answered (no number is invented), key 16 stays unset."""
+def test_the_user_data_silence_key_is_d091_and_the_d083_margin_stays_unset() -> None:
+    """D091: key 14 = 420000 ms from the Demo silence probe; key 16 stays unset."""
     document = tomllib.loads(EXECUTION_LIMITS_FILE.read_text(encoding="utf-8"))
-    assert document["stale_feed"]["max_user_data_silence_ms"] == "NOT_CONFIGURED"
-    assert document["provenance"]["stale_feed"]["max_user_data_silence_ms"] == "NOT_CONFIGURED"
+    assert document["stale_feed"]["max_user_data_silence_ms"] == 420000
+    assert document["provenance"]["stale_feed"]["max_user_data_silence_ms"] == "DECISION"
     assert document["rest_gate"]["ban_end_clock_margin_ms"] == "NOT_CONFIGURED"
     limits = load_execution_limits(EXECUTION_LIMITS_FILE)
-    assert limits.unset_keys() == ("stale_feed.max_user_data_silence_ms",), (
-        "DECISIONS D089: only the user-data silence bound is still unanswered"
-    )
+    assert limits.unset_keys() == (), "DECISIONS D091 set the last required key"

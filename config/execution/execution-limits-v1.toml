@@ -21,9 +21,9 @@
 #   rest_gate.ban_end_clock_margin_ms          Plan 24-03, D083 item 4 (OPTIONAL): clock-difference margin added to the ban end time read from a 418 / -1003 body
 # A value is the string NOT_CONFIGURED until the owner fills it (OWNER-OPEN O-04). Set so far:
 # the account keys (D084, D087), the margin keys (D085) and, by DECISIONS D089 (Phase 24, plan
-# 24-06, owner answer 2026-10-31), every other key except stale_feed.max_user_data_silence_ms
-# (not answered: no number is invented) and rest_gate.ban_end_clock_margin_ms (optional, stays
-# unset). Setting values does not enable live placement (LIVE_ORDERS_DISABLED stays). The live path refuses while any key is NOT_CONFIGURED, except
+# 24-06, owner answer 2026-10-31), every other key except rest_gate.ban_end_clock_margin_ms
+# (optional, stays unset); stale_feed.max_user_data_silence_ms was set last by DECISIONS D091 from
+# the Demo silence probe (longest gap 180374 ms, one server ping per 180 s). Setting values does not enable live placement (LIVE_ORDERS_DISABLED stays). The live path refuses while any key is NOT_CONFIGURED, except
 # reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
 # stale-entry check is skipped (and says so) and nothing else changes, and
 # rest_gate.ban_end_clock_margin_ms: it only refines the 418 ban wait, so while it is NOT_CONFIGURED
@@ -52,7 +52,7 @@ entry_stale_grace_ms = 900000
 
 [stale_feed]
 max_mark_price_age_ms = 60000
-max_user_data_silence_ms = "NOT_CONFIGURED"
+max_user_data_silence_ms = 420000
 
 [alerts]
 dedupe_window_ms = 300000
@@ -89,7 +89,7 @@ entry_stale_grace_ms = "DECISION"
 
 [provenance.stale_feed]
 max_mark_price_age_ms = "DECISION"
-max_user_data_silence_ms = "NOT_CONFIGURED"
+max_user_data_silence_ms = "DECISION"
 
 [provenance.alerts]
 dedupe_window_ms = "DECISION"

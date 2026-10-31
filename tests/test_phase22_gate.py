@@ -265,9 +265,8 @@ def test_invariant_5_the_margin_limits_are_required_and_hold_the_owner_numbers()
         assert document["provenance"][section][key] == "DECISION", f"{dotted} provenance"
         assert dotted not in ALERT_ONLY_LIMIT_KEYS, f"{dotted} must be required, not alert-only"
         assert dotted not in unset, f"{dotted} is still listed as unset"
-    # Setting them does not open the live path: other required keys stay NOT_CONFIGURED. D089
-    # (2026-10-31) set thirteen of the fourteen; the user-data silence bound is the one left.
-    assert unset == ("stale_feed.max_user_data_silence_ms",), "one required key stays unset (D089)"
+    # D089 set thirteen of the fourteen keys, D091 the last one (the user-data silence bound).
+    assert unset == (), "no required key is unset (D091)"
     assert NOT_CONFIGURED_WORD in EXECUTION_LIMITS_FILE.read_text(encoding="utf-8")
 
 

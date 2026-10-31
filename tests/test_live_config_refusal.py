@@ -280,16 +280,11 @@ def test_an_unset_limit_key_is_refused_naming_keys_only(
     assert_no_seeded_value(captured.out, captured.err)
 
 
-def test_the_shipped_limits_file_keeps_the_live_path_refused_until_the_owner_fills_it(
-    tmp_path: Path, repo_root: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    shipped = Path(__file__).resolve().parents[1] / "config" / "execution"
-    shipped_file = shipped / "execution-limits-v1.toml"
-    if "NOT_CONFIGURED" not in shipped_file.read_text(encoding="utf-8"):
-        pytest.skip("the owner has filled the shipped limits file (plan 24-06)")
-    code, _ = run_main(tmp_path, repo_root, shipped_file, demo_env())
-    assert code == int(LiveExitCode.LIMITS_NOT_CONFIGURED)
-    capsys.readouterr()
+def test_the_shipped_limits_file_is_complete_since_d091() -> None:
+    from src.execution.execution_limits import load_execution_limits
+
+    shipped_file = Path(__file__).resolve().parents[1] / "config/execution/execution-limits-v1.toml"
+    load_execution_limits(shipped_file).require_live_ready()  # no required key is unset
 
 
 def test_a_missing_limits_file_is_refused(tmp_path: Path, repo_root: Path) -> None:
