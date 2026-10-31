@@ -575,6 +575,19 @@ class ApprovalDesk:
             _SKIP_TOKEN_KEY: request.skip_token,
         }
 
+    def approve_token_for(self, approval_id: str) -> str | None:
+        """The raw APPROVE token of an issued request, by its APPROVE approval id, or None.
+
+        Memory only (D-04): the raw token is never persisted, so an unknown id and every id after
+        a restart give None. The live execution service reads it once per CONFIRM to build the
+        callback the manager's binding gate checks; it is never journaled or logged.
+        """
+        with self._lock:
+            for request in self._requests.values():
+                if request.approve_id == approval_id:
+                    return request.approve_token
+        return None
+
     def plan_context(self, short_id: str) -> tuple[Signal, TradePlan] | None:
         """The signal and plan behind a short id (memory only), or None."""
         with self._lock:
