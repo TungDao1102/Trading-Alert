@@ -11,8 +11,12 @@ live path refuses:
 keys. One further key (plan 20-28,
 ``reconcile.entry_stale_grace_ms``) only switches an alert on: it is an ALERT-ONLY key, loaded and
 validated like the others but left out of ``unset_keys`` and ``require_live_ready``, so while it is
-``NOT_CONFIGURED`` only that one check is skipped. ``tests/test_no_unratified_defaults.py``
-scans ``src`` and ``scripts`` so that no numeric default for these names ever appears.
+``NOT_CONFIGURED`` only that one check is skipped. A further key (plan 24-03, DECISIONS D083 item 4,
+``rest_gate.ban_end_clock_margin_ms``) is an OPTIONAL REFINEMENT: unset, the 418 ban keeps the
+fallback wait and nothing else changes, so it too is left out of ``unset_keys`` and
+``require_live_ready`` and is listed by ``unset_optional_refinement_keys``; no number is chosen for
+it. ``tests/test_no_unratified_defaults.py`` scans ``src``
+and ``scripts`` so that no numeric default for these names ever appears.
 
 The file is separate from ``config/binance/binance-limits-v1.toml``: that file is sha256-pinned
 by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended.
@@ -20,9 +24,9 @@ by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended
 The file format (``config/execution/README.md``):
 
 * exactly the sections ``protection``, ``pre_placement``, ``reconcile``, ``stale_feed``,
-  ``alerts``, ``account``, ``margin`` and ``provenance`` (plan 20-01 adds ``reconcile``,
-  ``stale_feed`` and ``alerts``, D-25; plan 21-02 adds ``account``, D-03; plan 22-02 adds
-  ``margin``, D-10, D-11, D-13);
+  ``alerts``, ``account``, ``margin``, ``rest_gate`` and ``provenance`` (plan 20-01 adds
+  ``reconcile``, ``stale_feed`` and ``alerts``, D-25; plan 21-02 adds ``account``, D-03; plan 22-02
+  adds ``margin``, D-10, D-11, D-13; plan 24-03 adds ``rest_gate``, D083);
 * exactly the keys of ``EXECUTION_LIMIT_KEYS``; a missing or unknown key refuses to load;
 * each value is a positive integer (not a boolean, not a float, not zero) or exactly the
   string ``NOT_CONFIGURED`` (read as ``None``);
@@ -39,6 +43,7 @@ from __future__ import annotations
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -69,6 +74,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "alerts": ("dedupe_window_ms",),
         "account": ("max_equity_age_ms", "max_daily_loss_age_ms"),
         "margin": ("liquidation_buffer_bps", "max_bracket_age_ms", "headroom_bps"),
+        "rest_gate": ("ban_end_clock_margin_ms",),
     }
 )
 
@@ -100,6 +106,7 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "margin.liquidation_buffer_bps": "margin_liquidation_buffer_bps",
         "margin.max_bracket_age_ms": "margin_max_bracket_age_ms",
         "margin.headroom_bps": "margin_headroom_bps",
+        "rest_gate.ban_end_clock_margin_ms": "rest_gate_ban_end_clock_margin_ms",
     }
 )
 
@@ -108,6 +115,14 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
 # `require_live_ready` leave it out, `unset_alert_only_keys` lists it). It is still loaded,
 # validated and given a provenance label like every other key, and no number is chosen for it.
 ALERT_ONLY_LIMIT_KEYS: frozenset[str] = frozenset({"reconcile.entry_stale_grace_ms"})
+
+# The keys that only REFINE a behaviour that already has a safe fallback (plan 24-03, D083 item 4).
+# While one is NOT_CONFIGURED the fallback applies (here: the 418 ban keeps its ratified fallback
+# wait); the key never keeps the live path refused (`unset_keys` and `require_live_ready` leave it
+# out, `unset_optional_refinement_keys` lists it). It is still loaded, validated and given a
+# provenance label like every other key, and no number is chosen for it: the owner sets it
+# (OWNER-OPEN O-1, plan 24-06).
+OPTIONAL_REFINEMENT_LIMIT_KEYS: frozenset[str] = frozenset({"rest_gate.ban_end_clock_margin_ms"})
 
 PROVENANCE_SECTION = "provenance"
 ALLOWED_SECTIONS: frozenset[str] = frozenset((*EXECUTION_LIMIT_KEYS, PROVENANCE_SECTION))
@@ -149,7 +164,7 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The nineteen owner-chosen execution limits; ``None`` means NOT_CONFIGURED.
+    """The twenty-one execution limits; ``None`` means NOT_CONFIGURED (the owner has not chosen).
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
@@ -203,7 +218,12 @@ class ExecutionLimits:
     2026-10-24 (DECISIONS D085), provenance DECISION, in the values file. No number is chosen
     here, and the consumers (plans 22-12, 22-13 and 22-14)
     read them from a loaded object. With the three margin keys and the daily-loss age the file
-    holds twenty keys, nineteen required and one alert-only.
+    held twenty keys, nineteen required and one alert-only.
+    ``rest_gate_ban_end_clock_margin_ms`` (plan 24-03, DECISIONS D083 item 4): the clock-difference
+    margin, in milliseconds, added to the ban end time read from a 418 / -1003 body. It is an
+    OPTIONAL REFINEMENT key (``OPTIONAL_REFINEMENT_LIMIT_KEYS``): unset, the body time is not used
+    and the ratified 418 fallback wait applies. ``rest_gate_ban_end_clock_margin`` gives it as a
+    ``timedelta``. The file holds twenty-one keys: nineteen required, one alert-only, one optional.
     """
 
     max_unprotected_ms: int | None
@@ -226,28 +246,45 @@ class ExecutionLimits:
     margin_liquidation_buffer_bps: int | None
     margin_max_bracket_age_ms: int | None
     margin_headroom_bps: int | None
+    rest_gate_ban_end_clock_margin_ms: int | None
 
-    def _unset(self, *, alert_only: bool) -> tuple[str, ...]:
+    @property
+    def rest_gate_ban_end_clock_margin(self) -> timedelta | None:
+        """The D083 clock margin as a ``timedelta``, or None while it is NOT_CONFIGURED."""
+        value = self.rest_gate_ban_end_clock_margin_ms
+        return None if value is None else timedelta(milliseconds=value)
+
+    def _unset(self, group: frozenset[str] | None) -> tuple[str, ...]:
+        """The unset keys of one group: the required keys when ``group`` is None."""
         return tuple(
             dotted
             for section, keys in EXECUTION_LIMIT_KEYS.items()
             for key in keys
             for dotted in (f"{section}.{key}",)
-            if (dotted in ALERT_ONLY_LIMIT_KEYS) is alert_only
+            if (
+                dotted in group
+                if group is not None
+                else dotted not in ALERT_ONLY_LIMIT_KEYS | OPTIONAL_REFINEMENT_LIMIT_KEYS
+            )
             and getattr(self, EXECUTION_LIMIT_FIELDS[dotted]) is None
         )
 
     def unset_keys(self) -> tuple[str, ...]:
         """The dotted names of the REQUIRED keys still NOT_CONFIGURED, in the fixed file order.
 
-        The alert-only keys (``ALERT_ONLY_LIMIT_KEYS``) are not listed here: they never keep the
-        live path refused. See ``unset_alert_only_keys``.
+        The alert-only keys (``ALERT_ONLY_LIMIT_KEYS``) and the optional refinement keys
+        (``OPTIONAL_REFINEMENT_LIMIT_KEYS``) are not listed here: they never keep the live path
+        refused. See ``unset_alert_only_keys`` and ``unset_optional_refinement_keys``.
         """
-        return self._unset(alert_only=False)
+        return self._unset(None)
 
     def unset_alert_only_keys(self) -> tuple[str, ...]:
         """The dotted names of the alert-only keys still NOT_CONFIGURED, in file order."""
-        return self._unset(alert_only=True)
+        return self._unset(ALERT_ONLY_LIMIT_KEYS)
+
+    def unset_optional_refinement_keys(self) -> tuple[str, ...]:
+        """The dotted names of the optional refinement keys still NOT_CONFIGURED, in file order."""
+        return self._unset(OPTIONAL_REFINEMENT_LIMIT_KEYS)
 
     def require_live_ready(self) -> None:
         """Refuse while any limit is unset.
@@ -413,6 +450,7 @@ __all__ = [
     "EXECUTION_LIMIT_FIELDS",
     "EXECUTION_LIMIT_KEYS",
     "NOT_CONFIGURED_WORD",
+    "OPTIONAL_REFINEMENT_LIMIT_KEYS",
     "PROJECT_PROVENANCE_LABELS",
     "ExecutionLimits",
     "ExecutionLimitsFileMissing",

@@ -75,6 +75,12 @@ COMMITTED_UNSET = EXPECTED_UNSET
 # Every required key in file order, the equity age included.
 ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, DAILY_LOSS_AGE_KEY, *MARGIN_KEYS)
 
+# Plan 24-03 (DECISIONS D083 item 4): the clock margin of the 418 ban end time, an OPTIONAL
+# REFINEMENT key. It is NOT_CONFIGURED in the committed file (the owner sets it, plan 24-06) and it
+# never keeps the live path refused.
+BAN_END_MARGIN_KEY = "rest_gate.ban_end_clock_margin_ms"
+BAN_END_MARGIN_FIELD = "rest_gate_ban_end_clock_margin_ms"
+
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
 # "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
 # pre_placement.max_mark_price_age_ms.
@@ -418,9 +424,11 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         margin_liquidation_buffer_bps=None,
         margin_max_bracket_age_ms=None,
         margin_headroom_bps=None,
+        rest_gate_ban_end_clock_margin_ms=None,
     )
     assert limits.unset_keys() == ALL_REQUIRED_KEYS
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
+    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
 
 
 def test_the_writer_can_write_a_bad_label_for_refusal_tests(tmp_path: Path) -> None:
@@ -479,8 +487,8 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms,
     # plan 22-02 the three margin keys). The equity age has a number and the label DECISION since
     # D084, the daily-loss age since D087 and the three margin keys since D085: 40 minus 2 minus 2
-    # minus 6 = 30.
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 30
+    # minus 6 = 30; the D083 clock margin (plan 24-03) adds a value and a label: 32.
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 32
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -510,8 +518,11 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     for section, count in _PHASE20_SECTIONS.items():
         assert len(el.EXECUTION_LIMIT_KEYS[section]) == count, section
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    # The nineteen required keys plus the alert-only key of plan 20-28, in file order.
-    assert [k for k in dotted_keys if k not in el.ALERT_ONLY_LIMIT_KEYS] == list(ALL_REQUIRED_KEYS)
+    # The nineteen required keys plus the alert-only key of plan 20-28 and the optional refinement
+    # key of plan 24-03 (D083), in file order.
+    not_required = el.ALERT_ONLY_LIMIT_KEYS | el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+    assert [k for k in dotted_keys if k not in not_required] == list(ALL_REQUIRED_KEYS)
+    assert el.OPTIONAL_REFINEMENT_LIMIT_KEYS == {BAN_END_MARGIN_KEY}
     assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
         dotted_keys.index("reconcile.lot_filter_refresh_interval_ms") + 1
@@ -766,7 +777,7 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
 
 
 def test_the_account_section_precedes_margin_and_has_the_prefixed_field() -> None:
-    assert list(el.EXECUTION_LIMIT_KEYS)[-2:] == ["account", "margin"]
+    assert list(el.EXECUTION_LIMIT_KEYS)[-3:] == ["account", "margin", "rest_gate"]
     assert el.EXECUTION_LIMIT_KEYS["account"] == ("max_equity_age_ms", "max_daily_loss_age_ms")
     assert el.EXECUTION_LIMIT_FIELDS[DAILY_LOSS_AGE_KEY] == "account_max_daily_loss_age_ms"
     assert el.EXECUTION_LIMIT_FIELDS[_ACCOUNT_KEY] == _ACCOUNT_FIELD
@@ -842,7 +853,7 @@ _MARGIN_KEYS_UNDER_TEST = MARGIN_KEYS
 
 
 def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fields() -> None:
-    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "margin"
+    assert list(el.EXECUTION_LIMIT_KEYS)[-2] == "margin"  # rest_gate (plan 24-03) follows it
     assert el.EXECUTION_LIMIT_KEYS["margin"] == (
         "liquidation_buffer_bps",
         "max_bracket_age_ms",
@@ -852,8 +863,8 @@ def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fi
         assert el.EXECUTION_LIMIT_FIELDS[dotted] == field_name, dotted
         assert field_name in el.ExecutionLimits.__dataclass_fields__, field_name
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    assert len(dotted_keys) == 20
-    assert dotted_keys[-3:] == list(MARGIN_KEYS)
+    assert len(dotted_keys) == 21
+    assert dotted_keys[-4:-1] == list(MARGIN_KEYS)
 
 
 def test_the_margin_keys_are_required_not_alert_only() -> None:
@@ -968,3 +979,91 @@ def test_overriding_one_margin_field_with_none_leaves_exactly_that_key_unset(dot
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         unset.require_live_ready()
     assert info.value.keys == (dotted,)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-03 (DECISIONS D083 item 4): rest_gate.ban_end_clock_margin_ms, an OPTIONAL REFINEMENT key.
+# NOT_CONFIGURED until the owner sets it (plan 24-06, O-1); unset, the 418 fallback wait applies and
+# the live path is NOT kept refused (D-12 stays satisfiable).
+# --------------------------------------------------------------------------- #
+
+
+def test_the_ban_end_margin_key_is_declared_last_with_a_prefixed_field() -> None:
+    assert el.EXECUTION_LIMIT_KEYS["rest_gate"] == ("ban_end_clock_margin_ms",)
+    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "rest_gate"
+    assert el.EXECUTION_LIMIT_FIELDS[BAN_END_MARGIN_KEY] == BAN_END_MARGIN_FIELD
+    assert BAN_END_MARGIN_FIELD in el.ExecutionLimits.__dataclass_fields__
+    assert BAN_END_MARGIN_KEY in el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+    assert BAN_END_MARGIN_KEY not in el.ALERT_ONLY_LIMIT_KEYS
+    assert not el.ALERT_ONLY_LIMIT_KEYS & el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+
+
+def test_the_committed_file_leaves_the_ban_end_margin_unset_and_labelled_not_configured() -> None:
+    import tomllib
+
+    document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
+    assert document["rest_gate"]["ban_end_clock_margin_ms"] == el.NOT_CONFIGURED_WORD
+    assert document["provenance"]["rest_gate"]["ban_end_clock_margin_ms"] == el.NOT_CONFIGURED_WORD
+    limits = el.load_execution_limits(LIMITS_FILE)
+    assert limits.rest_gate_ban_end_clock_margin_ms is None
+    assert limits.rest_gate_ban_end_clock_margin is None
+    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
+    assert BAN_END_MARGIN_KEY not in limits.unset_keys()
+    assert BAN_END_MARGIN_KEY not in limits.unset_alert_only_keys()
+
+
+def test_require_live_ready_never_names_the_ban_end_margin() -> None:
+    limits = el.load_execution_limits(LIMITS_FILE)
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        limits.require_live_ready()
+    assert BAN_END_MARGIN_KEY not in info.value.keys
+    assert "ban_end_clock_margin" not in str(info.value)
+    # With every REQUIRED key set and the optional one unset the live path is ready (D-12).
+    ready = tl.test_only_execution_limits(rest_gate_ban_end_clock_margin_ms=None)
+    assert ready.unset_keys() == ()
+    assert ready.require_live_ready() is None
+    assert ready.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
+
+
+def test_a_set_ban_end_margin_loads_as_milliseconds_and_as_a_timedelta() -> None:
+    from datetime import timedelta
+
+    limits = tl.test_only_execution_limits()
+    assert limits.rest_gate_ban_end_clock_margin_ms == 4545
+    assert limits.rest_gate_ban_end_clock_margin == timedelta(milliseconds=4545)
+    assert limits.unset_optional_refinement_keys() == ()
+
+
+def _ban_end_document(value: Any) -> dict[str, Any]:
+    document = _all_set_document()
+    document["rest_gate"]["ban_end_clock_margin_ms"] = value
+    return document
+
+
+def test_a_positive_int_ban_end_margin_loads_and_a_set_value_needs_a_real_label() -> None:
+    limits = el.parse_execution_limits(_ban_end_document(250))
+    assert limits.rest_gate_ban_end_clock_margin_ms == 250
+    placeholder = _ban_end_document(250)
+    placeholder["provenance"]["rest_gate"]["ban_end_clock_margin_ms"] = "PLACEHOLDER"
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(placeholder)
+    assert BAN_END_MARGIN_KEY in str(info.value)
+    labelled_unset = _ban_end_document(250)
+    labelled_unset["provenance"]["rest_gate"]["ban_end_clock_margin_ms"] = el.NOT_CONFIGURED_WORD
+    with pytest.raises(el.ExecutionLimitsInvalid):
+        el.parse_execution_limits(labelled_unset)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, False, "250", "not_configured", ""])
+def test_a_malformed_ban_end_margin_is_refused_by_name(bad: Any) -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(_ban_end_document(bad))
+    assert BAN_END_MARGIN_KEY in str(info.value)
+
+
+def test_a_document_without_the_rest_gate_section_is_refused_by_name() -> None:
+    document = _all_set_document()
+    del document["rest_gate"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert BAN_END_MARGIN_KEY in str(info.value)

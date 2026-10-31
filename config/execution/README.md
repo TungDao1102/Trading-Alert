@@ -32,7 +32,7 @@ are not edited.
 ## File format
 
 - Exactly the sections `[protection]`, `[pre_placement]`, `[reconcile]`, `[stale_feed]`,
-  `[alerts]`, `[account]`, `[margin]` and `[provenance]`.
+  `[alerts]`, `[account]`, `[margin]`, `[rest_gate]` and `[provenance]`.
 - Exactly the nineteen keys below, each written once; nothing else is accepted.
 - Every value is a TOML integer that is not a boolean, strictly positive (a float, a boolean,
   zero or a negative number is refused), or exactly the TOML string `"NOT_CONFIGURED"`, which
@@ -101,6 +101,12 @@ All three keys are REQUIRED (they would keep the live path refused while they ar
 - `margin.liquidation_buffer_bps` - the liquidation buffer, in basis points of the entry price; the margin guard compares it as a price distance beyond the stop (D-09, D-10, OWNER-OPEN O-2, decided by D085; used by plans 22-13 and 22-14; basis points). It stays an execution-limits key and is not a registry parameter; the owner accepted this deviation from RISK_MANAGEMENT section 9.
 - `margin.max_bracket_age_ms` - the maximum age of the cached leverage-bracket set before the margin guard refuses it as stale (D-11, OWNER-OPEN O-3, decided by D085; used by plans 22-12 and 22-14; milliseconds).
 - `margin.headroom_bps` - the headroom, in basis points of the margin the order needs, that the available balance must keep after the order (D-13, OWNER-OPEN O-3, decided by D085; used by plan 22-14; basis points).
+
+### `[rest_gate]` (Phase 24, plan 24-03; DECISIONS D083 item 4; OWNER-OPEN O-1)
+
+The one key of this section is OPTIONAL (`OPTIONAL_REFINEMENT_LIMIT_KEYS` in the loader): it refines a behaviour that already has a safe fallback, so it never keeps the live path refused. `ExecutionLimits.unset_keys()` and `require_live_ready()` leave it out, and `ExecutionLimits.unset_optional_refinement_keys()` lists it. It is `NOT_CONFIGURED` in the shipped file with provenance `NOT_CONFIGURED`; the code carries no default and no number is proposed here.
+
+- `rest_gate.ban_end_clock_margin_ms` - OPTIONAL: the clock-difference margin added to the ban end time that the REST gate may read from an HTTP 418 answer with body code -1003 (D083). Unset (the shipped state), the body time is not used and the ratified 259200 s fallback wait applies (`signed_calls.rate_limit_418_no_retry_after_wait_seconds` of the Binance limits file; `signed_calls.rate_limit_retry_after_cap_seconds` is the same 259200). Set, the gate takes the time only when it is in the future and not later than now plus 259200 s, pads it by this margin and stores it like any deadline; the restriction never ends before the padded time. The owner value comes with plan 24-06; setting it needs a DECISIONS row and the provenance label `DECISION` (milliseconds).
 
 ## Phase 20 notes
 

@@ -59,6 +59,9 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     "margin.liquidation_buffer_bps": 137,
     "margin.max_bracket_age_ms": 4141,
     "margin.headroom_bps": 233,
+    # Plan 24-03 (D083 item 4): a FAKE clock margin for the 418 ban end; the real one is the owner's
+    # (OWNER-OPEN O-1) and the shipped file keeps it NOT_CONFIGURED.
+    "rest_gate.ban_end_clock_margin_ms": 4545,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"
