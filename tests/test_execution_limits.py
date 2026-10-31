@@ -69,9 +69,28 @@ MARGIN_DECIDED = {
     "margin.max_bracket_age_ms": 60000,
     "margin.headroom_bps": 1000,
 }
-# The keys the committed file leaves unset, in file order: the fourteen of Phases 19 and 20 (the
-# equity age is set by D084, the three margin keys by D085).
-COMMITTED_UNSET = EXPECTED_UNSET
+# The required keys the committed file leaves unset, in file order: since DECISIONS D089 (owner
+# answer 2026-10-31) only the user-data silence bound, which the owner did not answer. The equity
+# age is set by D084, the three margin keys by D085, the daily-loss age by D087.
+COMMITTED_UNSET = ("stale_feed.max_user_data_silence_ms",)
+# The numbers the owner set for the other Phase 19 and Phase 20 keys (DECISIONS D089, 2026-10-31),
+# provenance DECISION; `reconcile.entry_stale_grace_ms` is the alert-only one.
+D089_DECIDED = {
+    "protection.max_unprotected_ms": 180000,
+    "protection.entry_terminal_timeout_ms": 900000,
+    "protection.entry_unknown_grace_ms": 1800000,
+    "protection.emergency_close_poll_timeout_ms": 30000,
+    "pre_placement.min_remaining_validity_seconds": 900,
+    "pre_placement.max_mark_price_age_ms": 5000,
+    "pre_placement.max_last_price_age_ms": 5000,
+    "reconcile.tick_interval_ms": 15000,
+    "reconcile.entry_unknown_probe_count": 3,
+    "reconcile.entry_unknown_probe_interval_ms": 5000,
+    "reconcile.lot_filter_refresh_interval_ms": 3600000,
+    "reconcile.entry_stale_grace_ms": 900000,
+    "stale_feed.max_mark_price_age_ms": 60000,
+    "alerts.dedupe_window_ms": 300000,
+}
 # Every required key in file order, the equity age included.
 ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, DAILY_LOSS_AGE_KEY, *MARGIN_KEYS)
 
@@ -105,20 +124,14 @@ def _all_set_document(label: str = "DECISION") -> dict[str, Any]:
     return {**values, "provenance": provenance}
 
 
-def test_the_real_file_loads_with_every_field_unset() -> None:
+def test_the_real_file_loads_with_the_owner_numbers_and_one_required_key_unset() -> None:
     limits = el.load_execution_limits(LIMITS_FILE)
-    assert limits.max_unprotected_ms is None
-    assert limits.entry_terminal_timeout_ms is None
-    assert limits.entry_unknown_grace_ms is None
-    assert limits.emergency_close_poll_timeout_ms is None
-    assert limits.min_remaining_validity_seconds is None
-    assert limits.max_mark_price_age_ms is None
-    assert limits.max_last_price_age_ms is None
+    for dotted, value in D089_DECIDED.items():
+        assert getattr(limits, el.EXECUTION_LIMIT_FIELDS[dotted]) == value, dotted  # D089
+    assert limits.stale_feed_max_user_data_silence_ms is None  # not answered, no number invented
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS
     assert limits.account_max_daily_loss_age_ms == DAILY_LOSS_AGE_DECIDED_MS  # D087
     assert limits.unset_keys() == COMMITTED_UNSET
-    for field_name in PHASE20_FIELDS.values():
-        assert getattr(limits, field_name) is None, field_name
     for dotted, field_name in MARGIN_FIELDS.items():
         assert getattr(limits, field_name) == MARGIN_DECIDED[dotted], field_name  # D085
 
@@ -135,10 +148,9 @@ def test_require_live_ready_refuses_naming_every_key() -> None:
         assert str(ROOT) not in message
         assert "toml" not in message
         assert not any(character.isdigit() for character in message)
-        assert "reconcile.tick_interval_ms" in message
-        # The fourteen dotted names still unset come in file order: protection, pre_placement,
-        # reconcile, stale_feed, alerts (account.max_equity_age_ms was set by D084 and the three
-        # margin keys by D085).
+        assert "stale_feed.max_user_data_silence_ms" in message
+        # The dotted names still unset come in file order: since D089 only the user-data silence
+        # bound (account.max_equity_age_ms was set by D084, the three margin keys by D085).
         assert [part.strip() for part in message.split(": ", 1)[1].split(",")] == list(
             COMMITTED_UNSET
         )
@@ -473,8 +485,10 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     text = LIMITS_FILE.read_text(encoding="utf-8")
     # The only numbers in the file are the owner's D084 equity age (2026-10-23) and the three
     # D085 margin keys (2026-10-24) and the D087 daily-loss age (2026-10-25).
+    # The D089 numbers (2026-10-31) come first, in file order, then those four.
     numeric = re.findall(r"^\s*([a-z_]+)\s*=\s*[-+]?\d+", text, flags=re.MULTILINE)
     assert numeric == [
+        *(dotted.split(".", 1)[1] for dotted in D089_DECIDED),
         "max_equity_age_ms",
         "max_daily_loss_age_ms",
         "liquidation_buffer_bps",
@@ -487,8 +501,10 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # 20-28 the alert-only reconcile.entry_stale_grace_ms, plan 21-02 account.max_equity_age_ms,
     # plan 22-02 the three margin keys). The equity age has a number and the label DECISION since
     # D084, the daily-loss age since D087 and the three margin keys since D085: 40 minus 2 minus 2
-    # minus 6 = 30; the D083 clock margin (plan 24-03) adds a value and a label: 32.
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 32
+    # minus 6 = 30; the D083 clock margin (plan 24-03) adds a value and a label: 32. D089 (plan
+    # 24-06) sets 14 more keys, a value and a label each: 32 - 28 = 4 (the user-data silence bound
+    # and the D083 clock margin, each a value and a label).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 4
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -668,6 +684,11 @@ def test_the_real_file_has_every_section_and_label_unset_except_the_decided_keys
                 assert document[section][key] == MARGIN_DECIDED[f"{section}.{key}"]
                 assert document["provenance"][section][key] == "DECISION"
                 continue
+            if f"{section}.{key}" in D089_DECIDED:
+                # Set by the owner on 2026-10-31 (D089): a number and the label DECISION.
+                assert document[section][key] == D089_DECIDED[f"{section}.{key}"]
+                assert document["provenance"][section][key] == "DECISION"
+                continue
             assert document[section][key] == el.NOT_CONFIGURED_WORD, (section, key)
             assert document["provenance"][section][key] == el.NOT_CONFIGURED_WORD, (section, key)
 
@@ -765,11 +786,11 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     assert limits.account_max_equity_age_ms == EQUITY_AGE_DECIDED_MS  # DECISIONS D084
     assert _ACCOUNT_KEY not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
-    assert len(limits.unset_keys()) == 14
-    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
+    assert len(limits.unset_keys()) == 1  # D089: only the user-data silence bound
+    assert limits.unset_alert_only_keys() == ()  # D089 set the stale-entry grace
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
     # Setting this key (and, since D085, the three margin keys) does not open the live path:
-    # fourteen required keys stay unset.
+    # one required key stays unset (D089).
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
     assert _ACCOUNT_KEY not in info.value.keys
@@ -884,7 +905,7 @@ def test_the_committed_file_holds_the_margin_keys_set_with_the_decision_label() 
     for dotted in MARGIN_KEYS:
         assert dotted not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
-    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
+    assert limits.unset_alert_only_keys() == ()  # D089 set the stale-entry grace
 
 
 def test_require_live_ready_still_refuses_and_no_longer_names_the_margin_keys() -> None:
@@ -892,7 +913,7 @@ def test_require_live_ready_still_refuses_and_no_longer_names_the_margin_keys() 
     limits = el.load_execution_limits(LIMITS_FILE)
     with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
         limits.require_live_ready()
-    assert len(info.value.keys) == 14
+    assert len(info.value.keys) == 1  # D089: only the user-data silence bound is unset
     for dotted in MARGIN_KEYS:
         assert dotted not in info.value.keys
         assert dotted not in str(info.value)

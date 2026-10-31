@@ -56,9 +56,7 @@ def _gtd_clock_margin_ms(binance: BinanceLimits) -> int:
 def relationship_violations(limits: ExecutionLimits, binance: BinanceLimits) -> list[str]:
     """Every broken rule, each message naming its keys and no value of a secret kind."""
     unset = [
-        dotted
-        for dotted, field in _RELATIONSHIP_FIELDS.items()
-        if getattr(limits, field) is None
+        dotted for dotted, field in _RELATIONSHIP_FIELDS.items() if getattr(limits, field) is None
     ]
     if unset:
         return [f"{dotted} is NOT_CONFIGURED, so its relationship cannot hold" for dotted in unset]

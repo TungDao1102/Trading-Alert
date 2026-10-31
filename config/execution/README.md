@@ -144,5 +144,5 @@ The owner answered the 24-01 limits checkpoint on 2026-10-31 ("theo recommend cá
 
 Still `NOT_CONFIGURED`, on purpose:
 
-- `stale_feed.max_user_data_silence_ms` - REQUIRED and not answered. The official user-data-streams page states no server ping interval, so no recommendation and no number exist; the owner chooses it from the ping and pong times a Demo run observes. The live path keeps refusing, naming this key, until then.
-- `rest_gate.ban_end_clock_margin_ms` - optional (D083 item 4); the owner left it unset until a real Futures 418 body has been seen.
+- The key `stale_feed.max_user_data_silence_ms` is REQUIRED and not answered. The official user-data-streams page states no server ping interval, so no recommendation and no number exist; the owner chooses it from the ping and pong times a Demo run observes. The live path keeps refusing, naming this key, until then.
+- The key `rest_gate.ban_end_clock_margin_ms` is optional (D083 item 4); the owner left it unset until a real Futures 418 body has been seen.
