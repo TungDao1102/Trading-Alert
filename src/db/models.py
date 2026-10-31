@@ -468,6 +468,11 @@ class OrderRow(Base):
     submitted_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     canceled_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Migration 0015 (D-10): the newest Binance event time `E` applied; NULL = none yet. Not a
+    # domain field and not part of the order_id hash.
+    exchange_event_time_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # No CHECK on `order_role` (free-string domain field) - research A3.
     __table_args__ = (
@@ -710,6 +715,11 @@ class PositionRow(Base):
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Migration 0015 (D-10): the newest exchange event time applied by `update_position_snapshot`;
+    # NULL = none yet. Not a domain field.
+    snapshot_event_time_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # `quantity` has NO sign CHECK: position_amt is signed (negative for SHORT in one-way
     # mode), so `>= 0` would reject a legal short (research C4 refinement, recorded for D051).
