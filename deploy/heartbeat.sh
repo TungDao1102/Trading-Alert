@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-# External heartbeat sender for the collector (plan 16-50, D042 condition 1) and, with
-# --target paper, for the paper runtime of the soak project (plan 16-56, 16-DEC-HUNG-RUNTIME).
+# External heartbeat sender for the collector (plan 16-50, D042 condition 1), with
+# --target paper for the paper runtime of the soak project (plan 16-56, 16-DEC-HUNG-RUNTIME)
+# and with --target live for the live runtime (plan 24-24, D-30, R-8, inherited item 16-50).
 #
 # Usage:
 #   deploy/heartbeat.sh [--fail-ping] [--url-file PATH] [--dry-run]
@@ -29,13 +30,31 @@ set -Eeuo pipefail
 #                                  `heartbeat-paper-url`, its own units
 #                                  trading-soak-paper-heartbeat.service and .timer; PATH is the
 #                                  soak env file the unit hands to deploy/compose-soak.sh
+#   deploy/heartbeat.sh --target live [--fail-ping] [--url-file PATH] [--dry-run]
+#                                  one run of the separate LIVE heartbeat (plan 24-24): probe the
+#                                  live runtime's liveness (`python -m src.live.runtime
+#                                  --liveness` inside the live service, read-only
+#                                  `docker compose exec -T`), then ping the live check of the
+#                                  external monitor
+#   deploy/heartbeat.sh --target live --set-url [--url-file PATH] [--dry-run]
+#   deploy/heartbeat.sh --target live --install-timer --interval-seconds N [--fail-ping]
+#                       [--url-file PATH] [--dry-run]
+#                                  (root) the same for the live check: its own URL file
+#                                  (/etc/trading/heartbeat-live.url by default, or
+#                                  HEARTBEAT_LIVE_URL_FILE), its own systemd credential
+#                                  `heartbeat-live-url`, its own units
+#                                  trading-live-heartbeat.service and .timer
 #   deploy/heartbeat.sh -h | --help
 #
 # --target collector (the default) is everything above the paper lines, unchanged. The paper
 # target never reads the collector's URL file or credential, refuses --url-file naming the
 # collector's default file, and its probe passes only while the paper runtime has no held marker
 # and both its event-loop stamp and its last market message are younger than the configured feed
-# silence timeout (never the bar-age healthcheck).
+# silence timeout (never the bar-age healthcheck). The live target likewise has its own URL file,
+# credential and units, refuses --url-file naming the collector's or the paper's default file,
+# and its probe passes only while the live runtime has no held marker and a fresh liveness stamp.
+# The check period (recommended 60 s) and grace (recommended 120 s) are set by the owner in the
+# monitor; --install-timer --interval-seconds N has no default for any target.
 #
 # One run executes the collector probe (`python -m src.data.collector --healthcheck` inside the
 # compose collector service, read-only) and sends exactly one success ping only while that probe
@@ -75,6 +94,10 @@ URL_PATTERN='^https://[A-Za-z0-9][A-Za-z0-9._~:/-]*$'
 # Allow-list for a URL file path that is baked into a unit (no whitespace and no systemd
 # specifier characters such as the percent sign).
 UNIT_PATH_PATTERN='^/[A-Za-z0-9._/+=,~-]+$'
+
+# The default URL files of the other checks: no target may use another target's file.
+PAPER_URL_FILE=/etc/trading/heartbeat-paper.url
+LIVE_URL_FILE=/etc/trading/heartbeat-live.url
 
 TOKEN_DIR='@TRADING_DIR@'
 TOKEN_URL_FILE='@URL_FILE@'
@@ -136,7 +159,7 @@ parse_args() {
         shift
         ;;
       --target)
-        (($# >= 2)) || usage_error "--target needs collector or paper"
+        (($# >= 2)) || usage_error "--target needs collector, paper or live"
         TARGET=$2
         shift
         ;;
@@ -181,8 +204,20 @@ parse_args() {
       usage_error "a URL file path must be absolute and hold only letters, digits and . _ / + = , ~ -"
     fi
   done
-  if [[ $TARGET == paper ]]; then
-    if [[ "$(url_file_path)" == "$COLLECTOR_URL_FILE" ]]; then
+  local chosen_url_file
+  chosen_url_file="$(url_file_path)"
+  if [[ $TARGET != live && $chosen_url_file == "$LIVE_URL_FILE" ]]; then
+    usage_error "the live heartbeat has its own URL file; the $TARGET heartbeat never uses $LIVE_URL_FILE"
+  fi
+  if [[ $TARGET == live ]]; then
+    if [[ $chosen_url_file == "$COLLECTOR_URL_FILE" || $chosen_url_file == "$PAPER_URL_FILE" ]]; then
+      usage_error "the live heartbeat has its own URL file; it never uses the collector's $COLLECTOR_URL_FILE or the paper's $PAPER_URL_FILE"
+    fi
+    if [[ -n $SOAK_ENV_FILE ]]; then
+      usage_error "--soak-env-file is only valid with --target paper --install-timer"
+    fi
+  elif [[ $TARGET == paper ]]; then
+    if [[ $chosen_url_file == "$COLLECTOR_URL_FILE" ]]; then
       usage_error "the paper heartbeat has its own URL file; it never uses the collector's $COLLECTOR_URL_FILE"
     fi
     if ((INSTALL_TIMER)); then
@@ -203,14 +238,24 @@ apply_target() {
     paper)
       SERVICE=paper
       PROBE_LABEL="paper liveness"
-      DEFAULT_URL_FILE=/etc/trading/heartbeat-paper.url
+      DEFAULT_URL_FILE=$PAPER_URL_FILE
       CREDENTIAL_NAME=heartbeat-paper-url
       URL_FILE_ENV_NAME=HEARTBEAT_PAPER_URL_FILE
       UNITS=(trading-soak-paper-heartbeat.service trading-soak-paper-heartbeat.timer)
       TIMER_UNIT=trading-soak-paper-heartbeat.timer
       TARGET_ARGS="--target paper "
       ;;
-    *) usage_error "--target must be collector or paper" ;;
+    live)
+      SERVICE=live
+      PROBE_LABEL="live liveness"
+      DEFAULT_URL_FILE=$LIVE_URL_FILE
+      CREDENTIAL_NAME=heartbeat-live-url
+      URL_FILE_ENV_NAME=HEARTBEAT_LIVE_URL_FILE
+      UNITS=(trading-live-heartbeat.service trading-live-heartbeat.timer)
+      TIMER_UNIT=trading-live-heartbeat.timer
+      TARGET_ARGS="--target live "
+      ;;
+    *) usage_error "--target must be collector, paper or live" ;;
   esac
 }
 
@@ -292,7 +337,7 @@ deliver() {
   log "heartbeat: $1 ping delivered"
 }
 
-# run_once: probe the collector (or the paper runtime), then ping according to the verdict.
+# run_once: probe the collector (or the paper or live runtime), then ping according to the verdict.
 run_once() {
   load_url
   compose_init
@@ -305,6 +350,11 @@ run_once() {
   if [[ $TARGET == paper ]]; then
     # The soak project only, through its wrapper; the read-only liveness probe (plan 16-56).
     if run timeout "$STEP_TIMEOUT" bash "$SCRIPT_DIR/compose-soak.sh" exec -T "$SERVICE" "$PY" -m src.paper.runtime --liveness; then
+      probe_ok=1
+    fi
+  elif [[ $TARGET == live ]]; then
+    # The main stack's live service; the read-only liveness probe (plans 24-11 and 24-24).
+    if run timeout "$STEP_TIMEOUT" "${COMPOSE[@]}" exec -T "$SERVICE" "$PY" -m src.live.runtime --liveness; then
       probe_ok=1
     fi
   elif run timeout "$STEP_TIMEOUT" "${COMPOSE[@]}" exec -T "$SERVICE" "$PY" -m src.data.collector --healthcheck; then
