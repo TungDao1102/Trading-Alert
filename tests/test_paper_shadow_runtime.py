@@ -34,6 +34,7 @@ from src.domain.enums import ApprovalResult, DailyState
 from src.domain.registry import load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.ops.store_executor import WRITER_THREAD_PREFIX
 from src.paper.loop import BarOutcome
 from src.paper.pipeline import PipelineResult
 from src.paper.shadow import SHADOW_LABEL, Mode
@@ -599,7 +600,7 @@ async def _session_confirm_expiry(rig: Rig) -> None:
     short = rig.buttons()[0][1].removeprefix("APR:")
     await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
     await rig.tap(f"CNF:{short}", "q-cnf-late", at=T_APPROVE + timedelta(seconds=61))
-    rig.coordinator.expire_due()
+    await rig.coordinator.expire_due()
 
 
 async def _session_approval_expired(rig: Rig) -> None:
@@ -1000,6 +1001,132 @@ async def test_a_poll_with_no_position_reads_no_minutes() -> None:
     await rig.coordinator.poll_once()
     assert "klines" not in rig.public.calls
     assert rig.public.calls.count("mark_klines") == 1, "only the best-effort mark of the alert"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-05 (D-25, P16R-03): the confirm sweep leaves the event loop.
+# --------------------------------------------------------------------------- #
+
+TEST_ONLY_WAIT_SECONDS = 5.0
+
+
+def _spy_expire_due(rig: Rig, threads: list[str], gate: threading.Event | None = None) -> None:
+    """Replace the confirm book's `expire_due` by a spy that records its thread, then delegates."""
+    real = rig.coordinator.confirm_book.expire_due
+
+    def spy(now_utc: datetime) -> list[str]:
+        threads.append(threading.current_thread().name)
+        if gate is not None:
+            assert gate.wait(TEST_ONLY_WAIT_SECONDS), "the test never released the sweep"
+        return real(now_utc)
+
+    rig.coordinator.confirm_book.expire_due = spy  # type: ignore[method-assign]
+
+
+async def test_the_confirm_sweep_of_a_poll_runs_on_the_store_writer_thread() -> None:
+    rig = Rig()
+    threads: list[str] = []
+    _spy_expire_due(rig, threads)
+    rig.now = after_minutes(1)
+    await rig.coordinator.poll_once()
+    await rig.coordinator.poll_once()
+    assert len(threads) == 2
+    assert all(name.startswith(WRITER_THREAD_PREFIX) for name in threads), threads
+    assert threading.current_thread().name not in threads
+    await rig.coordinator.stop()
+
+
+async def test_the_public_expire_due_also_runs_on_the_store_writer_thread() -> None:
+    rig = Rig()
+    threads: list[str] = []
+    _spy_expire_due(rig, threads)
+    assert await rig.coordinator.expire_due() == []
+    assert len(threads) == 1 and threads[0].startswith(WRITER_THREAD_PREFIX)
+    await rig.coordinator.stop()
+
+
+async def test_a_slow_confirm_sweep_does_not_block_the_event_loop() -> None:
+    rig = Rig()
+    started = threading.Event()
+    release = threading.Event()
+    threads: list[str] = []
+
+    real = rig.coordinator.confirm_book.expire_due
+
+    def blocking(now_utc: datetime) -> list[str]:
+        threads.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(TEST_ONLY_WAIT_SECONDS), "the test never released the sweep"
+        return real(now_utc)
+
+    rig.coordinator.confirm_book.expire_due = blocking  # type: ignore[method-assign]
+    rig.now = after_minutes(1)
+    poll = asyncio.create_task(rig.coordinator.poll_once())
+    assert await asyncio.to_thread(started.wait, TEST_ONLY_WAIT_SECONDS)
+    ticks = 0
+    for _ in range(5):  # the loop keeps turning while the sweep is stuck in the worker
+        await asyncio.sleep(0)
+        ticks += 1
+    assert ticks == 5 and not poll.done()
+    release.set()
+    await asyncio.wait_for(poll, timeout=TEST_ONLY_WAIT_SECONDS)
+    assert threads[0].startswith(WRITER_THREAD_PREFIX)
+    await rig.coordinator.stop()
+
+
+async def test_a_confirm_that_times_out_is_still_expired_and_journaled_by_the_off_loop_sweep() -> (
+    None
+):
+    rig = Rig()
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+    await rig.tap(f"APR:{short}", "q-apr-sweep", at=T_APPROVE)
+    rig.now = T_APPROVE + timedelta(seconds=61)  # past the 60 s confirm TTL, never pressed
+    await rig.coordinator.poll_once()
+    assert len(rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)) == 1
+    await rig.coordinator.poll_once()
+    assert len(rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)) == 1, "a second sweep writes nothing"
+    await rig.coordinator.stop()
+
+
+async def test_stop_closes_the_store_executor_and_a_later_poll_skips_the_sweep() -> None:
+    rig = Rig()
+    threads: list[str] = []
+    _spy_expire_due(rig, threads)
+    await rig.coordinator.stop()
+    await rig.coordinator.stop()  # idempotent, also without an application
+    rig.now = after_minutes(1)
+    await rig.coordinator.poll_once()  # the runtime may poll once more while it shuts down
+    assert threads == []
+    with pytest.raises(RuntimeError, match="closed"):
+        await rig.coordinator.expire_due()
+
+
+async def test_stop_waits_for_a_sweep_that_is_in_flight() -> None:
+    rig = Rig()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    real = rig.coordinator.confirm_book.expire_due
+
+    def blocking(now_utc: datetime) -> list[str]:
+        started.set()
+        assert release.wait(TEST_ONLY_WAIT_SECONDS)
+        try:
+            return real(now_utc)
+        finally:
+            finished.set()
+
+    rig.coordinator.confirm_book.expire_due = blocking  # type: ignore[method-assign]
+    rig.now = after_minutes(1)
+    poll = asyncio.create_task(rig.coordinator.poll_once())
+    assert await asyncio.to_thread(started.wait, TEST_ONLY_WAIT_SECONDS)
+    stopper = asyncio.create_task(rig.coordinator.stop())
+    await asyncio.sleep(0)
+    assert not stopper.done(), "stop() must wait for the write that is in flight"
+    release.set()
+    await asyncio.wait_for(asyncio.gather(poll, stopper), timeout=TEST_ONLY_WAIT_SECONDS)
+    assert finished.is_set()
 
 
 async def test_the_next_bars_context_sees_the_open_position_and_the_booked_daily_loss() -> None:
@@ -1606,7 +1733,7 @@ async def test_every_signal_of_a_session_gets_its_attribution_from_the_journal()
     await rig.tap(f"CNF:{shorts[1]}", "q-cnf-1", at=T_CONFIRM)
     await rig.tap(f"CXL:{shorts[3]}", "q-cxl-3", at=T_CONFIRM)
     await rig.tap(f"CNF:{shorts[4]}", "q-cnf-4", at=T_APPROVE + timedelta(seconds=61))
-    rig.coordinator.expire_due()
+    await rig.coordinator.expire_due()
 
     early = rig.coordinator.records_for(*pair(outcomes[7]))
     assert kinds(early) == [("system", "")], (

@@ -41,7 +41,7 @@ T = TypeVar("T")
 WRITER_THREAD_PREFIX = "store-writer"
 
 
-def _consume_outcome(future: asyncio.Future[T]) -> None:
+def _consume_outcome[V](future: asyncio.Future[V]) -> None:
     """Mark the outcome of a write as retrieved, so an abandoned failure is not logged twice."""
     if not future.cancelled():
         future.exception()

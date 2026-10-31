@@ -24,7 +24,11 @@ every message leaves through `send_shadow_alert`, the confirm callbacks and the 
 all of which build their text with the one composer.
 
 Threads: the event loop runs the Telegram application and the poller; every synchronous store
-call of a press (`dispatch_callback`) and of a poll step runs through `asyncio.to_thread`.
+call of a press (`dispatch_callback`) and of a poll step runs through `asyncio.to_thread`, except
+the confirm TTL sweep (`ConfirmBook.expire_due`): it runs on the one `StoreExecutor` writer
+thread (plan 24-05, D-25, P16R-03), never on the loop thread. The sweep may adopt a stored CONFIRM
+and call `_on_confirmed` there; that hook only builds drivers under the coordinator lock (the same
+code the poll step already runs on a worker thread) and touches nothing loop-bound.
 `ShadowLedger` and `ShadowReservations` serialise on the ledger lock; the position table has its
 own lock (the coordinator lock).
 
@@ -63,6 +67,7 @@ from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.ops.store_executor import StoreExecutor
 from src.paper.attribution import (
     EVENT_CONFIRM_EXPIRED,
     EVENT_CONFIRMED,
@@ -412,6 +417,10 @@ class ShadowCoordinator:
         self._telegram_errors: dict[str, int] = {}
         self._conflict_logged = False
         self._lost: list[str] = []
+        # D-25 / P16R-03: the confirm TTL sweep writes to the stores, so it runs on the one
+        # ordered writer thread. The coordinator owns the executor and closes it in `stop()`.
+        self._store_executor = StoreExecutor()
+        self._stopped = False
 
         self._book = ShadowApprovalBook(stores, clock=clock)
         self._reservations = ShadowReservations(ledger, stores, basis_for=self._basis_for)
@@ -833,9 +842,12 @@ class ShadowCoordinator:
         for position in active:
             await self._advance(position, settled[position.reservation.symbol])
         await asyncio.to_thread(self._sweep, now)
-        # The confirm book is driven by the callback handlers on this thread, so its TTL sweep runs
-        # here too (its state is not shared with the worker thread).
-        expired = self._confirm.expire_due(now)
+        if self._stopped:
+            return  # the runtime stopped the chain while this step ran: no sweep after the drain
+        # The TTL sweep journals EXPIRED events (store writes): it goes through the ordered writer
+        # and never blocks this loop (P16R-03). A cancelled step does not cancel the sweep, which
+        # is idempotent (a second call writes nothing).
+        expired = await self._store_executor.write(self._confirm.expire_due, now)
         # D-06: a delivered card whose TTL just ran out loses its keyboard (keyboard-only edit,
         # the card text stays). No sweep at startup: raw tokens and message ids do not survive a
         # restart (expire_on_restart journals RUNTIME_RESTART as before).
@@ -1284,13 +1296,20 @@ class ShadowCoordinator:
         self._application = application
 
     async def stop(self) -> None:
-        """Stop the application in the reverse order of `start` (idempotent)."""
+        """Stop the application in the reverse order of `start`, then drain the writer (idempotent).
+
+        The store executor is closed last: a sweep in flight finishes (no write is cut off) and a
+        poll step that runs afterwards skips its sweep. The close does not block the loop.
+        """
+        self._stopped = True
         application, self._application = self._application, None
-        if application is None:
-            return
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        try:
+            if application is not None:
+                await application.updater.stop()
+                await application.stop()
+                await application.shutdown()
+        finally:
+            await self._store_executor.aclose()
 
     async def on_telegram_error(self, update: object, context: Any) -> None:
         """The application error handler: log the class, count it, change nothing.
@@ -1317,9 +1336,12 @@ class ShadowCoordinator:
             self._conflict_logged = True
             log.error("paper.shadow.bot_token_conflict", rule=BOT_TOKEN_RULE)
 
-    def expire_due(self) -> list[str]:
-        """Journal EXPIRED for every confirm past its TTL (reason CONFIRM_TTL_ELAPSED)."""
-        return self._confirm.expire_due(self._clock())
+    async def expire_due(self) -> list[str]:
+        """Journal EXPIRED for every confirm past its TTL (reason CONFIRM_TTL_ELAPSED).
+
+        Runs on the store writer thread (D-25); raises `RuntimeError` after `stop()`.
+        """
+        return await self._store_executor.write(self._confirm.expire_due, self._clock())
 
 
 class SnapshotSource(Protocol):
