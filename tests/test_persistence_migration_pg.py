@@ -28,7 +28,10 @@ Every database here is built by `alembic upgrade` (never from ORM metadata, D-23
     named CHECK to `approvals`.
   * Migration 0014 (Phase 23, plan 23-08, G4-042) recreates `uq_approvals_one_decided_per_plan`
     with the predicate `status NOT IN ('PENDING','EXPIRED')`; its downgrade refuses when a plan
-    holds more than one non-PENDING row. The head test pins 0014.
+    holds more than one non-PENDING row.
+  * Migration 0015 (Phase 24, plan 24-07, D-10) adds the nullable `orders.exchange_event_time_utc`
+    and `positions.snapshot_event_time_utc` columns; its downgrade refuses when any row holds an
+    event time. The head test pins 0015.
 """
 
 from __future__ import annotations
@@ -120,6 +123,8 @@ REVISION_0013 = "0013_approval_money"
 MIGRATION_0013 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0013_approval_money.py"
 REVISION_0014 = "0014_decided_excl_expired"
 MIGRATION_0014 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0014_decided_excl_expired.py"
+REVISION_0015 = "0015_order_event_time"
+MIGRATION_0015 = REPO_ROOT / "src" / "db" / "alembic" / "versions" / "0015_order_event_time.py"
 _CHECK_VIOLATION = "23514"
 
 _AUTOGENERATE_PLUGINS = [
@@ -488,7 +493,7 @@ def test_data_bearing_upgrade_keeps_every_row(pg_empty_db: str) -> None:
 # Migration 0005: sized_realized_risk (Phase 19, D-22, G4-008)
 # --------------------------------------------------------------------------------------
 def test_migrated_database_is_at_the_script_directory_head(pg_db: str) -> None:
-    assert alembic_head_revision() == REVISION_0014
+    assert alembic_head_revision() == REVISION_0015
     eng = make_sync_engine(pg_db)
     try:
         with eng.connect() as conn:
@@ -1066,7 +1071,7 @@ def test_downgrade_0009_drops_only_the_filters_table_and_upgrade_restores_it(
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0014
+        assert version == REVISION_0015
     finally:
         engine.dispose()
 
@@ -1131,7 +1136,7 @@ def test_downgrade_0010_drops_only_the_day_state_tables_and_upgrade_restores_the
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0014
+        assert version == REVISION_0015
     finally:
         engine.dispose()
 
@@ -1187,7 +1192,7 @@ def test_downgrade_0011_drops_only_the_reservations_table_and_upgrade_restores_i
         assert _public_tables(engine) == full_schema
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert version == REVISION_0014
+        assert version == REVISION_0015
     finally:
         engine.dispose()
 
@@ -1361,7 +1366,7 @@ def test_downgrade_0012_drops_only_the_margin_columns_and_checks_and_keeps_the_r
                     "FROM risk_reservations"
                 )
             ).all()
-        assert version == REVISION_0014
+        assert version == REVISION_0015
         # The stored margin was lost by the downgrade: the restored columns are empty (unknown).
         assert [tuple(row) for row in restored] == [(None, None, None)]
     finally:
@@ -1521,7 +1526,7 @@ def test_downgrade_0013_drops_only_the_money_column_and_check_and_keeps_the_rows
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             restored = conn.execute(text("SELECT money_json FROM approvals")).all()
-        assert version == REVISION_0014
+        assert version == REVISION_0015
         # The stored money was lost by the downgrade: the restored column is empty (not recorded).
         assert [tuple(row) for row in restored] == [(None,)]
     finally:
@@ -1599,6 +1604,7 @@ def test_downgrade_0014_refuses_when_a_plan_holds_two_expired_rows(pg_empty_db: 
     finally:
         engine.dispose()
 
+    run_alembic(pg_empty_db, "downgrade", REVISION_0014)  # 0015 holds no event time: passes
     with pytest.raises(RuntimeError, match="1 plans have more than one non-PENDING approval"):
         run_alembic(pg_empty_db, "downgrade", REVISION_0013)
 
@@ -1614,5 +1620,116 @@ def test_downgrade_0014_refuses_when_a_plan_holds_two_expired_rows(pg_empty_db: 
         assert version == REVISION_0014
         assert list(statuses) == ["EXPIRED", "EXPIRED"]
         assert "'EXPIRED'" in _one_decided_index_sql(engine)
+    finally:
+        engine.dispose()
+
+
+# --------------------------------------------------------------------------------------
+# Migration 0015: exchange event time on orders and positions (Phase 24, plan 24-07, D-10)
+# --------------------------------------------------------------------------------------
+_EVENT_TIME_COLUMNS = {"orders": "exchange_event_time_utc", "positions": "snapshot_event_time_utc"}
+_TIMESTAMPTZ = ("YES", "timestamp with time zone")
+
+
+def _event_time_column_info(engine: Engine, table: str, column: str) -> tuple[str, str] | None:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT is_nullable, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = :t AND column_name = :c"
+            ),
+            {"t": table, "c": column},
+        ).one_or_none()
+    return None if row is None else (str(row[0]), str(row[1]))
+
+
+def test_migration_0015_imports_no_project_module() -> None:
+    assert forbidden_imports(MIGRATION_0015, ("src", "tests")) == []
+
+
+def test_migration_0015_revises_0014() -> None:
+    text_of_migration = MIGRATION_0015.read_text(encoding="utf-8")
+    assert f'down_revision = "{REVISION_0014}"' in text_of_migration
+    assert f'revision: str = "{REVISION_0015}"' in text_of_migration
+    assert len(REVISION_0015) <= 32  # alembic_version.version_num is VARCHAR(32)
+
+
+def test_the_two_event_time_columns_are_nullable_timestamptz(engine: Engine) -> None:
+    for table, column in _EVENT_TIME_COLUMNS.items():
+        assert _event_time_column_info(engine, table, column) == _TIMESTAMPTZ, (table, column)
+
+
+def test_downgrade_0015_on_empty_columns_succeeds_and_restores_0014(pg_empty_db: str) -> None:
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        tables_at_head = _public_tables(engine)
+        insert_and_commit(engine, make_signal(1), make_plan(1, 1), make_order(1, 1))
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "downgrade", REVISION_0014)
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        assert _public_tables(engine) == tables_at_head  # 0015 adds no table
+        for table, column in _EVENT_TIME_COLUMNS.items():
+            assert _event_time_column_info(engine, table, column) is None, (table, column)
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            kept = conn.execute(text("SELECT order_id FROM orders")).scalars().all()
+        assert version == REVISION_0014
+        assert list(kept) == [hexid(0x5001)]  # the row stays; only the columns leave
+    finally:
+        engine.dispose()
+
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        for table, column in _EVENT_TIME_COLUMNS.items():
+            assert _event_time_column_info(engine, table, column) == _TIMESTAMPTZ
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert version == REVISION_0015
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("table", sorted(_EVENT_TIME_COLUMNS))
+def test_downgrade_0015_refuses_when_a_row_holds_an_event_time(
+    pg_empty_db: str, table: str
+) -> None:
+    column = _EVENT_TIME_COLUMNS[table]
+    key, key_value = {
+        "orders": ("order_id", hexid(0x5001)),
+        "positions": ("position_id", hexid(0x4001)),
+    }[table]
+    run_alembic(pg_empty_db, "upgrade", "head")
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        insert_and_commit(
+            engine, make_signal(1), make_plan(1, 1), make_order(1, 1), make_position(1)
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(f"UPDATE {table} SET {column} = :t WHERE {key} = :k"),
+                {"t": T0, "k": key_value},
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="cannot drop event-time columns: 1 rows hold an event"):
+        run_alembic(pg_empty_db, "downgrade", REVISION_0014)
+
+    engine = make_sync_engine(pg_empty_db)
+    try:
+        with engine.connect() as conn:
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            stored = conn.execute(
+                text(f"SELECT {column} FROM {table} WHERE {key} = :k"), {"k": key_value}
+            ).scalar_one()
+        assert version == REVISION_0015
+        assert stored == T0  # the row is intact
+        for t, c in _EVENT_TIME_COLUMNS.items():
+            assert _event_time_column_info(engine, t, c) is not None, (t, c)
     finally:
         engine.dispose()

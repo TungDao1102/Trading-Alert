@@ -12,7 +12,7 @@ This file asserts, against the real tree and without any network or live evidenc
   `NOT_CONFIGURED`, so the live path still refuses;
 - the `RejectionReason` enum still has 21 members; both verification flags
   (`LIVE_NET_PNL_SEMANTICS_VERIFIED`, `FUNDING_SOURCE_VERIFIED`) are False; `daily_stop` is an
-  expiry trigger; the migration head is `0014_decided_excl_expired`; the OPS-05 rows of the daily
+  expiry trigger; the migration head is `0015_order_event_time`; the OPS-05 rows of the daily
   state name `src/execution/daily_stop.py`;
 - no Phase 21 fixture carries the account alias field of `GET /fapi/v3/balance` at any depth;
 - each Phase 21 requirement has its named automated tests, resolved with `ast` and never imported
@@ -244,12 +244,12 @@ def test_invariant_5_daily_stop_is_an_expiry_trigger() -> None:
     assert "daily_stop" in _EXPIRY_TRIGGERS
 
 
-def test_invariant_6_the_migration_head_is_0014_decided_excl_expired() -> None:
+def test_invariant_6_the_migration_head_is_0015_order_event_time() -> None:
     from tests.pg_support import alembic_head_revision
 
-    assert alembic_head_revision() == "0014_decided_excl_expired", (
-        "Phase 23 plan 23-08 moved the head to 0014; a later migration must update this gate "
-        "on purpose"
+    assert alembic_head_revision() == "0015_order_event_time", (
+        "Phase 24 plan 24-07 (D-10) moved the head to 0015; a later migration must update this "
+        "gate on purpose"
     )
 
 
