@@ -415,7 +415,7 @@ def live_liveness_problem(
         return f"the liveness stamp is unreadable ({exc})"
     if stamp is None:
         return "no liveness stamp: the live loop of this container has not stamped"
-    age_ms = int((now_utc - stamp.loop_alive_utc).total_seconds() * 1000)
+    age_ms = (now_utc - stamp.loop_alive_utc) // timedelta(milliseconds=1)
     if age_ms < 0:
         return "the liveness stamp is dated in the future"
     if age_ms > bound_ms:

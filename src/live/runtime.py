@@ -33,7 +33,7 @@ import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -157,7 +157,7 @@ def diagnostic_payload(
     environ: Mapping[str, str] | None = None,
     *,
     repo_root: Path = REPO_ROOT,
-    version_reader: Callable[[Path], Any] = read_code_version,
+    version_reader: Callable[[Path], Any] | None = None,
 ) -> dict[str, str]:
     """The Python version and the application revision for every health answer (OPS-04, D-31).
 
@@ -178,7 +178,8 @@ def diagnostic_payload(
         payload["app_revision"] = stamped
         return payload
     try:
-        payload["app_revision"] = str(version_reader(repo_root).text)
+        reader = version_reader if version_reader is not None else read_code_version
+        payload["app_revision"] = str(reader(repo_root).text)
     except (CodeVersionError, OSError):
         payload["app_revision"] = UNKNOWN_REVISION
     return payload
@@ -304,7 +305,7 @@ def _healthcheck(
     except LiveLivenessUnreadable:
         stamp = None
     if stamp is not None:
-        age_ms = int((now() - stamp.loop_alive_utc).total_seconds() * 1000)
+        age_ms = (now() - stamp.loop_alive_utc) // timedelta(milliseconds=1)
         tasks = dict(stamp.tasks)
     payload["liveness_age_ms"] = age_ms
     payload["tasks"] = tasks
