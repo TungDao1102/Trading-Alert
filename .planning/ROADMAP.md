@@ -1319,7 +1319,7 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 17/36 plans executed
+**Plans:** 25/36 plans executed
 
 Plans:
 
@@ -1347,14 +1347,14 @@ Plans:
 - [x] 24-17-PLAN.md - Telegram runner through on_callback, confirm and dispatch off the loop (D-17, R-2)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 24-18-PLAN.md - User-data stream to protection with the fill fan-out (D-14)
-- [ ] 24-19-PLAN.md - Stream persistence, feed source, divergence queue (D-10 writers, D-14, G4-034)
-- [ ] 24-20-PLAN.md - Reconcile loop, sweeper, UNKNOWN resolver composition; SAFE_MODE spill (EXEC-02)
-- [ ] 24-21-PLAN.md - Scheduled cancel at plan expiry and the criterion-5 Demo findings (D-13, D-34)
-- [ ] 24-22-PLAN.md - Health producers, D056 DEGRADED rows, D058 mark gate, DEMO enable and kill gate (D-26, D-27, D-28)
-- [ ] 24-23-PLAN.md - Telegram operator commands and the fake-level SAFE_MODE drill (R-4, OQ-5)
-- [ ] 24-24-PLAN.md - Heartbeat --target live with its own check and units (D-30)
-- [ ] 24-25-PLAN.md - Image carries the limits files and a revision stamp (R-6, OPS-04)
+- [x] 24-18-PLAN.md - User-data stream to protection with the fill fan-out (D-14)
+- [x] 24-19-PLAN.md - Stream persistence, feed source, divergence queue (D-10 writers, D-14, G4-034)
+- [x] 24-20-PLAN.md - Reconcile loop, sweeper, UNKNOWN resolver composition; SAFE_MODE spill (EXEC-02)
+- [x] 24-21-PLAN.md - Scheduled cancel at plan expiry and the criterion-5 Demo findings (D-13, D-34)
+- [x] 24-22-PLAN.md - Health producers, D056 DEGRADED rows, D058 mark gate, DEMO enable and kill gate (D-26, D-27, D-28)
+- [x] 24-23-PLAN.md - Telegram operator commands and the fake-level SAFE_MODE drill (R-4, OQ-5)
+- [x] 24-24-PLAN.md - Heartbeat --target live with its own check and units (D-30)
+- [x] 24-25-PLAN.md - Image carries the limits files and a revision stamp (R-6, OPS-04)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 24-26-PLAN.md - Start sequence D-08 and restart rehydrate (OPS-03, G4-029, D-09)
@@ -1518,7 +1518,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
-| 24. Live Runtime Composition + Demo Rehearsal | 17/36 | In Progress | - |
+| 24. Live Runtime Composition + Demo Rehearsal | 25/36 | In Progress | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
