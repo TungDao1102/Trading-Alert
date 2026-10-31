@@ -1300,11 +1300,17 @@ def _imports_supervisor(names: list[str]) -> bool:
     )
 
 
+# Plan 24-18 (D-14): the live stream composition root is the one legitimate importer; the same
+# allow-list is pinned, with its negative control, by tests/test_phase18_gate.py invariant 2.
+LIVE_STREAM_MODULE = REPO_ROOT / "src" / "live" / "stream.py"
+
+
 def test_no_src_module_imports_the_supervisor() -> None:
     offenders = [
         str(path.relative_to(REPO_ROOT))
         for path in sorted((REPO_ROOT / "src").rglob("*.py"))
-        if path != SUPERVISOR_PATH and _imports_supervisor(module_imports(path))
+        if path not in (SUPERVISOR_PATH, LIVE_STREAM_MODULE)
+        and _imports_supervisor(module_imports(path))
     ]
     assert offenders == []
 

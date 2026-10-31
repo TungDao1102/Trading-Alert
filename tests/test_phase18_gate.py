@@ -434,6 +434,26 @@ PURE_FORBIDDEN_IMPORTS: tuple[str, ...] = (
 )
 SUPERVISOR_PATH = ROOT / "src" / "adapters" / "binance_userdata_supervisor.py"
 SUPERVISOR_MODULE = "src.adapters.binance_userdata_supervisor"
+# Plan 24-18 (D-14): the live process composes the supervisor in exactly one module. Any other
+# importer is still an offender; a new entry needs its own plan and reason.
+SUPERVISOR_IMPORTERS_ALLOWED: dict[str, str] = {
+    "src/live/stream.py": "D-14: the live stream composition root is the only supervisor owner",
+}
+# Plan 24-18 (D-15): REST holders that stay outside the live process gate by design. Each runs in
+# a different process (its own `RestRateLimitGate` or its own rate-limit handling), so a 418 in the
+# live process does not reach them and theirs does not reach it. Inside the live process every
+# holder takes the one gate (`tests/test_live_exchange_wiring.py`, invariant 9 below).
+REST_HOLDERS_OUTSIDE_THE_LIVE_GATE: dict[str, str] = {
+    "src/data/backfill.py": "different process by design (D-15): data job",
+    "src/data/universe_freeze.py": "different process by design (D-15): data job",
+    "src/data/collector.py": "different process by design (D-15): data job",
+    "src/paper/runtime.py": "different process by design (D-15): the paper runtime",
+    "src/paper/shadow_runtime.py": "different process by design (D-15): the paper runtime",
+    "scripts/user_data_smoke.py": "different process by design (D-15): owner-run script",
+    "scripts/demo_probe.py": "different process by design (D-15): owner-run script",
+    "scripts/paper_ws_smoke.py": "different process by design (D-15): owner-run script",
+    "scripts/shadow_rehearsal.py": "different process by design (D-15): owner-run script",
+}
 ADAPTER_PATH = ROOT / "src" / "adapters" / "binance_usdm.py"
 MANAGER_PATH = ROOT / "src" / "execution" / "manager.py"
 
@@ -442,17 +462,45 @@ def test_invariant_1_one_sdk_construction_path() -> None:
     client_config_tests.test_sdk_client_is_constructed_only_at_the_allowed_sites()
 
 
-def test_invariant_2_no_src_module_imports_the_supervisor() -> None:
-    offenders = [
-        path.relative_to(ROOT).as_posix()
-        for path in sorted((ROOT / "src").rglob("*.py"))
+def _supervisor_importers(paths: list[Path], root: Path = ROOT) -> list[str]:
+    """The posix paths (relative to `root`) of every module that imports the supervisor."""
+    return [
+        path.relative_to(root).as_posix()
+        for path in sorted(paths)
         if path != SUPERVISOR_PATH
         and any(
             name == SUPERVISOR_MODULE or name.startswith(SUPERVISOR_MODULE + ".")
             for name in module_imports(path)
         )
     ]
-    assert offenders == [], "Phase 19 wires the supervisor; Phase 18 must not"
+
+
+def test_invariant_2_no_src_module_imports_the_supervisor() -> None:
+    """Only `src/live/stream.py` (D-14, plan 24-18) imports the supervisor; none other may."""
+    found = _supervisor_importers(list((ROOT / "src").rglob("*.py")))
+    offenders = [name for name in found if name not in SUPERVISOR_IMPORTERS_ALLOWED]
+    assert offenders == [], "only src/live/stream.py (D-14) composes the supervisor"
+    # The allow-list is exact: every entry really is an importer.
+    assert found == sorted(SUPERVISOR_IMPORTERS_ALLOWED)
+
+
+def test_invariant_2_negative_control_another_module_is_an_offender(tmp_path: Path) -> None:
+    """A seeded module outside the allow-list that imports the supervisor is found."""
+    seeded = tmp_path / "src" / "live" / "other.py"
+    seeded.parent.mkdir(parents=True)
+    seeded.write_text(f"import {SUPERVISOR_MODULE}\n", encoding="utf-8")
+    found = _supervisor_importers([seeded], tmp_path)
+    assert found == ["src/live/other.py"]
+    assert found[0] not in SUPERVISOR_IMPORTERS_ALLOWED
+
+
+def test_invariant_2_the_rest_holders_outside_the_live_gate_are_recorded_by_design() -> None:
+    """D-15: the outside holders exist, carry the reason, and none is in the live package."""
+    assert REST_HOLDERS_OUTSIDE_THE_LIVE_GATE
+    for relative, reason in REST_HOLDERS_OUTSIDE_THE_LIVE_GATE.items():
+        assert (ROOT / relative).is_file(), relative
+        assert reason.startswith("different process by design (D-15)"), relative
+        assert not relative.startswith("src/live/"), relative
 
 
 @pytest.mark.parametrize("relative", PURE_MODULES)
