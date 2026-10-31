@@ -20,7 +20,6 @@ import contextvars
 import threading
 
 import pytest
-
 from src.ops.store_executor import WRITER_THREAD_PREFIX, StoreExecutor
 
 TEST_ONLY_WAIT_SECONDS = 5.0
