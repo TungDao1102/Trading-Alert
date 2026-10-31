@@ -357,6 +357,10 @@ class PositionSnapshot:
     notional: Decimal | None
     margin_asset: str
     update_time_utc: datetime
+    # Plan 24-21 (D-34): True when the row carried `entry_price` as a float instead of the
+    # exchange's own string. The value is then exact text of that float, never rounded, but it may
+    # hold float noise (84816.40000000001); readers that need the exact price check this flag.
+    entry_price_from_float: bool = False
 
 
 @dataclass(frozen=True)
@@ -2126,13 +2130,12 @@ def _row_to_position_snapshot(
     position_amt = Decimal(str(item.position_amt))
     if not position_amt.is_finite():
         raise ValueError("position row positionAmt is not finite")
+    entry_price, entry_price_from_float = _entry_price_decimal(item.entry_price)
     return PositionSnapshot(
         symbol=item.symbol,
         position_side=item.position_side or "",
         position_amt=position_amt,
-        entry_price=Decimal(str(item.entry_price))
-        if item.entry_price is not None
-        else Decimal("0"),
+        entry_price=entry_price,
         break_even_price=Decimal(str(item.break_even_price))
         if item.break_even_price is not None
         else Decimal("0"),
@@ -2146,7 +2149,27 @@ def _row_to_position_snapshot(
         notional=(Decimal(str(item.notional)) if item.notional is not None else None),
         margin_asset=item.margin_asset or "",
         update_time_utc=_require_update_time_utc(item.update_time),
+        entry_price_from_float=entry_price_from_float,
     )
+
+
+def _entry_price_decimal(value: object) -> tuple[Decimal, bool]:
+    """The position `entry_price` as a Decimal, and whether it came from a float (D-34).
+
+    The installed SDK model types `entryPrice` as a string, so the exchange's own text reaches
+    here and `Decimal(text)` is exact (84816.4 stays 84816.4). A float can only arrive through a
+    row built without validation or from another SDK version: it is converted through its
+    shortest text (never rounded or quantized) and flagged, because float noise such as
+    84816.40000000001 cannot be repaired from the float alone. A missing value is zero, as before.
+    """
+    if value is None:
+        return Decimal("0"), False
+    if isinstance(value, float):
+        converted = Decimal(repr(value))
+        if not converted.is_finite():
+            raise ValueError("position row entryPrice is not finite")
+        return converted, True
+    return Decimal(str(value)), False
 
 
 def _algo_order_to_probe(
