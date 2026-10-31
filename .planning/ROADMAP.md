@@ -1319,7 +1319,7 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 4/36 plans executed
+**Plans:** 7/36 plans executed
 
 Plans:
 
@@ -1330,9 +1330,9 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 24-04-PLAN.md - Tracer: CONFIRM -> one place_entry -> stream fill -> REST-confirmed stop; Q5 and import guards for src/live (D-01, D-04, D-05, D-17)
-- [ ] 24-05-PLAN.md - StoreExecutor seam and the paper expire_due move (D-25, G4-040, P16R-03)
-- [ ] 24-07-PLAN.md - Migration 0015: exchange event time, monotonic updates, update_position_snapshot (D-10, G4-043)
-- [ ] 24-08-PLAN.md - Mode-scoped approved-approvals reader so SHADOW and DEMO share one database (OQ-6)
+- [x] 24-05-PLAN.md - StoreExecutor seam and the paper expire_due move (D-25, G4-040, P16R-03)
+- [x] 24-07-PLAN.md - Migration 0015: exchange event time, monotonic updates, update_position_snapshot (D-10, G4-043)
+- [x] 24-08-PLAN.md - Mode-scoped approved-approvals reader so SHADOW and DEMO share one database (OQ-6)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 24-06-PLAN.md - Owner limit values written with provenance, relationship test, DECISIONS row (D-12, T-06)
@@ -1518,7 +1518,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
-| 24. Live Runtime Composition + Demo Rehearsal | 4/36 | In Progress | - |
+| 24. Live Runtime Composition + Demo Rehearsal | 7/36 | In Progress | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
