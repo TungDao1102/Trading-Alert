@@ -22,6 +22,10 @@ set -Eeuo pipefail
 # allowlisted parameter set from /app/params and the runtime configuration named by
 # IN_IMAGE_RUNTIME_CONFIG. A failure exits non-zero and nothing is recorded.
 #
+# Build-time revision stamp (OPS-04, D-31): the commit is exported as TRADING_APP_REVISION before
+# the build, docker-compose.yml passes it as a build argument and the image reports it in the live
+# healthcheck (an image has no .git). It is the same 40 character commit that names the images.
+#
 # --dry-run (or DRY_RUN=1) prints the commands and the record and writes nothing; the dirty-tree
 # refusal still applies. TRADING_DEPLOY_STATE_DIR replaces .deploy (tests).
 
@@ -40,7 +44,7 @@ OPS_REPO=trading-alert-ops
 IN_IMAGE_RUNTIME_CONFIG=/app/config/paper/paper-runtime-v2.toml
 
 usage() {
-  sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -95,6 +99,8 @@ main() {
 
   # IMAGE_TAG feeds the image names of docker-compose.yml; the soak wrapper pins the project.
   export IMAGE_TAG="$sha"
+  export TRADING_APP_REVISION="$sha"
+  printf 'revision stamp TRADING_APP_REVISION=%s\n' "$sha"
   run bash "$SCRIPT_DIR/compose-soak.sh" --profile ops build
 
   if [[ $DRY_RUN == 1 ]]; then

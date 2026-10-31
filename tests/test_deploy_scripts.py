@@ -137,6 +137,7 @@ def test_tracked_deploy_scripts_are_executable_in_the_index() -> None:
 
 IN_IMAGE_CONFIG = "/app/config/paper/paper-runtime-v2.toml"
 FAKE_IMAGE_ID = "sha256:" + "ab" * 32
+STALE_REVISION = "f" * 40
 
 # A docker stub: records each call, answers `image inspect` with a fixed id and exits from
 # `run` with FAKE_DOCKER_RUN_STATUS (the in-image check), everything else with 0.
@@ -144,6 +145,7 @@ DOCKER_STUB = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >>"$FAKE_DOCKER_LOG"
 case ${1:-} in
   image) printf '%s\\n' "$FAKE_IMAGE_ID" ;;
+  compose) printf '%s\\n' "${TRADING_APP_REVISION-unset}" >>"$FAKE_DOCKER_ENV_LOG" ;;
   run) exit "${FAKE_DOCKER_RUN_STATUS:-0}" ;;
 esac
 exit 0
@@ -175,6 +177,7 @@ class _SoakImageRig:
         stub.write_text(DOCKER_STUB, encoding="utf-8", newline="\n")
         stub.chmod(0o755)
         self.log = tmp_path / "docker.log"
+        self.env_log = tmp_path / "docker-env.log"
         self.state = tmp_path / "state"
 
     def commit(self) -> str:
@@ -203,6 +206,8 @@ class _SoakImageRig:
         }
         env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
         env["FAKE_DOCKER_LOG"] = self.log.as_posix()
+        env["FAKE_DOCKER_ENV_LOG"] = self.env_log.as_posix()
+        env["TRADING_APP_REVISION"] = STALE_REVISION  # an ambient value must be replaced
         env["FAKE_IMAGE_ID"] = FAKE_IMAGE_ID
         env["FAKE_DOCKER_RUN_STATUS"] = str(run_status)
         env["TRADING_DEPLOY_STATE_DIR"] = self.state.as_posix()
@@ -269,3 +274,127 @@ def test_soak_env_template_names_the_in_image_config_path_without_a_value() -> N
     assignments = [ln for ln in lines if ln and not ln.startswith("#")]
     assert "PAPER_RUNTIME_CONFIG=" in assignments
     assert all(ln.endswith("=") for ln in assignments), "the template stays names-only"
+
+
+# --- 24-25: the build-time revision stamp (OPS-04, D-31) -----------------------------------------
+
+
+def test_soak_image_builds_with_the_commit_as_the_revision_stamp(tmp_path: Path) -> None:
+    rig = _SoakImageRig(tmp_path)
+    commit = rig.commit()
+    proc = rig.run()
+    assert proc.returncode == 0, proc.stderr.strip()[-500:]
+    assert rig.env_log.read_text(encoding="utf-8").splitlines() == [commit]
+    assert f"revision stamp TRADING_APP_REVISION={commit}" in proc.stdout.splitlines()
+
+
+def test_soak_image_dry_run_announces_the_stamp_and_runs_no_docker(tmp_path: Path) -> None:
+    rig = _SoakImageRig(tmp_path)
+    commit = rig.commit()
+    proc = rig.run("--dry-run")
+    assert proc.returncode == 0, proc.stderr.strip()[-500:]
+    assert f"revision stamp TRADING_APP_REVISION={commit}" in proc.stdout.splitlines()
+    assert not rig.env_log.exists()
+
+
+UPDATE_REF_SHA = "2" * 40
+UPDATE_OLD_SHA = "1" * 40
+
+# A git stub for update.sh: HEAD is a file; checkout moves it to the resolved ref.
+UPDATE_GIT_STUB = """#!/usr/bin/env bash
+case ${1:-} in
+  status) exit 0 ;;
+  fetch) exit 0 ;;
+  checkout) printf '%s\\n' "$FAKE_REF_SHA" >"$FAKE_HEAD_FILE" ;;
+  rev-parse)
+    if [ "${2:-}" = --verify ]; then printf '%s\\n' "$FAKE_REF_SHA"; else cat "$FAKE_HEAD_FILE"; fi
+    ;;
+esac
+exit 0
+"""
+
+
+UPDATE_DRIVER = """#!/usr/bin/env bash
+here="$(cd "$(dirname "$0")" && pwd)"
+export PATH="$here/bin:$PATH"
+script="$1"
+shift
+exec bash "$script" "$@"
+"""
+
+
+class _UpdateRig:
+    """A throwaway tree holding update.sh and lib.sh, with stub git and docker on PATH."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.repo = tmp_path / "checkout"
+        (self.repo / "deploy").mkdir(parents=True)
+        for name in ("update.sh", "lib.sh"):
+            (self.repo / "deploy" / name).write_bytes((DEPLOY_DIR / name).read_bytes())
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        for name, text in (("docker", DOCKER_STUB), ("git", UPDATE_GIT_STUB)):
+            stub = self.bin / name
+            stub.write_text(text, encoding="utf-8", newline="\n")
+            stub.chmod(0o755)
+        self.log = tmp_path / "docker.log"
+        self.env_log = tmp_path / "docker-env.log"
+        self.head = tmp_path / "head"
+        self.head.write_text(UPDATE_OLD_SHA + "\n", encoding="utf-8", newline="\n")
+        self.state = tmp_path / "state"
+        # Git for Windows puts its own git ahead of an inherited PATH, so the stubs are put first
+        # from inside the shell (the same driver tests/test_deploy_backup_scripts.py uses).
+        self.driver = tmp_path / "driver.sh"
+        self.driver.write_text(UPDATE_DRIVER, encoding="utf-8", newline="\n")
+
+    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        bash = find_bash()
+        if bash is None:
+            infra_skip("bash not found")
+        import os
+
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"DRY_RUN", "IMAGE_TAG", "COMPOSE_PROJECT_NAME", "TRADING_ENV_FILE"}
+        }
+        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
+        env["FAKE_DOCKER_LOG"] = self.log.as_posix()
+        env["FAKE_DOCKER_ENV_LOG"] = self.env_log.as_posix()
+        env["FAKE_IMAGE_ID"] = FAKE_IMAGE_ID
+        env["FAKE_REF_SHA"] = UPDATE_REF_SHA
+        env["FAKE_HEAD_FILE"] = self.head.as_posix()
+        env["TRADING_APP_REVISION"] = STALE_REVISION  # an ambient value must be replaced
+        env["TRADING_DEPLOY_STATE_DIR"] = self.state.as_posix()
+        env["MSYS_NO_PATHCONV"] = "1"
+        return subprocess.run(
+            [bash, self.driver.as_posix(), (self.repo / "deploy" / "update.sh").as_posix(), *args],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env=env,
+        )
+
+
+def test_update_stamps_the_checked_out_commit_before_the_build(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Both compose calls (build, then up) run in the process that exported the stamp; the build
+    # is the first one and must already see the checked-out commit, not the ambient value.
+    assert rig.env_log.read_text(encoding="utf-8").splitlines()[0] == UPDATE_REF_SHA
+    lines = proc.stdout.splitlines()
+    stamp = lines.index(f"+ export TRADING_APP_REVISION={UPDATE_REF_SHA}")
+    checkout = lines.index("+ git checkout --detach v0.3.1")
+    build = lines.index("+ docker compose --profile ops build")
+    assert checkout < stamp < build
+
+
+def test_update_dry_run_announces_the_stamp_and_exports_nothing(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup", "--dry-run")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert f"+ export TRADING_APP_REVISION={UPDATE_REF_SHA}" in proc.stdout.splitlines()
+    assert not rig.env_log.exists()

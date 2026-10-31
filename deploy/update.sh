@@ -17,6 +17,11 @@ set -Eeuo pipefail
 # A schema migration that the newer version applied is NOT undone by a code rollback: restore
 # from a backup (deploy/restore.sh) if the older code cannot read the migrated database.
 #
+# Build-time revision stamp (OPS-04, D-31): after the checkout the script exports the 40 character
+# commit as TRADING_APP_REVISION, which docker-compose.yml passes to the image build as a build
+# argument; the running process reports it because an image has no .git. An existing value in the
+# environment is replaced. --rollback does not build, so the older images keep their own stamp.
+#
 # COMPOSE_PROJECT_NAME, TRADING_ENV_FILE and IMAGE_TAG (default dev) are honoured from the
 # environment. TRADING_DEPLOY_STATE_DIR replaces .deploy (tests).
 
@@ -39,7 +44,7 @@ STATE_FILE=""
 COMPOSE=()
 
 usage() {
-  sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -142,6 +147,23 @@ is_retry() {
   return 0
 }
 
+# stamp_build_revision: export TRADING_APP_REVISION as the 40 character commit being built. After a
+# real checkout that is HEAD; a dry run has not checked out, so it resolves REF itself and prints
+# a placeholder when REF cannot be resolved yet.
+stamp_build_revision() {
+  local sha
+  if [[ $DRY_RUN == 1 ]]; then
+    sha="$(git rev-parse --verify --quiet "$REF^{commit}" || true)"
+    [[ $sha =~ ^[0-9a-f]{40}$ ]] || sha="<commit of $REF>"
+    printf '+ export TRADING_APP_REVISION=%s\n' "$sha"
+    return 0
+  fi
+  sha="$(git rev-parse HEAD)"
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || die "HEAD is not a 40 character commit id after the checkout: $sha"
+  export TRADING_APP_REVISION="$sha"
+  printf '+ export TRADING_APP_REVISION=%s\n' "$sha"
+}
+
 do_update() {
   local retry=0
   require_clean_tree
@@ -161,6 +183,7 @@ do_update() {
   fi
   run git fetch --tags origin
   run git checkout --detach "$REF"
+  stamp_build_revision
   run "${COMPOSE[@]}" --profile ops build
   run "${COMPOSE[@]}" up -d
   log "updated to $REF; undo with: deploy/update.sh --rollback"
