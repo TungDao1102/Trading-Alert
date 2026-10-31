@@ -45,19 +45,19 @@ from src.risk.reservations import CountedReservation, ReservationStatus
 
 from tests.shadow_fakes import make_shadow_plan, make_shadow_signal
 from tests.support.execution_limits import test_only_execution_limits as limits_with
-from tests.support.live_rig import forbid_real_sleep, make_live_rig
+from tests.support.live_rig import forbid_real_sleep
 from tests.support.live_risk_rig import (
     TEST_ONLY_PARAMS,
     TEST_ONLY_SYMBOL,
     UNIT_START,
-    LateInputs,
-    LateRegistry,
     MovingClock,
     Parts,
     ScriptedExchange,
     btc_filters,
     build_parts,
+    make_producer_rig,
     position_row,
+    prime,
 )
 from tests.support.margin_guard_fakes import CompositeRest, StatefulConfigSdk
 
@@ -111,14 +111,6 @@ def unit_parts(
     exchange = overrides.pop("exchange", None) or ScriptedExchange()
     parts = build_parts(clock=the_clock, exchange=exchange, signal=signal, rest=rest, **overrides)
     return parts, signal, plan
-
-
-async def prime(parts: Parts) -> None:
-    """Complete one backfill and open the day (what the scheduler did before the CONFIRM)."""
-    now = parts.clock()
-    await backfill_day_risk(parts.day_risk, now)
-    verdict = await parts.day_risk.evaluate(now_utc=parts.clock(), exposure=False)
-    assert verdict.state is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -483,28 +475,6 @@ async def test_backfill_day_risk_reports_the_failure_class_and_never_raises() ->
 # --------------------------------------------------------------------------- #
 # End to end under the live rig: the producer feeds the real manager.
 # --------------------------------------------------------------------------- #
-
-
-async def make_producer_rig(**rig_overrides: Any) -> tuple[Any, Parts]:
-    # The loss bound is raised for the rig only: the rig's presses take 30 virtual seconds.
-    limits = rig_overrides.pop("limits", None) or limits_with(account_max_daily_loss_age_ms=120_000)
-    late = LateInputs()
-    rig = await make_live_rig(inputs=late, limits=limits, **rig_overrides)
-    registry = LateRegistry()
-    registry.target = rig.wiring.coordinator
-    exchange = ScriptedExchange(wrapped=rig.fake)
-    parts = build_parts(
-        clock=rig.clock,
-        exchange=exchange,
-        signal=rig.signal,
-        limits=limits,
-        registry=registry,
-        alert_sink=None,
-        rest=CompositeRest(clock=None),
-    )
-    late.target = parts.producer
-    await prime(parts)
-    return rig, parts
 
 
 @pytest.fixture(autouse=True)

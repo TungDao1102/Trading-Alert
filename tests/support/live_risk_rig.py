@@ -38,6 +38,7 @@ from src.live.risk_inputs import (
     CostRatesFor,
     LiveRiskInputProducer,
     PlanSignalContext,
+    backfill_day_risk,
     make_cost_rates_for,
 )
 from src.risk.daily_loss import FundingPolicy
@@ -52,6 +53,7 @@ from tests.support.day_risk_fakes import (
 )
 from tests.support.execution_limits import test_only_execution_limits
 from tests.support.limits import test_only_signed_call_policy
+from tests.support.live_rig import make_live_rig
 from tests.support.margin_guard_fakes import (
     START as UNIT_START,
 )
@@ -379,6 +381,38 @@ def build_parts(
     )
 
 
+async def prime(parts: Parts) -> None:
+    """Complete one backfill and open the day (what the scheduler did before the CONFIRM)."""
+    now = parts.clock()
+    await backfill_day_risk(parts.day_risk, now)
+    verdict = await parts.day_risk.evaluate(now_utc=parts.clock(), exposure=False)
+    assert verdict.state is not None
+
+
+async def make_producer_rig(**rig_overrides: Any) -> tuple[Any, Parts]:
+    # The loss bound is raised for the rig only: the rig's presses take 30 virtual seconds.
+    limits = rig_overrides.pop("limits", None) or test_only_execution_limits(
+        account_max_daily_loss_age_ms=120_000
+    )
+    late = LateInputs()
+    rig = await make_live_rig(inputs=late, limits=limits, **rig_overrides)
+    registry = LateRegistry()
+    registry.target = rig.wiring.coordinator
+    exchange = ScriptedExchange(wrapped=rig.fake)
+    parts = build_parts(
+        clock=rig.clock,
+        exchange=exchange,
+        signal=rig.signal,
+        limits=limits,
+        registry=registry,
+        alert_sink=None,
+        rest=CompositeRest(clock=None),
+    )
+    late.target = parts.producer
+    await prime(parts)
+    return rig, parts
+
+
 __all__ = [
     "TEST_ONLY_PARAMS",
     "TEST_ONLY_QUOTE",
@@ -392,6 +426,8 @@ __all__ = [
     "ScriptedExchange",
     "btc_filters",
     "build_parts",
+    "make_producer_rig",
+    "prime",
     "position_row",
     "static_context",
     "drift_limits_for_tests",
