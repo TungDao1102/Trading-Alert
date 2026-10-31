@@ -215,6 +215,9 @@ class ExchangeStateUpdate:
     exchange_status: str
     exchange_order_id: str
     now_utc: datetime
+    # The exchange event time E of the order update (Phase 24 plan 24-19): the monotonic guard of
+    # `update_order_exchange_state` compares it with the stored one.
+    exchange_event_time_utc: datetime | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -564,6 +567,7 @@ class UserDataRouter:
             exchange_status=event.order_status,
             exchange_order_id=event.exchange_order_id,
             now_utc=self._clock(),
+            exchange_event_time_utc=event.event_time_utc,
         )
         if self._call_sink("exchange_state_sink", self._exchange_state_sink, update, event, tally):
             tally.exchange_states += 1

@@ -311,6 +311,9 @@ def test_known_trade_gives_exchange_state_hint_with_evidence_and_fill() -> None:
     assert update.exchange_status == "PARTIALLY_FILLED"
     assert update.exchange_order_id == str(ORDER_ID)
     assert update.now_utc == T0
+    # Phase 24 (24-19): the exchange event time E rides along for the monotonic order guard.
+    assert update.exchange_event_time_utc is not None
+    assert update.exchange_event_time_utc.utcoffset() == timedelta(0)
 
     assert len(h.sinks.status_hints) == 1
     hint = h.sinks.status_hints[0]
