@@ -1660,6 +1660,9 @@ class BinanceUsdmAdapter:
         Flag-never-fabricate (D-09, D-11): a missing, non-decimal,
         non-finite, negative, above-0.01 or wrong-symbol field raises
         `ValueError` — the adapter never returns a zero to mean unknown.
+        A symbol that is empty, not a str, padded or not upper-case raises `ValueError`
+        before any request (the call costs weight 20). A negative maker rate stays a refusal
+        (owner decision D-22, Phase 12 review IN-01).
         There is no retry and no fallback value; an SDK exception
         propagates unchanged. The adapter takes no clock: the caller stamps
         `observed_at_utc` when it builds the risk-layer `AccountCommission`,
@@ -1668,6 +1671,14 @@ class BinanceUsdmAdapter:
         Returns:
             A frozen `CommissionRates` for the requested symbol.
         """
+        # IN-01 (plan 24-15): a malformed symbol must not spend the weight-20 call.
+        if (
+            not isinstance(symbol, str)
+            or symbol == ""
+            or symbol != symbol.strip()
+            or symbol != symbol.upper()
+        ):
+            raise ValueError("symbol must be a non-empty upper-case string")
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
             UserCommissionRateResponse,
         )

@@ -11,6 +11,7 @@ test. Parameter rates: fee 0.0005 / 0.0005, slippage 0.0001 / 0.0003.
 from __future__ import annotations
 
 import ast
+import asyncio
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta, timezone
@@ -308,3 +309,37 @@ def test_module_does_not_import_backtest_or_adapters() -> None:
         check=True,
     )
     assert out.stdout.strip() == ""
+
+
+# --------------------------------------------------------------------------- #
+# Adapter read (plan 24-15, Phase 12 review IN-01): the symbol is checked before the weight-20
+# call, and a negative maker rate stays a fail-closed refusal (owner decision D-22).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("bad", ["", "btcusdt", "BtcUsdT", " BTCUSDT", "BTCUSDT ", None, 7, b"BTC"])
+def test_user_commission_rate_refuses_a_malformed_symbol_before_any_call(bad: object) -> None:
+    from tests.test_adapter_strictness import _commission_adapter, _commission_response
+
+    adapter, rest = _commission_adapter(_commission_response())
+    with pytest.raises(ValueError, match="symbol"):
+        asyncio.run(adapter.user_commission_rate(bad))  # type: ignore[arg-type]
+    assert rest.commission_calls == []
+
+
+def test_user_commission_rate_accepts_an_upper_case_symbol_with_digits() -> None:
+    from tests.test_adapter_strictness import _commission_adapter, _commission_response
+
+    adapter, rest = _commission_adapter(_commission_response(symbol="1000PEPEUSDT"))
+    out = asyncio.run(adapter.user_commission_rate("1000PEPEUSDT"))
+    assert out.symbol == "1000PEPEUSDT"
+    assert len(rest.commission_calls) == 1
+
+
+def test_user_commission_rate_negative_maker_stays_a_refusal() -> None:
+    from tests.test_adapter_strictness import _commission_adapter, _commission_response
+
+    adapter, rest = _commission_adapter(_commission_response(maker="-0.0001"))
+    with pytest.raises(ValueError, match="makerCommissionRate"):
+        asyncio.run(adapter.user_commission_rate("BTCUSDT"))
+    assert len(rest.commission_calls) == 1

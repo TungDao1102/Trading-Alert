@@ -119,7 +119,8 @@ def canonical_decimal_text(value: Decimal) -> str:
     if value == 0:
         return "0"
     sign, digits, exponent = value.as_tuple()
-    assert isinstance(exponent, int)  # finite Decimal
+    if not isinstance(exponent, int):  # a finite Decimal always has an int exponent (IN-05)
+        raise RuntimeError("finite Decimal exponent is not an int")
     mantissa = list(digits)
     while len(mantissa) > 1 and mantissa[-1] == 0:
         mantissa.pop()
