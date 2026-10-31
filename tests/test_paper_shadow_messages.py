@@ -18,6 +18,7 @@ from src.approval.tokens import token_hash_of
 from src.domain.enums import ApprovalAction, ApprovalResult
 from src.paper.shadow import (
     SHADOW_LABEL,
+    SHADOW_TEXT_V2,
     Mode,
     ShadowApprovalBook,
     ShadowDecisionOutcome,
@@ -37,6 +38,7 @@ from tests.shadow_fakes import (
     RecordingSleep,
     assert_shadow_text,
     keyboard_buttons,
+    make_shadow_money,
     make_shadow_plan,
     make_shadow_signal,
 )
@@ -129,6 +131,50 @@ async def test_r3b_the_sent_alert_shows_the_quantity_stored_on_both_rows() -> No
         assert row.approved_quantity is not None
         assert quantity_lines[0] == "Quantity: " + format(row.approved_quantity, "f")
         assert Decimal(quantity_lines[0][len("Quantity: ") :]) == row.approved_quantity
+
+
+def test_d19_p23_r1_text_v1_pin_is_unchanged_and_has_no_money_rows() -> None:
+    """Owner Q10 (24-01): the old SHADOW text is kept as V1; money rows live in V2 only."""
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+
+    text = format_shadow_alert(
+        signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+    )
+
+    assert not any(
+        line.startswith(("Notional: ", "Margin: ", "Loss at SL: ", "Profit at ", "Equity used: "))
+        for line in text.split("\n")
+    )
+
+
+async def test_d19_p23_r1_text_v2_alert_pin_shows_the_money_after_the_quantity() -> None:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+    stores, bot = InMemoryShadowStores(), FakeBot()
+    book = ShadowApprovalBook(stores, clock=lambda: T0, text_version=SHADOW_TEXT_V2)
+
+    await send_shadow_alert(
+        stores=stores,
+        book=book,
+        bot=bot,
+        chat_id=CHAT_ID,
+        mode=Mode.SHADOW,
+        signal=signal,
+        plan=plan,
+        now_utc=T0,
+        sleep=RecordingSleep(),
+        money=make_shadow_money(signal, plan),
+        **_alert_kwargs(),
+    )
+
+    lines = bot.sent[0].text.split("\n")
+    quantity_at = lines.index("Quantity: 0.08")
+    assert lines[quantity_at + 1] == "Notional: 4008.00 USDT"
+    assert lines[quantity_at + 2].startswith("Margin: 801.60 USDT at 5x leverage")
+    assert lines[quantity_at + 3].startswith("Loss at SL: 48.00 USDT gross")
+    assert lines[quantity_at + 6].startswith("Equity used: 1000 USDT")
+    assert lines[quantity_at + 7] == "SL: 49500"
 
 
 def test_r3b_a_plan_without_a_positive_quantity_is_refused_by_the_alert_formatter() -> None:
