@@ -26,7 +26,7 @@ import dataclasses
 import json
 import re
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -39,7 +39,14 @@ from src.execution.binding import recompute_plan_hash
 from src.execution.pending_actions import PendingKind
 from src.live.execution_service import EVENT_PLACEMENT_OUTCOME
 from src.live.operator import OperatorCommands
-from src.reconcile.safe_mode import SafeModeController
+from src.persistence.engine import make_sync_engine
+from src.persistence.execution_state import PgExecutionStateStore
+from src.persistence.journal import PgJournalStore
+from src.persistence.pending_actions import PgPendingActionStore
+from src.persistence.safe_mode_store import PgSafeModeStateStore
+from src.persistence.system_state import PgSystemStateStore
+from src.persistence.uow import OperationalDatabase
+from src.reconcile.safe_mode import ExitReadiness, SafeModeController, build_exit_readiness
 
 from tests.shadow_fakes import (
     AUTHORIZED_USER_IDS,
@@ -51,6 +58,7 @@ from tests.shadow_fakes import (
 )
 from tests.support.live_rig import LiveRig, forbid_real_sleep, make_live_rig
 from tests.support.pending_action_fakes import InMemoryPendingActionStore
+from tests.support.reconcile_doubles import FakeProtectionView
 
 TOKEN_RE = re.compile(r"/confirm (\S+)")
 
@@ -338,3 +346,125 @@ async def test_a_failed_state_save_after_the_exit_row_leaves_safe_mode_and_statu
     status = await ops.status(command_update(3), with_args())
     assert status.ok
     assert "mode: SAFE_MODE" in replies.last
+
+
+# --------------------------------------------------------------------------- #
+# The ExitReadiness contract against the real stores (20-DEFERRED row 46; PostgreSQL).
+# --------------------------------------------------------------------------- #
+
+
+class _NoAdapter:
+    """An exchange with nothing open: the three snapshot reads of the exit are empty."""
+
+    async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]:
+        return []
+
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> list[Any]:
+        return []
+
+    async def snapshot_positions(self, *, symbol: str | None = None) -> list[Any]:
+        return []
+
+
+def _clean_compare(**_kwargs: Any) -> Any:
+    return SimpleNamespace(agreement=True)
+
+
+async def test_the_exit_readiness_reads_the_real_stores_and_survives_a_restart(pg_db: str) -> None:
+    engine = make_sync_engine(pg_db)
+    db = OperationalDatabase(engine)
+    journal = PgJournalStore(db)
+    safe_store = PgSafeModeStateStore(PgSystemStateStore(db, journal))
+    intents = PgExecutionStateStore(db)
+    pending = PgPendingActionStore(db)
+    protections = FakeProtectionView()
+    t_restart = T0 + timedelta(minutes=5)
+    t_operator = T0 + timedelta(minutes=10)
+
+    def new_controller(*, load_at: datetime | None = None) -> SafeModeController:
+        if load_at is None:
+            return SafeModeController(
+                adapter=_NoAdapter(),  # type: ignore[arg-type]
+                journal=journal,
+                compare_fn=_clean_compare,
+                state_store=safe_store,
+            )
+        return SafeModeController.load(
+            adapter=_NoAdapter(),  # type: ignore[arg-type]
+            journal=journal,
+            state_store=safe_store,
+            now_utc=load_at,
+            compare_fn=_clean_compare,
+        )
+
+    def readiness() -> ExitReadiness:
+        return build_exit_readiness(
+            unresolved_intents_fn=intents.list_unresolved_intents,
+            protections_fn=protections.protections,
+            open_pending_fn=pending.list_open,
+            restore_complete_fn=lambda: True,
+        )
+
+    try:
+        new_controller().enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+        # A restart: a new controller loads SAFE_MODE from the real system-state log.
+        controller = new_controller(load_at=t_restart)
+        assert controller.in_safe_mode and controller.entered_reason == "DB_FAILURE"
+        assert controller.is_durable
+
+        # The facts the fake drill assumed: nothing open reads as zero, an open row reads as one.
+        assert readiness() == ExitReadiness(
+            unknown_intents=0, blocking_plans=0, open_pending_actions=0, restore_complete=True
+        )
+        pending.record_blocked(
+            plan_hash="d" * 64,
+            trade_plan_id="plan-0001",
+            approval_id="approval-0001",
+            symbol="BTCUSDT",
+            kind=PendingKind.STOP_NOT_SENT,
+            gate_reason="RATE_LIMIT_PAUSE_429",
+            retry_after_until_utc=None,
+            now_utc=T0,
+        )
+        assert readiness().open_pending_actions == 1
+
+        replies = Replies()
+        ops = OperatorCommands(
+            authorized_chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            controller=controller,
+            enablement=SimpleNamespace(is_disabled=False),
+            coordinator=SimpleNamespace(protections=protections.protections, restore_complete=True),
+            intent_store=intents,
+            pending_actions=pending,
+            gate=FakeRestGate(),
+            stream_state=StreamHolder(),
+            journal=journal,
+            clock=lambda: t_operator,
+            reply=replies,
+        )
+
+        # An open pending action refuses the exit through the real `list_open`.
+        assert (await ops.safemode_exit(command_update(1), with_args())).ok
+        refused = await ops.confirm(command_update(2), with_args(replies.last_token()))
+        assert refused.code == "EXIT_REFUSED" and "PENDING_ACTION_PRESENT" in replies.last
+        assert controller.in_safe_mode
+
+        # Resolved, the same two steps leave SAFE_MODE and the exit is durable.
+        pending.resolve(
+            plan_hash="d" * 64,
+            kind=PendingKind.STOP_NOT_SENT,
+            note="ENTRY_TERMINAL",
+            now_utc=t_restart,
+        )
+        assert (await ops.safemode_exit(command_update(3), with_args())).ok
+        exited = await ops.confirm(command_update(4), with_args(replies.last_token()))
+        assert exited.ok and exited.code == "SAFE_MODE_EXITED"
+
+        after_restart = new_controller(load_at=t_operator + timedelta(minutes=1))
+        assert not after_restart.in_safe_mode
+        snapshot = after_restart.state_snapshot()
+        assert snapshot["last_exit_operator_id"] == f"tg:{USER_ID}"
+    finally:
+        engine.dispose()
