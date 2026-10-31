@@ -19,6 +19,7 @@ constant it guards.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from src.domain.journal import JournalEvent
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.persistence.errors import ParentRowMissing, RowConflict
+from src.persistence.shadow_stores import mode_includes, validate_confirm_mode
 
 EXPECTED_LABEL = "SHADOW — no real order"
 
@@ -128,8 +130,12 @@ def make_shadow_plan(signal: Signal, **overrides: Any) -> TradePlan:
 class InMemoryShadowStores:
     """The `ShadowStores` port over dicts, with PostgreSQL's parent and decision rules."""
 
-    def __init__(self, trace: list[str] | None = None) -> None:
+    def __init__(self, trace: list[str] | None = None, *, confirm_mode: str | None = None) -> None:
         self.trace: list[str] = trace if trace is not None else []
+        # Mirror of `PgShadowStores(confirm_mode=...)` (plan 24-08): the mode marker written with
+        # every approval this view inserts, and the scope `list_approved_approvals` applies.
+        self.confirm_mode: str | None = validate_confirm_mode(confirm_mode)
+        self.approval_modes: dict[str, str] = {}
         self.signals: dict[str, Signal] = {}
         self.plans: dict[str, TradePlan] = {}
         self.approvals: dict[str, Approval] = {}
@@ -154,7 +160,10 @@ class InMemoryShadowStores:
             raise ValueError("insert_pending requires a PENDING approval")
         if approval.signal_id not in self.signals or approval.trade_plan_id not in self.plans:
             raise ParentRowMissing(f"approval {approval.approval_id}: parent row missing")
-        self.approvals.setdefault(approval.approval_id, approval)
+        if approval.approval_id not in self.approvals:
+            self.approvals[approval.approval_id] = approval
+            if self.confirm_mode is not None:
+                self.approval_modes[approval.approval_id] = self.confirm_mode
 
     def record_short_id_mapping(self, mapping: ShortIdMapping) -> None:
         self.trace.append("record_short_id_mapping")
@@ -213,12 +222,20 @@ class InMemoryShadowStores:
         return [a for a in self.approvals.values() if a.status == ApprovalResult.PENDING]
 
     def list_approved_approvals(self) -> list[Approval]:
-        """APPROVE-action approvals that reached APPROVED (the confirm layer's sweep input)."""
+        """APPROVE-action approvals that reached APPROVED, of this view's mode (sweep input)."""
         return [
             a
             for a in self.approvals.values()
-            if a.status == ApprovalResult.APPROVED and a.action == ApprovalAction.APPROVE
+            if a.status == ApprovalResult.APPROVED
+            and a.action == ApprovalAction.APPROVE
+            and mode_includes(self.confirm_mode, self.approval_modes.get(a.approval_id))
         ]
+
+    def scoped(self, confirm_mode: str | None) -> InMemoryShadowStores:
+        """Another view of the SAME data with another mode scope (two processes, one database)."""
+        view = copy.copy(self)
+        view.confirm_mode = validate_confirm_mode(confirm_mode)
+        return view
 
     def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]:
         return [event for event in self.journal if event.correlation_id == correlation_id]

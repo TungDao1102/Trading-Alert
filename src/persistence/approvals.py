@@ -145,8 +145,18 @@ class PgApprovalStore:
 
     # ----------------------------------------------------------------- writes
 
-    def insert_pending(self, approval: Approval) -> None:
+    def insert_pending(
+        self,
+        approval: Approval,
+        *,
+        after_insert: Callable[[Session, Approval], None] | None = None,
+    ) -> None:
         """Insert a PENDING approval; replaying the same request is a no-op.
+
+        `after_insert(session, approval)` (Phase 24, plan 24-08) is optional and None by default.
+        When given, it runs inside the SAME transaction right after the row was newly inserted
+        (never on a replay no-op); any exception it raises rolls the insert back as a whole. The
+        hook must not commit or roll back.
 
         Raises:
             ValueError: the approval is not PENDING (decisions go through `save_atomic`).
@@ -181,6 +191,8 @@ class PgApprovalStore:
                     f"approval {approval.approval_id}: constraint violated ({name})"
                 ) from exc
             if inserted is not None:
+                if after_insert is not None:
+                    after_insert(session, approval)
                 return
             existing = session.get(ApprovalRow, approval.approval_id)
             if existing is None:

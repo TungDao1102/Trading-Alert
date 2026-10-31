@@ -384,7 +384,8 @@ def _pg_stores(url: str) -> tuple[ShadowRuntimeStores, Callable[[], None]]:
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+psycopg://", 1)
     engine = make_sync_engine(url)
-    return cast(ShadowRuntimeStores, PgShadowStores(OperationalDatabase(engine))), engine.dispose
+    stores = PgShadowStores(OperationalDatabase(engine), confirm_mode="SHADOW")
+    return cast(ShadowRuntimeStores, stores), engine.dispose
 
 
 async def run_live_rehearsal(
