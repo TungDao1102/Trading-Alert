@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 24
 current_phase_name: Live Runtime Composition + Demo Rehearsal
-current_plan: 2
+current_plan: 3
 status: executing
-stopped_at: Completed 24-02-PLAN.md
-last_updated: "2026-10-30T18:17:18.506Z"
+stopped_at: Completed 24-03-PLAN.md
+last_updated: "2026-10-31T05:11:26.933Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 24 execution started
-state_head: a626d6283948ad8ad40d660580d849f7205da26e
+state_head: 7c19ff337218f8767ef7e722ff51f9be63aa9051
 progress:
   total_phases: 29
   completed_phases: 19
   total_plans: 364
-  completed_plans: 326
+  completed_plans: 327
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 24 (Live Runtime Composition + Demo Rehearsal) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 2
+Current Plan: 3
 Total Plans in Phase: 36
 Status: Ready to execute
 Last activity: 2026-10-31 — Phase 24 execution started
@@ -251,6 +251,7 @@ Progress: [██████░░░░] 61%
 | Phase 23 P11 | 70min | 3 tasks | 5 files |
 | Phase 23 P12 | 25min | 3 tasks | 9 files |
 | Phase 24 P02 | 35min | 3 tasks | 21 files |
+| Phase 24 P03 | ~1h | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -589,6 +590,7 @@ Recent decisions affecting current work:
 - [Phase 23]: Desk final message text is derived from stored approval rows, edited once per request
 - [Phase 23]: 23-12: validity_rule is called with keywords (expiry_utc, now_utc) so a partial over check_remaining_validity binds directly; a refused-before-recheck CONFIRM awaits no prefetch; a handler that raised is answered with the neutral text; the confirm core was not changed
 - [Phase 24]: 24-02: NO_FILL and HEALTH_CHECK_FAILED are RejectionReason members (23), values unchanged (G3-005, D-35)
+- [Phase 24]: 24-03: D083 clock margin is rest_gate.ban_end_clock_margin_ms, an OPTIONAL NOT_CONFIGURED key outside require_live_ready; ban-entry alert is REST_GATE_BAN_ENTERED until_utc=<ISO>
 
 ### Pending Todos
 
@@ -675,6 +677,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-30T18:17:11.448Z
-Stopped at: Completed 24-02-PLAN.md
+Last session: 2026-10-31T05:11:19.867Z
+Stopped at: Completed 24-03-PLAN.md
 Resume file: None
