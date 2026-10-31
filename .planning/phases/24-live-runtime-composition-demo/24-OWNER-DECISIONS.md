@@ -1,6 +1,6 @@
 # Phase 24 owner decisions (plan 24-01)
 
-Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status of this packet: OPEN, no question is answered yet.
+Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status of this packet: ANSWERED 2026-10-31. The owner followed every recommendation (Q1 to Q16, no override); the verbatim reply is in `24-01-SUMMARY.md`, section "Owner answers".
 
 ## What Phase 24 builds, and what it does not
 
@@ -33,7 +33,7 @@ Plans that depend on it: every plan from 24-10 on, in particular 24-11, 24-27 (t
 
 Research: C-8, C-11 and the "Architectural Responsibility Map".
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -51,7 +51,7 @@ Plans that depend on it: 24-05 (the seam), then every plan that touches a store 
 
 Research: C-11, P-1, P-2, A5, A6.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -69,7 +69,7 @@ Plans that depend on it: 24-07 (the migration), 24-19 (the stream writers).
 
 Research: C-10 (D-10 paragraph), R-7, "Official-doc facts" row on ordering.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -87,7 +87,7 @@ Plans that depend on it: 24-14 and 24-29 (the smoke).
 
 Research: C-4, OQ-2, P-8.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -111,7 +111,7 @@ Plans that depend on it: 24-22 and 24-26. Threat T-24-02: plan 24-22 tests that 
 
 Research: C-2, C-3, OQ-3, A4.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -129,7 +129,7 @@ Plans that depend on it: 24-17 and 24-30.
 
 Research: C-7, A2, A11.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -154,7 +154,7 @@ Plans that depend on it: 24-23.
 
 Research: C-6, OQ-5, 20-DEFERRED "Telegram operator commands".
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -172,7 +172,7 @@ Plans that depend on it: 24-08.
 
 Research: C-7, A10, OQ-6.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -192,7 +192,7 @@ Plans that depend on it: 24-16.
 
 Research: C-10, OQ-7, R-1.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -212,7 +212,7 @@ Plans that depend on it: 24-09.
 
 Research: D-19, P23-R1, O-6.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -230,7 +230,7 @@ Plans that depend on it: 24-24.
 
 Research: OQ-8, R-8.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -248,7 +248,7 @@ Plans that depend on it: 24-25.
 
 Research: C-8, OQ-9.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -266,7 +266,7 @@ Plans that depend on it: 24-25.
 
 Research: C-9, OQ-10.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -286,7 +286,7 @@ Plans that depend on it: 24-29 (the evidence record) and 24-31 (the documents).
 
 Research: C-10.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -304,7 +304,7 @@ Plans that depend on it: 24-30 and 24-35.
 
 Research: CONTEXT O-2, D-01.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 
@@ -322,7 +322,7 @@ Plans that depend on it: none changes in Phase 24 (24-19 and 24-20 keep the boun
 
 Research: CONTEXT D-10 and O-5.
 
-Answer: (blank)
+Answer: follow the recommendation (owner, 2026-10-31, relayed by the orchestrator; no override)
 
 ---
 

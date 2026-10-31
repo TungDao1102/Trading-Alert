@@ -1,6 +1,6 @@
 # Phase 24 limits checkpoint (plan 24-01)
 
-Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value is set.
+Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: ANSWERED 2026-10-31 except key 14 (`stale_feed.max_user_data_silence_ms`, NOT ANSWERED). Thirteen keys take the recommended value, key 16 stays NOT_CONFIGURED. Nothing is written to config yet; plan 24-06 does that once key 14 is answered.
 
 ## What this is
 
@@ -22,7 +22,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: a by-id stop query answered -2013 right after placement although the stop was NEW (demo-observed 2026-10-22, lag not measured); the confirmation therefore also reads the open-algo-orders list (plan 20-27).
 - ASSISTANT RECOMMENDATION: 180000.
 - Reason: three minutes is longer than the 120 s pause plus two protection steps, so a stop delayed by a 429 is not mistaken for a failure; a longer value leaves a filled entry without a confirmed stop for longer.
-- Owner value: (blank)
+- Owner value: 180000 (follow the recommendation; owner, 2026-10-31)
 
 ### 2. protection.entry_terminal_timeout_ms
 
@@ -32,7 +32,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: a GTD entry stayed NEW 840 s past `goodTillDate` on Demo (2026-10-22), so a GTD expiry is not proof of a final order (D079).
 - ASSISTANT RECOMMENDATION: 900000.
 - Reason: 15 minutes gives a slow partial fill time to complete without leaving a half-protected position open for long; it is the path the system relies on instead of GTD expiry.
-- Owner value: (blank)
+- Owner value: 900000 (follow the recommendation; owner, 2026-10-31)
 
 ### 3. protection.entry_unknown_grace_ms
 
@@ -42,7 +42,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: Demo kept a GTD entry NEW for 840 s past its `goodTillDate` (2026-10-22, demo-observed).
 - ASSISTANT RECOMMENDATION: 1800000.
 - Reason: 30 minutes exceeds the 840 s observation with a wide margin; a shorter grace could close the books on an entry that is still resting.
-- Owner value: (blank)
+- Owner value: 1800000 (follow the recommendation; owner, 2026-10-31)
 
 ### 4. protection.emergency_close_poll_timeout_ms
 
@@ -52,7 +52,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: a reduce-only market close normally fills at once; no Demo timing was recorded for a slow close.
 - ASSISTANT RECOMMENDATION: 30000.
 - Reason: 30 s allows two reconcile ticks of polling (at the recommended tick) before the close is declared unknown.
-- Owner value: (blank)
+- Owner value: 30000 (follow the recommendation; owner, 2026-10-31)
 
 ### 5. pre_placement.min_remaining_validity_seconds
 
@@ -62,7 +62,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: Demo -5040 for a GTD below now plus 600 s (plan 20-27); error-code page of the USDS-M Futures docs.
 - ASSISTANT RECOMMENDATION: 900.
 - Reason: 900 s is 600 s for the exchange floor, 60 s for the confirm window, and leaves 240 s for the clock margin and slack.
-- Owner value: (blank)
+- Owner value: 900 (follow the recommendation; owner, 2026-10-31)
 
 ### 6. pre_placement.max_mark_price_age_ms
 
@@ -72,7 +72,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: three sequential REST reads took 1 to 2 s on Demo (D084, demo-observed).
 - ASSISTANT RECOMMENDATION: 5000.
 - Reason: 5 s refuses a stuck read and does not refuse a normal one.
-- Owner value: (blank)
+- Owner value: 5000 (follow the recommendation; owner, 2026-10-31)
 
 ### 7. pre_placement.max_last_price_age_ms
 
@@ -82,7 +82,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: as in key 6.
 - ASSISTANT RECOMMENDATION: 5000.
 - Reason: same reason as key 6; both are fresh reads made together.
-- Owner value: (blank)
+- Owner value: 5000 (follow the recommendation; owner, 2026-10-31)
 
 ### 8. reconcile.tick_interval_ms
 
@@ -91,7 +91,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Constraint: strictly below `protection.max_unprotected_ms` (the loop constructor raises `ExecutionLimitsInvalid` otherwise).
 - Evidence: none on load. REST weight per tick, read from the docstrings of the installed SDK that the adapter wraps (not re-read on the current Binance REST pages, which the fetch tool does not render): open normal orders weight 1 for one symbol and 40 without a symbol; open algo orders the same (1 or 40); position information about 5; mark price weight 1 with a symbol. For five tracked symbols read one by one that is roughly 20 per tick; read for all symbols at once it is roughly 90 per tick. At the recommended value a minute holds four ticks, so roughly 80 to 360 per minute before any other holder of the shared gate. The REST ceiling per minute is not stated here; plan 24-20 must compare the tick weight with the `rateLimits` of the live `exchangeInfo` before the owner run.- ASSISTANT RECOMMENDATION: 15000.
 - Reason: twelve ticks fit into the recommended 180000 ms, so a stop gets many chances to be confirmed; a shorter tick raises REST load against the rate-limit gate for little gain.
-- Owner value: (blank)
+- Owner value: 15000 (follow the recommendation; owner, 2026-10-31)
 
 ### 9. reconcile.entry_unknown_probe_count
 
@@ -101,7 +101,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: Demo answered -2013 for a stop that was NEW right after placement (demo-observed 2026-10-22), so one not-found answer is not proof.
 - ASSISTANT RECOMMENDATION: 3.
 - Reason: three agreeing answers are strong enough to treat an order as absent, and the cost of waiting is bounded by key 10 and key 3.
-- Owner value: (blank)
+- Owner value: 3 (follow the recommendation; owner, 2026-10-31)
 
 ### 10. reconcile.entry_unknown_probe_interval_ms
 
@@ -111,7 +111,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: as in key 9.
 - ASSISTANT RECOMMENDATION: 5000.
 - Reason: five seconds apart is long enough for the exchange's listing lag seen on Demo and short enough that three probes finish within seconds.
-- Owner value: (blank)
+- Owner value: 5000 (follow the recommendation; owner, 2026-10-31)
 
 ### 11. reconcile.lot_filter_refresh_interval_ms
 
@@ -121,7 +121,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: filters change rarely, and the emergency closer reads live filters first anyway (D081).
 - ASSISTANT RECOMMENDATION: 3600000.
 - Reason: one hour keeps filters current without adding REST load to every tick.
-- Owner value: (blank)
+- Owner value: 3600000 (follow the recommendation; owner, 2026-10-31)
 
 ### 12. reconcile.entry_stale_grace_ms (ALERT ONLY)
 
@@ -131,7 +131,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: the 840 s late GTD behaviour (demo-observed).
 - ASSISTANT RECOMMENDATION: 900000.
 - Reason: 15 minutes is just beyond the 840 s seen on Demo, so a normal late expiry does not alert and a stuck entry does.
-- Owner value: (blank)
+- Owner value: 900000 (follow the recommendation; owner, 2026-10-31)
 
 ### 13. stale_feed.max_mark_price_age_ms
 
@@ -141,7 +141,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: none on load.
 - ASSISTANT RECOMMENDATION: 60000.
 - Reason: with the recommended tick, four missed reads in a row mean the feed is stale; one or two are noise.
-- Owner value: (blank)
+- Owner value: 60000 (follow the recommendation; owner, 2026-10-31)
 
 ### 14. stale_feed.max_user_data_silence_ms
 
@@ -151,7 +151,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: the rule was to take three times the server ping interval stated on the official Binance USDS-M user-data-streams page. Re-read on 2026-10-31 (the `.md` form of `.../derivatives-trading-usds-futures/user-data-streams`, HTTP 200, read in full; the websocket-market-streams page was also read once): neither page states a server ping interval. The user-data page states only that a listenKey is valid for 60 minutes, that a PUT extends it for 60 minutes and that a single connection is valid for 24 hours. The ratified keepalive is `stream.keepalive_interval_seconds` = 1800.
 - ASSISTANT RECOMMENDATION: no number. Owner to choose after the page is read. The page does not state the ping interval, so I will not derive a figure from it. I suggest the owner Demo run (plan 24-29 or 24-33) also records the observed ping and pong times from `supervisor.liveness()`, so the value can be set from a measurement; that is a suggestion, not yet in those plans.
 - Reason: a number invented without the ping interval could either raise false SAFE_MODE entries during a quiet account or hide a dead connection.
-- Owner value: (blank)
+- Owner value: NOT ANSWERED: no recommendation exists; owner to choose from the Demo run's observed ping/pong times (2026-10-31). No number is invented; this is the one open limit key.
 
 ### 15. alerts.dedupe_window_ms
 
@@ -161,7 +161,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: none.
 - ASSISTANT RECOMMENDATION: 300000.
 - Reason: five minutes folds a noisy repeat into one message and still repeats an unresolved alert; the open WR-C6 risk is recorded in the owner register.
-- Owner value: (blank)
+- Owner value: 300000 (follow the recommendation; owner, 2026-10-31)
 
 ### 16. Optional: the D083 clock margin (plan 24-03)
 
@@ -171,7 +171,7 @@ Written 2026-10-31 by the assistant (Claude Sonnet 5.5). Status: OPEN, no value 
 - Evidence: the first real 418 body has not been seen and must not be provoked.
 - ASSISTANT RECOMMENDATION: leave it NOT_CONFIGURED until a real Futures 418 body has been seen.
 - Reason: a margin tuned to a text format nobody has observed on Futures could be wrong; the 3-day fallback is safe and already ratified.
-- Owner value: (blank)
+- Owner value: left NOT_CONFIGURED (follow the recommendation; owner, 2026-10-31)
 
 ## Cadences that need no new key (derived)
 
@@ -199,7 +199,7 @@ With the recommended values: 15000 < 180000; 180000 > 120000 + 30000; 900 > 600 
 
 | Item | ASSISTANT RECOMMENDATION | Reason | Owner value |
 |---|---|---|---|
-| Live heartbeat check period and grace | period 60 s, grace 120 s | the same as the paper check you already chose (STATE.md, "second heartbeat check (period 60 s, grace 120 s)"); passed as `deploy/heartbeat.sh --target live --install-timer --interval-seconds 60`, no default exists | (blank) |
+| Live heartbeat check period and grace | period 60 s, grace 120 s | the same as the paper check you already chose (STATE.md, "second heartbeat check (period 60 s, grace 120 s)"); passed as `deploy/heartbeat.sh --target live --install-timer --interval-seconds 60`, no default exists | period 60 s, grace 120 s (follow the recommendation; owner, 2026-10-31) |
 
 ## Answer form
 
