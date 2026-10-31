@@ -253,6 +253,8 @@ def test_the_event_contract_is_closed_and_maps_every_event_to_a_severity() -> No
         "DAILY_LOSS_WARNING",
         "SAFE_MODE_ENTERED",
         "STALE_ENTRY_ORDER",
+        "REST_GATE_BAN_ENTERED",
+        "REST_GATE_RECOVERY_REQUIRED",
     }
     assert all(isinstance(s, AlertSeverity) for s in ALERT_EVENTS.values())
     assert ALERT_EVENTS["STALE_ENTRY_ORDER"] is AlertSeverity.HIGH

@@ -59,6 +59,8 @@ PLAN_SUBJECT = "plan-0001"
 SYSTEM_SUBJECT = "SYSTEM"
 FIXED_SYMBOL = "BTCUSDT"
 FIXED_PLAN_HASH = "a" * 64
+# Plan 24-13: the deadline of the REST gate ban golden (a whole second, 15 minutes after the time).
+FIXED_BAN_UNTIL_UTC = FIXED_AT_UTC + timedelta(minutes=15)
 
 # (file stem, event, reason, subject). The subject is the plan for the producers that know the
 # plan and SYSTEM for the SAFE_MODE observer events (src/ops/alerts.py SafeModeAlertObserver).
@@ -92,6 +94,14 @@ ALERT_CASES: tuple[tuple[str, str, str, str], ...] = (
         SYSTEM_SUBJECT,
     ),
     ("DB_FAILURE", "DB_FAILURE", "DB_FAILURE", SYSTEM_SUBJECT),
+    # Plan 24-13: the two REST gate events (subject SYSTEM, the gate's own reason code).
+    ("REST_GATE_BAN_ENTERED", "REST_GATE_BAN_ENTERED", "IP_BAN_418", SYSTEM_SUBJECT),
+    (
+        "REST_GATE_RECOVERY_REQUIRED",
+        "REST_GATE_RECOVERY_REQUIRED",
+        "GATE_STATE_UNKNOWN",
+        SYSTEM_SUBJECT,
+    ),
 )
 
 
@@ -103,6 +113,7 @@ def _alert(event: str, reason: str, subject: str) -> OperationalAlert:
         occurred_at_utc=FIXED_AT_UTC,
         plan_hash=FIXED_PLAN_HASH,
         symbol=FIXED_SYMBOL,
+        until_utc=FIXED_BAN_UNTIL_UTC if event == "REST_GATE_BAN_ENTERED" else None,
     )
 
 

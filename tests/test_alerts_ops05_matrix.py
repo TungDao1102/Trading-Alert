@@ -54,10 +54,14 @@ D24_EVENTS = ("ENTRY_STATE_UNKNOWN", "PROTECTION_HANDOFF_FAILED", "DB_FAILURE")
 # not a D-24 entry-path reason; it is its own row with its own requirement source.
 STALE_ENTRY_EVENTS = ("STALE_ENTRY_ORDER",)
 STALE_ENTRY_SOURCE = "owner request 2026-10-23 (stale entry)"
+# Plan 24-13 (W8 of 20-VERIFICATION): the two REST gate events, produced by the gate's alert hook.
+REST_GATE_EVENTS = ("REST_GATE_BAN_ENTERED", "REST_GATE_RECOVERY_REQUIRED")
+REST_GATE_SOURCE = "W8 of 20-VERIFICATION (REST gate alert hook, D083 point 5)"
 ALL_ROW_EVENTS = (
     [e for events in OPS05_REQUIREMENT_EVENTS.values() for e in events]
     + list(D24_EVENTS)
     + list(STALE_ENTRY_EVENTS)
+    + list(REST_GATE_EVENTS)
 )
 
 
@@ -119,7 +123,12 @@ def test_each_row_is_in_the_event_contract_and_states_its_sink_behavior(alert: s
     assert alert in ALERT_EVENTS
     assert row.journal_first is True
     assert row.dedupe_and_retry == SINK_BEHAVIOR
-    assert row.requirement_source in ("OPS-05", "D-24 (entry path)", STALE_ENTRY_SOURCE)
+    assert row.requirement_source in (
+        "OPS-05",
+        "D-24 (entry path)",
+        STALE_ENTRY_SOURCE,
+        REST_GATE_SOURCE,
+    )
     assert row.phase20_delivers.strip() != ""
     assert row.producer.strip() != ""
 
@@ -169,6 +178,21 @@ def test_the_stale_entry_row_is_alert_only_and_produced_by_the_reconcile_loop() 
     assert "alert only" in row.phase20_delivers
     assert "nothing is cancelled" in row.phase20_delivers
     assert "NOT_CONFIGURED" in row.phase20_delivers
+
+
+@pytest.mark.parametrize("alert", REST_GATE_EVENTS)
+def test_the_rest_gate_rows_are_produced_by_the_gate_hook(alert: str) -> None:
+    row = _row(alert)
+
+    assert row.requirement_source == REST_GATE_SOURCE
+    assert row.producer == "src/adapters/binance_ratelimit_gate.py"
+    assert "plan 24-13" in row.phase20_delivers
+    assert ALERT_EVENTS[alert].value in ("HIGH", "CRITICAL")
+
+
+def test_only_the_ban_row_carries_a_deadline() -> None:
+    assert "until_utc" in _row("REST_GATE_BAN_ENTERED").phase20_delivers
+    assert "no deadline" in _row("REST_GATE_RECOVERY_REQUIRED").phase20_delivers
 
 
 def test_the_entry_path_reasons_reach_the_sink_through_the_observer_in_alerts_py() -> None:

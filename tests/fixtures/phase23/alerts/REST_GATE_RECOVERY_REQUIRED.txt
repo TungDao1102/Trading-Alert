@@ -1,0 +1,8 @@
+[CRITICAL] REST_GATE_RECOVERY_REQUIRED
+subject: SYSTEM
+reason: GATE_STATE_UNKNOWN
+at: 2026-10-09T03:00:00Z
+What happened: The saved state of the REST gate (the ban and pause end times) was missing, unreadable or not trusted at start (REST_GATE_RECOVERY_REQUIRED, GATE_STATE_UNKNOWN), so the gate cannot tell whether a ban is active.
+Position: A position may be open, with or without a stop. While the gate is in this state the system cannot read it or change it through REST.
+System already did: The gate refuses every REST call before it is sent, with no known end time, until a restart reads a valid saved state. Nothing reaches the exchange meanwhile, an emergency close included.
+You must: Check the exchange position and its stop yourself now, and close or protect the position if it needs it. Then clear the gate state as RUNBOOK section 21.3 describes.
