@@ -942,6 +942,29 @@ async def _dispatched(
     return result
 
 
+# Plan 24-17 (R-2, P-1, D-25): the optional store seam. `run_sync(fn, *args, **kwargs)` awaits
+# `fn` on the store writer thread (`StoreExecutor.write`). `on_callback` hands the synchronous
+# dispatch to it when given, so the decision journal writes and the reservation lock never run
+# on the bot loop.
+RunSyncFn = Callable[..., Awaitable[Any]]
+
+
+def _off_loop_dispatch(run_sync: RunSyncFn, dispatch: DispatchCallable) -> DispatchCallable:
+    """Wrap `dispatch` so its synchronous body runs through `run_sync` (the gates stay on the loop).
+
+    An async dispatcher (it returns an awaitable) is awaited here, on the loop, after the worker
+    returned the coroutine: nothing is lost, the wrapper only moves the synchronous part.
+    """
+
+    async def _dispatch(parsed: ParsedCallback, **kwargs: Any) -> DispatchResult:
+        result = await run_sync(dispatch, parsed, **kwargs)
+        if inspect.isawaitable(result):
+            return await result  # type: ignore[no-any-return]
+        return result  # type: ignore[no-any-return]
+
+    return _dispatch
+
+
 # SHADOW confirm hooks (plan 16-11). `ConfirmHandler` serves CNF:/CXL: presses; `ApprovedHandler`
 # runs after a press reached APPROVED and returns True when it delivered its own reply (the
 # confirmation card), so the generic outcome reply is skipped.
@@ -1033,6 +1056,7 @@ async def on_callback(
     finalize_message: FinalizeHook | None = None,
     error_journal: JournalReceipt | None = None,
     clock: Callable[[], datetime] | None = None,
+    run_sync: RunSyncFn | None = None,
 ) -> DispatchResult:
     """PTB `CallbackQueryHandler` entry point.
 
@@ -1067,8 +1091,14 @@ async def on_callback(
     (a failing journal is logged and swallowed), and the authorized chat gets one neutral text.
     The result is `ok=False` with `CALLBACK_HANDLER_ERROR`. `CancelledError` still propagates, and
     a malformed update still raises `ValueError` before any correlation exists.
+
+    Plan 24-17 (R-2, P-1, D-25): `run_sync`, when given, awaits the synchronous `dispatch` on the
+    store writer thread (its journal writes and the reservation lock); the chat and user gates
+    still run first, here on the loop. None keeps today's inline call.
     """
     _validate_authorized_user_ids(authorized_user_ids)
+    if run_sync is not None:
+        dispatch = _off_loop_dispatch(run_sync, dispatch)
     query = update.callback_query
     if query is None:
         raise ValueError("update.callback_query must not be None")

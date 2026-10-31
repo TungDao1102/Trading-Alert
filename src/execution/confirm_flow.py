@@ -46,6 +46,7 @@ from src.adapters.telegram_callbacks import (
     ConfirmReply,
     DispatchResult,
     JournalReceipt,
+    RunSyncFn,
     current_press_correlation,
 )
 from src.adapters.telegram_notify import (
@@ -160,6 +161,7 @@ class ConfirmFlow:
         on_confirmed: OnConfirmedFn,
         prefetch: PrefetchFn | None,
         ttl_seconds: int,
+        run_sync: RunSyncFn | None = None,
     ) -> None:
         if profile is not DEMO_CONFIRM_PROFILE and profile is not LIVE_CONFIRM_PROFILE:
             raise ValueError("the confirm flow serves DEMO_CONFIRM_PROFILE or LIVE_CONFIRM_PROFILE")
@@ -176,6 +178,7 @@ class ConfirmFlow:
         self._sleep = sleep
         self._validity_rule = validity_rule
         self._prefetch = prefetch
+        self._run_sync = run_sync
         self._book = CoreConfirmBook(
             stores,
             profile=profile,
@@ -397,14 +400,20 @@ class ConfirmFlow:
             # the decision is taken, i.e. after the awaited exchange round trip, never earlier
             # than the press itself.
             decided_at = max(press.callback_at_utc, self._clock())
-            result = self._book.handle_confirm(
-                short_id=short_id,
-                chat_id=press.chat_id,
-                authorized_chat_id=press.authorized_chat_id,
-                from_user_id=press.from_user_id,
-                now_utc=decided_at,
-                correlation_id=press.correlation_id,
-            )
+            confirm_kwargs: dict[str, Any] = {
+                "short_id": short_id,
+                "chat_id": press.chat_id,
+                "authorized_chat_id": press.authorized_chat_id,
+                "from_user_id": press.from_user_id,
+                "now_utc": decided_at,
+                "correlation_id": press.correlation_id,
+            }
+            if self._run_sync is None:
+                result = self._book.handle_confirm(**confirm_kwargs)
+            else:
+                # Plan 24-17 (R-2, P-1): the journal writes, the recheck and the hand-off hook run
+                # on the store writer thread; the hook only schedules placement on the loop.
+                result = await self._run_sync(self._book.handle_confirm, **confirm_kwargs)
             ok = result.outcome is ConfirmOutcome.CONFIRMED
         elif kind is CallbackKind.CANCEL:
             result = self._book.handle_cancel(
@@ -796,8 +805,12 @@ class ConfirmFlow:
         authorized_user_ids: frozenset[int],
         error_journal: JournalReceipt | None = None,
     ) -> dict[str, Any]:
-        """The full keyword set of `on_callback` / `build_application` for this flow."""
-        return {
+        """The full keyword set of `on_callback` / `build_application` for this flow.
+
+        `run_sync` is added only when the flow was built with the store seam (the live process), so
+        the SHADOW and DEMO keyword set is unchanged.
+        """
+        kwargs: dict[str, Any] = {
             "authorized_chat_id": authorized_chat_id,
             "authorized_user_ids": authorized_user_ids,
             "binding_context_resolver": self._desk.resolve,
@@ -809,6 +822,9 @@ class ConfirmFlow:
             "error_journal": error_journal,
             "clock": self._clock,
         }
+        if self._run_sync is not None:
+            kwargs["run_sync"] = self._run_sync
+        return kwargs
 
 
 def make_confirm_flow(
@@ -825,6 +841,7 @@ def make_confirm_flow(
     on_confirmed: OnConfirmedFn,
     prefetch: PrefetchFn | None = None,
     ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT,
+    run_sync: RunSyncFn | None = None,
 ) -> ConfirmFlow:
     """Build the DEMO or LIVE confirm flow over `desk` (which must share `profile`).
 
@@ -832,6 +849,10 @@ def make_confirm_flow(
     default. `recheck` is the synchronous callable of `make_confirm_recheck`; `prefetch(signal,
     plan)` is awaited before every CONFIRM that could succeed and must put fresh readings where the
     recheck reads them. `validity_rule` gives the card's placement-check verdict.
+
+    `run_sync` (plan 24-17, R-2, P-1, D-25) is the optional store seam, `StoreExecutor.write` in
+    the live process: `handle_confirm` and the desk's dispatch are awaited through it, so they run
+    on the store writer thread. None (SHADOW, every existing test) keeps them inline.
     """
     return ConfirmFlow(
         desk=desk,
@@ -846,6 +867,7 @@ def make_confirm_flow(
         on_confirmed=on_confirmed,
         prefetch=prefetch,
         ttl_seconds=ttl_seconds,
+        run_sync=run_sync,
     )
 
 
