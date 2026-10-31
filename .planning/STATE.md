@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 24
 current_phase_name: Live Runtime Composition + Demo Rehearsal
-current_plan: 4
+current_plan: 5
 status: executing
-stopped_at: Completed 24-01-PLAN.md
-last_updated: "2026-10-31T05:24:03.056Z"
+stopped_at: Completed 24-04-PLAN.md
+last_updated: "2026-10-31T05:37:25.933Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 24 execution started
-state_head: 3a3919cc5077ceaa6d6ca2c120c8b4bf39f4532d
+state_head: fc3812d7cab10a360eead033a0e1a838c5c33747
 progress:
   total_phases: 29
   completed_phases: 19
   total_plans: 364
-  completed_plans: 328
+  completed_plans: 329
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 24 (Live Runtime Composition + Demo Rehearsal) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 4
+Current Plan: 5
 Total Plans in Phase: 36
 Status: Ready to execute
 Last activity: 2026-10-31 — Phase 24 execution started
@@ -253,6 +253,7 @@ Progress: [██████░░░░] 61%
 | Phase 24 P02 | 35min | 3 tasks | 21 files |
 | Phase 24 P03 | ~1h | 3 tasks | 17 files |
 | Phase 24 P01 | 1 session | 3 tasks | 2 files |
+| Phase 24 P04 | 1 session | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -597,6 +598,8 @@ Recent decisions affecting current work:
 - [Phase 24]: Q3: migration 0015_order_event_time with a monotonic event-time guard (24-01, owner 2026-10-31)
 - [Phase 24]: Q9/Q14: CLOSE_POSITION after a failed post-fill liquidation check (D085); LIVE_NET_PNL_SEMANTICS_VERIFIED stays False until the Phase 26 canary (D086) (24-01, owner 2026-10-31)
 - [Phase 24]: Q10: Phase 16 soak is running, so the SHADOW money block ships as a new text version with old pins kept (24-01, owner 2026-10-31)
+- [Phase 24]: 24-04: ExecutionService is the single execute_approved_plan call site (src/live), sync on_confirmed schedules on the loop (call_soon_threadsafe from other threads); entry client id is registered in the in-memory ClientIdIndex before the manager is awaited (P-4)
+- [Phase 24]: 24-04: build_execution_path in src/live/wiring.py is the only constructor of live objects (D-04); PlacementInputsSource is the port plan 24-16 implements
 
 ### Pending Todos
 
@@ -683,6 +686,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-31T05:23:10.183Z
-Stopped at: Completed 24-01-PLAN.md
+Last session: 2026-10-31T05:37:18.748Z
+Stopped at: Completed 24-04-PLAN.md
 Resume file: None
