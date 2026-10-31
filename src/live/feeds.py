@@ -55,7 +55,6 @@ import structlog
 
 from src.adapters.binance_public import MarkPriceReading
 from src.adapters.binance_userdata_router import StreamDivergence, StreamDivergenceKind
-from src.adapters.binance_userdata_supervisor import LivenessSnapshot, StreamState
 from src.reconcile.feed_freshness import FeedReading
 
 log = structlog.get_logger(__name__)
@@ -68,10 +67,35 @@ ESCALATED_ANOMALY_KIND = "DEPRECATED_EVENT"
 ESCALATED_REASON = "a triggered conditional order was rejected (CONDITIONAL_ORDER_TRIGGER_REJECT)"
 
 
+#: The `StreamState` value of a trusted stream. The supervisor module is not imported here (the
+#: Phase 18 gate, invariant 2, lists the modules allowed to import it); `StreamState` is a
+#: `StrEnum`, so its members compare equal to these plain strings.
+STATE_LIVE = "LIVE"
+
+
+class LivenessLike(Protocol):
+    """The fields of the supervisor's `LivenessSnapshot` this module reads."""
+
+    @property
+    def state(self) -> str: ...
+
+    @property
+    def state_since_utc(self) -> datetime: ...
+
+    @property
+    def last_event_at_utc(self) -> datetime | None: ...
+
+    @property
+    def last_ping_at_utc(self) -> datetime | None: ...
+
+    @property
+    def last_pong_at_utc(self) -> datetime | None: ...
+
+
 class LivenessSource(Protocol):
     """`UserDataSupervisor.liveness()`."""
 
-    def liveness(self) -> LivenessSnapshot: ...
+    def liveness(self) -> LivenessLike: ...
 
 
 class MarkReader(Protocol):
@@ -130,7 +154,7 @@ class LiveFeedSource:
     def user_data_liveness(self) -> datetime | None:
         """Newest of last event, ping, pong (and the LIVE entry while LIVE); None = none yet."""
         snap = self._supervisor.liveness()
-        entered_live = snap.state_since_utc if snap.state is StreamState.LIVE else None
+        entered_live = snap.state_since_utc if snap.state == STATE_LIVE else None
         return _newest(
             (snap.last_event_at_utc, snap.last_ping_at_utc, snap.last_pong_at_utc, entered_live)
         )
@@ -213,10 +237,10 @@ class StreamDivergenceQueue:
         """Bind to the supervisor's `on_failure`: a halt waits for a resync."""
         self._halt = reason
 
-    def note_state(self, state: StreamState, reason: str) -> None:
+    def note_state(self, state: str, reason: str) -> None:
         """Bind to the supervisor's `on_state_change`: LIVE again clears the halt."""
         del reason
-        if state is StreamState.LIVE:
+        if state == STATE_LIVE:
             self._halt = None
 
     # -- loop side ------------------------------------------------------------------------ #
@@ -238,8 +262,10 @@ class StreamDivergenceQueue:
 __all__ = [
     "ESCALATED_ANOMALY_KIND",
     "ESCALATED_REASON",
+    "STATE_LIVE",
     "REASON_DIVERGENCE_QUEUE_OVERFLOW",
     "LiveFeedSource",
+    "LivenessLike",
     "LivenessSource",
     "MarkBook",
     "MarkReader",
