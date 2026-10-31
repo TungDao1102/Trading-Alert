@@ -118,8 +118,23 @@ ALERT_EVENTS = MappingProxyType(
         # Plan 20-28 (owner request 2026-10-23): a resting entry still NEW past goodTillDate plus
         # the owner grace. Alert only: no SAFE_MODE, no cancel.
         "STALE_ENTRY_ORDER": AlertSeverity.HIGH,
+        # Plan 24-13 (W8 of 20-VERIFICATION, D083 point 5): the REST gate hook, once per ban
+        # entered and once per gate whose saved state could not be trusted. Only the first
+        # carries a deadline (`OperationalAlert.until_utc`).
+        "REST_GATE_BAN_ENTERED": AlertSeverity.HIGH,
+        "REST_GATE_RECOVERY_REQUIRED": AlertSeverity.CRITICAL,
     }
 )
+
+# The two REST gate events and the fixed reason code each one carries (the gate's own reason
+# constants, `IP_BAN_418` and `GATE_STATE_UNKNOWN`). The module does not import the adapter.
+_GATE_BAN_EVENT = "REST_GATE_BAN_ENTERED"
+_GATE_RECOVERY_EVENT = "REST_GATE_RECOVERY_REQUIRED"
+GATE_ALERT_SUBJECT = "SYSTEM"
+_GATE_ALERT_REASONS = MappingProxyType(
+    {_GATE_BAN_EVENT: "IP_BAN_418", _GATE_RECOVERY_EVENT: "GATE_STATE_UNKNOWN"}
+)
+_ISO_UTC = "%Y-%m-%dT%H:%M:%SZ"
 
 # A reason is an upper-case code (B2_STOP_UNCONFIRMED) or an exception class name
 # (StoreUnavailable). Anything else (spaces, `=`, `/`, `:`, `@`) cannot be one.
@@ -139,13 +154,37 @@ def _require_utc(value: datetime, name: str) -> None:
         raise ValueError(f"{name} must be a UTC-aware datetime")
 
 
-def _alert_id_of(*, event: str, subject: str, reason: str, occurred_at_utc: datetime) -> str:
+def _iso_utc(value: datetime) -> str:
+    """The strict ISO form of an alert time: UTC, whole seconds, a trailing Z."""
+    return value.astimezone(UTC).strftime(_ISO_UTC)
+
+
+def _ceil_to_second(value: datetime) -> datetime:
+    """Round a deadline UP to the whole second: the alert never states an earlier end."""
+    if value.microsecond == 0:
+        return value
+    return value.replace(microsecond=0) + timedelta(seconds=1)
+
+
+def _alert_id_of(
+    *,
+    event: str,
+    subject: str,
+    reason: str,
+    occurred_at_utc: datetime,
+    until_utc: datetime | None = None,
+) -> str:
+    # `until_utc` joins the hashed content only when present, so the id of every alert that has
+    # none is the id it always had.
+    content: dict[str, str] = {"event": event, "reason": reason}
+    if until_utc is not None:
+        content["until_utc"] = _iso_utc(until_utc)
     return content_hash_event_id(
         prefix="alert",
         event_type=EVENT_OPERATIONAL_ALERT,
         entity_id=subject,
         occurred_at_utc=occurred_at_utc,
-        payload_json=json.dumps({"event": event, "reason": reason}, sort_keys=True),
+        payload_json=json.dumps(content, sort_keys=True),
     )
 
 
@@ -165,6 +204,8 @@ class OperationalAlert:
     plan_hash: str | None
     symbol: str | None
     alert_id: str
+    # Only REST_GATE_BAN_ENTERED carries it: the gate's own end time of the ban, whole seconds.
+    until_utc: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.event not in ALERT_EVENTS:
@@ -180,11 +221,18 @@ class OperationalAlert:
         if self.symbol is not None and not _SYMBOL_RE.fullmatch(self.symbol):
             raise ValueError("symbol is malformed")
         _require_utc(self.occurred_at_utc, "occurred_at_utc")
+        if self.until_utc is not None:
+            if self.event != _GATE_BAN_EVENT:
+                raise ValueError("until_utc is only carried by REST_GATE_BAN_ENTERED")
+            _require_utc(self.until_utc, "until_utc")
+            if self.until_utc.microsecond != 0:
+                raise ValueError("until_utc must be a whole second")
         expected = _alert_id_of(
             event=self.event,
             subject=self.subject,
             reason=self.reason,
             occurred_at_utc=self.occurred_at_utc,
+            until_utc=self.until_utc,
         )
         if self.alert_id != expected:
             raise ValueError("alert_id does not match the alert content")
@@ -199,11 +247,20 @@ class OperationalAlert:
         occurred_at_utc: datetime,
         plan_hash: str | None = None,
         symbol: str | None = None,
+        until_utc: datetime | None = None,
     ) -> OperationalAlert:
-        """Validate the event and the time, replace any free field that is not enum-like."""
+        """Validate the event and the time, replace any free field that is not enum-like.
+
+        `until_utc` (REST_GATE_BAN_ENTERED only) must be UTC-aware; it is rounded up to the
+        whole second so the message never states an earlier end than the gate's.
+        """
         if event not in ALERT_EVENTS:
             raise ValueError("event is not in ALERT_EVENTS")
         _require_utc(occurred_at_utc, "occurred_at_utc")
+        safe_until: datetime | None = None
+        if until_utc is not None:
+            _require_utc(until_utc, "until_utc")
+            safe_until = _ceil_to_second(until_utc)
         safe_subject = subject if _SUBJECT_RE.fullmatch(subject) else INVALID_SUBJECT
         safe_reason = reason if _is_reason(reason) else INVALID_REASON
         safe_plan_hash = (
@@ -229,19 +286,27 @@ class OperationalAlert:
                 subject=safe_subject,
                 reason=safe_reason,
                 occurred_at_utc=occurred_at_utc,
+                until_utc=safe_until,
             ),
+            until_utc=safe_until,
         )
 
 
 def render_alert_text(alert: OperationalAlert) -> str:
-    """The fixed message template: severity, event, subject, reason, UTC time. Nothing else."""
-    at = alert.occurred_at_utc.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return (
+    """The fixed message template: severity, event, subject, reason, UTC time.
+
+    A gate ban adds one line, `until: <strict ISO UTC>`, after the time. Nothing else.
+    """
+    at = _iso_utc(alert.occurred_at_utc)
+    text = (
         f"[{alert.severity.value}] {alert.event}\n"
         f"subject: {alert.subject}\n"
         f"reason: {alert.reason}\n"
         f"at: {at}"
     )
+    if alert.until_utc is not None:
+        text += f"\nuntil: {_iso_utc(alert.until_utc)}"
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -250,17 +315,17 @@ def render_alert_text(alert: OperationalAlert) -> str:
 
 
 def _alert_event(alert: OperationalAlert) -> JournalEvent:
-    payload_json = json.dumps(
-        {
-            "event": alert.event,
-            "severity": alert.severity.value,
-            "subject": alert.subject,
-            "reason": alert.reason,
-            "plan_hash": alert.plan_hash,
-            "symbol": alert.symbol,
-        },
-        sort_keys=True,
-    )
+    payload: dict[str, Any] = {
+        "event": alert.event,
+        "severity": alert.severity.value,
+        "subject": alert.subject,
+        "reason": alert.reason,
+        "plan_hash": alert.plan_hash,
+        "symbol": alert.symbol,
+    }
+    if alert.until_utc is not None:
+        payload["until_utc"] = _iso_utc(alert.until_utc)
+    payload_json = json.dumps(payload, sort_keys=True)
     return JournalEvent(
         journal_event_id=alert.alert_id,
         occurred_at_utc=alert.occurred_at_utc,
@@ -317,6 +382,10 @@ def _alert_of_row(row: JournalEvent) -> OperationalAlert:
     payload = json.loads(row.payload_json)
     if not isinstance(payload, dict):
         raise TypeError("alert payload is not an object")
+    raw_until = payload.get("until_utc")
+    until_utc = (
+        None if raw_until is None else datetime.strptime(raw_until, _ISO_UTC).replace(tzinfo=UTC)
+    )
     return OperationalAlert(
         event=payload["event"],
         severity=AlertSeverity(payload["severity"]),
@@ -326,7 +395,18 @@ def _alert_of_row(row: JournalEvent) -> OperationalAlert:
         plan_hash=payload.get("plan_hash"),
         symbol=payload.get("symbol"),
         alert_id=row.entity_id,
+        until_utc=until_utc,
     )
+
+
+class _GateAlertLike(Protocol):
+    """What the sink reads of a gate alert: the event token and the optional deadline."""
+
+    @property
+    def event(self) -> str: ...
+
+    @property
+    def until_utc(self) -> datetime | None: ...
 
 
 @dataclass
@@ -382,14 +462,42 @@ class JournalFirstAlertSink:
         plan_hash: str | None = None,
         symbol: str | None = None,
     ) -> None:
-        alert = OperationalAlert.create(
-            event=event,
-            subject=subject,
-            reason=reason,
-            occurred_at_utc=now_utc,
-            plan_hash=plan_hash,
-            symbol=symbol,
+        self._accept(
+            OperationalAlert.create(
+                event=event,
+                subject=subject,
+                reason=reason,
+                occurred_at_utc=now_utc,
+                plan_hash=plan_hash,
+                symbol=symbol,
+            )
         )
+
+    def gate_alert(self, gate_alert: _GateAlertLike, *, now_utc: datetime) -> None:
+        """Alert one REST gate event (`GateAlert` of `src/live/exchange.py`, read by its fields).
+
+        `REST_GATE_BAN_ENTERED` carries the gate's deadline as `until_utc`;
+        `REST_GATE_RECOVERY_REQUIRED` carries none. The subject is `SYSTEM` and the reason is
+        the gate's own code (`IP_BAN_418`, `GATE_STATE_UNKNOWN`). The gate's text is never read.
+
+        Raises:
+            ValueError: the event is not one of the two gate events.
+        """
+        reason = _GATE_ALERT_REASONS.get(gate_alert.event)
+        if reason is None:
+            raise ValueError("event is not a REST gate event")
+        self._accept(
+            OperationalAlert.create(
+                event=gate_alert.event,
+                subject=GATE_ALERT_SUBJECT,
+                reason=reason,
+                occurred_at_utc=now_utc,
+                until_utc=gate_alert.until_utc if gate_alert.event == _GATE_BAN_EVENT else None,
+            )
+        )
+
+    def _accept(self, alert: OperationalAlert) -> None:
+        """Dedupe, journal first, then queue (the shared body of `alert` and `gate_alert`)."""
         key = (alert.event, alert.subject, alert.reason)
         episode = self._episodes.get(key)
         if episode is not None and alert.occurred_at_utc - episode.started_at_utc < self._window:
@@ -758,6 +866,7 @@ _SINK_BEHAVIOR = "dedupe window + bounded message retry; orders never retried"
 _SOURCE_OPS05 = "OPS-05"
 _SOURCE_D24 = "D-24 (entry path)"
 _SOURCE_STALE_ENTRY = "owner request 2026-10-23 (stale entry)"
+_SOURCE_REST_GATE = "W8 of 20-VERIFICATION (REST gate alert hook, D083 point 5)"
 _PRODUCER_DAILY_STOP = "src/execution/daily_stop.py"
 _DAILY_PRODUCER_TEXT = (
     "Phase 21 producer (enforce_daily_state): cancels the resting entries through "
@@ -875,6 +984,24 @@ OPS05_MATRIX: tuple[Ops05Row, ...] = (
         "(reconcile.entry_stale_grace_ms, NOT_CONFIGURED: the check is skipped and says so) past "
         "its goodTillDate; alert only, nothing is cancelled and SAFE_MODE is not entered",
         "src/reconcile/loop.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "REST_GATE_BAN_ENTERED",
+        _SOURCE_REST_GATE,
+        "the gate hook calls the sink once per 418 that starts or extends the ban; the alert "
+        "carries the gate's own end time as until_utc and no exchange text (plan 24-13)",
+        "src/adapters/binance_ratelimit_gate.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "REST_GATE_RECOVERY_REQUIRED",
+        _SOURCE_REST_GATE,
+        "the gate hook calls the sink once per gate whose saved state is missing, unreadable or "
+        "not trusted at start (GATE_STATE_UNKNOWN); no deadline is known (plan 24-13)",
+        "src/adapters/binance_ratelimit_gate.py",
         True,
         _SINK_BEHAVIOR,
     ),

@@ -88,13 +88,15 @@ def test_the_wording_value_is_four_single_lines() -> None:
 # --------------------------------------------------------------------------- #
 
 WORDING_SOURCE = Path(__file__).resolve().parents[1] / "src" / "ops" / "alert_wording.py"
-SIX_EVENTS = {
+WORDED_EVENTS = {
     "TP_UNAVAILABLE",
     "EMERGENCY_CLOSE_FAILED",
     "EMERGENCY_CLOSE_NOT_SENT",
     "ENTRY_STATE_UNKNOWN",
     "PROTECTION_HANDOFF_FAILED",
     "DB_FAILURE",
+    "REST_GATE_BAN_ENTERED",
+    "REST_GATE_RECOVERY_REQUIRED",
 }
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -120,8 +122,8 @@ def test_the_branch_literals_equal_the_coordinator_branch_constants_exactly() ->
     assert len(_protection_branch_codes()) == 9
 
 
-def test_every_event_wording_key_is_an_alert_event_and_the_six_are_worded() -> None:
-    assert set(EVENT_WORDING) == SIX_EVENTS
+def test_every_event_wording_key_is_an_alert_event_and_the_eight_are_worded() -> None:
+    assert set(EVENT_WORDING) == WORDED_EVENTS
     assert set(EVENT_WORDING) <= set(ALERT_EVENTS)
     assert "CLOSE_REQUIRED" in ALERT_EVENTS  # worded by branch code, not by EVENT_WORDING
 
@@ -163,7 +165,7 @@ def test_each_branch_wording_carries_its_code_and_says_what_the_system_did(code:
     assert "check" in wording.operator_must.lower()
 
 
-@pytest.mark.parametrize("event", sorted(SIX_EVENTS))
+@pytest.mark.parametrize("event", sorted(WORDED_EVENTS))
 def test_each_event_wording_carries_its_event_code(event: str) -> None:
     joined = "\n".join(EVENT_WORDING[event].lines())
 
@@ -216,7 +218,7 @@ def test_the_module_imports_nothing_from_the_execution_layer_and_reads_no_clock(
 
 
 def test_the_alert_contract_of_phase_20_is_untouched() -> None:
-    assert len(ALERT_EVENTS) == 20
+    assert len(ALERT_EVENTS) == 22
     alert = _alert("CLOSE_REQUIRED", "B2_STOP_UNCONFIRMED")
     assert render_alert_text(alert) == (
         "[CRITICAL] CLOSE_REQUIRED\nsubject: plan-0001\nreason: B2_STOP_UNCONFIRMED\n"

@@ -370,6 +370,50 @@ EVENT_WORDING: MappingProxyType[str, AlertWording] = MappingProxyType(
                 "exchange positions and orders directly until the records are healthy again."
             ),
         ),
+        # Plan 24-13 (W8 of 20-VERIFICATION). The header carries the until line of the ban.
+        "REST_GATE_BAN_ENTERED": AlertWording(
+            what_happened=(
+                "The exchange banned the requests of this system (HTTP 418) and the REST gate "
+                "now refuses every REST call before it is sent (REST_GATE_BAN_ENTERED, "
+                "IP_BAN_418). The until line of the header is the gate's own end time of the "
+                "ban."
+            ),
+            position=(
+                "A position may be open, with or without a stop. While the ban lasts the system "
+                "cannot read it or change it through REST."
+            ),
+            system_did=(
+                "Until that time no REST call leaves the system, so nothing reaches the "
+                "exchange meanwhile. The end time is saved, so a restart keeps the ban. A "
+                "placement is never re-sent."
+            ),
+            operator_must=(
+                "Check the exchange position and its stop yourself now, and close or protect "
+                "the position if it needs it. Start no other traffic to the exchange from this "
+                "address until the until time has passed."
+            ),
+        ),
+        "REST_GATE_RECOVERY_REQUIRED": AlertWording(
+            what_happened=(
+                "The saved state of the REST gate (the ban and pause end times) was missing, "
+                "unreadable or not trusted at start (REST_GATE_RECOVERY_REQUIRED, "
+                "GATE_STATE_UNKNOWN), so the gate cannot tell whether a ban is active."
+            ),
+            position=(
+                "A position may be open, with or without a stop. While the gate is in this "
+                "state the system cannot read it or change it through REST."
+            ),
+            system_did=(
+                "The gate refuses every REST call before it is sent, with no known end time, "
+                "until a restart reads a valid saved state. Nothing reaches the exchange "
+                "meanwhile, an emergency close included."
+            ),
+            operator_must=(
+                "Check the exchange position and its stop yourself now, and close or protect "
+                "the position if it needs it. Then clear the gate state as RUNBOOK section 21.3 "
+                "describes."
+            ),
+        ),
     }
 )
 
