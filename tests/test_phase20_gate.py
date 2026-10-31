@@ -417,12 +417,14 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "D086",
         "D087",
         "D088",
+        "D089",
     ], (
         f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
         "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
         "wrote D085 (Phase 22 O-1 to O-4) and D086 (Phase 21 O-3 to O-6); the owner answer of "
         "2026-10-25 wrote D087 (Phase 21 WR-08 and WR-05); the owner answer of 2026-10-26 "
-        "wrote D088 (Phase 23 O-2, the G4-042 expiry rule)"
+        "wrote D088 (Phase 23 O-2, the G4-042 expiry rule); the owner answer of 2026-10-31 "
+        "wrote D089 (Phase 24 execution limit values, plan 24-06)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:
