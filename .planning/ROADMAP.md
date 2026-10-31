@@ -1319,12 +1319,12 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 2/36 plans executed
+**Plans:** 3/36 plans executed
 
 Plans:
 
 **Wave 1**
-- [ ] 24-01-PLAN.md - Owner decision packet Q1..Q16 (one-way doors: process boundary, StoreExecutor, migration 0015) and the limits checkpoint with recommendations (D-01, D-10, D-12, D-25, O-1..O-7) *(checkpoint: owner decision)*
+- [x] 24-01-PLAN.md - Owner decision packet Q1..Q16 (one-way doors: process boundary, StoreExecutor, migration 0015) and the limits checkpoint with recommendations (D-01, D-10, D-12, D-25, O-1..O-7) *(checkpoint: owner decision)*
 - [x] 24-02-PLAN.md - G3-005 enum promotion (NO_FILL, HEALTH_CHECK_FAILED) and G2-035 triage (D-35)
 - [x] 24-03-PLAN.md - D083 ban-end parsing with the optional clock-margin key (D-15, P20-GATE-WIRING)
 
@@ -1518,7 +1518,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
-| 24. Live Runtime Composition + Demo Rehearsal | 2/36 | In Progress | - |
+| 24. Live Runtime Composition + Demo Rehearsal | 3/36 | In Progress | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |

@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 24
 current_phase_name: Live Runtime Composition + Demo Rehearsal
-current_plan: 3
+current_plan: 4
 status: executing
-stopped_at: Completed 24-03-PLAN.md
-last_updated: "2026-10-31T05:11:26.933Z"
+stopped_at: Completed 24-01-PLAN.md
+last_updated: "2026-10-31T05:24:03.056Z"
 last_activity: 2026-10-31
 last_activity_desc: Phase 24 execution started
-state_head: 7c19ff337218f8767ef7e722ff51f9be63aa9051
+state_head: 3a3919cc5077ceaa6d6ca2c120c8b4bf39f4532d
 progress:
   total_phases: 29
   completed_phases: 19
   total_plans: 364
-  completed_plans: 327
+  completed_plans: 328
 milestone_name: milestone
 ---
 
@@ -33,7 +33,7 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 24 (Live Runtime Composition + Demo Rehearsal) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 3
+Current Plan: 4
 Total Plans in Phase: 36
 Status: Ready to execute
 Last activity: 2026-10-31 — Phase 24 execution started
@@ -252,6 +252,7 @@ Progress: [██████░░░░] 61%
 | Phase 23 P12 | 25min | 3 tasks | 9 files |
 | Phase 24 P02 | 35min | 3 tasks | 21 files |
 | Phase 24 P03 | ~1h | 3 tasks | 17 files |
+| Phase 24 P01 | 1 session | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -591,6 +592,11 @@ Recent decisions affecting current work:
 - [Phase 23]: 23-12: validity_rule is called with keywords (expiry_utc, now_utc) so a partial over check_remaining_validity binds directly; a refused-before-recheck CONFIRM awaits no prefetch; a handler that raised is answered with the neutral text; the confirm core was not changed
 - [Phase 24]: 24-02: NO_FILL and HEALTH_CHECK_FAILED are RejectionReason members (23), values unchanged (G3-005, D-35)
 - [Phase 24]: 24-03: D083 clock margin is rest_gate.ban_end_clock_margin_ms, an OPTIONAL NOT_CONFIGURED key outside require_live_ready; ban-entry alert is REST_GATE_BAN_ENTERED until_utc=<ISO>
+- [Phase 24]: Q1: one live process python -m src.live.runtime, one asyncio loop (24-01, owner 2026-10-31)
+- [Phase 24]: Q2: sync stores kept; on-loop store calls go through src/ops/store_executor.py with one writer thread, no async pool (24-01, owner 2026-10-31)
+- [Phase 24]: Q3: migration 0015_order_event_time with a monotonic event-time guard (24-01, owner 2026-10-31)
+- [Phase 24]: Q9/Q14: CLOSE_POSITION after a failed post-fill liquidation check (D085); LIVE_NET_PNL_SEMANTICS_VERIFIED stays False until the Phase 26 canary (D086) (24-01, owner 2026-10-31)
+- [Phase 24]: Q10: Phase 16 soak is running, so the SHADOW money block ships as a new text version with old pins kept (24-01, owner 2026-10-31)
 
 ### Pending Todos
 
@@ -677,6 +683,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-31T05:11:19.867Z
-Stopped at: Completed 24-03-PLAN.md
+Last session: 2026-10-31T05:23:10.183Z
+Stopped at: Completed 24-01-PLAN.md
 Resume file: None
