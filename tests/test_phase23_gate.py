@@ -16,7 +16,7 @@ This file asserts, against the real tree and without any network or live evidenc
 - messages (D-14, owner O-3 answered 2026-10-30): every generated DEMO/LIVE/SIMULATE/card golden
   shows its times as the local `+07` time with UTC in brackets and carries no `Display:` line and
   no zone name, while the SHADOW time pair (UTC plus `Asia/Ho_Chi_Minh`) is unchanged;
-- the migration head is `0014_decided_excl_expired` (D-16, the owner's O-2 answer (a));
+- the migration head is `0015_order_event_time` (24-07, D-10; 0014 was D-16, owner answer O-2 a);
 - live placement is still disabled (`LiveEnablementController` default);
 - each Phase 23 requirement has its named automated tests, resolved with `ast` and never imported
   or run (`REQUIREMENT_TESTS`).
@@ -390,12 +390,12 @@ def test_invariant_5g_glossary_91_lists_exactly_the_enum() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_invariant_6_the_migration_head_is_0014_decided_excl_expired() -> None:
+def test_invariant_6_the_migration_head_is_0015_order_event_time() -> None:
     from tests.pg_support import alembic_head_revision
 
-    assert alembic_head_revision() == "0014_decided_excl_expired", (
-        "plan 23-08 moved the head to 0014 (owner answer a); a later migration must update this "
-        "gate on purpose"
+    assert alembic_head_revision() == "0015_order_event_time", (
+        "plan 24-07 (D-10) moved the head to 0015 (0014 is plan 23-08, owner answer a); a later "
+        "migration must update this gate on purpose"
     )
 
 
