@@ -21,6 +21,14 @@ rests under the id any more). Any other verdict journals `cancel_unverified`, an
 reported as skipped, so the next tick looks again. Every skipped cancel also leaves a best-effort
 `SWEEP_SKIPPED` row (IN-14, D-03): symbol, algo id and a reason code, never exception text.
 
+Plan 24-21 (D-34, Demo finding): right after an algo cancel the by-id query can still answer NEW
+for about a second while the open-algo list no longer holds the order. A STILL_OPEN verdict is
+therefore re-checked once against the open-algo list (`snapshot_open_algo_orders(symbol=...)`,
+read after the cancel): an id that is absent from a list that was read successfully counts as
+cancelled (the post-image says `verified_by: open_algo_list`), with no second cancel and no
+SWEEP_SKIPPED row. A list that cannot be read, still holds the id, or an adapter without that read
+keeps the older result (`cancel_unverified`, skipped, looked at again next tick).
+
 A manual close outside the system (G4-035) can end two ways and the sweeper relies on neither:
 the exchange auto-cancels the closePosition legs when the position goes flat (the probe finds
 nothing, `already_gone`), or the legs stay as orphans (two zero reads, a verified cancel).
@@ -336,7 +344,11 @@ class OrphanSweeper:
             verdict = await confirm_algo_cancel(
                 self._adapter, client_algo_id=client_algo_id, detail=detail
             )
-            if verdict not in PROVEN_GONE:
+            absent_from_open_list = (
+                verdict is CancelVerdict.STILL_OPEN
+                and await self._absent_from_open_list(symbol=symbol, client_algo_id=client_algo_id)
+            )
+            if verdict not in PROVEN_GONE and not absent_from_open_list:
                 self._record_failure_best_effort(
                     symbol=symbol,
                     client_algo_id=client_algo_id,
@@ -371,6 +383,7 @@ class OrphanSweeper:
                     client_algo_id=client_algo_id,
                     now_utc=effective_now,
                     verdict=verdict,
+                    verified_by=_VERIFIED_BY_OPEN_LIST if absent_from_open_list else None,
                 )
                 self._journal.record(post_event)
             except Exception as exc:
@@ -389,6 +402,21 @@ class OrphanSweeper:
         )
 
     # ----- internal helpers ---------------------------------------------- #
+
+    async def _absent_from_open_list(self, *, symbol: str, client_algo_id: str) -> bool:
+        """True only when the open-algo list was read now and does not hold `client_algo_id`.
+
+        An adapter without the read, a read that raises (class name is not needed: the caller keeps
+        the older `cancel_unverified` result) or a malformed answer is False (fail closed).
+        """
+        reader = getattr(self._adapter, "snapshot_open_algo_orders", None)
+        if reader is None:
+            return False
+        try:
+            rows = list(await reader(symbol=symbol))
+        except Exception:
+            return False
+        return all(getattr(row, "client_algo_id", None) != client_algo_id for row in rows)
 
     def _record_failure_best_effort(
         self,
@@ -541,11 +569,13 @@ class OrphanSweeper:
         client_algo_id: str,
         now_utc: datetime,
         verdict: CancelVerdict | None = None,
+        verified_by: str | None = None,
     ) -> JournalEvent:
         """Build the post-cancel JournalEvent carrying the cancel outcome.
 
         `verdict` (plan 20-11) is the post-cancel query result, CANCELED or GONE_NOT_CANCELED;
-        it is left out of the payload when None, which keeps older ids unchanged.
+        it is left out of the payload when None, which keeps older ids unchanged. `verified_by`
+        (plan 24-21) names the open-algo list when that, not the by-id query, showed the absence.
         """
         payload: dict[str, Any] = {
             "symbol": symbol,
@@ -556,6 +586,8 @@ class OrphanSweeper:
         }
         if verdict is not None:
             payload["verdict"] = verdict.value
+        if verified_by is not None:
+            payload["verified_by"] = verified_by
         payload_json = _build_payload_json(payload)
         return JournalEvent(
             journal_event_id=content_hash_event_id(
@@ -582,6 +614,7 @@ _ZERO_TIMEDELTA = timedelta(0)
 
 EVENT_SWEEP_SKIPPED = "SWEEP_SKIPPED"
 _REASON_TRANSIENT_GAP = "transient_position_gap"
+_VERIFIED_BY_OPEN_LIST = "open_algo_list"
 
 
 def _is_awaitable(value: Any) -> bool:

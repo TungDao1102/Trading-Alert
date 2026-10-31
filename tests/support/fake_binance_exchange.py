@@ -157,6 +157,8 @@ class ExchangeOrderRecord:
     reduce_only: bool = False
     working_type: str | None = None
     algo_type: str = ""
+    # Plan 24-21 (D-34): until this instant a by-id query of a CANCELED algo still answers NEW.
+    query_lag_until_utc: datetime | None = None
 
     @property
     def update_time_utc(self) -> datetime:
@@ -196,8 +198,13 @@ class BinanceSemanticsFakeAdapter:
         position_mode: str = "ONE_WAY",
         now_utc: datetime | None = None,
         enforce_flat_stop_rejection: bool = False,
+        algo_cancel_query_lag: timedelta = timedelta(0),
     ) -> None:
         self.enforce_flat_stop_rejection = enforce_flat_stop_rejection
+        # Plan 24-21 (D-34, Demo finding): after an algo cancel the open-algo list is already
+        # empty but `query_algo_order_by_client` still answers NEW for about a second. Zero keeps
+        # every older test unchanged; a positive lag is measured on `now_utc` (the fake's clock).
+        self.algo_cancel_query_lag = algo_cancel_query_lag
         self.calls: list[dict[str, Any]] = []
         # Injected, settable clock (tests move it to exercise the retention rule).
         self.now_utc: datetime = now_utc or datetime(2026, 9, 19, 10, 30, tzinfo=UTC)
@@ -337,6 +344,8 @@ class BinanceSemanticsFakeAdapter:
         record = self.open_algos.pop(client_algo_id)
         record.status = STATUS_CANCELED
         record.updated_at_utc = self.now_utc
+        if self.algo_cancel_query_lag > timedelta(0):
+            record.query_lag_until_utc = self.now_utc + self.algo_cancel_query_lag
         self.algo_history[client_algo_id] = record
 
     # ------------------------------------------------------------------ #
@@ -591,10 +600,15 @@ class BinanceSemanticsFakeAdapter:
                 algo_status=None,
                 update_time_utc=None,
             )
+        lagging = (
+            record.status == STATUS_CANCELED
+            and record.query_lag_until_utc is not None
+            and self.now_utc < record.query_lag_until_utc
+        )
         return AlgoOrderProbe(
             client_algo_id=client_algo_id,
             found=True,
-            algo_status=record.status,
+            algo_status=STATUS_NEW if lagging else record.status,
             update_time_utc=record.update_time_utc,
         )
 
