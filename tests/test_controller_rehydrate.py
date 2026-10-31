@@ -336,7 +336,7 @@ def test_enablement_rehydrate_fails_closed_on_malformed_state(state: Any) -> Non
 def test_constructor_signatures_are_unchanged() -> None:
     safe = inspect.signature(SafeModeController.__init__)
     # Plan 20-06 (D-14) adds the optional `state_store` keyword and plan 20-22 (D-24) the optional
-    # `on_enter` observer; the others keep their order.
+    # `on_enter` observer and plan 24-20 (row 41) the optional `spill`; the others keep their order.
     assert list(safe.parameters) == [
         "self",
         "adapter",
@@ -344,9 +344,11 @@ def test_constructor_signatures_are_unchanged() -> None:
         "compare_fn",
         "state_store",
         "on_enter",
+        "spill",
     ]
     assert safe.parameters["state_store"].default is None
     assert safe.parameters["on_enter"].default is None
+    assert safe.parameters["spill"].default is None
     enable = inspect.signature(LiveEnablementController.__init__)
     # Plan 20-08 (D-16) adds the optional `spill` keyword; `journal` keeps its place.
     assert list(enable.parameters) == ["self", "journal", "spill"]
