@@ -14,14 +14,31 @@ No network, no exchange access, no database, no float.
 
 from __future__ import annotations
 
+import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from src.backtest.experiment import CodeVersion, IncompleteExperimentRecord
 
-__all__ = ["CodeVersionError", "read_code_version"]
+__all__ = [
+    "BUILD_REVISION_VARIABLE",
+    "BuildRevisionError",
+    "CodeVersionError",
+    "read_build_revision",
+    "read_code_version",
+]
 
 _GIT_TIMEOUT_SECONDS = 30
+
+# The build stamp of an image (plan 24-11, OPS-04, D-31): a build argument stamped into the image
+# environment, because an image has no `.git` to ask (plan 24-25 writes it in the Dockerfile).
+BUILD_REVISION_VARIABLE = "TRADING_APP_REVISION"
+_REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+class BuildRevisionError(ValueError):
+    """The build stamp is present but is not 40 lowercase hex characters (value not echoed)."""
 
 
 class CodeVersionError(Exception):
@@ -73,3 +90,21 @@ def read_code_version(repo_root: Path) -> CodeVersion:
         raise CodeVersionError(
             "git rev-parse HEAD did not print 40 lowercase hex characters"
         ) from None
+
+
+def read_build_revision(environ: Mapping[str, str]) -> str | None:
+    """The revision stamped into the image environment, or None when no stamp is present.
+
+    Validation only: no subprocess, no file, no network. The value must be exactly 40 lowercase
+    hex characters (a git commit); an empty value counts as malformed, not as absent.
+
+    Raises:
+        BuildRevisionError: the stamp is present but malformed (the message names the variable
+            only, never the value).
+    """
+    if BUILD_REVISION_VARIABLE not in environ:
+        return None
+    value = environ[BUILD_REVISION_VARIABLE]
+    if _REVISION_PATTERN.fullmatch(value) is None:
+        raise BuildRevisionError(f"{BUILD_REVISION_VARIABLE} is not 40 lowercase hex characters")
+    return value
