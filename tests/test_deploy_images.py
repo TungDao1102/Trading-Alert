@@ -267,6 +267,10 @@ def test_dockerignore_does_not_exclude_what_the_image_copies() -> None:
 RUNTIME_READ_PATHS: tuple[str, ...] = (
     "params",
     "config/paper",
+    # R-6, C-8 (plan 24-25): the live process loads its limits from the image, so the image hash
+    # covers them like the paper configuration.
+    "config/execution",
+    "config/binance",
     "docs/research/universe",
     "alembic.ini",
     "src",
@@ -353,6 +357,8 @@ def test_the_runtime_stage_copies_every_path_the_runtime_reads_at_start() -> Non
     assert missing_runtime_paths(dockerfile, dockerignore) == []
     assert "COPY params ./params" in _lines()
     assert "COPY config/paper ./config/paper" in _lines()
+    assert "COPY config/execution ./config/execution" in _lines()
+    assert "COPY config/binance ./config/binance" in _lines()
 
 
 def test_the_path_check_names_params_when_its_copy_line_is_removed(tmp_path: Path) -> None:
@@ -372,7 +378,11 @@ def test_the_path_check_names_a_dockerignore_exclusion() -> None:
     """Negative control: a .dockerignore line that excludes config/ fails the check."""
     dockerignore = DOCKERIGNORE.read_text(encoding="utf-8") + "\nconfig\n"
     missing = missing_runtime_paths(DOCKERFILE.read_text(encoding="utf-8"), dockerignore)
-    assert missing == ["config/paper (excluded by .dockerignore pattern config)"]
+    assert missing == [
+        "config/paper (excluded by .dockerignore pattern config)",
+        "config/execution (excluded by .dockerignore pattern config)",
+        "config/binance (excluded by .dockerignore pattern config)",
+    ]
 
 
 # --- 16-55 Task 1: the in-image load check (scripts/check_image_paths.py) -------------------

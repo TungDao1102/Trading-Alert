@@ -65,6 +65,10 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
+      # Build-time revision stamp (OPS-04, D-31): deploy/update.sh and deploy/soak-image.sh export
+      # the checked-out commit; an unset variable stays empty and the image answers `unknown`.
+      args:
+        TRADING_APP_REVISION: ${TRADING_APP_REVISION:-}
     restart: "no"
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
     environment: *database-env
@@ -184,6 +188,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: ops
+      args:
+        TRADING_APP_REVISION: ${TRADING_APP_REVISION:-}
     profiles: ["ops"]
     restart: "no"
     command: ["/app/.venv/bin/python", "-m", "src.ops.backup", "scheduled"]

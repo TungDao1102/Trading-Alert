@@ -27,7 +27,14 @@ COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 HEALTH_PROBE = ["/app/.venv/bin/python", "-m", "src.data.collector", "--healthcheck"]
 PAPER_PROBE = ["CMD", "/app/.venv/bin/python", "-m", "src.paper.runtime", "--healthcheck"]
 BASE_VARS = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT")
-_SCRUBBED_ENV_PREFIXES = ("POSTGRES_", "COMPOSE_", "TRADING_ENV_FILE", "IMAGE_TAG", "DATABASE_URL")
+_SCRUBBED_ENV_PREFIXES = (
+    "POSTGRES_",
+    "COMPOSE_",
+    "TRADING_ENV_FILE",
+    "TRADING_APP_REVISION",
+    "IMAGE_TAG",
+    "DATABASE_URL",
+)
 
 
 def _require_compose() -> None:
@@ -217,6 +224,28 @@ def test_images_are_pinned_by_digest_or_local_tag(tmp_path: Path) -> None:
     builders = [n for n in ("db-upgrade", "collector") if "build" in services[n]]
     assert builders == ["db-upgrade"]
     assert services["db-upgrade"]["build"]["target"] == "runtime"
+
+
+REVISION_STAMP = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_building_services_pass_the_revision_as_a_build_argument(tmp_path: Path) -> None:
+    """OPS-04, D-31, Q13: the stamp reaches the Dockerfile ARG from the environment."""
+    config = compose_config(
+        tmp_path, profiles=("ops",), overrides={"TRADING_APP_REVISION": REVISION_STAMP}
+    )
+    services = _services(config)
+    builders = [name for name, svc in services.items() if "build" in svc]
+    assert sorted(builders) == ["backup", "db-upgrade"]
+    for name in builders:
+        assert services[name]["build"]["args"] == {"TRADING_APP_REVISION": REVISION_STAMP}
+
+
+def test_the_revision_build_argument_is_empty_when_unset(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("ops",)))
+    for name in ("db-upgrade", "backup"):
+        value = services[name]["build"]["args"]["TRADING_APP_REVISION"]
+        assert value in ("", None), name
 
 
 def test_missing_postgres_credentials_fail_config(tmp_path: Path) -> None:
