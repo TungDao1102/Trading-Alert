@@ -71,6 +71,16 @@ class JournalLike(Protocol):
     def record(self, event: Any) -> None: ...
 
 
+class SafeModeSpill(Protocol):
+    """The one method of `src.ops.spill.LocalSpill` the controller uses (plan 24-20, row 41).
+
+    Declared here so this module imports nothing from `src.ops`. Used only when the journal write
+    of a SAFE_MODE entry fails: the entry record is then written to the local spill.
+    """
+
+    def write(self, event: Any) -> object: ...
+
+
 class SafeModeStateStore(Protocol):
     """Durable memory of the SAFE_MODE state (D-14).
 
@@ -230,6 +240,11 @@ class SafeModeController:
             controller without this module importing `src.ops`. Best-effort: it runs after the
             flag flip, the journal row and the save attempt (also when the save raised), and an
             exception from it is swallowed.
+        spill: Optional local spill (plan 24-20, 20-DEFERRED row 41). When the journal write of an
+            entry (SAFE_MODE_ENTER, SAFE_MODE_REENTER, or an unreadable start) fails, the same
+            record is written to the spill before the journal error propagates unchanged. A spill
+            failure is swallowed (the journal error is the one the caller sees). None keeps the
+            behaviour exactly as before.
     """
 
     def __init__(
@@ -240,11 +255,13 @@ class SafeModeController:
         compare_fn: Callable[..., Any] | None = None,
         state_store: SafeModeStateStore | None = None,
         on_enter: Callable[[str, datetime], None] | None = None,
+        spill: SafeModeSpill | None = None,
     ) -> None:
         self._adapter = adapter
         self._journal = journal
         self._state_store = state_store
         self._on_enter = on_enter
+        self._spill = spill
         if compare_fn is None:
             from .compare import compare as _compare
 
@@ -288,6 +305,7 @@ class SafeModeController:
         now_utc: datetime,
         compare_fn: Callable[..., Any] | None = None,
         on_enter: Callable[[str, datetime], None] | None = None,
+        spill: SafeModeSpill | None = None,
     ) -> Self:
         """Start a controller from the durable store, failing closed (D-14, research C14).
 
@@ -307,6 +325,8 @@ class SafeModeController:
             on_enter: The entry observer (as for the constructor). It is also called once for an
                 unreadable start (reason `SAFE_MODE_STATE_UNREADABLE`), the one entry that does not
                 go through `enter_safe_mode`.
+            spill: The optional entry spill (as for the constructor); attached to the returned
+                controller, and used for the unreadable-start record when the journal fails.
 
         Raises:
             ValueError: `now_utc` is naive or not UTC (a caller bug, not a store failure).
@@ -328,6 +348,7 @@ class SafeModeController:
                 compare_fn=compare_fn,
                 state_store=state_store,
                 on_enter=on_enter,
+                spill=spill,
             )
             controller._in_safe_mode = True
             controller._entered_at_utc = now_utc
@@ -337,12 +358,14 @@ class SafeModeController:
                     event_type=SAFE_MODE_STATE_UNREADABLE,
                     payload={"error_type": type(exc).__name__},
                     now_utc=now_utc,
+                    spill_on_failure=True,
                 )
             except Exception:  # noqa: S110 - best-effort audit; the fail-closed state is set
                 pass
             controller._notify_entered(SAFE_MODE_STATE_UNREADABLE, now_utc)
             return controller
         controller._state_store = state_store
+        controller._spill = spill
         return controller
 
     @classmethod
@@ -794,10 +817,22 @@ class SafeModeController:
                 "system_mode": SystemMode.SAFE_MODE.value,
             },
             now_utc=now_utc,
+            spill_on_failure=True,
         )
 
-    def _record_event(self, *, event_type: str, payload: dict[str, Any], now_utc: datetime) -> None:
-        """Record one SystemMode JournalEvent with the given payload."""
+    def _record_event(
+        self,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+        now_utc: datetime,
+        spill_on_failure: bool = False,
+    ) -> None:
+        """Record one SystemMode JournalEvent with the given payload.
+
+        With `spill_on_failure` (entry records only) and a spill attached, a failing journal write
+        leaves the same event in the spill, then the journal error propagates unchanged.
+        """
         from src.domain.journal import JournalEvent, content_hash_event_id
 
         entity_id = SystemMode.SAFE_MODE.value
@@ -819,7 +854,15 @@ class SafeModeController:
             correlation_id="reconcile_safe_mode",
             payload_json=payload_json,
         )
-        self._journal.record(event)
+        try:
+            self._journal.record(event)
+        except Exception:
+            if spill_on_failure and self._spill is not None:
+                try:
+                    self._spill.write(event)
+                except Exception:  # noqa: S110 - the journal error below is the one that matters
+                    pass
+            raise
 
 
 # --------------------------------------------------------------------------- #

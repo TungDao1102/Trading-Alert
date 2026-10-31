@@ -390,3 +390,128 @@ def test_a_restart_never_exits_safe_mode() -> None:
     assert first.in_safe_mode is True
     assert second.in_safe_mode is True
     assert second.entered_at_utc == T0
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-20 (20-DEFERRED row 41): a journal failure while entering leaves a spill record
+# --------------------------------------------------------------------------- #
+
+
+class RecordingSpill:
+    """The one method a `SafeModeController` calls on a spill: `write(event)`."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.events: list[Any] = []
+        self.fail = fail
+
+    def write(self, event: Any) -> object:
+        if self.fail:
+            raise OSError("spill volume down")
+        self.events.append(event)
+        return object()
+
+
+def _spilling(
+    journal: FakeJournal, spill: RecordingSpill | None, store: FakeStore | None = None
+) -> SafeModeController:
+    return SafeModeController(
+        adapter=_NoAdapter(),
+        journal=journal,
+        compare_fn=_clean_compare,
+        state_store=store if store is not None else FakeStore(),
+        spill=spill,
+    )
+
+
+def test_a_journal_failure_on_entry_leaves_one_spill_record_and_still_raises() -> None:
+    spill = RecordingSpill()
+    controller = _spilling(FakeJournal(fail=True), spill)
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    assert controller.in_safe_mode is True, "the flag is set first (fail closed)"
+    (event,) = spill.events
+    assert event.event_type == "SAFE_MODE_ENTER"
+    assert event.occurred_at_utc == T0
+    assert json.loads(event.payload_json)["reason"] == "DB_FAILURE"
+
+
+def test_a_journal_failure_on_reentry_with_a_new_reason_is_spilled_too() -> None:
+    spill = RecordingSpill()
+    journal = FakeJournal()
+    controller = _spilling(journal, spill)
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+    journal.fail = True
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        controller.enter_safe_mode(reason="API_DEGRADATION", now_utc=T1)
+
+    (event,) = spill.events
+    assert event.event_type == "SAFE_MODE_REENTER"
+    assert json.loads(event.payload_json)["reason"] == "API_DEGRADATION"
+
+
+def test_a_working_journal_writes_nothing_to_the_spill() -> None:
+    spill = RecordingSpill()
+    controller = _spilling(FakeJournal(), spill)
+
+    controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    assert spill.events == []
+
+
+def test_a_failing_spill_does_not_hide_the_journal_error() -> None:
+    controller = _spilling(FakeJournal(fail=True), RecordingSpill(fail=True))
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    assert controller.in_safe_mode is True
+
+
+def test_without_a_spill_the_journal_error_propagates_as_before() -> None:
+    controller = _spilling(FakeJournal(fail=True), None)
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T0)
+
+    assert controller.in_safe_mode is True
+
+
+def test_load_passes_the_spill_to_the_controller() -> None:
+    spill = RecordingSpill()
+    journal = FakeJournal(fail=True)
+    controller = SafeModeController.load(
+        adapter=_NoAdapter(),
+        journal=journal,
+        state_store=FakeStore(),
+        now_utc=T0,
+        compare_fn=_clean_compare,
+        spill=spill,
+    )
+    assert controller.in_safe_mode is False
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        controller.enter_safe_mode(reason="DB_FAILURE", now_utc=T1)
+
+    assert len(spill.events) == 1
+
+
+def test_an_unreadable_start_with_a_failing_journal_leaves_a_spill_record() -> None:
+    store = FakeStore()
+    store.load_error = RuntimeError("db down")
+    spill = RecordingSpill()
+
+    controller = SafeModeController.load(
+        adapter=_NoAdapter(),
+        journal=FakeJournal(fail=True),
+        state_store=store,
+        now_utc=T2,
+        compare_fn=_clean_compare,
+        spill=spill,
+    )
+
+    assert controller.in_safe_mode is True
+    (event,) = spill.events
+    assert event.event_type == SAFE_MODE_STATE_UNREADABLE
