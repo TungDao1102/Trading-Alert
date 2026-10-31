@@ -1319,7 +1319,7 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 7/36 plans executed
+**Plans:** 12/36 plans executed
 
 Plans:
 
@@ -1335,11 +1335,11 @@ Plans:
 - [x] 24-08-PLAN.md - Mode-scoped approved-approvals reader so SHADOW and DEMO share one database (OQ-6)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 24-06-PLAN.md - Owner limit values written with provenance, relationship test, DECISIONS row (D-12, T-06)
-- [ ] 24-09-PLAN.md - SHADOW money block (D-19, P23-R1)
-- [ ] 24-10-PLAN.md - Scheduler primitive and cadences from the limits (D-11, D-12)
-- [ ] 24-11-PLAN.md - Live config, mode, refusals, CLI verbs, OPS-04 diagnostic output (D-02, D-03, D-31)
-- [ ] 24-12-PLAN.md - Exchange composition: one durable REST gate, drift-guarded adapter (D-06, D-15)
+- [x] 24-06-PLAN.md - Owner limit values written with provenance, relationship test, DECISIONS row (D-12, T-06)
+- [x] 24-09-PLAN.md - SHADOW money block (D-19, P23-R1)
+- [x] 24-10-PLAN.md - Scheduler primitive and cadences from the limits (D-11, D-12)
+- [x] 24-11-PLAN.md - Live config, mode, refusals, CLI verbs, OPS-04 diagnostic output (D-02, D-03, D-31)
+- [x] 24-12-PLAN.md - Exchange composition: one durable REST gate, drift-guarded adapter (D-06, D-15)
 - [ ] 24-13-PLAN.md - Alert path and the T-05 producers (D-07)
 - [ ] 24-14-PLAN.md - Approval request sender, signal source, second-plan refusal, D028 chain (D-18, OQ-2)
 - [ ] 24-15-PLAN.md - Commission refresh and Phase 12 IN-01/IN-05 (D-22, G3-008, G3-014)
@@ -1518,7 +1518,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
-| 24. Live Runtime Composition + Demo Rehearsal | 7/36 | In Progress | - |
+| 24. Live Runtime Composition + Demo Rehearsal | 12/36 | In Progress | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
