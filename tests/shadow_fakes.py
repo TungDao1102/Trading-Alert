@@ -35,8 +35,16 @@ from src.domain.enums import ApprovalAction, ApprovalResult, SignalStatus, Trade
 from src.domain.journal import JournalEvent
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.paper.shadow import build_shadow_money
 from src.persistence.errors import ParentRowMissing, RowConflict
 from src.persistence.shadow_stores import mode_includes, validate_confirm_mode
+from src.risk.cost_rates import FEE_SOURCE_PARAMETER, CostRates
+from src.risk.money_at_stake import (
+    EQUITY_SOURCE_PAPER_CONFIG,
+    LEVERAGE_SOURCE_PAPER_CONFIG,
+    MoneyAtStake,
+)
+from src.risk.types import SizedResult
 
 EXPECTED_LABEL = "SHADOW — no real order"
 
@@ -120,6 +128,48 @@ def make_shadow_plan(signal: Signal, **overrides: Any) -> TradePlan:
     }
     values.update(overrides)
     return TradePlan(**values)
+
+
+MONEY_OBSERVED_AT = datetime(2026, 10, 9, 2, 55, 0, tzinfo=UTC)
+
+
+def make_shadow_sized(plan: TradePlan, **overrides: Any) -> SizedResult:
+    """A `SizedResult` that agrees with `make_shadow_plan` (entry at the zone top, LONG)."""
+    values: dict[str, Any] = {
+        "is_no_trade": False,
+        "quantity": plan.quantity_after_rounding,
+        "quantity_before_rounding": plan.quantity_before_rounding,
+        "quantity_after_rounding": plan.quantity_after_rounding,
+        "quantization_decision": "ACCEPTED",
+        "realized_risk": Decimal("48.5"),
+        "modeled_costs_per_unit": Decimal("6"),
+        "sizing_entry_price": plan.entry_max_price,
+    }
+    values.update(overrides)
+    return SizedResult(**values)
+
+
+def make_shadow_money(signal: Signal, plan: TradePlan, **overrides: Any) -> MoneyAtStake:
+    """The money block of a fixture plan, built by `build_shadow_money` from its sizing."""
+    values: dict[str, Any] = {
+        "signal": signal,
+        "plan": plan,
+        "sized": make_shadow_sized(plan),
+        "cost_rates": CostRates(
+            fee_rate_entry=Decimal("0.0005"),
+            entry_slippage_rate=Decimal("0.0002"),
+            fee_rate_exit=Decimal("0.0005"),
+            exit_slippage_rate=Decimal("0.0002"),
+            fee_source=FEE_SOURCE_PARAMETER,
+        ),
+        "leverage": 5,
+        "leverage_source": LEVERAGE_SOURCE_PAPER_CONFIG,
+        "equity": Decimal("1000"),
+        "equity_source": EQUITY_SOURCE_PAPER_CONFIG,
+        "equity_observed_at_utc": MONEY_OBSERVED_AT,
+    }
+    values.update(overrides)
+    return build_shadow_money(**values)
 
 
 # --------------------------------------------------------------------------- #
