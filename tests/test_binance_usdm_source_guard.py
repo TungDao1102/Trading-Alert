@@ -12,6 +12,10 @@ Rules:
    message text for a decision: no attribute named `error_message`, and no `str(<name>)` for
    a typical exception variable name unless the call sits inside the arguments of a logger
    call (`log.info`, `log.warning`, `log.error`, `log.exception`, `log.debug`).
+   `src/adapters/binance_errors.py` is scanned too (plan 24-03): DECISIONS D083 item 2 allows
+   exactly ONE read there, the `error_message` of a 418 in `_ban_until_epoch_ms`; any other read
+   in that file, and any other form (`args`, `msg`, `str(exc)`, f-strings) in that function,
+   still fails.
 4. `place_entry` and `place_algo_protective` contain no loop (so no `await` in a loop) and
    no use of `tenacity`.
 """
@@ -26,6 +30,12 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 ADAPTER = REPO / "src" / "adapters" / "binance_usdm.py"
 MANAGER = REPO / "src" / "execution" / "manager.py"
+ERRORS = REPO / "src" / "adapters" / "binance_errors.py"
+
+# D083 item 2 (plan 24-03): the one function allowed to read exception message text, and the one
+# attribute it may read. Nothing else is allowed, there or elsewhere.
+D083_FUNCTION = "_ban_until_epoch_ms"
+D083_ALLOWED: dict[str, frozenset[str]] = {D083_FUNCTION: frozenset({"error_message"})}
 
 # The removed names: the not-found regex constant, the not-found code set, the
 # already-canceled message helper and the transient-reconcile helper.
@@ -154,19 +164,31 @@ def _exception_names(tree: ast.AST) -> set[str]:
     return names
 
 
-def message_text_reads(source: str) -> list[str]:
+def message_text_reads(source: str, allowed: dict[str, frozenset[str]] | None = None) -> list[str]:
     """Reads of an exception's message text outside logger calls.
 
     Flagged: any `error_message` attribute; `str(x)`, `repr(x)` and `format(x)` of an exception
     name; `x.args` and `x.msg`; `getattr(x, "error_message" | "args" | "msg")`; and an f-string
     that interpolates an exception name.
+
+    `allowed` maps a function name to the `error_message` form it may read (`.error_message` or
+    `getattr(x, "error_message")`), and only that one (D083 item 2). Default: nothing is allowed.
     """
+    allowed = allowed or {}
     tree = ast.parse(source)
     parents: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
             parents[child] = parent
     names = _exception_names(tree)
+
+    def error_message_allowed(node: ast.AST) -> bool:
+        ancestor = parents.get(node)
+        while ancestor is not None:
+            if isinstance(ancestor, ast.FunctionDef | ast.AsyncFunctionDef):
+                return "error_message" in allowed.get(ancestor.name, frozenset())
+            ancestor = parents.get(ancestor)
+        return False
 
     def inside_logger(node: ast.AST) -> bool:
         ancestor = parents.get(node)
@@ -178,7 +200,11 @@ def message_text_reads(source: str) -> list[str]:
 
     found: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == "error_message":
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "error_message"
+            and not error_message_allowed(node)
+        ):
             found.append(f"{node.lineno}: reads .error_message")
         if (
             isinstance(node, ast.Attribute)
@@ -208,6 +234,7 @@ def message_text_reads(source: str) -> list[str]:
             and isinstance(node.args[1], ast.Constant)
             and node.args[1].value in {"error_message", "args", "msg"}
             and not inside_logger(node)
+            and not (node.args[1].value == "error_message" and error_message_allowed(node))
         ):
             found.append(f"{node.lineno}: getattr({node.args[0].id}, {node.args[1].value!r})")
         if (
@@ -226,6 +253,78 @@ def test_adapter_reads_no_message_text_for_a_decision() -> None:
 
 def test_manager_reads_no_message_text_for_a_decision() -> None:
     assert message_text_reads(_read(MANAGER)) == []
+
+
+def test_errors_module_reads_message_text_only_in_the_d083_function() -> None:
+    source = _read(ERRORS)
+    assert message_text_reads(source, D083_ALLOWED) == []
+    # Without the allow-list the D083 read is seen, so the guard really scans this file.
+    unallowed = message_text_reads(source)
+    assert len(unallowed) == 1
+    assert "getattr(exc, 'error_message')" in unallowed[0]
+    # The allow-listed function exists exactly once (a rename cannot silently drop the fence).
+    definitions = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == D083_FUNCTION
+    ]
+    assert len(definitions) == 1
+
+
+def test_d083_allow_list_is_one_function_and_one_attribute() -> None:
+    assert D083_ALLOWED == {D083_FUNCTION: frozenset({"error_message"})}
+
+
+def test_d083_function_exists_only_in_the_errors_module() -> None:
+    for path in (ADAPTER, MANAGER):
+        assert D083_FUNCTION not in _read(path)
+
+
+def test_d083_allow_list_negative_control_another_function_reading_msg_or_error_message() -> None:
+    snippet = (
+        "def _ban_until_epoch_ms(exc: BaseException) -> int | None:\n"
+        "    return getattr(exc, 'error_message', None)\n"
+        "def _retry_after_seconds(exc: BaseException) -> int | None:\n"
+        "    if exc.msg:\n"
+        "        return 1\n"
+        "    return getattr(exc, 'error_message', None)\n"
+        "def _other(exc: BaseException) -> str:\n"
+        "    return exc.error_message\n"
+    )
+    assert message_text_reads(snippet, D083_ALLOWED) == [
+        "4: exc.msg outside a logger call",
+        "6: getattr(exc, 'error_message')",
+        "8: reads .error_message",
+    ]
+
+
+def test_d083_allow_list_negative_control_the_d083_function_reading_args_or_other_forms() -> None:
+    snippet = (
+        "def _ban_until_epoch_ms(exc: BaseException) -> int | None:\n"
+        "    text = exc.args[1]\n"
+        "    text = getattr(exc, 'args', None)\n"
+        "    text = getattr(exc, 'msg', None)\n"
+        "    text = exc.msg\n"
+        "    text = str(exc)\n"
+        "    text = f'{exc}'\n"
+        "    return 1\n"
+    )
+    assert message_text_reads(snippet, D083_ALLOWED) == [
+        "2: exc.args outside a logger call",
+        "3: getattr(exc, 'args')",
+        "4: getattr(exc, 'msg')",
+        "5: exc.msg outside a logger call",
+        "6: str(exc) outside a logger call",
+        "7: f-string interpolates exc",
+    ]
+
+
+def test_d083_allow_list_does_not_leak_to_a_nested_or_renamed_function() -> None:
+    renamed = (
+        "def _ban_until_epoch_ms_v2(exc: BaseException) -> int | None:\n"
+        "    return getattr(exc, 'error_message', None)\n"
+    )
+    assert message_text_reads(renamed, D083_ALLOWED) == ["2: getattr(exc, 'error_message')"]
 
 
 def test_message_text_guard_reports_each_form() -> None:
