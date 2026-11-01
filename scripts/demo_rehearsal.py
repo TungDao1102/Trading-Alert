@@ -2662,12 +2662,16 @@ async def _smoke_sequence(
     # ---- signal, card, APPROVE, CONFIRM, the GTD LIMIT entry with no entry-time stop --------- #
     first = await _inject(env, recorder, "fill", "signal")
     wiring = env.wiring
-    shown = await _wait_until(
-        env,
-        lambda: _async_value(
-            wiring.demo_signal is not None and wiring.demo_signal.source.pending == 0
-        ),
-    )
+
+    async def card_issued() -> bool:
+        # The pump empties the queue when it TAKES the request; the plan row is written when the
+        # card is issued, seconds later (first Demo run: the script gave up in that gap).
+        if wiring.demo_signal is None or wiring.demo_signal.source.pending != 0:
+            return False
+        row = await _smoke_read(env, wiring.stores.entities.get_trade_plan, first.trade_plan_id)
+        return row is not None
+
+    shown = await _wait_until(env, card_issued)
     plan_row = await _smoke_read(env, wiring.stores.entities.get_trade_plan, first.trade_plan_id)
     if not shown or plan_row is None:
         raise _smoke_fail(env, recorder, "card", "the approval card was not issued")
