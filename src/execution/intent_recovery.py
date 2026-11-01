@@ -95,6 +95,11 @@ _PROBE_ID_PREFIX = "uep"
 _KEPT_ID_PREFIX = "uek"
 _CORRELATION_PREFIX = "unknown-entry:"
 
+# Plan 24-34 (D-35): called as `on_resolved(plan_hash, resolution_reason_code)` the moment the
+# resolver has closed an UNKNOWN entry (today only RESOLUTION_RECONCILED_ABSENT). It carries no
+# secret and no exchange text; the live composition binds it to the protection coordinator.
+EntryResolvedCallback = Callable[[str, str], None]
+
 # Why an UNKNOWN entry stayed UNKNOWN in one step (fixed text).
 KEPT_NOT_DUE = "NOT_DUE"
 KEPT_PROBES_PENDING = "PROBES_PENDING"
@@ -503,6 +508,7 @@ class UnknownEntryResolver:
         safe_mode_controller: SafeModeEntry,
         limits: ExecutionLimits,
         entry_good_till: Callable[[IntentRecord], datetime | None],
+        on_resolved: EntryResolvedCallback | None = None,
     ) -> None:
         count = limits.reconcile_entry_unknown_probe_count
         interval_ms = limits.reconcile_entry_unknown_probe_interval_ms
@@ -523,6 +529,7 @@ class UnknownEntryResolver:
         self._interval = timedelta(milliseconds=interval_ms)
         self._grace = timedelta(milliseconds=grace_ms)
         self._entry_good_till = entry_good_till
+        self._on_resolved = on_resolved
         self._state: dict[str, _ProbeState] = {}
 
     async def step(self, *, now_utc: datetime) -> UnknownEntryReport:
@@ -604,7 +611,9 @@ class UnknownEntryResolver:
             return self._keep(record, state, blocked, now_utc)
 
         # The evidence row precedes the finalization: no row, no close (T-20-23).
-        if not self._journal_ok(lambda: self._exit_event(record, "REJECTED", now_utc)):
+        if not self._journal_ok(
+            lambda: self._exit_event(record, "REJECTED", now_utc, probe_count=state.clean)
+        ):
             state.clean = 0
             return _KEPT, KEPT_JOURNAL_FAILED
         try:
@@ -618,7 +627,21 @@ class UnknownEntryResolver:
             state.clean = 0
             return _KEPT, KEPT_STORE_FAILED
         del self._state[record.approval_id]
+        self._notify_resolved(record)
         return _CLOSED, RESOLUTION_RECONCILED_ABSENT
+
+    def _notify_resolved(self, record: IntentRecord) -> None:
+        """Tell the optional listener that this entry was closed RECONCILED_ABSENT (D-35).
+
+        Best effort: the close is already durable, so a failing listener changes nothing here (the
+        plan then leaves its tracked state on its own step, as before the callback existed).
+        """
+        if self._on_resolved is None:
+            return
+        try:
+            self._on_resolved(record.plan_hash, RESOLUTION_RECONCILED_ABSENT)
+        except Exception:  # noqa: BLE001, S110 - the close is durable; the listener is optional
+            pass
 
     def _good_till(self, record: IntentRecord) -> datetime | None:
         """The entry's GTD time, or None when it is missing, naive or not UTC (fail closed)."""
@@ -649,7 +672,9 @@ class UnknownEntryResolver:
     def _ack(
         self, record: IntentRecord, answer: _Probe, state: _ProbeState, now_utc: datetime
     ) -> tuple[str, str]:
-        if not self._journal_ok(lambda: self._exit_event(record, "ACKED", now_utc)):
+        if not self._journal_ok(
+            lambda: self._exit_event(record, "ACKED", now_utc, probe_count=state.clean + 1)
+        ):
             state.clean = 0
             return _KEPT, KEPT_JOURNAL_FAILED
         if not _record(
@@ -719,7 +744,20 @@ class UnknownEntryResolver:
             created_at_utc=now_utc,
         )
 
-    def _exit_event(self, record: IntentRecord, to_status: str, now_utc: datetime) -> JournalEvent:
+    def _exit_event(
+        self,
+        record: IntentRecord,
+        to_status: str,
+        now_utc: datetime,
+        probe_count: int | None = None,
+    ) -> JournalEvent:
+        """The UNKNOWN_EXIT_EVIDENCE row of one exit (G4-034, D051 item (i)).
+
+        The row names the evidence source (REST_RECONCILE, the probe) and the injected time
+        (`observed_at_utc`); with `probe_count` it also names how many REST probes stand behind
+        the exit: for REJECTED the consecutive clean not-found probes, for ACKED the probes of the
+        sequence including the one that found the order. Fixed text and numbers only.
+        """
         reference = record.client_order_id
         if reference is None:  # unreachable: a probe needs the id
             raise ValueError("an UNKNOWN entry without a client order id cannot be closed")
@@ -743,13 +781,19 @@ class UnknownEntryResolver:
         # every later step, so the entry could never leave UNKNOWN. Each observation is its own
         # append-only row: the id is a content hash over the observation, and the same
         # observation replayed is still one row.
+        payload_json = event.payload_json
+        if probe_count is not None:
+            body = json.loads(payload_json)
+            body["probe_count"] = str(probe_count)
+            payload_json = _sorted_text(body)
         return replace(
             event,
+            payload_json=payload_json,
             journal_event_id=content_hash_event_id(
                 prefix=EXIT_EVIDENCE_PREFIX,
                 event_type=event.event_type,
                 entity_id=event.entity_id,
                 occurred_at_utc=now_utc,
-                payload_json=event.payload_json,
+                payload_json=payload_json,
             ),
         )

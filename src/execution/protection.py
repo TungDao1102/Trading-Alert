@@ -205,7 +205,7 @@ from src.domain.transitions import PROTECTION_INITIAL_STATE, TransitionKind, is_
 from src.execution.cancel_verification import PROVEN_GONE, CancelVerdict
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
-from src.execution.intent_store import ExecutionIntentStore
+from src.execution.intent_store import RESOLUTION_RECONCILED_ABSENT, ExecutionIntentStore
 from src.execution.liquidation_watch import (
     LIQUIDATION_TOO_CLOSE_AFTER_FILL,
     LIQUIDATION_UNKNOWN_AFTER_FILL,
@@ -302,6 +302,9 @@ EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
 EVENT_SWEEP_UNVERIFIED = "PROTECTION_SWEEP_UNVERIFIED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
+# Plan 24-34 (D-35): the UNKNOWN-entry resolver closed the entry RECONCILED_ABSENT and told the
+# coordinator through ``note_entry_resolved``; one note per plan, after the ordinary transition row.
+EVENT_ENTRY_RECONCILED_ABSENT = "PROTECTION_ENTRY_RECONCILED_ABSENT"
 # Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
 EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
 # Plan 20-19 (D-08): one note per plan the coordinator rebuilt after a restart.
@@ -1088,6 +1091,44 @@ class ProtectionCoordinator:
         state = "NONE" if tracked.state is None else tracked.state.value
         self._journal_note(
             tracked, EVENT_DIVERGENCE_NOTIFIED, {"kind": kind, "state": state}, self._now()
+        )
+        return True
+
+    def note_entry_resolved(self, plan_hash: str, resolution: str) -> bool:
+        """The UNKNOWN-entry resolver closed this plan's entry as absent (plan 24-34, D-35).
+
+        20-DEFERRED: before this call the plan stayed tracked as AWAITING_FILL (or
+        ENTRY_UNRESOLVED) until its own step. The resolver only closes an entry on repeated REST
+        probes, GTD plus grace, and fresh flat position and open-order reads (D080), so a
+        ``RESOLUTION_RECONCILED_ABSENT`` here means nothing rests and nothing is open: the plan
+        moves to ENTRY_ENDED_NO_FILL at once (the ordinary transition row, reason
+        ``ENTRY_ENDED_NO_FILL``) and one ``PROTECTION_ENTRY_RECONCILED_ABSENT`` note is journaled.
+
+        Nothing is sent, cancelled or closed here, and SAFE_MODE is not touched (this module never
+        leaves it). Returns False, with no row, for an unknown plan, any other resolution, or a
+        plan that is not waiting for its entry (AWAITING_FILL, ENTRY_UNRESOLVED): a plan with a
+        fill or a position is never changed by an absence verdict.
+        """
+        if resolution != RESOLUTION_RECONCILED_ABSENT:
+            return False
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None or tracked.state not in (
+            ProtectionState.AWAITING_FILL,
+            ProtectionState.ENTRY_UNRESOLVED,
+        ):
+            return False
+        previous = tracked.state
+        now = self._now()
+        if not self._transition(
+            tracked, ProtectionState.ENTRY_ENDED_NO_FILL, REASON_ENTRY_ENDED_NO_FILL, now
+        ):
+            return False
+        tracked.entry_terminal_at = now
+        self._journal_note(
+            tracked,
+            EVENT_ENTRY_RECONCILED_ABSENT,
+            {"resolution": resolution, "state_before": previous.value if previous else "NONE"},
+            now,
         )
         return True
 
@@ -3107,6 +3148,7 @@ __all__ = [
     "EVENT_DIVERGENCE_NOTIFIED",
     "EVENT_ENTRY_CANCEL_FAILED",
     "EVENT_ENTRY_CANCEL_NOT_SENT",
+    "EVENT_ENTRY_RECONCILED_ABSENT",
     "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
     "EVENT_LIQUIDATION_CHECKED",
