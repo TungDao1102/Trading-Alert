@@ -98,6 +98,12 @@ class JournalWriter(Protocol):
     def record(self, event: JournalEvent) -> None: ...
 
 
+#: Called as `(approval_id, trade_plan_id, reason_code, now_utc)` after a CONFIRM was refused
+#: before anything was consumed (plan 24-37, F4). The live composition binds the reservation
+#: releaser; it decides itself which refusals are final. A failing hook is logged and ignored.
+type RefusalHook = Callable[[str, str, str, datetime], Awaitable[Any]]
+
+
 class ExecutionService:
     """Bridges `on_confirmed` to one `execute_approved_plan` call (see the module docstring)."""
 
@@ -116,7 +122,9 @@ class ExecutionService:
         clock: Callable[[], datetime],
         authorized_chat_id: int,
         run_sync: Callable[..., Awaitable[Any]] | None = None,
+        on_refused: RefusalHook | None = None,
     ) -> None:
+        self._on_refused = on_refused
         self._run_sync = run_sync
         self._loop = loop
         self._token_for = token_for
@@ -196,6 +204,7 @@ class ExecutionService:
         resolved = await self._inputs.for_plan(approval, plan, confirmed_at)
         if isinstance(resolved, PlacementRefusal):
             await self._journal_refusal(approval, plan, resolved.reason)
+            await self._after_refusal(approval, plan, resolved.reason, confirmed_at)
             return
         callback = Callback(
             raw_token=raw_token,
@@ -240,6 +249,20 @@ class ExecutionService:
             approval=approval,
             plan=plan,
         )
+        if outcome.is_no_trade:
+            await self._after_refusal(approval, plan, outcome.reason_code, resolved.now_utc)
+
+    async def _after_refusal(
+        self, approval: Approval, plan: TradePlan, reason_code: str, now_utc: datetime
+    ) -> None:
+        """Hand a refused CONFIRM to the release hook (F4). Never raises, never places."""
+        hook = self._on_refused
+        if hook is None:
+            return
+        try:
+            await hook(approval.approval_id, plan.trade_plan_id, reason_code, now_utc)
+        except Exception as exc:  # noqa: BLE001 - the refusal is already journaled; class name only
+            log.warning("live.execution_service.release_failed", error_class=type(exc).__name__)
 
     # ---- journal ------------------------------------------------------------------------- #
 

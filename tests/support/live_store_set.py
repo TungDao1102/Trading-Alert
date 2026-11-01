@@ -55,6 +55,7 @@ from src.persistence.risk_reservations import ReservationRecord
 from src.persistence.system_state import SystemStateRecord
 from src.risk.margin_check import MarginClaim
 from src.risk.reservations import (
+    RELEASE_SOURCE_STATUSES,
     CountedReservation,
     ReleaseReason,
     ReservationRequest,
@@ -442,6 +443,47 @@ class InMemoryReservations:
                 row.status = ReservationStatus.PLACED
                 row.placed_at_utc = now_utc
             return row.record()
+
+    def release(
+        self, trade_plan_id: str, *, reason: ReleaseReason, now_utc: datetime, tx: Any = None
+    ) -> ReservationRecord:
+        """`PgRiskReservationStore.release`: RELEASE_SOURCE_STATUSES, first reason wins."""
+        with self._lock:
+            row = self._rows.get(trade_plan_id)
+            if row is None:
+                raise RowConflict(f"risk_reservations {trade_plan_id}: no reservation stored")
+            if row.status is ReservationStatus.RELEASED:
+                return row.record()
+            if row.status not in RELEASE_SOURCE_STATUSES[reason]:
+                raise RowConflict(
+                    f"risk_reservations {trade_plan_id}: {reason.value} cannot release "
+                    f"a {row.status.value} reservation"
+                )
+            row.status = ReservationStatus.RELEASED
+            row.release_reason = reason
+            row.released_at_utc = now_utc
+            return row.record()
+
+    def mark_open(
+        self, trade_plan_id: str, *, now_utc: datetime, tx: Any = None
+    ) -> ReservationRecord:
+        with self._lock:
+            row = self._rows[trade_plan_id]
+            if row.status is ReservationStatus.PLACED:
+                row.status = ReservationStatus.OPEN
+                row.opened_at_utc = now_utc
+            return row.record()
+
+    def list_unreleased(self, *, tx: Any = None) -> tuple[ReservationRecord, ...]:
+        wanted = {
+            ReservationStatus.REQUESTED,
+            ReservationStatus.RESERVED,
+            ReservationStatus.PLACED,
+            ReservationStatus.OPEN,
+        }
+        with self._lock:
+            rows = [r for r in self._rows.values() if r.status in wanted]
+        return tuple(r.record() for r in sorted(rows, key=lambda r: r.request.trade_plan_id))
 
     def get(self, trade_plan_id: str, *, tx: Any = None) -> ReservationRecord | None:
         with self._lock:

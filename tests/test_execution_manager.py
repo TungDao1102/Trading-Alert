@@ -527,6 +527,7 @@ def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
         "clock": lambda: _post_read_instant(case_input),
         # Phase 22 (plan 22-15): the guard is a REQUIRED field; the default stub passes.
         "margin_guard": StubMarginGuard(),
+        "snapshot_recorder": lambda snapshot: None,  # plan 24-37: required, TEST_ONLY no-op
     }
     values.update(overrides)
     return LivePlacementContext(**values)
@@ -2930,6 +2931,8 @@ def test_live_context_validates_every_field() -> None:
         "clock",
         "margin_guard",
         "alert_sink",
+        # Plan 24-37 (F3, D095): a deliberate addition to the pinned field set.
+        "snapshot_recorder",
     }
     # Every field is required except the optional alert sink (plan 20-22): building without one
     # raises TypeError. Phase 22 (plan 22-15) adds the required margin_guard: no None default
@@ -2952,6 +2955,7 @@ def test_live_context_validates_every_field() -> None:
         "tp1_quantity_fraction": 0.5,
         "clock": object(),
         "margin_guard": object(),
+        "snapshot_recorder": object(),
         "alert_sink": object(),
     }
     for name, bad in bad_values.items():

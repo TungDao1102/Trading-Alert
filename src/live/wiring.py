@@ -100,6 +100,7 @@ from src.live.reconcile import (
     build_reconcile,
     reconcile_tick_once,
 )
+from src.live.reservation_release import ReservationReleaser
 from src.live.risk_inputs import (
     LiveRiskInputProducer,
     PositionModeUnavailable,
@@ -184,6 +185,7 @@ TASK_HEALTH = "health_tick"
 TASK_LIVENESS = "liveness_stamp"
 TASK_SCHEDULED_CANCEL = "scheduled_cancel"
 TASK_SIGNAL_PUMP = "signal_source_pump"
+TASK_RESERVATION_SWEEP = "reservation_release_sweep"
 TASK_NAMES = frozenset(
     {
         TASK_PROTECTION,
@@ -198,6 +200,7 @@ TASK_NAMES = frozenset(
         TASK_LIVENESS,
         TASK_SCHEDULED_CANCEL,
         TASK_SIGNAL_PUMP,
+        TASK_RESERVATION_SWEEP,
     }
 )
 
@@ -223,6 +226,8 @@ LINK_SAFE_MODE = "durable_safe_mode_controller"
 LINK_SCHEDULER_SPECS = "scheduler_task_set"
 LINK_COMMANDS = "operator_commands_registered"
 LINK_DEMO_SIGNAL = "demo_signal_command_demo_only"
+LINK_SNAPSHOT_RECORDER = "plan_snapshot_recorder_in_the_write_ahead_path"
+LINK_RESERVATION_RELEASE = "reservation_release_on_refusal_and_expiry"
 
 
 class LiveStores(DeskStores, ConfirmStores, Protocol):
@@ -443,6 +448,7 @@ class CompleteLiveWiring:
     reconcile_observer: ReconcileObserver
     telegram_observer: TelegramDeliveryObserver
     kill_gate: KillGateSources
+    releaser: ReservationReleaser
     scheduler: Scheduler
     specs: tuple[TaskSpec, ...]
 
@@ -612,6 +618,15 @@ class LiveAssembly:
             ),
         )
         self.reservations = ExecutorReservations(stores.reservations, self.executor)
+        # Plan 24-37 (F4, D095): the release of reservations that will never be placed.
+        self.releaser = ReservationReleaser(
+            reservations=stores.reservations,
+            entities=stores.entities,
+            intents=stores.execution_state,
+            events_for_correlation=stores.journal.list_by_correlation,
+            executor=self.executor,
+            record=self.record,
+        )
 
     # ---- the lazy view -------------------------------------------------------------------- #
 
@@ -726,6 +741,9 @@ class LiveAssembly:
             alert_sink=sink,
             clock=clock,
             signal_context_for=self.signal_book.lookup,
+            # Plan 24-37 (F3, D095): the verified snapshot is made durable in the write-ahead
+            # path, so `restored_plans_builder` finds it after a restart.
+            snapshot_recorder=stores.snapshots.record,
         )
         service = ExecutionService(
             loop=loop,
@@ -740,6 +758,7 @@ class LiveAssembly:
             clock=clock,
             authorized_chat_id=self.config.authorized_chat_id,
             run_sync=self.executor.write,
+            on_refused=self.releaser.release_refused,
         )
 
         persistence = StreamPersistence(
@@ -994,6 +1013,7 @@ class LiveAssembly:
             reconcile_observer=self.reconcile_observer,
             telegram_observer=self.telegram_observer,
             kill_gate=self.kill_gate,
+            releaser=self.releaser,
             scheduler=scheduler,
             specs=specs,
         )
@@ -1031,6 +1051,9 @@ class LiveAssembly:
 
         async def confirm_sweep() -> None:
             await parts.runner.finalize_expired_once(clock())
+
+        async def reservation_sweep() -> None:
+            await self.releaser.sweep_once(clock())
 
         async def alert_drain() -> None:
             report = await drain_once(self.alerts)
@@ -1076,6 +1099,9 @@ class LiveAssembly:
             TaskSpec(TASK_COMMISSION, errors.wrap(commission), cadences.reconcile_tick),
             TaskSpec(TASK_DAY_RISK, day_risk, cadences.day_risk_backfill),
             TaskSpec(TASK_CONFIRM_SWEEP, confirm_sweep, cadences.confirm_ttl_sweep),
+            # The expiry sweep of unplaced reservations runs at the confirm-TTL cadence: the same
+            # kind of "something expired" check, no new number (plan 24-37).
+            TaskSpec(TASK_RESERVATION_SWEEP, reservation_sweep, cadences.confirm_ttl_sweep),
             TaskSpec(TASK_ALERT_DRAIN, alert_drain, cadences.alert_drain),
             TaskSpec(TASK_HEALTH, health_tick, cadences.health),
             TaskSpec(TASK_LIVENESS, liveness, cadences.liveness_stamp),
@@ -1110,6 +1136,17 @@ class LiveAssembly:
         report = await reconcile_tick_once(wiring.reconcile, now_utc)
         self.reconcile_observer.note(report)
         return report
+
+    async def _startup_reconcile_tick(self, now_utc: datetime) -> Any:
+        """The first tick of a start (D-08 step 8, D094): marks first, then the full tick.
+
+        The scheduler's mark-refresh task has not run yet, so after a restart with a tracked plan
+        the tick would judge the mark price of its symbol absent and enter SAFE_MODE STALE_FEED
+        although the feed is fine. `refresh_marks` never raises: a failed read leaves the mark
+        stale and the tick still enters SAFE_MODE (fail closed).
+        """
+        await refresh_marks(reader=self.exchange.public, marks=self.marks, symbols=self.symbols)
+        return await self._reconcile_tick(now_utc)
 
     # ---- the start sequence ports ------------------------------------------------------------ #
 
@@ -1165,7 +1202,7 @@ class LiveAssembly:
             measure_clock_drift=self._measure_drift,
             refresh_exchange_info=self._refresh_exchange_info,
             recovery=recovery,
-            reconcile_tick=self._reconcile_tick,
+            reconcile_tick=self._startup_reconcile_tick,
             expire_confirms=lambda now: self.wiring.runner.expire_on_restart(now),
             requeue_alerts=self._requeue_alerts,
             start_stream=lambda: self.wiring.stream.supervisor.start(),
@@ -1414,6 +1451,18 @@ def check_wiring(wiring: CompleteLiveWiring) -> list[str]:
         else wiring.demo_signal is None and COMMAND_DEMO_SIGNAL not in registered
     )
     need(demo_ok, LINK_DEMO_SIGNAL)
+    # F4 (plan 24-37): the service hands a refused CONFIRM to the releaser that the sweep task
+    # also runs, over the very same stores.
+    need(
+        getattr(wiring.service, "_on_refused", None) == wiring.releaser.release_refused
+        and TASK_RESERVATION_SWEEP in names,
+        LINK_RESERVATION_RELEASE,
+    )
+    # F3 (plan 24-37): the producer hands the manager the write-once snapshot store's `record`.
+    need(
+        getattr(wiring.producer, "_snapshot_recorder", None) == wiring.stores.snapshots.record,
+        LINK_SNAPSHOT_RECORDER,
+    )
     return broken
 
 
@@ -1434,11 +1483,13 @@ __all__ = [
     "LINK_ONE_GATE",
     "LINK_RECONCILE",
     "LINK_RESOLVER",
+    "LINK_RESERVATION_RELEASE",
     "LINK_RESTORE_REQUIRED",
     "LINK_RISK_PRODUCER",
     "LINK_SAFE_MODE",
     "LINK_SCHEDULER_SPECS",
     "LINK_SIGNAL_PUMP",
+    "LINK_SNAPSHOT_RECORDER",
     "LINK_SWEEPER",
     "REST_MAX_ERROR_RATE",
     "TASK_NAMES",

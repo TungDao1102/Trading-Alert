@@ -1255,6 +1255,19 @@ async def execute_approved_plan(
         )
         return _stored_entry_outcome(existing_entry)
 
+    # Plan constraint snapshot (plan 24-37, finding F3; D095): the VERIFIED snapshot (the A8
+    # margin type, leverage and equity the guard just read) is made durable here, once, after the
+    # approval was consumed and BEFORE `mark_sent`, so that nothing is ever sent for a plan whose
+    # snapshot a restart could not read back (`restored_plans_builder` raises RestoreSourceMissing
+    # for a live ENTRY row without it). It sits after the consume on purpose: a replay of this
+    # CONFIRM never gets here (the consume reports it), so the write-once row cannot meet a second,
+    # different snapshot of the same plan. Like a failing `mark_sent`, a store failure leaves the
+    # INTENDED row unresolved and nothing was sent. The recorder is required by the context.
+    try:
+        live_context.snapshot_recorder(verified_snapshot)
+    except PersistenceError:
+        return _reconciliation_required()
+
     # Post-consume store handling. Before `place_entry` a store failure only stops the
     # placement; once the entry may exist a store failure enters SAFE_MODE(DB_FAILURE)
     # exactly once and every later store write is skipped (the protective leg is still

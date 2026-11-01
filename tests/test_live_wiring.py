@@ -33,12 +33,14 @@ from src.live.wiring import (
     LINK_LIQUIDATION_WATCH,
     LINK_ONE_GATE,
     LINK_RECONCILE,
+    LINK_RESERVATION_RELEASE,
     LINK_RESOLVER,
     LINK_RESTORE_REQUIRED,
     LINK_RISK_PRODUCER,
     LINK_SAFE_MODE,
     LINK_SCHEDULER_SPECS,
     LINK_SIGNAL_PUMP,
+    LINK_SNAPSHOT_RECORDER,
     LINK_SWEEPER,
     TASK_NAMES,
     CompleteLiveWiring,
@@ -104,6 +106,8 @@ async def test_the_scheduler_specs_are_exactly_the_listed_set(complete: Complete
         "liveness_stamp",
         "scheduled_cancel",
         "signal_source_pump",
+        # Plan 24-37 (F4, D095): a deliberate addition to the pinned set.
+        "reservation_release_sweep",
     }
 
 
@@ -349,6 +353,33 @@ async def test_negative_control_a_runner_with_another_service(complete: Complete
 
     broken = check_wiring(_replace(complete, runner=_Runner(complete.runner)))  # type: ignore[arg-type]
     assert LINK_EXECUTION_SERVICE in broken
+
+
+async def test_negative_control_a_producer_without_the_snapshot_recorder_f3(
+    complete: CompleteLiveWiring,
+) -> None:
+    """Plan 24-37 / F3: without the recorder no placement makes its snapshot durable and a
+    restart cannot rebuild the plan, so the start must be refused naming the link."""
+    recorder = complete.producer._snapshot_recorder
+    assert recorder == complete.stores.snapshots.record
+    complete.producer._snapshot_recorder = None
+    try:
+        assert check_wiring(complete) == [LINK_SNAPSHOT_RECORDER]
+    finally:
+        complete.producer._snapshot_recorder = recorder
+
+
+async def test_negative_control_a_service_without_the_release_hook_f4(
+    complete: CompleteLiveWiring,
+) -> None:
+    """Plan 24-37 / F4: a refused CONFIRM must reach the releaser the sweep task runs."""
+    hook = complete.service._on_refused
+    assert hook == complete.releaser.release_refused
+    complete.service._on_refused = None
+    try:
+        assert check_wiring(complete) == [LINK_RESERVATION_RELEASE]
+    finally:
+        complete.service._on_refused = hook
 
 
 async def test_negative_control_a_service_not_fed_by_the_producer(

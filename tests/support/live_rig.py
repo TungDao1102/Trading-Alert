@@ -129,6 +129,8 @@ class RigPlacementInputs:
         self.margin_verdict = margin_verdict
         self.wiring: LiveWiring | None = None
         self.calls = 0
+        # TEST_ONLY: the snapshots the manager made durable (plan 24-37, F3), in order.
+        self.recorded_snapshots: list[Any] = []
 
     async def for_plan(
         self, approval: Approval, plan: TradePlan, confirmed_at_utc: datetime
@@ -202,6 +204,7 @@ class RigPlacementInputs:
             tp1_quantity_fraction=D("0.5"),
             clock=self.clock,
             margin_guard=StubMarginGuard(verdict=self.margin_verdict),
+            snapshot_recorder=self.recorded_snapshots.append,
         )
         return PlacementInputs(
             now_utc=now,

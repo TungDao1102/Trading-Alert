@@ -319,6 +319,9 @@ def harness(tmp_path: Path) -> Harness:
 # Task 1: the order.
 # --------------------------------------------------------------------------- #
 
+# D094 (owner, 2026-11-01), a DELIBERATE change of this pin: the user-data stream starts BEFORE the
+# first reconcile tick (D-08 had it after). Plan 24-29 finding F1: with the old order the tick
+# always judged a silent feed and every clean start was parked in SAFE_MODE STALE_FEED.
 EXPECTED_CALLS = [
     "config",
     "gate.restore",
@@ -331,10 +334,10 @@ EXPECTED_CALLS = [
     "builder",
     "coordinator.restore",
     "close_reader",
+    "stream",
     "reconcile",
     "expire_confirms",
     "requeue",
-    "stream",
     "bot",
     "scheduler",
     "health",
@@ -352,6 +355,7 @@ async def test_the_steps_run_in_the_d08_order_each_journaled_and_enable_is_last(
     assert outcome.admitted and not outcome.in_safe_mode and outcome.enabled
     assert outcome.enable_reason == REASON_ENABLED
     assert outcome.started_tasks == ("STREAM", "BOT", "SCHEDULER")
+    assert startup.START_STEPS.index("STREAM") < startup.START_STEPS.index("RECONCILE")
     assert [r["step"] for r in harness.step_rows()] == list(startup.START_STEPS)
     assert [r["outcome"] for r in harness.step_rows()] == ["OK"] * len(startup.START_STEPS)
     assert [r["group"] for r in harness.step_rows()] == [
@@ -361,6 +365,46 @@ async def test_the_steps_run_in_the_d08_order_each_journaled_and_enable_is_last(
     assert all(harness.controller_disabled_at_row[:-1])
     assert harness.enablement is not None and not harness.enablement.is_disabled
     assert [s.name for s in outcome.steps] == list(startup.START_STEPS)
+
+
+async def test_the_stream_is_up_when_the_first_reconcile_tick_judges_the_feed(
+    harness: Harness,
+) -> None:
+    """D094 / finding F1: the tick must find the stream started, and it is started only after the
+    recovery rebuilt the registry and the client-id index (no frame before the rebuild)."""
+    seen: dict[str, list[str]] = {}
+
+    async def tick(now: datetime) -> TickReport:
+        seen["calls_at_tick"] = list(harness.calls)
+        return TickReport(
+            outcome=TICK_COMPARED, now_utc=now, agreement=True, divergences=(), failed_source=None
+        )
+
+    harness.overrides["reconcile"] = tick
+    outcome = await harness.run()
+
+    at_tick = seen["calls_at_tick"]
+    assert "stream" in at_tick
+    assert at_tick.index("stream") > at_tick.index("coordinator.restore")
+    assert at_tick.index("stream") > at_tick.index("builder")
+    assert "bot" not in at_tick and "scheduler" not in at_tick
+    assert outcome.admitted and not outcome.in_safe_mode and outcome.enabled
+
+
+async def test_a_stream_that_cannot_start_still_runs_the_tick_and_continues_in_safe_mode(
+    harness: Harness,
+) -> None:
+    """D-08 fail-closed semantics survive the reorder: a failing stream start is SAFE_MODE with
+    monitoring (the tick, the bot and the scheduler) still running, and nothing is enabled."""
+    harness.overrides["stream"] = _raises("stream")
+    outcome = await harness.run()
+
+    assert outcome.admitted and outcome.in_safe_mode and not outcome.enabled
+    assert "STREAM" in outcome.degraded_steps
+    assert "reconcile" in harness.calls, "monitoring continues"
+    assert outcome.started_tasks == ("BOT", "SCHEDULER")
+    assert harness.safe_mode is not None
+    assert harness.safe_mode.entered_reason == "STARTUP_STREAM_FAILED"
 
 
 def test_start_steps_is_the_nine_groups_in_order() -> None:

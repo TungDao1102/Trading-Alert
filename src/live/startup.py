@@ -19,9 +19,13 @@ Groups, as numbered in D-08 (`START_STEP_GROUP`):
    failure starts it IN SAFE_MODE), a DISABLED enablement controller (a persisted "enabled" is
    never trusted), the constraint snapshots, and the spill sentinel check (20-DEFERRED row 43).
 5. CLOCK_DRIFT. 6. EXCHANGE_INFO (exchange info and the lot filters). 7. RECOVERY
-   (`run_startup_recovery`, the restored-plans and close-attempts glue below). 8. RECONCILE (one
-   full tick).
-9. CONFIRM_EXPIRY, ALERT_REQUEUE, STREAM, BOT, SCHEDULER, then HEALTH and ENABLE (DEMO only).
+   (`run_startup_recovery`, the restored-plans and close-attempts glue below). 8. STREAM, then
+   RECONCILE (one full tick). Since D094 (owner, 2026-11-01) the user-data stream is started and
+   LIVE BEFORE the first reconcile tick: D-08 ran the tick first, so the tick always judged a
+   silent feed and every clean start was parked in SAFE_MODE `STALE_FEED`. The stream is started
+   only after RECOVERY, so the restored plans and the client-id index are complete before the first
+   frame; nothing is placed before the last step either way.
+9. CONFIRM_EXPIRY, ALERT_REQUEUE, BOT, SCHEDULER, then HEALTH and ENABLE (DEMO only).
 
 Failure classes (fail closed):
 
@@ -117,16 +121,17 @@ STEP_SPILL_SENTINEL: Final = "SPILL_SENTINEL"
 STEP_CLOCK_DRIFT: Final = "CLOCK_DRIFT"
 STEP_EXCHANGE_INFO: Final = "EXCHANGE_INFO"
 STEP_RECOVERY: Final = "RECOVERY"
+STEP_STREAM: Final = "STREAM"
 STEP_RECONCILE: Final = "RECONCILE"
 STEP_CONFIRM_EXPIRY: Final = "CONFIRM_EXPIRY"
 STEP_ALERT_REQUEUE: Final = "ALERT_REQUEUE"
-STEP_STREAM: Final = "STREAM"
 STEP_BOT: Final = "BOT"
 STEP_SCHEDULER: Final = "SCHEDULER"
 STEP_HEALTH: Final = "HEALTH"
 STEP_ENABLE: Final = "ENABLE"
 
-#: The fixed order of a start (D-08). Nothing is placed before the last step completes.
+#: The fixed order of a start (D-08 as amended by D094: STREAM before RECONCILE). Nothing is
+#: placed before the last step completes.
 START_STEPS: Final[tuple[str, ...]] = (
     STEP_CONFIG,
     STEP_GATE,
@@ -138,10 +143,10 @@ START_STEPS: Final[tuple[str, ...]] = (
     STEP_CLOCK_DRIFT,
     STEP_EXCHANGE_INFO,
     STEP_RECOVERY,
+    STEP_STREAM,
     STEP_RECONCILE,
     STEP_CONFIRM_EXPIRY,
     STEP_ALERT_REQUEUE,
-    STEP_STREAM,
     STEP_BOT,
     STEP_SCHEDULER,
     STEP_HEALTH,
@@ -160,10 +165,10 @@ START_STEP_GROUP: Final[Mapping[str, int]] = {
     STEP_CLOCK_DRIFT: 5,
     STEP_EXCHANGE_INFO: 6,
     STEP_RECOVERY: 7,
+    STEP_STREAM: 8,
     STEP_RECONCILE: 8,
     STEP_CONFIRM_EXPIRY: 9,
     STEP_ALERT_REQUEUE: 9,
-    STEP_STREAM: 9,
     STEP_BOT: 9,
     STEP_SCHEDULER: 9,
     STEP_HEALTH: 9,
@@ -942,7 +947,13 @@ async def _drive(run: _Run) -> None:
 
     await run.run(STEP_RECOVERY, recovery)
 
-    # ---- 8. one full reconcile tick ------------------------------------------------------- #
+    # ---- 8. the user-data stream, then one full reconcile tick ----------------------------- #
+    # D094: the stream is LIVE (the supervisor's start returns once LIVE or halted) before the
+    # tick, so the tick judges a live feed. A stream that cannot start (it raises, or halts and
+    # the tick sees USER_DATA_STREAM_HALTED) still continues in SAFE_MODE: fail closed (D-08).
+    if await run.run(STEP_STREAM, _starter(ports.start_stream)):
+        run.started.append(STEP_STREAM)
+
     async def reconcile() -> str | None:
         report = await ports.reconcile_tick(ports.clock())
         run.reconcile = report
@@ -973,7 +984,6 @@ async def _drive(run: _Run) -> None:
     await run.run(STEP_ALERT_REQUEUE, requeue)
 
     for name, port in (
-        (STEP_STREAM, ports.start_stream),
         (STEP_BOT, ports.start_bot),
         (STEP_SCHEDULER, ports.start_scheduler),
     ):

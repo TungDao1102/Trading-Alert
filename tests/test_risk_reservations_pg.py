@@ -450,6 +450,7 @@ def test_the_store_has_no_delete_path() -> None:
         "get",
         "list_counted",
         "list_margin_claims",
+        "list_unreleased",  # plan 24-37 (F4): a read for the release sweep, still no delete path
         "register_request",
         "reserve_in",
         "mark_placed",
@@ -533,6 +534,24 @@ def test_a_closed_position_releases_a_placed_row_whose_first_fill_was_never_mark
     assert store.list_counted() == ()
     with pytest.raises(RowConflict):
         store.mark_open(P1, now_utc=datetime(2026, 10, 23, 13, 0, tzinfo=UTC))
+
+
+def test_list_unreleased_reads_every_status_but_released_for_the_release_sweep(
+    db: OperationalDatabase, store: PgRiskReservationStore
+) -> None:
+    # Plan 24-37 (F4/F5): written, NOT run in the plan (no PostgreSQL there). REQUESTED, RESERVED,
+    # PLACED and OPEN rows are listed, sorted by plan id; a RELEASED row is not.
+    open_today(db)
+    store.register_request(request(), now_utc=NOW)
+    assert [(r.trade_plan_id, r.status) for r in store.list_unreleased()] == [(P1, S.REQUESTED)]
+    reserve(db, store, decided())
+    assert [r.status for r in store.list_unreleased()] == [S.RESERVED]
+    store.mark_placed(P1, now_utc=LATER)
+    assert [r.status for r in store.list_unreleased()] == [S.PLACED]
+    store.mark_open(P1, now_utc=datetime(2026, 10, 23, 12, 30, tzinfo=UTC))
+    assert [r.status for r in store.list_unreleased()] == [S.OPEN]
+    store.release(P1, reason=R.POSITION_CLOSED, now_utc=datetime(2026, 10, 23, 13, 0, tzinfo=UTC))
+    assert store.list_unreleased() == ()
 
 
 def test_mark_placed_then_mark_open_walk_the_lifecycle(

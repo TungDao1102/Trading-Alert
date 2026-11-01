@@ -73,6 +73,12 @@ class LivePlacementContext:
         alert_sink: Optional operator-alert sink with the `JournalFirstAlertSink.alert(...)` call
             shape. `execute_approved_plan` uses it only to alert a duplicate execution attempt
             (D-23); `None` sends nothing. A failing sink never changes the outcome.
+        snapshot_recorder: REQUIRED write-once recorder of the VERIFIED plan constraint snapshot
+            (`PgPlanConstraintSnapshotStore.record`, plan 24-37 / D095). The manager calls it once,
+            after the approval was consumed and before the entry is marked sent; a
+            `PersistenceError` ends the placement as RECONCILIATION_REQUIRED with nothing sent. No
+            `None` default: a context that forgot it would place entries a restart cannot rebuild.
+            The wiring gate checks the link in the live composition.
     """
 
     signal: Signal
@@ -84,6 +90,7 @@ class LivePlacementContext:
     tp1_quantity_fraction: Decimal
     clock: Callable[[], datetime]
     margin_guard: MarginGuardPort
+    snapshot_recorder: Callable[[PlanConstraintSnapshot], None]
     alert_sink: Any | None = None
 
     def __post_init__(self) -> None:
@@ -116,6 +123,8 @@ class LivePlacementContext:
             raise TypeError("margin_guard must provide an async evaluate(request)")
         if self.alert_sink is not None and not callable(getattr(self.alert_sink, "alert", None)):
             raise TypeError("alert_sink must provide alert(...) or be None")
+        if not callable(self.snapshot_recorder):
+            raise TypeError("snapshot_recorder must be callable (the write-once snapshot recorder)")
 
 
 __all__ = ["LivePlacementContext"]
