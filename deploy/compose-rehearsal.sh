@@ -20,6 +20,8 @@ set -Eeuo pipefail
 #     token, and the database port): stop the soak first, `deploy/compose-soak.sh stop`.
 # --dry-run (only as the first argument; DRY_RUN=1 does the same) prints the compose command and
 # runs no docker at all, so the soak check is only announced. COMPOSE_PROJECT_NAME is overridden.
+# TRADING_PAPER_ENV_FILE and TRADING_BACKUP_ENV_FILE (plan 24-36) are pointed at the rehearsal env
+# file too, so a rehearsal never reads the checkout's own .env.paper or .env.backup.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -145,6 +147,8 @@ main() {
   fi
 
   export COMPOSE_PROJECT_NAME="$REHEARSAL_PROJECT"
+  export TRADING_PAPER_ENV_FILE="$file"
+  export TRADING_BACKUP_ENV_FILE="$file"
   compose_init
   # Put the project flag right after `docker compose`; compose_init has added --env-file.
   COMPOSE=(docker compose -p "$REHEARSAL_PROJECT" "${COMPOSE[@]:2}")

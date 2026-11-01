@@ -15,6 +15,12 @@ set -Eeuo pipefail
 # that names another project is refused too, so this wrapper cannot be pointed elsewhere by
 # mistake. TRADING_ENV_FILE is honoured (see compose_init in lib.sh); DRY_RUN=1 only prints.
 #
+# One soak env file (plan 24-36, D-29, WR-06): the compose file gives the paper services a paper
+# env file (TRADING_PAPER_ENV_FILE) and the backup and ops services a backup env file
+# (TRADING_BACKUP_ENV_FILE), on top of the shared one. When TRADING_ENV_FILE is set this wrapper
+# points both at it, so the soak keeps its single operator file and never reads the checkout's own
+# .env.paper or .env.backup (which hold the real shadow bot token and the real backup secrets).
+#
 # The guard covers this wrapper. It cannot stop a hand-typed raw compose command: the runbook
 # and tests/test_soak_compose.py therefore forbid one, and the test scans the runbook code
 # blocks and deploy/*.sh for it.
@@ -69,6 +75,10 @@ main() {
     die "refused: this wrapper drives only the project $SOAK_PROJECT; drop the -p / --project-name flag."
   fi
   export COMPOSE_PROJECT_NAME="$SOAK_PROJECT"
+  if [[ -n ${TRADING_ENV_FILE:-} ]]; then
+    export TRADING_PAPER_ENV_FILE="$TRADING_ENV_FILE"
+    export TRADING_BACKUP_ENV_FILE="$TRADING_ENV_FILE"
+  fi
   compose_init
   # Put the project flag right after `docker compose`; compose_init may have added --env-file.
   COMPOSE=(docker compose -p "$SOAK_PROJECT" "${COMPOSE[@]:2}")
