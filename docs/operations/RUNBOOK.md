@@ -958,6 +958,8 @@ How a SAFE_MODE exit goes:
 
 If the bot does not answer (stream down, process held, bot token conflict), the commands are unavailable: the process still holds new entries in SAFE_MODE, and the exit then needs a restart after the cause is fixed (a restart never leaves SAFE_MODE by itself, section 21.1). Clearing a REST gate restriction stays an ssh command (section 21.3); `/safemode_exit` refuses `GATE_NOT_OPEN` while one is in force.
 
+The start order is, after the recovery below, STREAM, then one RECONCILE tick, then the bot, the scheduler, HEALTH and ENABLE (DECISIONS D094): the user-data stream is up before the first tick, so a clean start, including a restart with an open position, is enabled by the start sequence itself and needs no `/safemode_exit`. SAFE_MODE after a start means something real: read its reason in the journal. A placement records the verified plan constraint snapshot before the entry is sent, which is what lets a restart rebuild a live plan; a reservation is released by the `reservation_release_sweep` task when its plan expired unplaced, when its CONFIRM was refused for a final reason, when its entry was rejected, or when its position closed or its entry ended with no fill (DECISIONS D095); an entry that may still fill stays counted.
+
 After a restart the coordinator is rebuilt from the intent rows, the persisted plans and the journal, and no new entry opens until that restore is complete. The rows it reads are the ENTRY intents in SENT, UNKNOWN and ACKED for plans that have not ended (a `PROTECTION_TRANSITION` into `FLAT` or `ENTRY_ENDED_NO_FILL` ends a plan; no age limit, DECISIONS D093).
 
 ### 21.1b Injecting a Demo smoke signal (DEMO only)
