@@ -2282,7 +2282,6 @@ SMOKE_EXPIRY_ROUNDS = 60
 _SMOKE_STEPS = (
     "start",
     "wiring_check",
-    "startup_safe_mode_exit",
     "demo_enable",
     "signal",
     "card",
@@ -2295,8 +2294,10 @@ _SMOKE_STEPS = (
     "restart_rehydrate",
     "replays_place_nothing",
     "close_cleanup",
+    "reservation_released_on_close",
     "account_clean",
     "safe_mode_drill",
+    "drill_reservation_released",
 )
 
 
@@ -2542,9 +2543,7 @@ async def _record_start_facts(env: SmokeEnv, recorder: EvidenceRecorder) -> None
 
 
 async def _bring_up(env: SmokeEnv, recorder: EvidenceRecorder, label: str) -> Any:
-    """Start the process (the D-08 sequence) and leave it admitted, SAFE_MODE exited, enabled."""
-    from src.adapters.binance_userdata_supervisor import StreamState
-    from src.live.enablement import enable_demo
+    """Start the process (D-08 as amended by D094); it must be admitted and enabled."""
     from src.live.startup import run_start_sequence
     from src.live.wiring import check_wiring
 
@@ -2597,49 +2596,30 @@ async def _bring_up(env: SmokeEnv, recorder: EvidenceRecorder, label: str) -> An
     if label == "start":
         _smoke_record(env, recorder, "wiring_check", STEP_PASSED, "check_wiring is empty")
         await _record_start_facts(env, recorder)
-    wiring = env.wiring
-    exit_name = "startup_safe_mode_exit" if label == "start" else f"{label}_safe_mode_exit"
-    if outcome.in_safe_mode:
-        # Finding F1 (24-29): the D-08 order runs the reconcile tick (step 8) before the stream
-        # starts (step 9), so every start enters SAFE_MODE STALE_FEED and skips HEALTH and ENABLE.
-        live = await _wait_until(
-            env, lambda: _async_value(wiring.stream.supervisor.state is StreamState.LIVE)
-        )
-        if not live:
-            raise _smoke_fail(env, recorder, exit_name, "the stream never went LIVE")
-        await env.owner.act("safemode_exit")
-        left = await _wait_until(env, lambda: _async_value(not wiring.safe_mode.in_safe_mode))
-        if not left:
-            raise _smoke_fail(env, recorder, exit_name, "SAFE_MODE was not left")
-        _smoke_record(
+    name = "demo_enable" if label == "start" else f"{label}_enable"
+    if outcome.in_safe_mode or not outcome.enabled:
+        # D094 (24-37): the stream is started before the first reconcile tick, so a CLEAN start
+        # is enabled by the start sequence itself (HEALTH, then ENABLE as the last step). A start
+        # that is still in SAFE_MODE or disabled is a real finding: the smoke stops and names it;
+        # it no longer hides it behind an operator exit and a hand-made enable.
+        enable_row = next((s for s in outcome.steps if s.name == "ENABLE"), None)
+        standing = getattr(env.wiring.safe_mode, "entered_reason", None)
+        raise _smoke_fail(
             env,
             recorder,
-            exit_name,
-            STEP_PASSED,
-            "start-up SAFE_MODE ("
-            + ",".join(outcome.safe_mode_reasons or ("STALE_FEED",))
-            + ") left by the operator exit",
+            name,
+            "the start did not enable entries: SAFE_MODE "
+            + (
+                ",".join(outcome.safe_mode_reasons) or str(standing)
+                if outcome.in_safe_mode
+                else "off"
+            )
+            + "; ENABLE "
+            + ("missing" if enable_row is None else f"{enable_row.outcome} {enable_row.code}"),
         )
-    if not outcome.enabled:
-        verdict = ports.health_verdict()
-        if hasattr(verdict, "__await__"):
-            verdict = await verdict
-        kill = ports.kill_gate_state()
-        if hasattr(kill, "__await__"):
-            kill = await kill
-        result = await enable_demo(
-            mode=assembly.config.mode,
-            controller=wiring.enablement,
-            health_verdict=verdict,
-            kill_gate_state=kill,
-            now_utc=env.clock(),
-            record=ports.record,
-            persist=ports.persist_enablement,
-        )
-        name = "demo_enable" if label == "start" else f"{label}_enable"
-        if not result.enabled:
-            raise _smoke_fail(env, recorder, name, f"entries stay disabled: {result.reason}")
-        _smoke_record(env, recorder, name, STEP_PASSED, "entries enabled in process (DEMO)")
+    _smoke_record(
+        env, recorder, name, STEP_PASSED, "entries enabled by the start sequence (DEMO), last step"
+    )
     return outcome
 
 
@@ -2839,6 +2819,7 @@ async def _smoke_sequence(
         raise _smoke_fail(second, recorder, "close_cleanup", "the plan did not end FLAT")
     await _record_cancel_lag(second, recorder, first, (stop_role, *tp_roles))
     _smoke_record(second, recorder, "close_cleanup", STEP_PASSED, "closed by the operator close")
+    await _reservation_released_on_close(second, recorder, first)
     adapter = second.assembly.exchange.adapter
     left = (
         len(await adapter.snapshot_open_normal_orders(symbol=SYMBOL)),
@@ -2874,11 +2855,13 @@ async def _wait_for_expiry(env: SmokeEnv, expiry_utc: datetime) -> None:
 async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, *, after: datetime) -> None:
     """Enter SAFE_MODE, show the owner's CONFIRM refused, leave it through the operator exit.
 
-    It runs LAST, on an idle symbol, after the main plan has expired: while a position, an active
-    plan or an open approval exists on the symbol, a second request is refused at the card
-    (CONFLICT_WITH_OPEN_POSITION, ACTIVE_PLAN, PENDING_OR_APPROVED_APPROVAL), and a refused
-    CONFIRM leaves its plan APPROVED and its reservation counted (finding F4), so nothing may
-    follow it.
+    It runs after the close, on an idle symbol, once the main plan has expired. It cannot sit
+    between the clean reconcile and the restart (the D-33 position): while the first position is
+    open, a second request on the symbol is refused at the card (CONFLICT_WITH_OPEN_POSITION,
+    ACTIVE_PLAN, PENDING_OR_APPROVED_APPROVAL), and that is the symbol rule, not the reservation.
+    A refused CONFIRM leaves its plan APPROVED, so the card of the symbol stays refused until the
+    drill plan expires; the last step (F4, plan 24-37) waits for that expiry and shows that the
+    scheduler's reservation sweep released the reservation, so the next entry is not counted out.
     """
     wiring = env.wiring
     await _wait_for_expiry(env, after)
@@ -2919,6 +2902,77 @@ async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, *, after: 
         "safe_mode_drill",
         STEP_PASSED,
         "entered; a CONFIRM placed nothing; left through /safemode_exit",
+    )
+    await _drill_reservation_released(env, recorder, drill)
+
+
+async def _reservation_released_on_close(
+    env: SmokeEnv, recorder: EvidenceRecorder, first: _Request
+) -> None:
+    """F5: the closed position's reservation is released by the sweep (POSITION_CLOSED)."""
+    reservations = env.wiring.stores.reservations
+
+    async def released() -> bool:
+        record = await _smoke_read(env, reservations.get, first.trade_plan_id)
+        return record is not None and record.status.value == "RELEASED"
+
+    if not await _wait_until(env, released):
+        raise _smoke_fail(
+            env,
+            recorder,
+            "reservation_released_on_close",
+            "the reservation of the closed position was not released by the sweep",
+        )
+    record = await _smoke_read(env, reservations.get, first.trade_plan_id)
+    reason = (
+        None if record is None or record.release_reason is None else record.release_reason.value
+    )
+    if reason != "POSITION_CLOSED":
+        raise _smoke_fail(
+            env, recorder, "reservation_released_on_close", f"released with reason {reason}"
+        )
+    _smoke_record(
+        env,
+        recorder,
+        "reservation_released_on_close",
+        STEP_PASSED,
+        "the sweep released the closed position's reservation (POSITION_CLOSED)",
+    )
+
+
+async def _drill_reservation_released(
+    env: SmokeEnv, recorder: EvidenceRecorder, drill: _Request
+) -> None:
+    """F4: the refused drill plan's reservation is released by the sweep once the plan expires."""
+    wiring = env.wiring
+    reservations = wiring.stores.reservations
+    await _wait_for_expiry(env, drill.expiry_utc)
+
+    async def released() -> bool:
+        record = await _smoke_read(env, reservations.get, drill.trade_plan_id)
+        return record is not None and record.status.value == "RELEASED"
+
+    if not await _wait_until(env, released):
+        raise _smoke_fail(
+            env,
+            recorder,
+            "drill_reservation_released",
+            "the reservation of the refused drill plan was not released after its expiry",
+        )
+    record = await _smoke_read(env, reservations.get, drill.trade_plan_id)
+    reason = (
+        None if record is None or record.release_reason is None else record.release_reason.value
+    )
+    if reason != "PLAN_EXPIRED":
+        raise _smoke_fail(
+            env, recorder, "drill_reservation_released", f"released with reason {reason}"
+        )
+    _smoke_record(
+        env,
+        recorder,
+        "drill_reservation_released",
+        STEP_PASSED,
+        "the sweep released the refused plan's reservation (PLAN_EXPIRED)",
     )
 
 

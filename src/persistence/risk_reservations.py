@@ -259,6 +259,29 @@ class PgRiskReservationStore:
             row = session.get(RiskReservationRow, trade_plan_id, populate_existing=True)
             return None if row is None else _to_record(row)
 
+    def list_unreleased(self, *, tx: Session | None = None) -> tuple[ReservationRecord, ...]:
+        """Every row that is not RELEASED, sorted by plan id (plan 24-37, the release sweep).
+
+        REQUESTED, RESERVED, PLACED and OPEN: the sweep decides per row which reason (if any)
+        applies; the store still enforces `RELEASE_SOURCE_STATUSES` when it releases.
+        """
+        with self._unit(tx) as session:
+            rows = session.scalars(
+                select(RiskReservationRow)
+                .where(
+                    RiskReservationRow.status.in_(
+                        [
+                            _S.REQUESTED.value,
+                            _S.RESERVED.value,
+                            _S.PLACED.value,
+                            _S.OPEN.value,
+                        ]
+                    ),
+                )
+                .order_by(RiskReservationRow.trade_plan_id)
+            ).all()
+            return tuple(_to_record(row) for row in rows)
+
     def list_counted(self, *, tx: Session | None = None) -> tuple[CountedReservation, ...]:
         """Every RESERVED, PLACED and OPEN row, sorted by (symbol, position_side, plan id).
 

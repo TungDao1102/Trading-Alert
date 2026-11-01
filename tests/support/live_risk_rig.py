@@ -362,6 +362,7 @@ def build_parts(
         clock=clock,
         signal_context_for=static_context(signal, bar_close),
         margin_guard=margin_guard,
+        snapshot_recorder=lambda snapshot: None,  # plan 24-37 (F3): required, TEST_ONLY no-op
     )
     return Parts(
         producer=producer,

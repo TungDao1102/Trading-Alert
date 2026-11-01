@@ -67,7 +67,11 @@ from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
 from src.execution.account_equity import LiveEquitySource
 from src.execution.confirm_recheck import ConfirmInputs
-from src.execution.constraint_snapshot import ExchangeFilterExtras, build_plan_constraint_snapshot
+from src.execution.constraint_snapshot import (
+    ExchangeFilterExtras,
+    PlanConstraintSnapshot,
+    build_plan_constraint_snapshot,
+)
 from src.execution.day_risk_service import LiveDayRiskService
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
 from src.execution.liquidation_watch import (
@@ -463,6 +467,7 @@ class LiveRiskInputProducer:
         alert_sink: Any | None,
         clock: Callable[[], datetime],
         signal_context_for: SignalContextLookup,
+        snapshot_recorder: Callable[[PlanConstraintSnapshot], None],
         margin_guard: MarginGuardPort | None = None,
     ) -> None:
         age_ms = execution_limits.account_max_equity_age_ms
@@ -481,6 +486,7 @@ class LiveRiskInputProducer:
         self._params = dict(parameter_set)
         self._limits = execution_limits
         self._alert_sink = alert_sink
+        self._snapshot_recorder = snapshot_recorder
         self._clock = clock
         self._signal_context_for = signal_context_for
         self._max_equity_age = age_ms * _ONE_MS
@@ -665,6 +671,7 @@ class LiveRiskInputProducer:
             clock=self._clock,
             margin_guard=self._margin_guard,
             alert_sink=self._alert_sink,
+            snapshot_recorder=self._snapshot_recorder,
         )
         return PlacementInputs(
             now_utc=now_utc,

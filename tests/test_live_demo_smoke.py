@@ -132,13 +132,32 @@ async def test_no_secret_reaches_the_evidence_file_or_stdout(
     assert json.loads(text)["details"]["evidence_kind"] == "SYNTHETIC"
 
 
-async def test_without_the_snapshot_gap_fill_the_restart_fails_closed_f3(tmp_path: Path) -> None:
-    """Finding F3: nothing in `src` records the plan constraint snapshot, so a restart cannot
-    rebuild a live plan; the recovery fails closed (SAFE_MODE DB_FAILURE) and the smoke says so.
-    This pins the gap: it flips when a production writer for the snapshot is added.
-    """
+async def test_the_placement_records_the_verified_snapshot_and_the_restart_rehydrates_f3(
+    tmp_path: Path,
+) -> None:
+    """Finding F3 (fixed by plan 24-37, D095): the write-ahead path records the VERIFIED plan
+    constraint snapshot, so the restart rebuilds the plan with no test-side gap fill."""
+    from src.execution.constraint_snapshot import LiveInputsStatus
+
     recorder = _recorder()
-    env = build_fake_smoke_env(tmp_path, persist_snapshots=False)
+    env = build_fake_smoke_env(tmp_path)
+    await dr.run_composed_smoke(env, recorder)
+    stored = list(env.rig.stores.snapshots._rows.values())
+    assert len(stored) == 1, "one write-once snapshot, for the one plan that was placed"
+    (snapshot,) = stored
+    assert snapshot.live_inputs_status is LiveInputsStatus.COMPLETE
+    assert snapshot.margin_type is not None and snapshot.leverage and snapshot.equity_used
+    restart = recorder.details["start_sequences"][-1]
+    assert restart["label"] == "restart"
+    assert restart["recovery_failed_steps"] == [] and restart["plans_restored"] == 1
+    assert _statuses(recorder)["restart_rehydrate"] == dr.STEP_PASSED
+
+
+async def test_a_restart_that_finds_no_snapshot_row_fails_closed(tmp_path: Path) -> None:
+    """The fail-closed side of F3: a database that lost the row cannot rebuild the plan; the
+    recovery enters SAFE_MODE DB_FAILURE and the smoke stops at the restart step."""
+    recorder = _recorder()
+    env = build_fake_smoke_env(tmp_path, drop_snapshots_before_restart=True)
     with pytest.raises(dr.SmokeHalt, match="restart_rehydrate"):
         await dr.run_composed_smoke(env, recorder)
     restart = recorder.details["start_sequences"][-1]
@@ -147,6 +166,66 @@ async def test_without_the_snapshot_gap_fill_the_restart_fails_closed_f3(tmp_pat
     assert restart["recovery_safe_mode_reasons"] == ["DB_FAILURE"]
     assert _statuses(recorder)["restart_rehydrate"] == dr.STEP_FAILED
     assert len(env.fake.calls_to("place_entry")) == 1
+
+
+async def test_the_snapshot_is_recorded_after_the_consume_and_before_the_entry_is_sent_f3(
+    tmp_path: Path,
+) -> None:
+    """The one added write sits between the consume and `mark_sent`: nothing is sent for a plan
+    whose snapshot is not durable, and the Phase 17 to 21 order around it is unchanged."""
+    env = build_fake_smoke_env(tmp_path)
+    rig = env.rig
+    order: list[str] = []
+    intents = rig.stores.execution_state
+    for name in ("consume_and_record_entry_intent", "mark_sent"):
+        original = getattr(intents, name)
+
+        def wrap(*args: Any, _name: str = name, _orig: Any = original, **kwargs: Any) -> Any:
+            order.append(_name)
+            return _orig(*args, **kwargs)
+
+        setattr(intents, name, wrap)
+    original_place = env.fake.place_entry
+
+    async def place(**kwargs: Any) -> Any:
+        order.append("place_entry")
+        return await original_place(**kwargs)
+
+    env.fake.place_entry = place
+    snapshots = rig.stores.snapshots
+    record = snapshots.record
+
+    def spy(snapshot: Any, **kwargs: Any) -> Any:
+        order.append("snapshot.record")
+        return record(snapshot, **kwargs)
+
+    snapshots.record = spy  # type: ignore[method-assign]
+    await dr.run_composed_smoke(env, _recorder())
+    first = {name: order.index(name) for name in set(order)}
+    assert first["consume_and_record_entry_intent"] < first["snapshot.record"]
+    assert first["snapshot.record"] < first["mark_sent"] < first["place_entry"]
+
+
+async def test_a_snapshot_that_cannot_be_recorded_sends_nothing_f3(tmp_path: Path) -> None:
+    """A store failure of the new write ends the placement as RECONCILIATION_REQUIRED, with the
+    INTENDED row unresolved and no order sent (like a failing `mark_sent`)."""
+    from src.persistence.errors import StoreUnavailable
+
+    class _Down(dict[str, Any]):
+        def __setitem__(self, key: str, value: Any) -> None:
+            raise StoreUnavailable("down")
+
+    recorder = _recorder()
+    env = build_fake_smoke_env(tmp_path)
+    env.rig.stores.snapshots._rows = _Down()  # the wiring gate still sees the real recorder
+    with pytest.raises(dr.SmokeHalt, match="confirm_entry"):
+        await dr.run_composed_smoke(env, recorder)
+    assert env.fake.calls_to("place_entry") == []
+    outcomes = [
+        json.loads(event.payload_json)["reason_code"]
+        for event in env.rig.memory.journal.by_type("LIVE_PLACEMENT_OUTCOME")
+    ]
+    assert outcomes == ["RECONCILIATION_REQUIRED"]
 
 
 async def test_a_confirm_in_safe_mode_places_nothing(tmp_path: Path) -> None:
@@ -191,20 +270,34 @@ async def test_the_demo_start_enables_only_through_the_explicit_degraded_flag_f2
     assert _statuses(recorder)["demo_enable"] == dr.STEP_PASSED
 
 
-async def test_a_fresh_start_enters_safe_mode_stale_feed_before_the_stream_starts_f1(
+async def test_a_clean_start_and_a_restart_enable_entries_without_an_operator_exit_f1(
     tmp_path: Path,
 ) -> None:
-    """Finding F1: step 8 (reconcile) runs before step 9 (stream), so every start enters SAFE_MODE
-    STALE_FEED and skips HEALTH and ENABLE; the smoke performs the operator exit and the enable.
-    This pins the observed order; it flips if the D-08 order is changed."""
+    """Finding F1 (fixed by plan 24-37, D094): the stream starts before the first reconcile tick,
+    so a clean start is not parked in SAFE_MODE STALE_FEED. HEALTH and ENABLE run as the last
+    steps of BOTH starts, and the only /safemode_exit of the whole run is the drill's."""
     recorder = _recorder()
     env = build_fake_smoke_env(tmp_path)
+    actions: list[str] = []
+    original_act = env.owner.act
+
+    async def spy(action: str, **context: Any) -> None:
+        actions.append(action)
+        await original_act(action, **context)
+
+    env.owner.act = spy  # type: ignore[method-assign]
     await dr.run_composed_smoke(env, recorder)
-    first = recorder.details["start_sequences"][0]
-    assert first["label"] == "start"
-    assert "RECONCILE=OK" in first["steps"] and "STREAM=OK" in first["steps"]
-    assert "HEALTH=SKIPPED" in first["steps"] and "ENABLE=SKIPPED" in first["steps"]
-    assert "startup_safe_mode_exit" in _statuses(recorder)
+    first, second = recorder.details["start_sequences"]
+    for sequence in (first, second):
+        steps = sequence["steps"]
+        assert steps.index("STREAM=OK") < steps.index("RECONCILE=OK")
+        assert "HEALTH=OK" in steps and "ENABLE=OK" in steps
+        assert sequence["safe_mode_reasons"] == []
+    statuses = _statuses(recorder)
+    assert "startup_safe_mode_exit" not in statuses
+    assert statuses["demo_enable"] == dr.STEP_PASSED
+    assert statuses["restart_enable"] == dr.STEP_PASSED
+    assert actions.count("safemode_exit") == 1, "only the drill needs the operator exit"
 
 
 def test_the_executed_run_uses_the_admitted_environment_and_writes_an_evidence_file(
@@ -302,15 +395,25 @@ def test_the_console_owner_prints_one_instruction_per_action_and_records_it(
     assert any("/safemode_exit" in line for line in lines)
 
 
-async def test_the_refused_drill_confirm_leaves_its_reservation_counted_f4(tmp_path: Path) -> None:
-    """Finding F4: nothing in `src` releases the reservation of an approved plan that was never
-    placed (`release_reason_for_plan` has no caller), so the drill runs last. This pins the gap."""
+async def test_the_refused_drill_reservation_is_released_by_the_sweep_at_its_expiry_f4(
+    tmp_path: Path,
+) -> None:
+    """Finding F4 (fixed by plan 24-37, D095): the SAFE_MODE refusal is not final, so the drill's
+    reservation stays counted until its plan expires; the scheduler's sweep then releases it
+    (PLAN_EXPIRED) and the smoke shows it. The executed plan's reservation is released when its
+    position is closed (POSITION_CLOSED, finding F5): no reservation is left counted."""
     recorder = _recorder()
     env = build_fake_smoke_env(tmp_path)
     await dr.run_composed_smoke(env, recorder)
+    statuses = _statuses(recorder)
+    assert statuses["drill_reservation_released"] == dr.STEP_PASSED
+    assert statuses["reservation_released_on_close"] == dr.STEP_PASSED
     rows = env.rig.memory.reservations._rows
-    statuses = sorted(row.status.value for row in rows.values())
-    assert "RESERVED" in statuses, statuses
+    released = sorted(
+        (row.status.value, row.release_reason.value) for row in rows.values() if row.release_reason
+    )
+    assert released == [("RELEASED", "PLAN_EXPIRED"), ("RELEASED", "POSITION_CLOSED")], released
+    assert env.rig.memory.reservations.list_counted() == ()
     outcomes = [
         json.loads(event.payload_json)["reason_code"]
         for event in env.rig.memory.journal.by_type("LIVE_PLACEMENT_OUTCOME")

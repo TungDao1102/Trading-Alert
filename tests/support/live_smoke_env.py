@@ -29,6 +29,7 @@ from src.live.wiring import (
     TASK_MARKS,
     TASK_PROTECTION,
     TASK_RECONCILE,
+    TASK_RESERVATION_SWEEP,
     TASK_SIGNAL_PUMP,
 )
 
@@ -44,6 +45,7 @@ _TICK_TASKS = (
     TASK_SIGNAL_PUMP,
     TASK_PROTECTION,
     TASK_RECONCILE,
+    TASK_RESERVATION_SWEEP,
 )
 TEST_ONLY_FILL_ORDER_ID = 8_000_000_901
 _USER_ID = 7001
@@ -148,14 +150,15 @@ def _env_ports(rig: ComposedRig) -> Any:
 
 
 def build_fake_smoke_env(
-    tmp_path: Path, *, scripted_trade: bool = True, persist_snapshots: bool = True
+    tmp_path: Path, *, scripted_trade: bool = True, drop_snapshots_before_restart: bool = False
 ) -> Any:
     """A `SmokeEnv` over the composed rig; `restart` builds a second wiring over the same stores.
 
-    `persist_snapshots=True` is a TEST_ONLY gap fill (finding F3 of plan 24-29): nothing in `src`
-    records the plan constraint snapshot, so the recovery of a restart cannot rebuild a live plan.
-    Before the restart the env writes the coordinator's own snapshot into the in-memory store; with
-    `persist_snapshots=False` the restart meets the real gap and must fail closed.
+    Since plan 24-37 (F3, D095) the placement itself records the verified plan constraint snapshot,
+    so a restart needs no help from this env (the TEST_ONLY gap fill of plan 24-29 is gone).
+    `drop_snapshots_before_restart=True` empties the in-memory snapshot store just before the
+    restart: the recovery must then fail closed (SAFE_MODE DB_FAILURE), the way a database that
+    lost the row would.
     """
     holder: list[ComposedRig] = []
     first = make_composed_rig(tmp_path)
@@ -215,10 +218,8 @@ def build_fake_smoke_env(
 
     async def restart() -> Any:
         previous = holder[-1]
-        if persist_snapshots:
-            assert previous.wiring is not None
-            for tracked in previous.wiring.coordinator._tracked.values():
-                previous.stores.snapshots.record(tracked.entry.plan_constraint_snapshot)
+        if drop_snapshots_before_restart:
+            previous.stores.snapshots._rows.clear()
         second = make_composed_rig(
             tmp_path,
             stores=(previous.stores, previous.memory),
