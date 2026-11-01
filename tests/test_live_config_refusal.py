@@ -380,13 +380,15 @@ def test_loaded_secrets_are_registered_with_the_redactor(
     assert_no_seeded_value(redacted)
 
 
-def test_an_admitted_start_without_a_composed_runner_fails_closed(
+def test_an_admitted_start_without_a_database_url_fails_closed(
     tmp_path: Path, repo_root: Path, limits_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Plan 24-27: the production runner is composed; without a database URL it refuses."""
     code, _ = run_main(tmp_path, repo_root, limits_file, demo_env())
     captured = capsys.readouterr()
     assert code == int(LiveExitCode.STARTUP_FAILED)
-    assert "runner not composed" in captured.err
+    assert "DATABASE_URL_SYNC or DATABASE_URL is not set" in captured.err
+    assert "runner not composed" not in captured.err
     assert_no_seeded_value(captured.out, captured.err)
 
 

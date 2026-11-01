@@ -443,6 +443,10 @@ class WiringIncomplete(RuntimeError):  # noqa: N818 - a composition error, not a
     """The wiring was used before the start sequence loaded the SAFE_MODE controller."""
 
 
+class WiringBroken(RuntimeError):  # noqa: N818 - a composition error, not an exception family
+    """`check_wiring` named at least one broken link; the start does not proceed (D-05)."""
+
+
 # --------------------------------------------------------------------------- #
 # The assembly.
 # --------------------------------------------------------------------------- #
@@ -501,6 +505,7 @@ class LiveAssembly:
         self.initialize_gate_state = False
         self.operator_id: str | None = None
         self.scheduler_task: asyncio.Task[None] | None = None
+        self.broken_links: list[str] = []
         self._safe_mode: SafeModeController | None = None
         self._enablement: Any = None
         self._wiring: CompleteLiveWiring | None = None
@@ -636,7 +641,11 @@ class LiveAssembly:
         )
         self._enablement = started.controller
         if self._safe_mode is not None:
-            self.complete(safe_mode=self._safe_mode, enablement=started.controller)
+            wiring = self.complete(safe_mode=self._safe_mode, enablement=started.controller)
+            # D-05: a wiring with a broken link never starts (this step holds the start).
+            self.broken_links = check_wiring(wiring)
+            if self.broken_links:
+                raise WiringBroken(", ".join(self.broken_links))
         return started
 
     def complete(self, *, safe_mode: SafeModeController, enablement: Any) -> CompleteLiveWiring:
@@ -1380,6 +1389,7 @@ __all__ = [
     "LiveStoreSet",
     "LiveStores",
     "LiveWiring",
+    "WiringBroken",
     "WiringIncomplete",
     "build_execution_path",
     "build_pg_stores",
