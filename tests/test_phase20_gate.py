@@ -420,6 +420,7 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "D089",
         "D090",
         "D091",
+        "D092",
     ], (
         f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
         "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
@@ -428,7 +429,8 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "wrote D088 (Phase 23 O-2, the G4-042 expiry rule); the owner answer of 2026-10-31 "
         "wrote D089 (Phase 24 execution limit values, plan 24-06); the assistant proposed "
         "D090 (Phase 24 REST gate alert events, plan 24-13); the owner answer of 2026-10-31 "
-        "wrote D091 (key 14 and two live-health bounds)"
+        "wrote D091 (key 14 and two live-health bounds) and the owner answer of 2026-11-01 "
+        "wrote D092 (kill-gate state source)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:
