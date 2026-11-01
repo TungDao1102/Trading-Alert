@@ -1111,8 +1111,15 @@ def test_telegram_callbacks_adapter_is_the_only_ptb_application_importer() -> No
         if "telegram.ext" in text or "from telegram.ext" in text:
             importers.append(py_file)
     importers.sort()
-    assert importers == [src_dir / "adapters" / "telegram_callbacks.py"], (
-        f"only src/adapters/telegram_callbacks.py may import telegram.ext; found: {importers}"
+    # Phase 24 (plans 24-17, 24-27): the live process builds its own Application with a lazy
+    # `telegram.ext` import in these two composition modules; every other module stays barred.
+    allowed = [
+        src_dir / "adapters" / "telegram_callbacks.py",
+        src_dir / "live" / "runtime.py",
+        src_dir / "live" / "telegram_runner.py",
+    ]
+    assert importers == sorted(allowed), (
+        f"only {allowed} may import telegram.ext; found: {importers}"
     )
 
 
