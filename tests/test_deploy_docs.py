@@ -611,13 +611,16 @@ def test_every_compose_variable_is_documented_in_env_example() -> None:
     env_example = _read(ENV_EXAMPLE)
     undocumented = sorted(
         v
-        for v in variables - {"TRADING_ENV_FILE"}
+        for v in variables - {"TRADING_ENV_FILE", "TRADING_LIVE_ENV_FILE"}
         if not re.search(rf"^#?\s*{v}=", env_example, re.M)
     )
     assert not undocumented, f".env.example does not document: {undocumented}"
     # TRADING_ENV_FILE selects which env file compose reads; the runbook documents it instead
     assert "TRADING_ENV_FILE" in compose
     assert "TRADING_ENV_FILE" in _runbook()
+    # plan 24-30: the live service's own env file is selected the same way and documented there
+    assert "TRADING_LIVE_ENV_FILE" in compose
+    assert "TRADING_LIVE_ENV_FILE" in _runbook()
 
 
 def test_security_and_operations_cites_d050_in_the_controlled_sections() -> None:

@@ -33,10 +33,12 @@ logs/
 htmlcov/
 
 # Local env (T-02-02 — credentials must never be in git). Every .env variant is ignored
-# (.env.prod, .env.live, .env.backup, ...); only the template is tracked.
+# (.env.prod, .env.live, .env.backup, ...); only the templates are tracked (.env.example and every
+# .env.<name>.example, such as .env.live.example, plan 24-30).
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 # Keys and secrets files passed to deploy/bootstrap.sh (--secrets-file, --deploy-key)
 *.pem

@@ -16,6 +16,7 @@ from src.ops.redaction import SHAPE_RULES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+ENV_LIVE_EXAMPLE = REPO_ROOT / ".env.live.example"
 
 _ASSIGNMENT = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 _COMMENTED_ASSIGNMENT = re.compile(r"^#\s*([A-Z][A-Z0-9_]*)=(.*)$")
@@ -44,26 +45,27 @@ EXISTING_NAMES: tuple[str, ...] = (
 )
 
 
-def _lines() -> list[str]:
-    return ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+def _lines(path: Path = ENV_EXAMPLE) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines()
 
 
-def _assignments() -> dict[str, str]:
+def _assignments(path: Path = ENV_EXAMPLE) -> dict[str, str]:
     found: dict[str, str] = {}
-    for line in _lines():
+    for line in _lines(path):
         match = _ASSIGNMENT.match(line)
         if match:
             found[match.group(1)] = match.group(2)
     return found
 
 
-def _commented_names() -> set[str]:
-    return {m.group(1) for line in _lines() if (m := _COMMENTED_ASSIGNMENT.match(line))}
+def _commented_names(path: Path = ENV_EXAMPLE) -> set[str]:
+    return {m.group(1) for line in _lines(path) if (m := _COMMENTED_ASSIGNMENT.match(line))}
 
 
-def test_no_live_shaped_or_key_like_values() -> None:
+@pytest.mark.parametrize("path", [ENV_EXAMPLE, ENV_LIVE_EXAMPLE], ids=lambda p: p.name)
+def test_no_live_shaped_or_key_like_values(path: Path) -> None:
     offenders: list[str] = []
-    for number, line in enumerate(_lines(), start=1):
+    for number, line in enumerate(_lines(path), start=1):
         if "change_me" in line:
             continue  # documented placeholder
         text = line
@@ -86,28 +88,48 @@ def test_assigned_values_are_empty_or_documented_placeholders() -> None:
             assert value == "", f"{name} must be an empty assignment in the template"
 
 
-def test_demo_credentials_are_empty_active_assignments() -> None:
-    assigned = _assignments()
+def test_demo_credentials_are_empty_active_assignments_of_the_live_template() -> None:
+    """Plan 24-30 (D-29): the Binance names moved out of the shared template to the live one."""
+    assigned = _assignments(ENV_LIVE_EXAMPLE)
     assert assigned.get("BINANCE_DEMO_API_KEY") == ""
     assert assigned.get("BINANCE_DEMO_API_SECRET") == ""
 
 
-def test_no_testnet_credential_name_is_invented() -> None:
-    # TESTNET stays NOT_CONFIGURED (O-18-01): the template carries no BINANCE_TESTNET_ name.
+def test_the_shared_template_carries_no_binance_or_live_bot_name() -> None:
+    """C-8 / WR-06: a BINANCE_ name in the shared file stops the paper service and reaches the
+    collector, so the shared template names none of the live-only variables."""
     names = set(_assignments()) | _commented_names()
-    assert not {n for n in names if n.startswith("BINANCE_TESTNET_")}
+    assert not {n for n in names if n.startswith("BINANCE_")}
+    assert not names & {"TELEGRAM_LIVE_BOT_TOKEN", "TELEGRAM_LIVE_AUTHORIZED_CHAT_ID"}
+    assert "LIVE_RUNTIME_MODE" not in names
+
+
+def test_the_shared_template_does_not_claim_more_than_the_split_delivers() -> None:
+    """The old sentence said a paper process can never pick up a live credential; the template
+    now states the per-service rule instead (plan 24-30)."""
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "can never pick up a live credential" not in text
+    assert ".env.live" in text
+    assert "tests/test_live_compose_env_split.py" in text
+
+
+def test_no_testnet_credential_name_is_invented() -> None:
+    # TESTNET stays NOT_CONFIGURED (O-18-01): neither template carries a BINANCE_TESTNET_ name.
+    for path in (ENV_EXAMPLE, ENV_LIVE_EXAMPLE):
+        names = set(_assignments(path)) | _commented_names(path)
+        assert not {n for n in names if n.startswith("BINANCE_TESTNET_")}
 
 
 def test_live_credentials_appear_only_on_comment_lines() -> None:
-    assigned = _assignments()
+    assigned = _assignments(ENV_LIVE_EXAMPLE)
     assert not [name for name in assigned if "LIVE" in name and name.startswith("BINANCE_")]
-    commented = _commented_names()
+    commented = _commented_names(ENV_LIVE_EXAMPLE)
     assert "BINANCE_LIVE_API_KEY" in commented
     assert "BINANCE_LIVE_API_SECRET" in commented
 
 
 def test_paper_and_live_credential_names_differ() -> None:
-    names = set(_assignments()) | _commented_names()
+    names = set(_assignments(ENV_LIVE_EXAMPLE)) | _commented_names(ENV_LIVE_EXAMPLE)
     demo = {n for n in names if n.startswith("BINANCE_DEMO_")}
     live = {n for n in names if n.startswith("BINANCE_LIVE_")}
     assert demo and live
@@ -186,9 +208,10 @@ def test_env_variants_and_key_files_are_gitignored(name: str) -> None:
     assert proc.returncode == 0, f"{name} is not gitignored"
 
 
-def test_the_env_template_is_not_gitignored() -> None:
+@pytest.mark.parametrize("name", [".env.example", ".env.live.example"])
+def test_the_env_templates_are_not_gitignored(name: str) -> None:
     proc = subprocess.run(
-        ["git", "check-ignore", "-q", ".env.example"],
+        ["git", "check-ignore", "-q", name],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
