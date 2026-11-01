@@ -3310,7 +3310,10 @@ async def test_the_committed_not_configured_limits_file_refuses_every_live_place
     from src.execution.execution_limits import load_execution_limits
 
     path = Path(__file__).parents[1] / "config" / "execution" / "execution-limits-v1.toml"
-    limits = load_execution_limits(path)
+    import dataclasses as _dc
+
+    # D091 completed the committed file; clear key 14 to keep exercising the refusal.
+    limits = _dc.replace(load_execution_limits(path), stale_feed_max_user_data_silence_ms=None)
     assert limits.unset_keys() != ()
     adapter = FakeExecutionAdapter()
     outcome = await _run_plan(
