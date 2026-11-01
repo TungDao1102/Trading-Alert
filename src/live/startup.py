@@ -14,7 +14,7 @@ Groups, as numbered in D-08 (`START_STEP_GROUP`):
    never re-initialized silently); a missing file without the flag is "unknown", not a fresh
    install, and holds. `gate.restore()` runs before any REST call and must report
    RESTORED_DURABLE.
-3. ALEMBIC: the database is at the code's single head (read-only; `create_all` is never used).
+3. ALEMBIC: the database is at the code's single head (read-only; only Alembic creates tables).
 4. SAFE_MODE, ENABLEMENT, SNAPSHOTS, SPILL_SENTINEL: the durable SAFE_MODE controller (a store
    failure starts it IN SAFE_MODE), a DISABLED enablement controller (a persisted "enabled" is
    never trusted), the constraint snapshots, and the spill sentinel check (20-DEFERRED row 43).
@@ -499,7 +499,7 @@ def resting_entry_from_intent(
         snapshot_ttl=snapshot_ttl,
         registered_at_utc=entry.intended_at_utc,
         entry_state_unknown=unknown,
-        entry_good_till_utc=(_gtd_datetime(plan.expiry_utc) if unknown else None),
+        entry_good_till_utc=_gtd_datetime(plan.expiry_utc),
     )
 
 
