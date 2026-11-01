@@ -24,6 +24,7 @@ from src.adapters.binance_userdata_supervisor import StreamState
 from src.live.startup import AlembicRevisions
 from src.live.wiring import (
     TASK_COMMISSION,
+    TASK_CONFIRM_SWEEP,
     TASK_DAY_RISK,
     TASK_MARKS,
     TASK_PROTECTION,
@@ -38,6 +39,7 @@ D = Decimal
 _TICK_TASKS = (
     TASK_MARKS,
     TASK_COMMISSION,
+    TASK_CONFIRM_SWEEP,
     TASK_DAY_RISK,
     TASK_SIGNAL_PUMP,
     TASK_PROTECTION,
@@ -83,8 +85,8 @@ class FakeOwner:
         query = f"q-{action}-{self._n}"
         if action in ("approve", "replay_approve"):
             await rig.press("APR", short_id, query_id=query)
-        elif action in ("confirm", "replay_confirm"):
-            if action == "confirm":
+        elif action in ("confirm", "confirm_refused", "replay_confirm"):
+            if action in ("confirm", "confirm_refused"):
                 await rig.clock.advance(30)
                 _set_prices(rig)
             await rig.press("CNF", short_id, query_id=query)

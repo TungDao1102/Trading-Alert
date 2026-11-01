@@ -12,10 +12,11 @@ Scenario ``smoke`` (the default) is criterion 2 of Phase 24 over the COMPOSED li
 protection coordinator or places an order by hand. The sequence: the Demo injector queues a
 signal (the ``/demo_signal`` handler of the process); the owner taps APPROVE and CONFIRM on the
 live Demo bot (bounded waits); one GTD LIMIT entry with no entry-time stop (D079); the fill is seen
-on the user-data stream; the stop is placed and REST-confirmed; TP1 and TP2; reconcile clean; the
-SAFE_MODE drill (enter, a CONFIRM refused, operator exit through /safemode_exit); a restart and
-rehydrate (a second wiring over the same stores); replayed presses place nothing; close and
-clean-up.
+on the user-data stream; the stop is placed and REST-confirmed; TP1 and TP2; reconcile clean; a
+restart and rehydrate (a second wiring over the same stores); replayed presses place nothing; close
+and clean-up; last, the SAFE_MODE drill (enter, a CONFIRM refused, operator exit through
+/safemode_exit). The drill is last because a second request on the symbol is refused while a
+position, a plan or an approval is open and a refused CONFIRM leaves its reservation counted.
 
 Without ``--execute`` the same sequence runs against the Binance-semantics fake with fake presses
 (tests/support/live_smoke_env.py); every step of such a run is labelled SYNTHETIC and none is
@@ -2275,6 +2276,9 @@ SMOKE_POLL_SECONDS = 2
 SMOKE_LAG_POLLS = 4
 SMOKE_LAG_GAP_SECONDS = 0.5
 SMOKE_REPLAY_SETTLE_TICKS = 5
+SMOKE_LIVENESS_SAMPLE_CAP = 200
+SMOKE_EXPIRY_STEP_SECONDS = 30
+SMOKE_EXPIRY_ROUNDS = 60
 _SMOKE_STEPS = (
     "start",
     "wiring_check",
@@ -2288,11 +2292,11 @@ _SMOKE_STEPS = (
     "stop_confirmed",
     "tp_legs",
     "reconcile_clean",
-    "safe_mode_drill",
     "restart_rehydrate",
     "replays_place_nothing",
     "close_cleanup",
     "account_clean",
+    "safe_mode_drill",
 )
 
 
@@ -2380,6 +2384,10 @@ class ConsoleOwner:
     _TEXT: Mapping[str, str] = {
         "approve": "On the live Demo bot tap APPROVE on the card {note}(short id {short_id}).",
         "confirm": "Tap CONFIRM on the confirm prompt that follows {note}(short id {short_id}).",
+        "confirm_refused": (
+            "SAFE_MODE was entered on purpose (the drill): tap CONFIRM now on the confirm prompt "
+            "(short id {short_id}); the entry must be REFUSED and nothing placed."
+        ),
         "safemode_exit": (
             "Send /safemode_exit to the live Demo bot, then send the '/confirm <token>' line "
             "it answers with, within the token lifetime."
@@ -2447,6 +2455,7 @@ class _Request:
     entry_client_id: str
     quantity: Decimal
     scenario: str
+    expiry_utc: datetime
 
 
 async def _inject(env: SmokeEnv, recorder: EvidenceRecorder, scenario: str, step: str) -> _Request:
@@ -2473,6 +2482,7 @@ async def _inject(env: SmokeEnv, recorder: EvidenceRecorder, scenario: str, step
         ),
         quantity=request.plan.quantity_after_rounding,
         scenario=scenario,
+        expiry_utc=request.plan.expiry_utc,
     )
     _smoke_record(
         env,
@@ -2665,6 +2675,7 @@ async def _smoke_sequence(
             "SYNTHETIC run: the exchange is the Binance-semantics fake, the presses are fake and "
             "every id, price and time is a test value; nothing here is Demo-observed"
         )
+    _sample_liveness_on_tick(env, recorder)
     await _bring_up(env, recorder, "start")
     record_user_data_liveness(env, recorder)
 
@@ -2790,8 +2801,6 @@ async def _smoke_sequence(
         raise _smoke_fail(env, recorder, "reconcile_clean", "the reconcile compare was not clean")
     _smoke_record(env, recorder, "reconcile_clean", STEP_PASSED, "reconcile agrees, no divergence")
 
-    await _safe_mode_drill(env, recorder, first)
-
     # ---- restart and rehydrate over the same stores, then the replays ------------------------ #
     if env.restart is None:
         raise _smoke_fail(env, recorder, "restart_rehydrate", "no restart is available")
@@ -2801,6 +2810,7 @@ async def _smoke_sequence(
     recorder.details["first_process_shutdown_failed_steps"] = failed_steps
     second = await env.restart()
     current.append(second)
+    _sample_liveness_on_tick(second, recorder)
     await _bring_up(second, recorder, "restart")
     restored = _protection(second, first)
     if restored is None or restored.state is not ProtectionState.COMPLETE:
@@ -2845,27 +2855,57 @@ async def _smoke_sequence(
     _smoke_record(
         second, recorder, "account_clean", STEP_PASSED, "no order, algo order or position"
     )
+    await _safe_mode_drill(second, recorder, after=first.expiry_utc)
     return OUTCOME_COMPLETE_WITH_GAPS if gaps else OUTCOME_COMPLETE
 
 
-async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, first: _Request) -> None:
-    """Enter SAFE_MODE, show a CONFIRM refused, leave it through the operator exit."""
+async def _wait_for_expiry(env: SmokeEnv, expiry_utc: datetime) -> None:
+    """Wait (bounded) until a plan's expiry has passed, ticking the process meanwhile."""
+    for _ in range(SMOKE_EXPIRY_ROUNDS):
+        remaining = (expiry_utc - env.clock()).total_seconds()
+        if remaining <= 0:
+            break
+        await env.pause(min(remaining + 1, SMOKE_EXPIRY_STEP_SECONDS))
+        await env.tick()
+    for _ in range(SMOKE_REPLAY_SETTLE_TICKS):
+        await env.tick()
+
+
+async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, *, after: datetime) -> None:
+    """Enter SAFE_MODE, show the owner's CONFIRM refused, leave it through the operator exit.
+
+    It runs LAST, on an idle symbol, after the main plan has expired: while a position, an active
+    plan or an open approval exists on the symbol, a second request is refused at the card
+    (CONFLICT_WITH_OPEN_POSITION, ACTIVE_PLAN, PENDING_OR_APPROVED_APPROVAL), and a refused
+    CONFIRM leaves its plan APPROVED and its reservation counted (finding F4), so nothing may
+    follow it.
+    """
     wiring = env.wiring
-    wiring.safe_mode.enter_safe_mode(reason="DEMO_SMOKE_DRILL", now_utc=env.clock())
-    second = await _inject(env, recorder, "far", "safe_mode_drill_signal")
-    await _wait_until(
+    await _wait_for_expiry(env, after)
+    drill = await _inject(env, recorder, "far", "safe_mode_drill_signal")
+    shown = await _wait_until(
         env,
         lambda: _async_value(
             wiring.demo_signal is not None and wiring.demo_signal.source.pending == 0
         ),
     )
-    await env.owner.act("approve", short_id=second.short_id, note="of the SECOND request ")
-    await env.owner.act("confirm", short_id=second.short_id, note="of the SECOND request ")
+    if not shown:
+        raise _smoke_fail(env, recorder, "safe_mode_drill", "the drill card was not issued")
+    await env.owner.act("approve", short_id=drill.short_id, note="of the DRILL request ")
+
+    async def approved() -> bool:
+        row = await _smoke_read(env, wiring.stores.entities.get_trade_plan, drill.trade_plan_id)
+        return row is not None and row.status is TradePlanStatus.APPROVED
+
+    if not await _wait_until(env, approved):
+        raise _smoke_fail(env, recorder, "safe_mode_drill", "the drill plan was not APPROVED")
+    wiring.safe_mode.enter_safe_mode(reason="DEMO_SMOKE_DRILL", now_utc=env.clock())
+    await env.owner.act("confirm_refused", short_id=drill.short_id)
     for _ in range(SMOKE_REPLAY_SETTLE_TICKS):
         await env.tick()
     adapter = env.assembly.exchange.adapter
-    placed = await env.assembly.executor.read(
-        wiring.stores.execution_state.intent_for_client_id, second.entry_client_id
+    placed = await _smoke_read(
+        env, wiring.stores.execution_state.intent_for_client_id, drill.entry_client_id
     )
     orders = await adapter.snapshot_open_normal_orders(symbol=SYMBOL)
     if placed is not None or orders:
@@ -2962,20 +3002,35 @@ async def _record_cancel_lag(
 def record_user_data_liveness(env: SmokeEnv, recorder: EvidenceRecorder) -> None:
     """The ping and pong times the supervisor saw (reused from the process, not re-measured).
 
-    The long silence measurement stays `scripts/user_data_silence_probe.py`.
+    A sample is kept only when one of the times changed since the last one, so the list is the
+    sequence of distinct observed ping/pong/event times (capped). The long silence measurement
+    stays `scripts/user_data_silence_probe.py`.
     """
     snapshot = env.wiring.stream.supervisor.liveness()
-    samples = recorder.details.setdefault("user_data_liveness", [])
-    samples.append(
-        _jsonable(
-            {
-                "state": snapshot.state,
-                "last_event_at_utc": snapshot.last_event_at_utc,
-                "last_ping_at_utc": snapshot.last_ping_at_utc,
-                "last_pong_at_utc": snapshot.last_pong_at_utc,
-            }
-        )
+    sample = _jsonable(
+        {
+            "state": snapshot.state,
+            "last_event_at_utc": snapshot.last_event_at_utc,
+            "last_ping_at_utc": snapshot.last_ping_at_utc,
+            "last_pong_at_utc": snapshot.last_pong_at_utc,
+        }
     )
+    samples: list[dict[str, Any]] = recorder.details.setdefault("user_data_liveness", [])
+    if len(samples) >= SMOKE_LIVENESS_SAMPLE_CAP or (samples and samples[-1] == sample):
+        return
+    samples.append(sample)
+
+
+def _sample_liveness_on_tick(env: SmokeEnv, recorder: EvidenceRecorder) -> None:
+    """Sample the supervisor's ping/pong times after every poll of this process."""
+    inner = env.tick
+
+    async def tick() -> None:
+        await inner()
+        if env.assembly.is_complete:
+            record_user_data_liveness(env, recorder)
+
+    env.tick = tick
 
 
 def build_smoke_attestation(recorder: EvidenceRecorder) -> dict[str, Any]:

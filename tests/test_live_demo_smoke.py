@@ -300,3 +300,19 @@ def test_the_console_owner_prints_one_instruction_per_action_and_records_it(
     assert len(lines) == 5
     assert len(recorder.details["operator_instructions"]) == 5
     assert any("/safemode_exit" in line for line in lines)
+
+
+async def test_the_refused_drill_confirm_leaves_its_reservation_counted_f4(tmp_path: Path) -> None:
+    """Finding F4: nothing in `src` releases the reservation of an approved plan that was never
+    placed (`release_reason_for_plan` has no caller), so the drill runs last. This pins the gap."""
+    recorder = _recorder()
+    env = build_fake_smoke_env(tmp_path)
+    await dr.run_composed_smoke(env, recorder)
+    rows = env.rig.memory.reservations._rows
+    statuses = sorted(row.status.value for row in rows.values())
+    assert "RESERVED" in statuses, statuses
+    outcomes = [
+        json.loads(event.payload_json)["reason_code"]
+        for event in env.rig.memory.journal.by_type("LIVE_PLACEMENT_OUTCOME")
+    ]
+    assert outcomes[0] == "OK" and outcomes[-1] != "OK", outcomes

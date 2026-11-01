@@ -287,6 +287,12 @@ class InMemoryShadowStores:
         view.confirm_mode = validate_confirm_mode(confirm_mode)
         return view
 
+    def get_signal(self, signal_id: str) -> Signal | None:
+        return self.signals.get(signal_id)
+
+    def get_trade_plan(self, trade_plan_id: str) -> TradePlan | None:
+        return self.plans.get(trade_plan_id)
+
     def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]:
         return [event for event in self.journal if event.correlation_id == correlation_id]
 
