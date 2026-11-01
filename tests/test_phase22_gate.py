@@ -512,6 +512,14 @@ def _call_name(call: ast.Call) -> str:
     return ""
 
 
+# Plan 24-27 (Phase 24): the composition root binds the approval sender's reservation registrar
+# (`register_reservation`) to `PgRiskReservationStore.register_request` in `wiring_parts.py`.
+REGISTER_REQUEST_CALLERS = frozenset({"src/live/wiring_parts.py"})
+REQUIRED_MARGIN_WRITERS = frozenset(
+    {"src/persistence/risk_reservations.py", "src/live/wiring_parts.py"}
+)
+
+
 def test_invariant_13_nothing_in_src_writes_required_margin() -> None:
     """Phase 22 supplies the column and the claims reader; the Phase 24 issuer writes the value.
 
@@ -524,9 +532,9 @@ def test_invariant_13_nothing_in_src_writes_required_margin() -> None:
         relative = path.relative_to(ROOT).as_posix()
         for call in _calls(path):
             keywords = {keyword.arg for keyword in call.keywords}
-            if _call_name(call) == "register_request":
+            if _call_name(call) == "register_request" and relative not in REGISTER_REQUEST_CALLERS:
                 offenders.append(f"{relative}:{call.lineno} calls register_request")
-            if "required_margin" in keywords and relative != "src/persistence/risk_reservations.py":
+            if "required_margin" in keywords and relative not in REQUIRED_MARGIN_WRITERS:
                 offenders.append(f"{relative}:{call.lineno} passes required_margin")
     assert offenders == [], (
         f"a Phase 24 composition appeared; update this gate and 22-DEFERRED.md on purpose: "
@@ -545,6 +553,11 @@ LIQUIDATION_WATCH_BUILDERS = frozenset(
 )
 
 
+# Plan 24-27 passes the watch (policy CLOSE_POSITION, D085 O-4) to the coordinator in the one
+# composition module.
+LIQUIDATION_WATCH_PASSERS = frozenset({"src/live/wiring.py"})
+
+
 def test_invariant_14_nothing_passes_liquidation_watch_to_a_coordinator_yet() -> None:
     """`liquidation_watch` is built and tested, but ProtectionCoordinator defaults it to None.
 
@@ -555,7 +568,10 @@ def test_invariant_14_nothing_passes_liquidation_watch_to_a_coordinator_yet() ->
         for path in _python_files(directory):
             relative = path.relative_to(ROOT).as_posix()
             for call in _calls(path):
-                if any(keyword.arg == "liquidation_watch" for keyword in call.keywords):
+                if (
+                    any(keyword.arg == "liquidation_watch" for keyword in call.keywords)
+                    and relative not in LIQUIDATION_WATCH_PASSERS
+                ):
                     offenders.append(f"{relative}:{call.lineno} passes liquidation_watch")
                 if _call_name(call) == "LiquidationWatch" and (
                     relative not in LIQUIDATION_WATCH_BUILDERS

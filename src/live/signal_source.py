@@ -135,6 +135,11 @@ class SignalRequest:
     money_inputs: MoneyInputs
     exposure_quote: Decimal
     reason_codes: tuple[str, ...]
+    # Plan 24-27: the PRICE the invalidation rule compares with the SL level at placement.
+    # `latest_closed_bar_close` above is the bar's time; the Demo smoke has no strategy bar, so
+    # it stands in the mark price it derived the plan from (a rehearsal input, not a market
+    # fact). None means "not available" and the manager's invalidation check refuses.
+    bar_close_price: Decimal | None = None
 
 
 class SignalSource(Protocol):
@@ -521,6 +526,7 @@ class DemoSmokeSignalSource:
             signal=signal,
             plan=trade_plan,
             latest_closed_bar_close=latest_closed_bar_close,
+            bar_close_price=mark_price,
             money_inputs=MoneyInputs(
                 sized=sized,
                 take_profits=_take_profits(tp1, tp2),

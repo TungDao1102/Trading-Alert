@@ -26,7 +26,7 @@ are owned by the caller (the runner never closes the executor).
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Any, Final
 
@@ -59,7 +59,9 @@ BOT_TOKEN_RULE: Final = (
     "separate-bot: exactly one getUpdates consumer per bot token (16-DEC-Q-L, RUNBOOK 20.3)"
 )
 
-ALLOWED_UPDATES: Final = ["callback_query"]
+#: The runner polls callback queries (the one on_callback handler) and messages (the operator
+#: commands of plan 24-23; without "message" a command never reaches the bot, 24-23 hand-off).
+ALLOWED_UPDATES: Final = ["callback_query", "message"]
 
 ApplicationFactory = Callable[[], Any]
 
@@ -86,6 +88,7 @@ class LiveTelegramRunner:
         validity_rule: ValidityRule,
         recheck: RecheckFn,
         prefetch: PrefetchFn | None,
+        command_handlers: Mapping[str, Callable[..., Awaitable[Any]]] | None = None,
     ) -> None:
         # Fails at construction, not at the first press: an empty allow-list is never allow-all.
         _validate_authorized_user_ids(authorized_user_ids)
@@ -93,6 +96,7 @@ class LiveTelegramRunner:
         self._bot = bot
         self._authorized_chat_id = authorized_chat_id
         self._authorized_user_ids = authorized_user_ids
+        self._service = service
         self._flow: ConfirmFlow = make_confirm_flow(
             desk=desk,
             profile=profile,
@@ -112,6 +116,10 @@ class LiveTelegramRunner:
             authorized_user_ids=authorized_user_ids,
             error_journal=error_journal,
         )
+        # The operator commands (plan 24-23 `OperatorCommands.handlers()`): name -> async handler.
+        self._command_handlers: dict[str, Callable[..., Awaitable[Any]]] = dict(
+            command_handlers or {}
+        )
         self._application: Any | None = None
         self._log_application_error = make_application_error_handler()
         self._telegram_errors: dict[str, int] = {}
@@ -123,6 +131,16 @@ class LiveTelegramRunner:
     def flow(self) -> ConfirmFlow:
         """The confirm flow the handler drives (its book is the live confirm book)."""
         return self._flow
+
+    @property
+    def service(self) -> ExecutionService:
+        """The execution service whose `on_confirmed` the flow calls (the D-05 gate reads it)."""
+        return self._service
+
+    @property
+    def handler(self) -> Callable[..., Any]:
+        """The one callback handler: `functools.partial(on_callback, **callback_kwargs)`."""
+        return functools.partial(on_callback, **self._callback_kwargs)
 
     @property
     def callback_kwargs(self) -> dict[str, Any]:
@@ -174,8 +192,12 @@ class LiveTelegramRunner:
         # PTB is imported here, not at module import: `src.live` stays importable without it.
         from telegram.ext import CallbackQueryHandler
 
-        handler = functools.partial(on_callback, **self._callback_kwargs)
-        application.add_handler(CallbackQueryHandler(handler))
+        application.add_handler(CallbackQueryHandler(self.handler))
+        if self._command_handlers:
+            from telegram.ext import CommandHandler
+
+            for name, command in self._command_handlers.items():
+                application.add_handler(CommandHandler(name, command))  # type: ignore[arg-type]
         application.add_error_handler(self._on_application_error)
         await application.initialize()
         try:

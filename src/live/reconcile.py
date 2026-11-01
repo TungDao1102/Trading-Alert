@@ -229,8 +229,12 @@ def build_reconcile(
     lot_filters: LotFilterSource,
     pending_actions: OpenPendingSource,
     plan_store: PlanStore,
+    on_entry_resolved: Callable[[str, str], None] | None = None,
 ) -> ReconcileBundle:
     """Build the sweeper, the UNKNOWN-entry resolver and the reconcile loop over one adapter.
+
+    `on_entry_resolved(plan_hash, resolution)` is the resolver's `on_resolved` (plan 24-34): the
+    composition binds it to `ProtectionCoordinator.note_entry_resolved`.
 
     Raises (all at build, nothing is started):
         ValueError: `safe_mode` is not durable (no state store).
@@ -246,6 +250,7 @@ def build_reconcile(
         safe_mode_controller=safe_mode,
         limits=limits,
         entry_good_till=entry_good_till_from_store(plan_store),
+        on_resolved=on_entry_resolved,
     )
     loop = ReconcileLoop(
         adapter=adapter,

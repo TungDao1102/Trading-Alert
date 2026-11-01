@@ -184,6 +184,56 @@ class PgExecutionStateStore:
             ).scalars()
             return tuple(_to_record(row) for row in rows)
 
+    def get_intent(self, *, approval_id: str, role: str) -> IntentRecord | None:
+        """The row of one (approval, role) pair, or None (plan 24-27, 24-26 hand-off 1)."""
+        with self._db.transaction() as session:
+            row = session.execute(
+                select(ExecutionIntentRow).where(
+                    ExecutionIntentRow.approval_id == approval_id,
+                    ExecutionIntentRow.role == role,
+                )
+            ).scalar_one_or_none()
+            return None if row is None else _to_record(row)
+
+    def restorable_entries(self) -> Sequence[IntentRecord]:
+        """Every ENTRY row that may still have a live order or a live position after a restart.
+
+        SENT, UNKNOWN and ACKED rows of the ENTRY role, oldest first. `list_unresolved_intents`
+        returns neither the ACKED rows nor the protective rows, so a resting or filled entry that
+        was acknowledged would not be re-tracked. Known limit: an ACKED row is never moved by the
+        protection lifecycle, so the list also holds entries whose plan has long ended (the
+        rebuild marks them FLAT from the journal); bounding it needs an owner number.
+        """
+        restorable = (
+            ExecutionIntentStatus.SENT.value,
+            ExecutionIntentStatus.UNKNOWN.value,
+            ExecutionIntentStatus.ACKED.value,
+        )
+        with self._db.transaction() as session:
+            rows = session.execute(
+                select(ExecutionIntentRow)
+                .where(
+                    ExecutionIntentRow.role == OrderRole.ENTRY.value,
+                    ExecutionIntentRow.intent_status.in_(restorable),
+                )
+                .order_by(ExecutionIntentRow.intended_at_utc, ExecutionIntentRow.approval_id)
+            ).scalars()
+            return tuple(_to_record(row) for row in rows)
+
+    def intent_for_client_id(self, client_order_id: str) -> IntentRecord | None:
+        """The row behind a client order id (entry id or protective algo id), or None.
+
+        The stream persistence writer reads it on the writer thread (plan 24-19 hand-off 2).
+        """
+        with self._db.transaction() as session:
+            row = session.execute(
+                select(ExecutionIntentRow).where(
+                    (ExecutionIntentRow.client_order_id == client_order_id)
+                    | (ExecutionIntentRow.algo_client_id == client_order_id)
+                )
+            ).scalar_one_or_none()
+            return None if row is None else _to_record(row)
+
     def consume_and_record_entry_intent(
         self,
         *,

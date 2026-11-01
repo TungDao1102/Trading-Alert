@@ -18,20 +18,25 @@ Verbs:
 - `--initialize-gate-state` and `--operator-id`: parsed here, consumed by the start sequence of
   plan 24-26.
 
-Refusals and health output name variables and keys, never values (OPS-02, T-24-29). Until plan
-24-27 composes the production runner, an admitted start refuses with STARTUP_FAILED
-"runner not composed" (fail closed).
+Refusals and health output name variables and keys, never values (OPS-02, T-24-29).
+
+The production runner is `production_run_live` (plan 24-27): it assembles the live process with
+`build_wiring`, runs the start sequence, waits for SIGTERM or SIGINT and stops in order (scheduler,
+bot, stream supervisor, queued stream writes, `ExecutionService.drain()`, `StoreExecutor.close()`).
+A start the sequence refuses, or a wiring with a broken link, is reported with its step and code
+(`--hold-on-refusal` then holds instead of exiting).
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import signal
 import sys
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -60,6 +65,7 @@ from src.live.config import (
     live_liveness_problem,
     parse_live_environment,
     read_live_liveness,
+    remove_live_liveness,
 )
 from src.ops.redaction import configure_logging
 from src.paper import held_marker
@@ -78,6 +84,9 @@ class LiveContext:
     started_at_utc: datetime
     initialize_gate_state: bool
     operator_id: str | None
+    # Plan 24-27: `--hold-on-refusal` and an injected stop wait (None = install signal handlers).
+    hold_on_refusal: bool = False
+    wait_for_stop: Callable[[], None] | None = None
 
 
 LiveRunner = Callable[[LiveContext], int]
@@ -375,12 +384,7 @@ def main(
     except LiveRefusal as refusal:
         return refuse(refusal.code, refusal.reason, refusal.mode_label)
 
-    if run_live is None:
-        return refuse(
-            LiveExitCode.STARTUP_FAILED,
-            "runner not composed (the production runner is composed by plan 24-27)",
-            config.mode.value,
-        )
+    runner = run_live if run_live is not None else production_run_live
     context = LiveContext(
         config=config,
         env=env,
@@ -388,9 +392,11 @@ def main(
         started_at_utc=now(),
         initialize_gate_state=args.initialize_gate_state,
         operator_id=args.operator_id,
+        hold_on_refusal=hold,
+        wait_for_stop=wait_for_stop,
     )
     try:
-        return run_live(context)
+        return runner(context)
     except Exception as exc:  # the runner failed: fail closed, name the class only
         print(
             f"live runtime failed (exit {int(LiveExitCode.STARTUP_FAILED)}, mode "
@@ -403,13 +409,255 @@ def main(
         return int(LiveExitCode.STARTUP_FAILED)
 
 
+# --------------------------------------------------------------------------- #
+# The production runner (plan 24-27; D-01, D-03).
+# --------------------------------------------------------------------------- #
+
+DATABASE_URL_VARIABLES = ("DATABASE_URL_SYNC", "DATABASE_URL")
+BINANCE_LIMITS_RELATIVE = Path("config") / "binance" / "binance-limits-v1.toml"
+STRATEGY_ID = "trend-pullback"
+PARAMETER_SET_ID = "baseline-v5"
+DEMO_SYMBOLS = ("BTCUSDT",)
+
+
+class DatabaseUrlMissing(Exception):  # noqa: N818 - a refusal of the start, not an error family
+    """Neither DATABASE_URL_SYNC nor DATABASE_URL is set (names the variables, never a value)."""
+
+
+AssembleFn = Callable[[LiveContext], Any]
+
+
+def _sqlalchemy_url(database_url: str) -> Any:
+    """SQLAlchemy URL object; a bare ``postgresql://`` gets the psycopg 3 driver."""
+    from sqlalchemy.engine import make_url
+
+    url = make_url(database_url)
+    if url.drivername in ("postgresql", "postgres"):
+        url = url.set(drivername="postgresql+psycopg")
+    return url
+
+
+def default_assemble(context: LiveContext, *, repo_root: Path = REPO_ROOT) -> Any:
+    """Build the live process for real: PostgreSQL engine, SDK, PTB application, parameter set.
+
+    Raises:
+        DatabaseUrlMissing: no database URL variable is set.
+    """
+    from sqlalchemy import create_engine
+
+    from src.adapters.binance_limits import load_binance_limits
+    from src.domain.registry import load_parameter_set
+    from src.live.wiring import build_wiring
+    from src.live.wiring_parts import LiveBotProxy
+
+    url = next((context.env[n] for n in DATABASE_URL_VARIABLES if context.env.get(n)), None)
+    if url is None:
+        raise DatabaseUrlMissing(" or ".join(DATABASE_URL_VARIABLES))
+    config = context.config
+    token = config.telegram_bot_token
+
+    def application_factory() -> Any:
+        from telegram.ext import ApplicationBuilder
+
+        return ApplicationBuilder().token(token).build()
+
+    return build_wiring(
+        config=config,
+        execution_limits=config.limits,
+        binance_limits=load_binance_limits(repo_root / BINANCE_LIMITS_RELATIVE),
+        parameter_set=load_parameter_set(STRATEGY_ID, PARAMETER_SET_ID),
+        clock=context.clock,
+        sleep=asyncio.sleep,
+        sdk_factory=None,
+        application_factory=application_factory,
+        bot=LiveBotProxy(),
+        engine=create_engine(_sqlalchemy_url(url), pool_pre_ping=True),
+        repo_root=repo_root,
+        symbols=DEMO_SYMBOLS,
+        session_id=context.started_at_utc.strftime("%Y%m%dT%H%M%SZ"),
+    )
+
+
+@dataclass(frozen=True)
+class _RunResult:
+    """What the async run came to: an exit code, and a refusal reason when it did not run."""
+
+    code: LiveExitCode
+    reason: str | None = None
+
+
+def _install_stop_handlers() -> Callable[[], None]:
+    """Install SIGINT and SIGTERM handlers in THIS (the main) thread; return the blocking wait."""
+    stop = threading.Event()
+
+    def _handler(_signum: int, _frame: object) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+
+    def wait() -> None:
+        stop.wait()
+
+    return wait
+
+
+async def shutdown_in_order(assembly: Any) -> list[str]:
+    """Stop the live process in order; returns the names of the steps that failed.
+
+    scheduler, Telegram bot, stream supervisor, queued stream writes, the execution service
+    (every outstanding placement completes, none is cancelled mid-send), then the store executor
+    (every queued write completes). A step that raises is logged by class name and the next one
+    still runs. Safe to call on an assembly that never completed.
+    """
+    failed: list[str] = []
+
+    async def step(name: str, call: Callable[[], Awaitable[Any]]) -> None:
+        try:
+            await call()
+        except Exception as exc:  # noqa: BLE001 - shutdown goes on, the class name is kept
+            failed.append(name)
+            structlog.get_logger().error(
+                "live shutdown step failed", step=name, error=type(exc).__name__
+            )
+
+    if assembly.is_complete:
+        wiring = assembly.wiring
+        wiring.scheduler.stop()
+        task = assembly.scheduler_task
+        if task is not None:
+            await step("scheduler", lambda: asyncio.shield(task))
+        await step("bot", wiring.runner.stop)
+        await step("supervisor", lambda: wiring.stream.supervisor.stop(close_listen_key=True))
+        await step("stream_writes", wiring.stream.fanout.drain)
+        await step("persistence", wiring.persistence.drain)
+        await step("service", wiring.service.drain)
+        try:
+            remove_live_liveness(assembly.config.liveness_dir)
+        except OSError as exc:
+            structlog.get_logger().warning(
+                "live liveness stamp not removed", error=type(exc).__name__
+            )
+    await step("executor", assembly.executor.aclose)
+    return failed
+
+
+async def _run_async(
+    context: LiveContext, assembly: Any, wait_for_stop: Callable[[], None]
+) -> _RunResult:
+    from src.live.startup import run_start_sequence
+    from src.live.wiring import check_wiring
+
+    ports = assembly.startup_ports(
+        initialize_gate_state=context.initialize_gate_state, operator_id=context.operator_id
+    )
+    try:
+        outcome = await run_start_sequence(ports, now_utc=context.clock())
+    except Exception as exc:  # noqa: BLE001 - fail closed, name the class only
+        await shutdown_in_order(assembly)
+        return _RunResult(
+            LiveExitCode.STARTUP_FAILED, f"the start sequence failed ({type(exc).__name__})"
+        )
+    if not outcome.admitted:
+        reason = f"held at step {outcome.held_step} ({outcome.held_code}): {outcome.held_message}"
+        if assembly.broken_links:
+            reason += f"; broken links: {', '.join(assembly.broken_links)}"
+        await shutdown_in_order(assembly)
+        return _RunResult(LiveExitCode.STARTUP_FAILED, reason)
+    broken = check_wiring(assembly.wiring)
+    if broken:
+        await shutdown_in_order(assembly)
+        return _RunResult(LiveExitCode.STARTUP_FAILED, f"broken wiring links: {', '.join(broken)}")
+
+    loop = asyncio.get_running_loop()
+    stopped = asyncio.Event()
+
+    def wait_then_set() -> None:
+        wait_for_stop()
+        loop.call_soon_threadsafe(stopped.set)
+
+    threading.Thread(target=wait_then_set, name="live-stop-wait", daemon=True).start()
+    stop_waiter = asyncio.ensure_future(stopped.wait())
+    waiters: set[asyncio.Future[Any]] = {stop_waiter}
+    if assembly.scheduler_task is not None:
+        waiters.add(assembly.scheduler_task)
+    await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+    stop_waiter.cancel()
+    scheduler_ended = assembly.scheduler_task is not None and assembly.scheduler_task.done()
+    stop_requested = stopped.is_set()
+    await shutdown_in_order(assembly)
+    if scheduler_ended and not stop_requested:
+        return _RunResult(LiveExitCode.STARTUP_FAILED, "the scheduler ended before a stop signal")
+    return _RunResult(LiveExitCode.OK)
+
+
+def run_admitted(context: LiveContext, *, assemble: AssembleFn | None = None) -> int:
+    """Run an admitted live process until a stop signal, then stop it in order (D-01, D-03).
+
+    `assemble(context)` builds the `LiveAssembly` (default: `default_assemble`, the real
+    PostgreSQL, SDK and PTB objects). A refusal of the start is printed with its step and code and
+    held when `--hold-on-refusal` was given (nothing is running then).
+    """
+    mode = context.config.mode.value
+    marker_dir = context.config.held_marker_dir
+    waiter = context.wait_for_stop
+
+    def stopper() -> None:
+        if waiter is not None:
+            waiter()
+        else:
+            wait_for_stop_signal()
+
+    def refuse(code: LiveExitCode, reason: str) -> int:
+        return _refuse(
+            code,
+            reason,
+            mode_label=mode,
+            hold=context.hold_on_refusal,
+            wait_for_stop=stopper,
+            marker_dir=marker_dir,
+        )
+
+    build = assemble if assemble is not None else default_assemble
+    try:
+        assembly = build(context)
+    except DatabaseUrlMissing as exc:
+        return refuse(LiveExitCode.STARTUP_FAILED, f"{exc} is not set")
+    except Exception as exc:  # noqa: BLE001 - fail closed, name the class only
+        return refuse(
+            LiveExitCode.STARTUP_FAILED,
+            f"the live process could not be built ({type(exc).__name__})",
+        )
+    run_wait = waiter if waiter is not None else _install_stop_handlers()
+    try:
+        result = asyncio.run(_run_async(context, assembly, run_wait))
+    except Exception as exc:  # noqa: BLE001 - fail closed, name the class only
+        return refuse(
+            LiveExitCode.STARTUP_FAILED, f"the live process failed ({type(exc).__name__})"
+        )
+    if result.code is LiveExitCode.OK:
+        return int(LiveExitCode.OK)
+    return refuse(result.code, result.reason or "the live process stopped")
+
+
+def production_run_live(context: LiveContext) -> int:
+    """The default `LiveRunner` of `main`: assemble for real and run (plan 24-27)."""
+    return run_admitted(context)
+
+
 __all__ = [
     "BUILD_REVISION_VARIABLE",
+    "DATABASE_URL_VARIABLES",
+    "DatabaseUrlMissing",
     "LiveContext",
     "LiveRunner",
     "build_parser",
+    "default_assemble",
     "diagnostic_payload",
     "main",
+    "production_run_live",
+    "run_admitted",
+    "shutdown_in_order",
     "wait_for_stop_signal",
 ]
 
