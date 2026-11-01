@@ -34,12 +34,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models import ApprovalRow, ExecutionIntentRow
+from src.db.models import ApprovalRow, ExecutionIntentRow, JournalEventRow
 from src.domain.enums import (
     ApprovalConsumptionStatus,
     ApprovalResult,
@@ -55,6 +55,12 @@ from src.persistence.errors import (
     ParentRowMissing,
 )
 from src.persistence.uow import OperationalDatabase
+
+# The journal rows `restorable_entries` reads (the coordinator writes them; a test pins the values
+# to `src.execution.protection`, which this persistence module does not import).
+PROTECTION_CORRELATION_PREFIX = "protection_"
+PROTECTION_TRANSITION_EVENT = "PROTECTION_TRANSITION"
+PROTECTION_ENDED_STATES = ("FLAT", "ENTRY_ENDED_NO_FILL")
 
 _SQLSTATE_UNIQUE_VIOLATION = "23505"
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
@@ -198,16 +204,36 @@ class PgExecutionStateStore:
     def restorable_entries(self) -> Sequence[IntentRecord]:
         """Every ENTRY row that may still have a live order or a live position after a restart.
 
-        SENT, UNKNOWN and ACKED rows of the ENTRY role, oldest first. `list_unresolved_intents`
-        returns neither the ACKED rows nor the protective rows, so a resting or filled entry that
-        was acknowledged would not be re-tracked. Known limit: an ACKED row is never moved by the
-        protection lifecycle, so the list also holds entries whose plan has long ended (the
-        rebuild marks them FLAT from the journal); bounding it needs an owner number.
+        SENT, UNKNOWN and ACKED rows of the ENTRY role, oldest first, for plans that have NOT
+        ended (DECISIONS D093; no age limit and no new number). A plan has ended when its
+        journal holds a `PROTECTION_TRANSITION` row into `FLAT` or `ENTRY_ENDED_NO_FILL`: both
+        states have no successor (`src.domain.transitions.PROTECTION`), so the presence of one
+        row is conclusive and a later row cannot revive the plan. `list_unresolved_intents`
+        returns neither the ACKED rows nor the protective rows, so a resting or filled entry
+        that was acknowledged would not be re-tracked without this read; an ACKED row is never
+        moved by the protection lifecycle, hence the journal test. A plan with no ended row
+        stays (fail toward re-tracking: the rebuild reads REST and the journal, never trusts
+        age).
         """
         restorable = (
             ExecutionIntentStatus.SENT.value,
             ExecutionIntentStatus.UNKNOWN.value,
             ExecutionIntentStatus.ACKED.value,
+        )
+        ended = (
+            select(JournalEventRow.journal_event_id)
+            .where(
+                JournalEventRow.correlation_id
+                == literal(PROTECTION_CORRELATION_PREFIX) + ExecutionIntentRow.plan_hash,
+                JournalEventRow.event_type == PROTECTION_TRANSITION_EVENT,
+                or_(
+                    *(
+                        JournalEventRow.payload_json.contains(f'"to":"{state}"')
+                        for state in PROTECTION_ENDED_STATES
+                    )
+                ),
+            )
+            .exists()
         )
         with self._db.transaction() as session:
             rows = session.execute(
@@ -215,6 +241,7 @@ class PgExecutionStateStore:
                 .where(
                     ExecutionIntentRow.role == OrderRole.ENTRY.value,
                     ExecutionIntentRow.intent_status.in_(restorable),
+                    ~ended,
                 )
                 .order_by(ExecutionIntentRow.intended_at_utc, ExecutionIntentRow.approval_id)
             ).scalars()

@@ -495,7 +495,16 @@ class InMemoryReservations:
 
 
 class LiveIntentStore(InMemoryExecutionIntentStore):
-    """The shared intent fake plus the two production reads of `PgExecutionStateStore`."""
+    """The shared intent fake plus the two production reads of `PgExecutionStateStore`.
+
+    `restorable_entries` applies the D093 rule through the journal, as the SQL does: ENTRY rows in
+    SENT, UNKNOWN or ACKED whose plan has no `PROTECTION_TRANSITION` row into FLAT or
+    ENTRY_ENDED_NO_FILL.
+    """
+
+    def __init__(self, journal: InMemoryJournal | None = None) -> None:
+        super().__init__()
+        self._journal = journal
 
     def intent_for_client_id(self, client_order_id: str) -> IntentRecord | None:
         with self._lock:
@@ -504,6 +513,18 @@ class LiveIntentStore(InMemoryExecutionIntentStore):
                     return row
         return None
 
+    def _ended(self, plan_hash: str) -> bool:
+        if self._journal is None:
+            return False
+        for event in self._journal.list_by_correlation(f"protection_{plan_hash}"):
+            if event.event_type != "PROTECTION_TRANSITION":
+                continue
+            if any(
+                f'"to":"{state}"' in event.payload_json for state in ("FLAT", "ENTRY_ENDED_NO_FILL")
+            ):
+                return True
+        return False
+
     def restorable_entries(self) -> tuple[IntentRecord, ...]:
         with self._lock:
             rows = [
@@ -511,6 +532,7 @@ class LiveIntentStore(InMemoryExecutionIntentStore):
                 for r in self._rows.values()
                 if r.role == OrderRole.ENTRY.value and r.intent_status in _RESTORABLE
             ]
+        rows = [r for r in rows if not self._ended(r.plan_hash)]
         return tuple(sorted(rows, key=lambda r: (r.intended_at_utc, r.approval_id)))
 
 
@@ -542,7 +564,7 @@ def build_memory_stores() -> tuple[LiveStoreSet, MemoryStoreHandles]:
         shadow=shadow,
         approvals=InMemoryApprovals(shadow),
         entities=InMemoryEntities(shadow),
-        execution_state=LiveIntentStore(),
+        execution_state=LiveIntentStore(journal),
         journal=journal,
         pending_actions=InMemoryPendingActionStore(),
         reservations=InMemoryReservations(),

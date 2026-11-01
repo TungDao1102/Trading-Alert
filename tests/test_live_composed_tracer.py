@@ -111,3 +111,36 @@ async def test_confirm_places_one_entry_and_its_stream_fill_ends_in_a_protected_
         plan_hash=request.plan.plan_hash, role=OrderRole.STOP_LOSS.value
     )
     assert len(rig.fake.calls_to("place_entry")) == 1, "a placement is never re-sent"
+
+
+async def test_the_protected_entry_is_restorable_until_its_plan_ends_d093(tmp_path: Path) -> None:
+    """D093 on the composed process: an ACKED entry is restored while its plan is live."""
+    from src.domain.journal import JournalEvent
+
+    rig = make_composed_rig(tmp_path)
+    wiring = await rig.prepare()
+    request = await rig.derive_request()
+    await _run_pump(rig)
+    short_id = next(iter(rig.memory.shadow.mappings))
+    assert (await rig.press("APR", short_id, query_id="q-apr")).ok
+    await rig.clock.advance(30)
+    rig.set_prices()
+    assert (await rig.press("CNF", short_id, query_id="q-cnf")).ok
+    await wiring.service.drain()
+    intents = rig.memory.execution_state
+    assert [e.plan_hash for e in intents.restorable_entries()] == [request.plan.plan_hash]
+
+    # The coordinator journals every transition; an END (FLAT) removes the plan from the read.
+    correlation = f"protection_{request.plan.plan_hash}"
+    rig.memory.journal.record(
+        JournalEvent(
+            journal_event_id="ended-1",
+            occurred_at_utc=rig.clock.now(),
+            event_type="PROTECTION_TRANSITION",
+            entity_type="ProtectionState",
+            entity_id=request.plan.plan_hash,
+            correlation_id=correlation,
+            payload_json='{"seq":3,"to":"FLAT"}',
+        )
+    )
+    assert intents.restorable_entries() == ()
