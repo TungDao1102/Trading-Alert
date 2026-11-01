@@ -205,7 +205,7 @@ from src.domain.transitions import PROTECTION_INITIAL_STATE, TransitionKind, is_
 from src.execution.cancel_verification import PROVEN_GONE, CancelVerdict
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
-from src.execution.intent_store import ExecutionIntentStore
+from src.execution.intent_store import RESOLUTION_RECONCILED_ABSENT, ExecutionIntentStore
 from src.execution.liquidation_watch import (
     LIQUIDATION_TOO_CLOSE_AFTER_FILL,
     LIQUIDATION_UNKNOWN_AFTER_FILL,
@@ -302,6 +302,9 @@ EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
 EVENT_SWEEP_UNVERIFIED = "PROTECTION_SWEEP_UNVERIFIED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
+# Plan 24-34 (D-35): the UNKNOWN-entry resolver closed the entry RECONCILED_ABSENT and told the
+# coordinator through ``note_entry_resolved``; one note per plan, after the ordinary transition row.
+EVENT_ENTRY_RECONCILED_ABSENT = "PROTECTION_ENTRY_RECONCILED_ABSENT"
 # Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
 EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
 # Plan 20-19 (D-08): one note per plan the coordinator rebuilt after a restart.
@@ -1088,6 +1091,44 @@ class ProtectionCoordinator:
         state = "NONE" if tracked.state is None else tracked.state.value
         self._journal_note(
             tracked, EVENT_DIVERGENCE_NOTIFIED, {"kind": kind, "state": state}, self._now()
+        )
+        return True
+
+    def note_entry_resolved(self, plan_hash: str, resolution: str) -> bool:
+        """The UNKNOWN-entry resolver closed this plan's entry as absent (plan 24-34, D-35).
+
+        20-DEFERRED: before this call the plan stayed tracked as AWAITING_FILL (or
+        ENTRY_UNRESOLVED) until its own step. The resolver only closes an entry on repeated REST
+        probes, GTD plus grace, and fresh flat position and open-order reads (D080), so a
+        ``RESOLUTION_RECONCILED_ABSENT`` here means nothing rests and nothing is open: the plan
+        moves to ENTRY_ENDED_NO_FILL at once (the ordinary transition row, reason
+        ``ENTRY_ENDED_NO_FILL``) and one ``PROTECTION_ENTRY_RECONCILED_ABSENT`` note is journaled.
+
+        Nothing is sent, cancelled or closed here, and SAFE_MODE is not touched (this module never
+        leaves it). Returns False, with no row, for an unknown plan, any other resolution, or a
+        plan that is not waiting for its entry (AWAITING_FILL, ENTRY_UNRESOLVED): a plan with a
+        fill or a position is never changed by an absence verdict.
+        """
+        if resolution != RESOLUTION_RECONCILED_ABSENT:
+            return False
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None or tracked.state not in (
+            ProtectionState.AWAITING_FILL,
+            ProtectionState.ENTRY_UNRESOLVED,
+        ):
+            return False
+        previous = tracked.state
+        now = self._now()
+        if not self._transition(
+            tracked, ProtectionState.ENTRY_ENDED_NO_FILL, REASON_ENTRY_ENDED_NO_FILL, now
+        ):
+            return False
+        tracked.entry_terminal_at = now
+        self._journal_note(
+            tracked,
+            EVENT_ENTRY_RECONCILED_ABSENT,
+            {"resolution": resolution, "state_before": previous.value if previous else "NONE"},
+            now,
         )
         return True
 
@@ -2790,11 +2831,43 @@ class ProtectionCoordinator:
                 tracked, EVENT_SWEEP_FAILED, {"error_type": type(exc).__name__}, self._now()
             )
             return
-        legs = self._sweep_leg_verdicts(verdicts)
+        legs = await self._legs_gone_from_open_list(tracked, self._sweep_leg_verdicts(verdicts))
         if all(CancelVerdict(name) in PROVEN_GONE for name in legs.values()):
             tracked.sweep_done = True
             return
         self._journal_sweep_unverified(tracked, legs)
+
+    async def _legs_gone_from_open_list(
+        self, tracked: _Tracked, legs: dict[str, str]
+    ) -> dict[str, str]:
+        """A STILL_OPEN leg that a fresh open-algo list no longer shows is gone (plan 24-34, D-34).
+
+        Demo criterion 5: for about a second after an algo cancel the by-id query still answers NEW
+        while the open-algo list already omits the order, so the by-id verdict alone read a
+        successful cancel as STILL_OPEN and the next step cancelled the leg again. Only a leg
+        verified STILL_OPEN is re-checked, with one list read for the plan. A list that cannot be
+        read, is not a list, or still holds the leg's id changes nothing (the leg stays
+        STILL_OPEN, fail closed). The corrected verdict is GONE_NOT_CANCELED: it no longer rests,
+        and nothing proves the cancel did it.
+        """
+        still_open = [
+            role for role, name in legs.items() if CancelVerdict(name) is CancelVerdict.STILL_OPEN
+        ]
+        if not still_open:
+            return legs
+        try:
+            listing = await self._adapter.snapshot_open_algo_orders(symbol=tracked.entry.symbol)
+        except Exception:  # noqa: BLE001 - an unreadable list proves nothing
+            return legs
+        if not isinstance(listing, (list, tuple)):
+            return legs
+        resting = {_attr(row, "client_algo_id") for row in listing}
+        checked = dict(legs)
+        for role in still_open:
+            leg_id = derive_algo_client_id(plan_hash=tracked.entry.plan_hash, role=role)
+            if leg_id not in resting:
+                checked[role] = CancelVerdict.GONE_NOT_CANCELED.value
+        return checked
 
     @staticmethod
     def _sweep_leg_verdicts(verdicts: object) -> dict[str, str]:
@@ -3107,6 +3180,7 @@ __all__ = [
     "EVENT_DIVERGENCE_NOTIFIED",
     "EVENT_ENTRY_CANCEL_FAILED",
     "EVENT_ENTRY_CANCEL_NOT_SENT",
+    "EVENT_ENTRY_RECONCILED_ABSENT",
     "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
     "EVENT_LIQUIDATION_CHECKED",
