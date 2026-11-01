@@ -780,6 +780,14 @@ class LiveAssembly:
                 divergence_sink=divergences.sink,
             ),
             session_id=self.session_id,
+            # fills_reader stays None (plan 24-27B, documented): no production REST read of the
+            # fills of one order exists. `user_trades_in_window` (the only trade-list read)
+            # returns UserTradeRow, which carries neither price, quantity, side nor position side,
+            # so it cannot build the FillEvent the coordinator needs; a reader needs a NEW adapter
+            # method mapping the account_trade_list fields, verified against the current Binance
+            # docs first. Until then the router's own FILL_TOTAL_MISMATCH divergence (journaled,
+            # reconcile compares REST positions) is the only trace of a fill the stream missed.
+            fills_reader=None,
             on_state_change=divergences.note_state,
             on_failure=divergences.note_failure,
         )

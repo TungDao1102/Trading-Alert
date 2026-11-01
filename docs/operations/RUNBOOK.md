@@ -916,11 +916,11 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 
 ## 21. Reconcile loop, SAFE_MODE exit and recovery (Phase 20)
 
-Status: everything in this section is built and tested with fakes (a Binance-semantics fake exchange, in-memory and local PostgreSQL stores). Nothing is wired into a running process yet (composition is Phase 24), nothing was observed against Binance Demo, and the real-stack rehearsal is Phases 25 and 26. Reading this section is not a statement that live execution is safe or ready; the execution model is decided by D079 (2026-10-22) and live placement stays disabled.
+Status: everything in this section is built and tested with fakes (a Binance-semantics fake exchange, in-memory and local PostgreSQL stores). The live composition exists since Phase 24 (sections 21.1a and 21.1b), but nothing was observed against Binance Demo, and the real-stack rehearsal is Phases 25 and 26. Reading this section is not a statement that live execution is safe or ready; the execution model is decided by D079 (2026-10-22) and live placement stays disabled.
 
 ### 21.1 Leaving SAFE_MODE (operator exit)
 
-SAFE_MODE is never left by a restart, a timer, a recovered feed, a closed intent or a flag flip. The only way out is `SafeModeController.exit_safe_mode`, an explicit, fail-closed, operator-attributed call. There is no command, Telegram surface or authentication for it yet: today only the restore drill calls it (Phase 23 / Phase 24 own the operator entry point; ssh access to the host is the access control). The `operator_id` is audit metadata (a non-blank text), not authentication, and an operator-id allow-list must exist before any LIVE path.
+SAFE_MODE is never left by a restart, a timer, a recovered feed, a closed intent or a flag flip. The only way out is `SafeModeController.exit_safe_mode`, an explicit, fail-closed, operator-attributed call. Since Phase 24 the live process has one entry point for it, the Telegram commands `/safemode_exit` and `/confirm <token>` (section 21.1a); the restore drill calls it too. The `operator_id` the commands pass is `tg:<Telegram user id>` of the allow-listed user who confirmed, so it is audit metadata backed by the chat and user allow-list of the live bot (section 21.1a), not a password.
 
 The exit succeeds only when every readiness row holds in one call; every refusal found is returned and journaled as `SAFE_MODE_EXIT_REFUSED` (codes only) and the state does not change:
 
@@ -936,13 +936,41 @@ An unfilled resting entry (GTD LIMIT still `NEW` on the exchange, no position on
 
 On success the order is: journal `SAFE_MODE_EXIT` with the operator id first, persist the exit state second, flip memory last. If the journal row was written and the state save then failed, the journal says EXIT while the durable state still says SAFE_MODE and a retry journals a second EXIT row: read the system-state row as the truth. An open gate means only "no restriction currently known"; it never replaces the fresh Binance reads of row 3.
 
+### 21.1a Operator commands on the live bot (`/safemode_exit`, `/confirm`)
+
+The live process (`python -m src.live.runtime`, Phase 24) registers these commands on its OWN Telegram bot (one `getUpdates` consumer per token; the paper/SHADOW bot has none). Every command is checked by the same two gates as an approval press: the message must come from the authorized chat (`TELEGRAM_CHAT_ID` of the live service), then from a private chat with a user id in `TELEGRAM_AUTHORIZED_USER_IDS`. Anything else changes nothing, is journaled with the user id, the chat id and a fixed reason code (never the message text) and is answered with the single word `Rejected`.
+
+| Command | Effect |
+|---|---|
+| `/status` | read only: mode, SAFE_MODE and its reason, entry enablement, REST gate, user-data stream, protections |
+| `/disable_entries` | disables new entries at once (risk reducing, no confirmation); idempotent |
+| `/safemode_exit` | step 1 of 2: replies with a one-time token; nothing changes yet |
+| `/close SYMBOL` | step 1 of 2: replies with a one-time token; the position is closed only after the confirmation, through the coordinator's own close flow |
+| `/confirm <token>` | step 2 of 2 for either command above |
+| `/demo_signal [far\|fill]` | DEMO only, section 21.1b |
+
+How a SAFE_MODE exit goes:
+
+1. Look at the cause first (`/status`, the journal, the Binance UI). The exit is refused unless every readiness row of section 21.1 holds, so there is nothing to gain by trying early, but the refusal rows are also the checklist.
+2. Send `/safemode_exit`. The bot answers with a token. The token is bound to the user who asked, is single use and valid for `CONFIRM_TTL_SECONDS_DEFAULT` seconds (60). Only its SHA-256 is kept, in memory: a restart of the process forgets it, which is the safe direction. Asking again replaces the earlier token.
+3. Send `/confirm <token>` from the SAME user within the window. The exit runs in the process through `SafeModeController.exit_safe_mode`, so all seven rows decide. On success the bot says so and the journal holds `SAFE_MODE_EXIT` with `tg:<user id>`; on refusal it lists the controller's own codes (`COMPARE_NOT_CLEAN`, `GATE_NOT_OPEN`, `STREAM_NOT_LIVE`, ...) and SAFE_MODE stays.
+4. An unknown, expired, already used or other-user token answers `Not confirmed` and changes nothing. `/confirm` does nothing by itself: it only completes a pending `/safemode_exit` or `/close`.
+
+If the bot does not answer (stream down, process held, bot token conflict), the commands are unavailable: the process still holds new entries in SAFE_MODE, and the exit then needs a restart after the cause is fixed (a restart never leaves SAFE_MODE by itself, section 21.1). Clearing a REST gate restriction stays an ssh command (section 21.3); `/safemode_exit` refuses `GATE_NOT_OPEN` while one is in force.
+
+After a restart the coordinator is rebuilt from the intent rows, the persisted plans and the journal, and no new entry opens until that restore is complete. The rows it reads are the ENTRY intents in SENT, UNKNOWN and ACKED for plans that have not ended (a `PROTECTION_TRANSITION` into `FLAT` or `ENTRY_ENDED_NO_FILL` ends a plan; no age limit, DECISIONS D093).
+
+### 21.1b Injecting a Demo smoke signal (DEMO only)
+
+`/demo_signal [far|fill]` is the owner-triggered way to put one Demo smoke request into the RUNNING live process (there is no other: no file to drop, no network port). It exists only when the process runs in DEMO; a LIVE or TESTNET process does not register it and `check_wiring` refuses a start that does. It reads the current Demo exchange filters, mark price, commission rate and account equity through the signed adapter, derives one request sized from that account equity (`far` rests below the mark and is not meant to fill, `fill` sits just above it; the default is `far`), and queues it. The signal-source task then sends the normal approval card, and the placement still needs your APPROVE and CONFIRM presses. One request may wait at a time (`ALREADY_QUEUED` otherwise). The reply and the journal row carry only a fixed code (`QUEUED`, `ALREADY_QUEUED`, `BAD_USAGE`, `FILTERS_UNAVAILABLE`, `EQUITY_UNAVAILABLE`, `DERIVATION_FAILED`). The command has not been run against Binance Demo: that run is owner-only (`--execute` rules apply to the smoke scripts, not to this command, but the Demo evidence is Phases 25 and 26).
+
 ### 21.2 Spill directory and replay
 
 When the journal is down, records that must not be lost (operator audit rows, pending protective-action intents, the closer's pre-send attempt) are written to a local spill directory by `src/ops/spill.py`: one canonical JSON file per journal event id, written atomically. At start `run_startup_recovery` reads the spill once and replays it into the journal: an identical stored event is `already_present`; a conflicting or corrupt file is kept and enters SAFE_MODE `RESTORE_INCONSISTENT`; a failed journal write enters `DB_FAILURE` and keeps the file. Do not edit or delete spill files by hand. The spill is supplementary evidence of what this process did, never a substitute for Binance truth, and a missing or empty spill proves nothing. Where the directory lives on the host is a composition decision that is not made yet (TBD, Phase 24). The coordinator does not spill its own `PROTECTION_TRANSITION` rows when the journal is down; that limit is recorded in `20-DEFERRED.md` of Phase 20.
 
 ### 21.3 REST gate restart recovery (owner decision O-C, option a1 with commands)
 
-The REST gate keeps its 418 ban and 429 pause deadlines in a state file (`src/ops/rest_gate_state.py`) and restores them at start. The first-install bootstrap call `FileGateStateStore.initialize(...)` must run once before the first start (the deploy bootstrap does not call it yet; Phase 24), and the state file path is a composition decision (TBD). Accepted consequence of option a1: if the initialized state file is missing, corrupt or cannot be read at start, the gate is in an unknown state and blocks every REST call, including emergency reduce-only closes, protective actions and reconciliation reads, until it is cleared (the assumed ban wait is 3 days, 259200 s); every restart before that keeps the block, and there is no bypass for any order category. The alert hook `REST_GATE_RECOVERY_REQUIRED` is not wired to the alert sink yet.
+The REST gate keeps its 418 ban and 429 pause deadlines in a state file (`src/ops/rest_gate_state.py`) and restores them at start. The first-install bootstrap call `FileGateStateStore.initialize(...)` must run once before the first start (the deploy bootstrap does not call it yet; Phase 24), and the state file path is a composition decision (TBD). Accepted consequence of option a1: if the initialized state file is missing, corrupt or cannot be read at start, the gate is in an unknown state and blocks every REST call, including emergency reduce-only closes, protective actions and reconciliation reads, until it is cleared (the assumed ban wait is 3 days, 259200 s); every restart before that keeps the block, and there is no bypass for any order category. The alert hook `REST_GATE_RECOVERY_REQUIRED` (and `REST_GATE_BAN_ENTERED`) reaches the journal-first alert sink in the live process since Phase 24 (plan 24-13 hook, composed in 24-27).
 
 Two operator commands exist (run on the host, over ssh):
 

@@ -184,6 +184,17 @@ async def test_the_runner_registers_the_operator_commands_and_the_demo_signal_an
     assert "callback_query" in ALLOWED_UPDATES
 
 
+async def test_no_rest_fills_reader_is_composed_and_the_fallback_schedules_nothing(
+    complete: CompleteLiveWiring,
+) -> None:
+    """24-27B: no production fills-by-order read exists (UserTradeRow lacks price and quantity)."""
+    from src.adapters.binance_usdm import UserTradeRow
+
+    assert complete.stream.fills_fallback("123") == ()
+    assert complete.stream.fills_fallback.scheduled == 0
+    assert {"price", "quantity", "side"}.isdisjoint(UserTradeRow.__dataclass_fields__)
+
+
 async def test_the_resolver_on_resolved_is_the_coordinator(complete: CompleteLiveWiring) -> None:
     callback = complete.reconcile.resolver._on_resolved
     assert callback == complete.coordinator.note_entry_resolved
