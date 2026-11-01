@@ -31,6 +31,7 @@ _SCRUBBED_ENV_PREFIXES = (
     "POSTGRES_",
     "COMPOSE_",
     "TRADING_ENV_FILE",
+    "TRADING_LIVE_ENV_FILE",
     "TRADING_APP_REVISION",
     "IMAGE_TAG",
     "DATABASE_URL",
@@ -350,6 +351,19 @@ def test_every_service_has_its_own_healthcheck_decision(tmp_path: Path) -> None:
         assert "healthcheck" in svc, f"{name} must state a healthcheck decision explicitly"
     # The paper service is no longer a placeholder: it carries the runtime's own probe (16-32).
     assert services["paper"]["healthcheck"]["test"] == PAPER_PROBE
+
+
+def test_live_service_reads_its_own_optional_env_file_and_not_the_shared_one(
+    tmp_path: Path,
+) -> None:
+    """Plan 24-30 (D-29): the `live` service lists `.env.live` only; its environment holds the
+    database values and nothing from the shared `.env` (the temp `.env` here holds POSTGRES_*)."""
+    live = _services(compose_config(tmp_path, profiles=("live",)))["live"]
+    assert set(live["environment"]) == {"DATABASE_URL", "POSTGRES_HOST"}
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert "${TRADING_LIVE_ENV_FILE:-.env.live}" in text
+    # every other app service keeps the shared file only
+    assert text.count("env_file: ${TRADING_ENV_FILE:-.env}") == 1  # the x-app anchor
 
 
 def test_profile_services_need_no_backup_or_live_variables(tmp_path: Path) -> None:

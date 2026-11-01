@@ -9,6 +9,13 @@
 #    another file. `${VAR:?}` checks exist only on the always-on postgres vars: profile-gated
 #    services are still interpolated, so a required-variable check there would break every
 #    compose command for operators who have not configured backups or live.
+#  - Per-service secrets (plan 24-30, D-29, WR-06): the `live` service reads its OWN env file
+#    (`${TRADING_LIVE_ENV_FILE:-.env.live}`, mode 0600, gitignored, `required: false` so every
+#    other compose command works without it) and NOT the shared one. The Binance credential names
+#    and the live Telegram bot names live only there; the collector, db-upgrade and paper services
+#    never receive a `BINANCE_` name. The closed per-service variable lists are written in
+#    tests/test_live_compose_env_split.py and checked against `docker compose config`; plan 24-36
+#    splits the paper Telegram and backup names the same way.
 #  - No container_name anywhere (two projects on one daemon must not collide).
 
 name: trading
@@ -120,9 +127,11 @@ services:
   #  - This command never passes `--pin-epoch`: the pin exits 0, which this policy would restart.
   #    The pin is the one-shot `paper-pin` service below (16-DEC-PIN-COMMAND).
   #  - logs holds logs/paper/pinned_epoch.json and registry_diff.jsonl.
-  #  - WR-06 (per-service env_file split) stays Phase 24: every x-app service shares one
-  #    env_file, so this container also sees any BACKUP_ variable in it. The runtime refuses any
-  #    BINANCE_ name at start as the second barrier. The soak runs as its own project
+  #  - WR-06 (per-service env_file split), first half done in plan 24-30: the Binance names are
+  #    in the live service's own file, so this container receives none. It still shares the base
+  #    env_file with the collector, so it also sees any BACKUP_ variable in it until plan 24-36.
+  #    The runtime refuses any BINANCE_ name at start as the second barrier. The soak runs as its
+  #    own project
   #    (`deploy/compose-soak.sh`, project trading-soak, own pgdata volume).
   paper:
     <<: *app
@@ -164,9 +173,16 @@ services:
 
   # Live runner placeholder, never part of the default stack. No entrypoint yet: Phase 24
   # (live) replaces this command and defines the service probe (D-06). Live credentials use
-  # separate variable names in env_file (OPS-06); nothing is interpolated here.
+  # separate variable names (OPS-06) in the live service's own env file (plan 24-30, D-29): the
+  # `env_file` below REPLACES the shared one of the x-app anchor, so nothing in `.env` (the shadow
+  # bot token, BACKUP_ names, the paper names) reaches this container; only the database values
+  # of x-database-env are added. Nothing is interpolated except the file name.
   live:
     <<: *app
+    env_file:
+      - path: ${TRADING_LIVE_ENV_FILE:-.env.live}
+        required: false
+    environment: *database-env
     profiles: ["live"]
     restart: "no"
     command:
