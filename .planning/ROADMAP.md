@@ -1319,7 +1319,7 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
 - [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 30/36 plans executed
+**Plans:** 32/36 plans executed
 
 Plans:
 
@@ -1367,8 +1367,8 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 24-28-PLAN.md - Replay and restart matrix on fakes and PostgreSQL (D-09, D-20, EXEC-03)
-- [ ] 24-29-PLAN.md - Demo smoke script over the composed process (D-33, D-16, D-22, D-23, D-34)
-- [ ] 24-35-PLAN.md - Compose live service with probe and hold (D-01, D-03, O-2)
+- [x] 24-29-PLAN.md - Demo smoke script over the composed process (D-33, D-16, D-22, D-23, D-34)
+- [x] 24-35-PLAN.md - Compose live service with probe and hold (D-01, D-03, O-2)
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 24-31-PLAN.md - DECISIONS rows, RUNBOOK, TELEGRAM, DATA_MODEL, AGENTS.md (O-7)
@@ -1518,7 +1518,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
-| 24. Live Runtime Composition + Demo Rehearsal | 30/36 | In Progress | - |
+| 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
 | 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
