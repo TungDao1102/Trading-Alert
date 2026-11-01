@@ -2831,11 +2831,43 @@ class ProtectionCoordinator:
                 tracked, EVENT_SWEEP_FAILED, {"error_type": type(exc).__name__}, self._now()
             )
             return
-        legs = self._sweep_leg_verdicts(verdicts)
+        legs = await self._legs_gone_from_open_list(tracked, self._sweep_leg_verdicts(verdicts))
         if all(CancelVerdict(name) in PROVEN_GONE for name in legs.values()):
             tracked.sweep_done = True
             return
         self._journal_sweep_unverified(tracked, legs)
+
+    async def _legs_gone_from_open_list(
+        self, tracked: _Tracked, legs: dict[str, str]
+    ) -> dict[str, str]:
+        """A STILL_OPEN leg that a fresh open-algo list no longer shows is gone (plan 24-34, D-34).
+
+        Demo criterion 5: for about a second after an algo cancel the by-id query still answers NEW
+        while the open-algo list already omits the order, so the by-id verdict alone read a
+        successful cancel as STILL_OPEN and the next step cancelled the leg again. Only a leg
+        verified STILL_OPEN is re-checked, with one list read for the plan. A list that cannot be
+        read, is not a list, or still holds the leg's id changes nothing (the leg stays
+        STILL_OPEN, fail closed). The corrected verdict is GONE_NOT_CANCELED: it no longer rests,
+        and nothing proves the cancel did it.
+        """
+        still_open = [
+            role for role, name in legs.items() if CancelVerdict(name) is CancelVerdict.STILL_OPEN
+        ]
+        if not still_open:
+            return legs
+        try:
+            listing = await self._adapter.snapshot_open_algo_orders(symbol=tracked.entry.symbol)
+        except Exception:  # noqa: BLE001 - an unreadable list proves nothing
+            return legs
+        if not isinstance(listing, (list, tuple)):
+            return legs
+        resting = {_attr(row, "client_algo_id") for row in listing}
+        checked = dict(legs)
+        for role in still_open:
+            leg_id = derive_algo_client_id(plan_hash=tracked.entry.plan_hash, role=role)
+            if leg_id not in resting:
+                checked[role] = CancelVerdict.GONE_NOT_CANCELED.value
+        return checked
 
     @staticmethod
     def _sweep_leg_verdicts(verdicts: object) -> dict[str, str]:
