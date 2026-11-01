@@ -4,7 +4,7 @@
 #    with `-p` to run a second, isolated environment from the same checkout (cutover tests).
 #  - postgres publishes on loopback only (F-709); it is reachable from other hosts only
 #    through an SSH tunnel. Docker bypasses ufw, so the bind address is the control.
-#  - Data lives only in named volumes (pgdata, rawdata, backupdata, logs); no host bind mounts.
+#  - Data lives only in named volumes (pgdata, rawdata, backupdata, logs, livestate); no host bind mounts.
 #  - Secrets come only from env_file (.env, mode 0600, gitignored). TRADING_ENV_FILE selects
 #    another file. `${VAR:?}` checks exist only on the always-on postgres vars: profile-gated
 #    services are still interpolated, so a required-variable check there would break every
@@ -195,12 +195,33 @@ services:
     healthcheck:
       disable: true
 
-  # Live runner placeholder, never part of the default stack. No entrypoint yet: Phase 24
-  # (live) replaces this command and defines the service probe (D-06). Live credentials use
-  # separate variable names (OPS-06) in the live service's own env file (plan 24-30, D-29): the
-  # `env_file` below REPLACES the shared one of the x-app anchor, so nothing in `.env` (the shadow
-  # bot token, BACKUP_ names, the paper names) reaches this container; only the database values
-  # of x-database-env are added. Nothing is interpolated except the file name.
+  # Live runtime (Phase 24, D-01, D-03, O-2): `python -m src.live.runtime` with its own probe.
+  # Live credentials use separate variable names (OPS-06) in the live service's own env file
+  # (plan 24-30, D-29): the `env_file` below REPLACES the shared one of the x-app anchor, so
+  # nothing in `.env` (the shadow bot token, BACKUP_ names, the paper names) reaches this
+  # container; only the database values of x-database-env are added. Nothing is interpolated
+  # except the file name. The image bakes the execution limits and the Binance filter config
+  # (plan 24-25) and stamps its commit, so no config is mounted from the host.
+  #  - profile `live`: never part of the default stack. Start it with
+  #    `docker compose --profile live up -d live`.
+  #  - command `--hold-on-refusal`: a refused start (missing mode, a credential of the other mode,
+  #    an unratified limit) writes the held marker and holds instead of exiting, so no restart
+  #    policy can crash-loop on it (D-03, T-24-30). The marker makes the probe report unhealthy.
+  #  - healthcheck `--healthcheck`: opens no client; exit 0 only with no held marker and a fresh
+  #    liveness stamp. Interval, timeout, start period and retries copy the paper service. The
+  #    external heartbeat (deploy/heartbeat.sh --target live) runs `--liveness` in this container.
+  #  - the `livestate` volume is mounted at /app/logs: the live state directory is logs/live (the
+  #    gate state file, the spill directory, the liveness stamp and the held marker), so a
+  #    recreated container keeps its gate state and unsent spill (T-24-102). The image creates
+  #    /app/logs owned by the runtime user, so a fresh volume is writable; mounting only
+  #    /app/logs/live would create a root-owned mount point. Nothing else uses this volume.
+  #  - restart `"no"` (O-2, 24-01 Q15): the policy stays off until the owner has seen the first
+  #    clean Demo run. To enable it, change the line below to `restart: unless-stopped` (the
+  #    D-03 hold makes that safe: no code path exits 0 or crash-loops on a refusal, a refused
+  #    start holds and a requested `stop` stays down) and run
+  #    `docker compose --profile live up -d live`. See docs/operations/RUNBOOK.md.
+  #  - no published port: the live process opens no listener (Telegram polling and the Binance
+  #    stream are outbound).
   live:
     <<: *app
     env_file:
@@ -209,12 +230,18 @@ services:
     environment: *database-env
     profiles: ["live"]
     restart: "no"
-    command:
-      - /app/.venv/bin/python
-      - -c
-      - "raise SystemExit('live runner not implemented yet: arrives in Phase 24')"
+    depends_on:
+      db-upgrade:
+        condition: service_completed_successfully
+    volumes:
+      - livestate:/app/logs
+    command: ["/app/.venv/bin/python", "-m", "src.live.runtime", "--hold-on-refusal"]
     healthcheck:
-      disable: true
+      test: ["CMD", "/app/.venv/bin/python", "-m", "src.live.runtime", "--healthcheck"]
+      interval: 60s
+      timeout: 15s
+      start_period: 6m
+      retries: 3
 
   # Scheduled backup (ops profile). Owns the ops image build (runtime + pg client 17, rclone,
   # rsync, ssh). The CLI is implemented by plans 06 and 08. BACKUP_S3_* and BACKUP_CRYPT_*
@@ -270,3 +297,6 @@ volumes:
   rawdata:
   backupdata:
   logs:
+  # State of the live runtime (plan 24-35): gate state file, spill directory, liveness stamp and
+  # held marker under logs/live. Separate from `logs` so the collector never shares it.
+  livestate:
