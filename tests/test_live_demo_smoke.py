@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from scripts import demo_rehearsal as dr
@@ -204,3 +205,98 @@ async def test_a_fresh_start_enters_safe_mode_stale_feed_before_the_stream_start
     assert "RECONCILE=OK" in first["steps"] and "STREAM=OK" in first["steps"]
     assert "HEALTH=SKIPPED" in first["steps"] and "ENABLE=SKIPPED" in first["steps"]
     assert "startup_safe_mode_exit" in _statuses(recorder)
+
+
+def test_the_executed_run_uses_the_admitted_environment_and_writes_an_evidence_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--execute` with the typed phrase and an admitted environment; the env itself is the fake."""
+    from src.ops import redaction
+
+    redaction.clear_runtime_secrets()
+
+    async def factory(recorder: dr.EvidenceRecorder) -> dr.SmokeEnv:
+        del recorder
+        env = build_fake_smoke_env(tmp_path / "fake")
+        assert isinstance(env, dr.SmokeEnv)
+        return env
+
+    code = dr.main(
+        ["--scenario", "smoke", "--execute"],
+        environ={
+            "LIVE_RUNTIME_MODE": "DEMO",
+            "BINANCE_DEMO_API_KEY": SENTINELS["BINANCE_DEMO_API_KEY"],
+            "BINANCE_DEMO_API_SECRET": SENTINELS["BINANCE_DEMO_API_SECRET"],
+            "TELEGRAM_LIVE_BOT_TOKEN": SENTINELS["TELEGRAM_LIVE_BOT_TOKEN"],
+            "TELEGRAM_LIVE_AUTHORIZED_CHAT_ID": "424242",
+            "TELEGRAM_AUTHORIZED_USER_IDS": "424242",
+        },
+        clock=lambda: FAKE_NOW,
+        is_tty=lambda: True,
+        read_confirmation=lambda _p: "DEMO SMOKE BTCUSDT",
+        evidence_dir=tmp_path / "evidence",
+        smoke_env_factory=factory,
+    )
+    assert code == dr.EXIT_OK
+    (path,) = (tmp_path / "evidence").glob("*.json")
+    assert "EVIDENCE-smoke" in path.name
+    text = path.read_text(encoding="utf-8")
+    data = json.loads(text)
+    assert data["mode"] == "EXECUTE"
+    for secret in SENTINELS.values():
+        assert secret not in text
+    out = capsys.readouterr()
+    for secret in SENTINELS.values():
+        assert secret not in out.out and secret not in out.err
+
+
+def test_the_real_environment_assembles_the_process_with_the_demo_guarded_sdk_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No network: `default_assemble` is replaced; what the smoke hands it is what is asserted."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.live import runtime
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_assemble(context: Any, **kwargs: Any) -> Any:
+        seen.append({"context": context, **kwargs})
+        return SimpleNamespace()
+
+    monkeypatch.setattr(runtime, "default_assemble", fake_assemble)
+    config = SimpleNamespace(authorized_chat_id=1)
+    factory = dr._real_smoke_env_factory(
+        config=config,
+        environ={},
+        clock=lambda: FAKE_NOW,
+        initialize_gate_state=True,
+        approval_timeout_seconds=300,
+        sleep=dr._default_sleep,
+    )
+    recorder = _recorder()
+    env = asyncio.run(factory(recorder))
+    assert seen[0]["sdk_factory"] is dr.demo_guarded_sdk_factory
+    assert seen[0]["context"].initialize_gate_state is True
+    assert seen[0]["context"].operator_id == dr.OPERATOR_ID
+    assert env.synthetic is False and env.label == "DEMO_OBSERVED"
+    assert env.wait_ticks == 150
+    restarted = asyncio.run(env.restart())  # type: ignore[misc]
+    assert seen[1]["context"].initialize_gate_state is False, "a restart never re-initializes"
+    assert restarted.synthetic is False
+
+
+def test_the_console_owner_prints_one_instruction_per_action_and_records_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import asyncio
+
+    recorder = _recorder()
+    owner = dr.ConsoleOwner(recorder)
+    for action in ("approve", "confirm", "safemode_exit", "replay_approve", "replay_confirm"):
+        asyncio.run(owner.act(action, short_id="abc123", note=""))
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("OPERATOR: ")]
+    assert len(lines) == 5
+    assert len(recorder.details["operator_instructions"]) == 5
+    assert any("/safemode_exit" in line for line in lines)

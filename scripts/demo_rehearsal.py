@@ -1,28 +1,41 @@
-"""Binance Demo Trading rehearsal runner (quick task 261005-tx9, closes plan 09-04 task 3).
+"""Binance Demo Trading smoke and rehearsal runner (plan 24-29, D-33; closes the 09-04 rehearsal).
 
-Run from the repository root, never with real credentials unless you are the operator::
+Run from the repository root, only as the owner::
 
-    uv run --python 3.13 python -m scripts.demo_rehearsal --scenario far
+    uv run python -m scripts.demo_rehearsal                       # dry run: fakes, SYNTHETIC
+    uv run python -m scripts.demo_rehearsal --execute             # the Demo smoke (typed phrase)
+    uv run python -m scripts.demo_rehearsal --scenario taps       # approval taps only, no order
 
-What it is. A single-file operator tool that rehearses the Phase 9 execution path against
-Binance Demo Trading (REST only) and writes an evidence file. The only host it can reach is
-the SDK constant for Demo Trading. There is no host, base-url or symbol option. The symbol is
-fixed to BTCUSDT.
+Scenario ``smoke`` (the default) is criterion 2 of Phase 24 over the COMPOSED live process:
+``build_wiring`` constructs the process (with an SDK factory that re-checks the Demo host),
+``run_start_sequence`` starts it, and this script only observes it. Nothing here steps the
+protection coordinator or places an order by hand. The sequence: the Demo injector queues a
+signal (the ``/demo_signal`` handler of the process); the owner taps APPROVE and CONFIRM on the
+live Demo bot (bounded waits); one GTD LIMIT entry with no entry-time stop (D079); the fill is seen
+on the user-data stream; the stop is placed and REST-confirmed; TP1 and TP2; reconcile clean; the
+SAFE_MODE drill (enter, a CONFIRM refused, operator exit through /safemode_exit); a restart and
+rehydrate (a second wiring over the same stores); replayed presses place nothing; close and
+clean-up.
 
-Safety posture (read before running anything):
+Without ``--execute`` the same sequence runs against the Binance-semantics fake with fake presses
+(tests/support/live_smoke_env.py); every step of such a run is labelled SYNTHETIC and none is
+Demo-observed. With ``--execute`` the environment is the live process's own: LIVE_RUNTIME_MODE=DEMO,
+BINANCE_DEMO_API_KEY and BINANCE_DEMO_API_SECRET, TELEGRAM_LIVE_BOT_TOKEN,
+TELEGRAM_LIVE_AUTHORIZED_CHAT_ID, TELEGRAM_AUTHORIZED_USER_IDS and DATABASE_URL (the Demo database,
+migrated with ``alembic upgrade head``). LIVE credentials, a LIVE mode and the shadow bot's token
+refuse the run before any network call. Stop the live service first: one process per bot token.
 
-* Dry run is the default. Without ``--execute`` no request that changes exchange state ever
-  leaves the process: the four mutating adapter methods (place_entry, place_algo_protective,
-  cancel_normal_order, cancel_algo_order) never reach the underlying adapter.
-* ``--execute`` needs an interactive terminal AND an exactly typed phrase, for example
-  ``DEMO FAR BTCUSDT``. Anything else exits 2 before any network call.
-* Credentials come only from five environment variables of the current shell session:
-  BINANCE_DEMO_API_KEY, BINANCE_DEMO_API_SECRET, TELEGRAM_BOT_TOKEN,
-  TELEGRAM_AUTHORIZED_CHAT_ID and TELEGRAM_AUTHORIZED_USER_IDS (the comma-separated user
-  allow-list of Phase 23). No file is read for credentials and no other variable is used.
-  Set them in the shell session only, never in a file that is committed.
-* Evidence files carry exchange-returned ids only, never a secret, and are scrubbed before
-  and re-checked after the write.
+Safety posture:
+
+* ``--execute`` needs an interactive terminal AND the exactly typed phrase ``DEMO SMOKE BTCUSDT``;
+  anything else exits 2 before any network call. The assistant that built this tool never ran it.
+* The only host is the SDK constant for Demo Trading; there is no host, base-url or symbol option.
+* Evidence carries exchange-returned ids only, never a secret, and is scrubbed before and re-checked
+  after the write. The user-data listen key is replaced by a fixed marker.
+
+Scenario ``taps`` (no order) keeps the REST-only health preflight and the SKIP, APPROVE and
+unknown-chat taps on the five Phase 23 variables (BINANCE_DEMO_*, TELEGRAM_BOT_TOKEN,
+TELEGRAM_AUTHORIZED_CHAT_ID, TELEGRAM_AUTHORIZED_USER_IDS).
 
 Exit codes::
 
@@ -31,14 +44,10 @@ Exit codes::
     2  refused before any network call (usage, credentials, --execute gate)
     3  aborted before any order (host violation, failed health probe, fail-closed constraint)
 
-Operator runbook (the executor agent that built this tool never ran it):
-
-1. Set the five variables in the shell session. Stop any other process that polls the bot.
-2. Run the dry run first (the default), then the taps scenario, then far, then fill. Each
-   ``--execute`` run asks you to type its phrase.
-3. Read the evidence file under ``.planning/phases/09-live-execution-rollout/``. Dry runs write
-   ``09-DEMO-REHEARSAL-DRYRUN-*.json`` with zero exchange order records; executed runs write
-   ``09-DEMO-REHEARSAL-EVIDENCE-*.json``.
+Evidence files: the smoke writes under ``.planning/phases/24-live-runtime-composition-demo/
+evidence/`` and the taps scenario under ``.planning/phases/09-live-execution-rollout/``
+(``--evidence-dir`` to change): ``09-DEMO-REHEARSAL-DRYRUN-*.json`` for a dry run,
+``09-DEMO-REHEARSAL-EVIDENCE-*.json`` for an executed run.
 """
 
 from __future__ import annotations
@@ -189,6 +198,9 @@ ENV_TELEGRAM_USERS = "TELEGRAM_AUTHORIZED_USER_IDS"
 
 EVIDENCE_SCHEMA = "demo-rehearsal-evidence/schema-1"
 DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-rollout"
+SMOKE_EVIDENCE_DIR = (
+    REPO_ROOT / ".planning" / "phases" / "24-live-runtime-composition-demo" / "evidence"
+)
 # Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
 # signed request an explicit recvWindow; no number is chosen here.
 DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
@@ -3185,7 +3197,7 @@ def _main_smoke(
         factory = _fake_smoke_env
     target_dir = evidence_dir if evidence_dir is not None else args.evidence_dir
     if target_dir is None:
-        target_dir = DEFAULT_EVIDENCE_DIR
+        target_dir = SMOKE_EVIDENCE_DIR
     recorder = EvidenceRecorder(
         mode=mode,
         scenario=SCENARIO_SMOKE,
