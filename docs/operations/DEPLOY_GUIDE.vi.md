@@ -178,7 +178,7 @@ Tệp này sẽ trở thành `/opt/trading/.env` (quyền 0600, chủ là user `
 - Mọi giá trị chứa chữ `change_me` bị từ chối. `.env.example` có chữ này ở `POSTGRES_PASSWORD` và `DATABASE_URL`, nên bạn phải thay mật khẩu và sửa hoặc bỏ dòng `DATABASE_URL`. Compose tự dựng `DATABASE_URL` cho các service từ các biến `POSTGRES_*` (ghi chú ở đầu khối `x-database-env` trong `docker-compose.yml`); việc bỏ dòng đó đã được đọc từ file, chưa chạy thật `[CHƯA XÁC MINH]`.
 - `POSTGRES_PASSWORD` chỉ gồm chữ, số và các ký tự `.` `_` `~` `-` (an toàn trong URL), dài tối thiểu 16 ký tự. RUNBOOK nói "ví dụ chuỗi hex"; script mới là nơi quy tắc được thực thi. Hãy để trình quản lý mật khẩu sinh chuỗi này.
 - Tệp phải dùng LF; ký tự CR bị từ chối.
-- Nhóm `BACKUP_*` được điền sau khi bucket tồn tại (mục 6.1). Ví dụ phần đầu của tệp:
+- Nhóm `BACKUP_*` không nằm trong tệp này mà trong tệp `.env.backup` riêng (mẫu `.env.backup.example`, quyền 0600), điền sau khi bucket tồn tại (mục 6.1); tên Telegram của bot SHADOW nằm trong `.env.paper` (mẫu `.env.paper.example`). Ví dụ phần đầu của tệp `.env`:
 
 ```text
 POSTGRES_USER=trading
@@ -188,7 +188,7 @@ OI_POLL_INTERVAL_SECONDS=300
 IMAGE_TAG=dev
 ```
 
-Tuyệt đối không đặt `BINANCE_LIVE_*` vào tệp của máy paper/soak này (OPS-06). Khóa Binance Demo nếu có dùng tên `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET`, và tách thành tệp riêng cho máy khác.
+Tuyệt đối không đặt `BINANCE_*` (cả `BINANCE_LIVE_*` lẫn `BINANCE_DEMO_*`) vào `.env` này (OPS-06, D-29). Khóa Binance Demo, tên `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET`, nằm trong tệp `.env.live` riêng (mẫu `.env.live.example`, quyền 0600, đổi đường dẫn bằng `TRADING_LIVE_ENV_FILE`); chỉ service `live` đọc tệp đó, còn runtime paper từ chối khởi động nếu thấy một tên `BINANCE_`.
 
 #### Bước 2.6 Quyền truy cập repository [THỦ CÔNG] [CHƯA XÁC MINH]
 
@@ -214,7 +214,7 @@ Bạn cần (tạo ở mục 3.6 và 6.1): một bucket S3 riêng tư, mới và
 rclone obscure -
 ```
 
-Giữ chuỗi gốc ở trình quản lý mật khẩu cộng một bản ngoại tuyến thứ hai. Mất cụm mật khẩu thì mọi bản sao lưu không thể phục hồi (RUNBOOK 11, mục "Key custody"). Giá trị trong `.env` là kết quả `rclone obscure`, thứ có thể đảo ngược và không phải mã hóa.
+Giữ chuỗi gốc ở trình quản lý mật khẩu cộng một bản ngoại tuyến thứ hai. Mất cụm mật khẩu thì mọi bản sao lưu không thể phục hồi (RUNBOOK 11, mục "Key custody"). Giá trị trong `.env.backup` là kết quả `rclone obscure`, thứ có thể đảo ngược và không phải mã hóa.
 
 Nguồn: `docs/operations/RUNBOOK.md`, `deploy/bootstrap.sh`, `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md`, `.planning/phases/16-paper-runtime-composition/16-14-PLAN.md`
 
@@ -530,7 +530,7 @@ Bootstrap in danh sách này ở cuối. Bằng lời đơn giản:
 3. Cụm mật khẩu mã hóa sao lưu phải được giữ ngoài VPS; mất nó thì mọi bản sao lưu không thể phục hồi (mục 6).
 4. Thử phiên SSH thứ hai, kể cả `sudo -v`, trước khi đóng phiên đầu.
 5. Mã hóa ổ đĩa của nhà cung cấp phải bật hoặc được xác nhận bật.
-6. Đặt các biến `BACKUP_*` trong `/opt/trading/.env` và chạy `deploy/backup.sh --init-remote` bằng user `trading` (mục 6). Root không còn đăng nhập SSH; `trading` ở nhóm `sudo` và sudo hỏi mật khẩu. Sau đó cài timer bằng `sudo /opt/trading/deploy/backup.sh --install-timer` (lệnh cài không đọc `.env`) và dùng `sudo` cho mọi thay đổi apt, ufw hay systemctl về sau.
+6. Đặt các biến `BACKUP_*` trong `/opt/trading/.env.backup` và chạy `deploy/backup.sh --init-remote` bằng user `trading` (mục 6). Root không còn đăng nhập SSH; `trading` ở nhóm `sudo` và sudo hỏi mật khẩu. Sau đó cài timer bằng `sudo /opt/trading/deploy/backup.sh --install-timer` (lệnh cài không đọc `.env`) và dùng `sudo` cho mọi thay đổi apt, ufw hay systemctl về sau.
 7. Nhóm `docker` tương đương root: chỉ giữ một tài khoản vận hành. ufw không điều khiển các cổng do Docker công bố; chỉ công bố các cổng `127.0.0.1`.
 8. Xóa tệp bí mật đã chép khỏi máy khi `.env` đã được kiểm tra (bước 4.8).
 
@@ -856,7 +856,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `deploy/migrate.sh`, `docker-compose.yml`
 
 1. Tạo bucket mới và trống cùng một khóa truy cập chỉ có quyền trên nó (bước 3.6).
 2. Chọn một cụm mật khẩu dài và một cụm thứ hai (muối). Trên máy trạm của bạn, không bao giờ trên VPS, đổi từng cụm sang dạng obscured bằng `rclone obscure -` (đọc từ stdin để tránh lịch sử shell). rclone từ chối cụm mật khẩu thô.
-3. Đặt các biến sau vào `/opt/trading/.env` (mode 0600) bằng user `trading`. Một biến thiếu làm lệnh dừng và nêu TÊN biến, không bao giờ nêu giá trị:
+3. Đặt các biến sau vào `/opt/trading/.env.backup` (mode 0600, mẫu `.env.backup.example`) bằng user `trading`; chỉ service `backup`/`ops` và `deploy/backup.sh` đọc tệp này, collector không bao giờ thấy chúng (D-29). Một biến thiếu làm lệnh dừng và nêu TÊN biến, không bao giờ nêu giá trị:
 
 ```text
 BACKUP_S3_PROVIDER=AWS
@@ -929,7 +929,7 @@ Thứ tự: dump cơ sở dữ liệu, sao lưu Parquet, kiểm bundle với man
 
 **Chạy ở:** `[MÁY EC2]` bằng user `trading`
 
-Điều kiện: máy đã bootstrap, `.env` có cùng các giá trị `BACKUP_*` (các cụm mật khẩu obscured suy ra từ cụm thô bạn giữ ngoài VPS), và checkout ở phiên bản bạn muốn. Hãy đọc kế hoạch trước, rồi dùng `--no-start` để xem dữ liệu đã khôi phục trước khi collector chạy:
+Điều kiện: máy đã bootstrap, `.env.backup` có cùng các giá trị `BACKUP_*` (các cụm mật khẩu obscured suy ra từ cụm thô bạn giữ ngoài VPS), và checkout ở phiên bản bạn muốn. Hãy đọc kế hoạch trước, rồi dùng `--no-start` để xem dữ liệu đã khôi phục trước khi collector chạy:
 
 ```bash
 deploy/restore.sh --dry-run
@@ -1023,7 +1023,7 @@ sudo deploy/backup.sh --install-timer
 sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env
 ```
 
-Cờ: `--init-remote` (khởi tạo remote), `--install-timer` (cài hai unit và bật timer), `--install-soak-timer` cùng `--soak-env-file` (cài cặp unit sao lưu của project soak, kế hoạch 16-55; tệp env soak phải có `BACKUP_S3_BUCKET` riêng, khác bucket của `trading-backup`), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--init-remote` và `--install-timer` không dùng chung được. Biến môi trường `COMPOSE_PROJECT_NAME` và `TRADING_ENV_FILE` được tôn trọng.
+Cờ: `--init-remote` (khởi tạo remote), `--install-timer` (cài hai unit và bật timer), `--install-soak-timer` cùng `--soak-env-file` (cài cặp unit sao lưu của project soak, kế hoạch 16-55; tệp env soak phải có `BACKUP_S3_BUCKET` riêng, khác bucket của `trading-backup`), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--init-remote` và `--install-timer` không dùng chung được. Biến môi trường `COMPOSE_PROJECT_NAME` và `TRADING_ENV_FILE` được tôn trọng; tệp chứa các biến `BACKUP_*` là `TRADING_BACKUP_ENV_FILE` (mặc định `.env.backup` trong checkout; nếu chỉ đặt `TRADING_ENV_FILE` thì tệp đó cũng là tệp backup).
 
 **Chạy thử:** mỗi chế độ có `--dry-run` riêng, in lệnh sẽ chạy mà không chạy:
 
@@ -1121,9 +1121,9 @@ systemctl list-timers trading-backup.timer
 > - **Giải quyết vấn đề gì:** Unit `trading-backup` không đặt project nên chỉ sao lưu project `trading`; volume `trading-soak_pgdata` sẽ không được sao lưu nếu thiếu unit này (review B2-WR-07).
 > - **Mức quan trọng:** **BẮT BUỘC** trước soak dài (RUNBOOK 20.5; D061 hosts: có sao lưu trước soak dài). Bucket riêng của soak do chủ dự án tạo trước kế hoạch 16-43.
 
-**Mục đích:** unit oneshot gọi `deploy/backup.sh` với `COMPOSE_PROJECT_NAME=trading-soak` và `TRADING_ENV_FILE` là tệp env soak. Remote sao lưu không có tên project trong đường dẫn, nên project soak phải dùng một bucket riêng với mật khẩu crypt riêng; dùng chung một bucket thì hai project thành một chuỗi snapshot và quy tắc giữ lại sẽ xóa bản sao lưu hằng ngày của một trong hai.
+**Mục đích:** unit oneshot gọi `deploy/backup.sh` với `COMPOSE_PROJECT_NAME=trading-soak` và `TRADING_ENV_FILE` cùng `TRADING_BACKUP_ENV_FILE` là tệp env soak. Remote sao lưu không có tên project trong đường dẫn, nên project soak phải dùng một bucket riêng với mật khẩu crypt riêng; dùng chung một bucket thì hai project thành một chuỗi snapshot và quy tắc giữ lại sẽ xóa bản sao lưu hằng ngày của một trong hai.
 
-**Khi nào chạy:** không chạy tay. Cài một lần bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file <đường dẫn tuyệt đối>`, sau khi bucket riêng đã được khởi tạo bằng `--init-remote` cho project soak (RUNBOOK 20.5). Lệnh cài từ chối khi `BACKUP_S3_BUCKET` của tệp env soak rỗng hoặc trùng bucket của tệp `.env` của `trading-backup`, và chỉ in tên biến, không in giá trị.
+**Khi nào chạy:** không chạy tay. Cài một lần bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file <đường dẫn tuyệt đối>`, sau khi bucket riêng đã được khởi tạo bằng `--init-remote` cho project soak (RUNBOOK 20.5). Lệnh cài từ chối khi `BACKUP_S3_BUCKET` của tệp env soak rỗng hoặc trùng bucket của tệp `.env.backup` của `trading-backup`, và chỉ in tên biến, không in giá trị.
 
 **Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
 
@@ -1436,7 +1436,7 @@ Kế hoạch 16-53 thêm script bọc cho buổi diễn tập trước soak (m�
 
 **Khi nào chạy:** thay cho `docker compose` trong mọi thao tác trên máy soak (khởi động, xem trạng thái, xem nhật ký, dừng).
 
-**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; biến `TRADING_ENV_FILE` chọn tệp môi trường soak (tạo từ `deploy/soak.env.example`, đặt ngoài checkout, quyền 0600).
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; biến `TRADING_ENV_FILE` chọn tệp môi trường soak (tạo từ `deploy/soak.env.example`, đặt ngoài checkout, quyền 0600); script này cũng trỏ `TRADING_PAPER_ENV_FILE` và `TRADING_BACKUP_ENV_FILE` vào chính tệp đó, nên soak không đọc `.env.paper` hay `.env.backup` của checkout (kế hoạch 24-36).
 
 **Lệnh:**
 
@@ -1613,7 +1613,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Tạo bot: bạn tự làm trong ứng dụng Telegram bằng BotFather (nơi `.env.example` ghi là nguồn cấp token). Các lệnh và câu hỏi của BotFather không nằm trong repository nên hướng dẫn này không liệt kê chúng `[CHƯA XÁC MINH]`.
 - Token chỉ nằm ở trình quản lý mật khẩu và trong tệp bí mật ngoài VPS, dưới tên biến `TELEGRAM_BOT_TOKEN`. Không bao giờ dán token vào một dòng lệnh terminal, chat, issue hay tài liệu này. Mã bot cho hệ thống thấy token đó, nhưng agent và người viết kế hoạch không bao giờ cần nhìn thấy nó.
 - Thêm biến `TELEGRAM_AUTHORIZED_CHAT_ID`: số nguyên của cuộc trò chuyện riêng được phép nhận thông báo SIMULATE (có thể âm đối với nhóm).
-- Thêm biến `TELEGRAM_AUTHORIZED_USER_IDS`: danh sách mã người dùng Telegram được phép bấm nút, là các số nguyên dương phân cách bằng dấu phẩy. Chủ sở hữu tự đặt giá trị trong `.env` trên máy chạy (mặc định chỉ một mã, là mã Telegram của bạn); không ghi mã nào vào repository, tài liệu này hay chat. Từ Phase 23 (đã xây ở mức thư viện), nếu Telegram đã được cấu hình (có token và mã chat) mà thiếu biến này thì runtime từ chối khởi động; danh sách rỗng không bao giờ có nghĩa là cho phép tất cả.
+- Thêm biến `TELEGRAM_AUTHORIZED_USER_IDS`: danh sách mã người dùng Telegram được phép bấm nút, là các số nguyên dương phân cách bằng dấu phẩy. Chủ sở hữu tự đặt giá trị trong `.env.paper` trên máy chạy (mặc định chỉ một mã, là mã Telegram của bạn); không ghi mã nào vào repository, tài liệu này hay chat. Từ Phase 23 (đã xây ở mức thư viện), nếu Telegram đã được cấu hình (có token và mã chat) mà thiếu biến này thì runtime từ chối khởi động; danh sách rỗng không bao giờ có nghĩa là cho phép tất cả.
 - Cẩn thận: `.env.example` gợi ý lấy mã chat bằng một URL `getUpdates` có nhúng chính token. Một URL như vậy nằm trong lịch sử shell, nhật ký proxy và có thể bị chụp màn hình. Cách an toàn để biết mã chat chưa được kế hoạch 16-34 hay 16-40 nêu, nên nó là `[CHƯA XÁC MINH]`; hỏi trong phiên lập kế hoạch trước khi tự chế một cách.
 - Thu hồi hay tạo lại token trong BotFather nếu nghi bị lộ: việc đó nằm ngoài repository và là `[CHƯA XÁC MINH]`.
 - Hành vi dự kiến của thông báo: mọi thông báo SHADOW mang nhãn "SHADOW — no real order" và nhấn APPROVE chỉ chuyển thông báo thành thẻ xác nhận (D041); chỉ nút CONFIRM, mã CONFIRM riêng, dùng một lần, hiệu lực mặc định 60 giây, mới được ghi nhận. Các mô-đun cho phần này đã xây ở mức đồ giả (16-04, 16-11) nhưng chưa nối vào một tiến trình chạy được (16-31), nên `[CHƯA XÂY]` ở cấp vận hành.
@@ -1636,7 +1636,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Soak SHADOW chỉ dùng dữ liệu thị trường công khai và KHÔNG cần khóa nào.
 - Giai đoạn DEMO về sau dùng khóa Demo, tên biến `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET` (người dùng là Phase 18).
 - Giai đoạn CANARY dùng một khóa mainnet CHỈ-ĐỌC (không giao dịch, không rút tiền, giới hạn theo IP của VPS theo D042). Tên biến cho khóa này chưa được repository định nghĩa `[CHƯA XÂY]`.
-- `BINANCE_LIVE_*` chỉ được phép nằm trong tệp env riêng của một triển khai live, không bao giờ trên máy paper/soak (OPS-06). Việc tách `env_file` theo từng service (WR-06) phải làm xong TRƯỚC khi bất kỳ khóa live nào vào `.env` (D061 hosts).
+- `BINANCE_LIVE_*` chỉ được phép nằm trong tệp env riêng của một triển khai live, không bao giờ trên máy paper/soak (OPS-06). Việc tách `env_file` theo từng service (WR-06) đã làm xong ở các kế hoạch 24-30 và 24-36: khóa Binance chỉ nằm trong `.env.live`, tên Telegram SHADOW trong `.env.paper`, nhóm `BACKUP_*` trong `.env.backup`, nên không khóa hay bí mật sao lưu nào đi vào `.env` (D061 hosts).
 - Quy tắc IP whitelist: mỗi khóa Binance bị giới hạn ở đúng Elastic IP của máy, quyền rút tiền tắt, và danh sách IP được cập nhật sau mỗi lần cutover hay khi địa chỉ đổi (D042 điều kiện 4; RUNBOOK 13.5 mục 1 và 15.6). Giao diện Binance để làm việc đó không được repository mô tả; việc này là `[THỦ CÔNG]` và chưa được kiểm chứng.
 - Phép ping vùng ở bước 3.7 vẫn là phép thử đầu tiên: Binance phải chấp nhận địa chỉ của máy.
 
@@ -2450,7 +2450,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `docker-compose.yml`
 | `migrate.sh` thoát 3 | khoảng trống Open Interest vượt `--max-gap-minutes` | đây là dữ liệu, không phải lỗi cần thử lại; quyết định khoảng trống có quan trọng hay không | RUNBOOK 15.4 |
 | `migrate.sh` từ chối vì `data/backup/cutover/pg.dump` đã tồn tại | còn sót từ một lần thử trước | kiểm tra rồi tự tay xóa ở bên báo | RUNBOOK 15.3 |
 | `migrate.sh` hoặc ssh báo lỗi kiểm tra khóa máy chủ | máy cũ không có trong `known_hosts` của thư mục khóa | thêm khóa máy chủ lấy từ kênh tin cậy (bước 5.4) | RUNBOOK 15.1 |
-| backup báo thiếu một biến `BACKUP_...` | chưa đặt biến trong `.env` | thêm biến (bước 6.1); thông báo chỉ nêu tên | RUNBOOK 11.1 |
+| backup báo thiếu một biến `BACKUP_...` | chưa đặt biến trong `.env.backup` | thêm biến (bước 6.1); thông báo chỉ nêu tên | RUNBOOK 11.1 |
 | `parquet push refused`, `parquet verification failed`, `manifest verification failed`, `rclone ... failed (exit N)` | các nhóm lỗi đẩy Parquet | dùng bảng ở bước 6.8 | RUNBOOK 11.8 |
 | restore từ chối đích không trống | cơ sở dữ liệu hay thư mục Parquet đích đã có dữ liệu | dùng máy trống; chỉ dùng `--force` khi hiểu rõ, và nó vẫn không ghi đè | RUNBOOK 11.5 |
 | diễn tập lỗi ở phép so sánh | collector vừa thêm một hàng symbol mới | chạy lại diễn tập | RUNBOOK 11.6 |
@@ -2615,7 +2615,7 @@ Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì ch
 
 ### Sao lưu
 
-- [ ] Các biến `BACKUP_*` đã nằm trong `/opt/trading/.env` (mục 6.1)
+- [ ] Các biến `BACKUP_*` đã nằm trong `/opt/trading/.env.backup` (mục 6.1)
 - [ ] `deploy/backup.sh --init-remote` đã chạy đúng một lần trên bucket trống (mục 6.2)
 - [ ] Timer đã cài và `systemctl list-timers trading-backup.timer` liệt kê nó (mục 6.3)
 - [ ] Một lần diễn tập `deploy/backup-drill.sh` đã thành công (mục 6.6)

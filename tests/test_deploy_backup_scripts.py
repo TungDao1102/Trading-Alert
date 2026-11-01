@@ -1144,7 +1144,6 @@ def test_the_scripts_default_to_the_checkout_backup_file_and_not_to_dot_env() ->
     code = _strip_comments((DEPLOY / "backup.sh").read_text(encoding="utf-8"))
     assert "$REPO_ROOT/.env.backup" in code
     assert "$REPO_ROOT/.env}" not in code, "backup.sh must not default to the shared .env"
-    assert "TRADING_ENV_FILE:-$REPO_ROOT" not in code
 
 
 def test_the_help_names_the_backup_env_file(rig: Rig) -> None:
@@ -1160,3 +1159,68 @@ def test_the_help_names_the_backup_env_file(rig: Rig) -> None:
 def test_the_soak_template_says_the_soak_file_serves_the_backup_service_too() -> None:
     text = (DEPLOY / "soak.env.example").read_text(encoding="utf-8")
     assert "TRADING_BACKUP_ENV_FILE" in text
+
+
+def _compose_init_exports(extra_env: dict[str, str]) -> list[str]:
+    """TRADING_PAPER_ENV_FILE and TRADING_BACKUP_ENV_FILE after `compose_init` (lib.sh)."""
+    bash = find_bash()
+    if bash is None:
+        infra_skip("bash not found; the wrapper tests need Git Bash or Linux bash")
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"TRADING_ENV_FILE", "TRADING_PAPER_ENV_FILE", "TRADING_BACKUP_ENV_FILE"}
+    }
+    env.update(extra_env)
+    proc = subprocess.run(
+        [
+            bash,
+            "-c",
+            'source "$1"; compose_init; printf "%s\\n%s\\n%s\\n" '
+            '"${COMPOSE[*]}" "${TRADING_PAPER_ENV_FILE-unset}" "${TRADING_BACKUP_ENV_FILE-unset}"',
+            "lib",
+            (DEPLOY / "lib.sh").as_posix(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr.strip()[:300]
+    return proc.stdout.splitlines()
+
+
+def test_a_project_env_file_is_also_its_paper_and_backup_file_unless_they_are_set() -> None:
+    project = "/outside/project.env"
+    command, paper, backup = _compose_init_exports({"TRADING_ENV_FILE": project})
+    assert command == f"docker compose --env-file {project}"
+    assert (paper, backup) == (project, project)
+
+
+def test_an_explicit_paper_or_backup_file_is_kept() -> None:
+    project = "/outside/project.env"
+    _command, paper, backup = _compose_init_exports(
+        {
+            "TRADING_ENV_FILE": project,
+            "TRADING_PAPER_ENV_FILE": "/outside/paper.env",
+            "TRADING_BACKUP_ENV_FILE": "/outside/backup.env",
+        }
+    )
+    assert (paper, backup) == ("/outside/paper.env", "/outside/backup.env")
+
+
+def test_the_production_stack_keeps_the_compose_defaults() -> None:
+    command, paper, backup = _compose_init_exports({})
+    assert command == "docker compose"
+    assert (paper, backup) == ("unset", "unset")
+
+
+def test_init_remote_in_a_one_file_project_reads_the_mode_from_the_project_file(rig: Rig) -> None:
+    proc = rig.run("backup.sh", "--init-remote", env=_remote_env(rig, "BACKUP_REMOTE=none\n"))
+    assert proc.returncode == 2
+    project = _write(rig.base / "project.env", "BACKUP_REMOTE=none\n")
+    proc = rig.run("backup.sh", "--init-remote", env={"TRADING_ENV_FILE": project.as_posix()})
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "nothing to initialise" in proc.stderr
+    assert rig.lines() == []

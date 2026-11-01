@@ -12,7 +12,8 @@ set -Eeuo pipefail
 # running. The exit code is the drill's own. COMPOSE_PROJECT_NAME and TRADING_ENV_FILE are honoured
 # from the environment. The BACKUP_ names come from the backup env file (plan 24-36, D-29):
 # TRADING_BACKUP_ENV_FILE, default the checkout's .env.backup (template .env.backup.example), which
-# compose hands to the ops service on top of the shared env file. With BACKUP_REMOTE=none in that
+# compose hands to the ops service on top of the shared env file; a project that sets
+# TRADING_ENV_FILE keeps that one file when the variable is unset. With BACKUP_REMOTE=none in that
 # file (local-only mode, RUNBOOK 11) the push and pull are replaced by a verified copy of the local
 # bundle, no remote is contacted, and the drill prints the OFF-HOST COPY SKIPPED warning and
 # OFFSITE_COPY=skipped.
@@ -29,7 +30,7 @@ PY=/app/.venv/bin/python
 COMPOSE=()
 
 usage() {
-  sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {

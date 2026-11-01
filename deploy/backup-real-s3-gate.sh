@@ -20,8 +20,9 @@ set -Eeuo pipefail
 # was interrupted, 2 a usage or configuration error (nothing was touched). COMPOSE_PROJECT_NAME and
 # TRADING_ENV_FILE are honoured. The BACKUP_ names come from the backup env file (plan 24-36, D-29):
 # TRADING_BACKUP_ENV_FILE, default the checkout's .env.backup, which compose hands to the ops
-# service; point both TRADING_ENV_FILE and TRADING_BACKUP_ENV_FILE at the soak env file to gate the
-# soak bucket. No value of the env file is printed; the bucket name appears as <bucket>.
+# service; a project that sets TRADING_ENV_FILE (the soak) keeps that one file when the variable
+# is unset, so the soak bucket is gated with the soak env file. No value of the env file is
+# printed; the bucket name appears as <bucket>.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -38,7 +39,7 @@ EVIDENCE_FILE=""
 COMPOSE=()
 
 usage() {
-  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
