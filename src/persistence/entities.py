@@ -438,6 +438,22 @@ class PgTradingEntityStore:
             row = _fetch(session, _TRADE_PLAN, trade_plan_id)
             return None if row is None else _TRADE_PLAN.from_row(row)
 
+    def get_trade_plan_by_hash(
+        self, plan_hash: str, *, tx: Session | None = None
+    ) -> TradePlan | None:
+        """The stored plan whose `plan_hash` is given (plan 24-21 hand-off: expiry by hash)."""
+        with self._unit(tx) as session:
+            row = (
+                session.execute(
+                    select(TradePlanRow)
+                    .where(TradePlanRow.plan_hash == plan_hash)
+                    .order_by(TradePlanRow.created_at_utc)
+                )
+                .scalars()
+                .first()
+            )
+            return None if row is None else _TRADE_PLAN.from_row(row)
+
     def transition_trade_plan(
         self,
         trade_plan_id: str,
