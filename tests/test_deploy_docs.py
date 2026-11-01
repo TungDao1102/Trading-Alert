@@ -603,6 +603,18 @@ def test_runbook_keeps_secrets_out_of_the_operator_workflow() -> None:
     assert not re.search(r"docker compose config\s*(?:$|\|)", text, re.M)
 
 
+# Variables that only select which env file a service reads: the runbook documents them, the
+# shared template does not (each service's own template does).
+_ENV_FILE_SELECTORS = frozenset(
+    {
+        "TRADING_ENV_FILE",
+        "TRADING_LIVE_ENV_FILE",
+        "TRADING_PAPER_ENV_FILE",
+        "TRADING_BACKUP_ENV_FILE",
+    }
+)
+
+
 def test_every_compose_variable_is_documented_in_env_example() -> None:
     lines = _read(COMPOSE).splitlines()
     compose = "\n".join(ln for ln in lines if not ln.lstrip().startswith("#"))
@@ -611,16 +623,18 @@ def test_every_compose_variable_is_documented_in_env_example() -> None:
     env_example = _read(ENV_EXAMPLE)
     undocumented = sorted(
         v
-        for v in variables - {"TRADING_ENV_FILE", "TRADING_LIVE_ENV_FILE"}
+        for v in variables - _ENV_FILE_SELECTORS
         if not re.search(rf"^#?\s*{v}=", env_example, re.M)
     )
     assert not undocumented, f".env.example does not document: {undocumented}"
     # TRADING_ENV_FILE selects which env file compose reads; the runbook documents it instead
     assert "TRADING_ENV_FILE" in compose
     assert "TRADING_ENV_FILE" in _runbook()
-    # plan 24-30: the live service's own env file is selected the same way and documented there
-    assert "TRADING_LIVE_ENV_FILE" in compose
-    assert "TRADING_LIVE_ENV_FILE" in _runbook()
+    # plans 24-30 and 24-36: the live, paper and backup services' own env files are selected the
+    # same way and documented there
+    for selector in sorted(_ENV_FILE_SELECTORS - {"TRADING_ENV_FILE"}):
+        assert selector in compose, selector
+        assert selector in _runbook(), selector
 
 
 def test_security_and_operations_cites_d050_in_the_controlled_sections() -> None:

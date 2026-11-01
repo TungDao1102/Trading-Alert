@@ -1,11 +1,14 @@
-"""Plan 24-30 (D-29, WR-06 first half, T-02, OPS-02): which container may hold which secret.
+"""Plans 24-30 and 24-36 (D-29, WR-06, T-02, OPS-02): which container may hold which secret.
 
 The shared env file (`.env`, `TRADING_ENV_FILE`) no longer carries every credential. The `live`
 service reads its own file (`TRADING_LIVE_ENV_FILE`, default `.env.live`) and nothing else, so the
-Binance names and the live bot names reach the live container only; the collector, `db-upgrade`
-and the paper services never receive a `BINANCE_` name. Plan 24-36 completes the split (paper
-Telegram file, backup file); until then the shared file still carries the names listed in
-`SHARED_FILE_NAMES`, and this module keeps that list closed.
+Binance names and the live bot names reach the live container only (plan 24-30). Plan 24-36 split
+the rest the same way: the SHADOW Telegram names are in the paper services' file
+(`TRADING_PAPER_ENV_FILE`, default `.env.paper`) and the BACKUP_ names in the backup and ops
+services' file (`TRADING_BACKUP_ENV_FILE`, default `.env.backup`), each read on top of the shared
+file. The shared file carries only the names listed in `SHARED_FILE_NAMES`, and this module keeps
+that list closed, so the always-on collector holds no Telegram token, no backup secret and no
+Binance key.
 
 The per-service allow-lists below are derived from the readers, not only from greps:
 
@@ -42,6 +45,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 ENV_LIVE_EXAMPLE = REPO_ROOT / ".env.live.example"
+ENV_PAPER_EXAMPLE = REPO_ROOT / ".env.paper.example"
+ENV_BACKUP_EXAMPLE = REPO_ROOT / ".env.backup.example"
 
 _ASSIGNMENT = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 _COMMENTED_ASSIGNMENT = re.compile(r"^#\s*([A-Z][A-Z0-9_]*)=(.*)$")
@@ -50,6 +55,8 @@ _SCRUBBED_ENV_PREFIXES = (
     "COMPOSE_",
     "TRADING_ENV_FILE",
     "TRADING_LIVE_ENV_FILE",
+    "TRADING_PAPER_ENV_FILE",
+    "TRADING_BACKUP_ENV_FILE",
     "TRADING_APP_REVISION",
     "IMAGE_TAG",
     "DATABASE_URL",
@@ -58,9 +65,10 @@ _SCRUBBED_ENV_PREFIXES = (
 # Set by compose itself in `environment` (x-database-env), not read from any file.
 DATABASE_VALUES: frozenset[str] = frozenset({"DATABASE_URL", "POSTGRES_HOST"})
 
-# What the shared base file (`.env.example`) delivers to every service that reads it, until plan
-# 24-36 splits the backup and paper Telegram names out. A name added to `.env.example` without
-# being added here fails `test_the_shared_file_example_carries_only_the_closed_list`.
+# What the shared base file (`.env.example`) delivers to every service that reads it. Since plan
+# 24-36 it holds the database values, the collector cadence and the image tag only. A name added
+# to `.env.example` without being added here fails
+# `test_the_shared_file_example_carries_only_the_closed_list`.
 SHARED_FILE_NAMES: frozenset[str] = frozenset(
     {
         "POSTGRES_USER",
@@ -70,6 +78,22 @@ SHARED_FILE_NAMES: frozenset[str] = frozenset(
         "POSTGRES_PORT",
         "DATABASE_URL",
         "OI_POLL_INTERVAL_SECONDS",
+        "IMAGE_TAG",
+    }
+)
+
+# The SHADOW Telegram names: the paper services' own file (`.env.paper`), nowhere else. The live
+# bot has other names (`TELEGRAM_LIVE_*`), and the live process refuses the shadow token.
+PAPER_FILE_NAMES: frozenset[str] = frozenset(
+    {"TELEGRAM_BOT_TOKEN", "TELEGRAM_AUTHORIZED_CHAT_ID", "TELEGRAM_AUTHORIZED_USER_IDS"}
+)
+# The shadow names the live service must never receive (TELEGRAM_AUTHORIZED_USER_IDS is shared
+# with the live file on purpose: the same owner users, set again in `.env.live`).
+SHADOW_ONLY_NAMES: frozenset[str] = frozenset({"TELEGRAM_BOT_TOKEN", "TELEGRAM_AUTHORIZED_CHAT_ID"})
+
+# The backup services' own file (`.env.backup`): every BACKUP_ name and the bundle target.
+BACKUP_FILE_NAMES: frozenset[str] = frozenset(
+    {
         "OFF_HOST_BACKUP_TARGET",
         "BACKUP_REMOTE",
         "BACKUP_S3_PROVIDER",
@@ -80,7 +104,6 @@ SHARED_FILE_NAMES: frozenset[str] = frozenset(
         "BACKUP_S3_SECRET_ACCESS_KEY",
         "BACKUP_CRYPT_PASSWORD",
         "BACKUP_CRYPT_PASSWORD2",
-        "IMAGE_TAG",
     }
 )
 
@@ -112,6 +135,9 @@ ALLOWED_BY_SERVICE: dict[str, frozenset[str]] = {
     "collector": COLLECTOR_READER_NAMES | SHARED_FILE_NAMES | DATABASE_VALUES,
     "db-upgrade": DB_UPGRADE_READER_NAMES | SHARED_FILE_NAMES | DATABASE_VALUES,
     "paper": frozenset(ALLOWED_ENV_NAMES) | SHARED_FILE_NAMES | DATABASE_VALUES,
+    "paper-pin": frozenset(ALLOWED_ENV_NAMES) | SHARED_FILE_NAMES | DATABASE_VALUES,
+    "backup": BACKUP_FILE_NAMES | SHARED_FILE_NAMES | DATABASE_VALUES,
+    "ops": BACKUP_FILE_NAMES | SHARED_FILE_NAMES | DATABASE_VALUES,
     "live": LIVE_READER_NAMES | DATABASE_VALUES,
 }
 
@@ -194,9 +220,13 @@ def _hermetic_env() -> dict[str, str]:
 
 
 def _render(
-    tmp_path: Path, *, with_live_file: bool = True
+    tmp_path: Path, *, with_live_file: bool = True, with_split_files: bool = True
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, str]]:
-    """`docker compose config` of the real compose file over FAKE copies of both examples."""
+    """`docker compose config` of the real compose file over FAKE copies of every example.
+
+    The returned dictionaries are the FAKE values written to the shared file and to the live file.
+    The paper and backup files are written too, unless `with_split_files` is false.
+    """
     _require_compose()
     project = tmp_path / f"project-{secrets.token_hex(3)}"
     project.mkdir()
@@ -206,6 +236,9 @@ def _render(
     live_values: dict[str, str] = {}
     if with_live_file:
         live_values = _fake_env_file(ENV_LIVE_EXAMPLE, project / ".env.live")
+    if with_split_files:
+        _fake_env_file(ENV_PAPER_EXAMPLE, project / ".env.paper")
+        _fake_env_file(ENV_BACKUP_EXAMPLE, project / ".env.backup")
     cmd = [
         "docker",
         "compose",
@@ -445,6 +478,174 @@ def test_every_other_real_env_variant_stays_ignored(name: str) -> None:
     assert _check_ignore(name) == 0
 
 
-@pytest.mark.parametrize("name", [".env.example", ".env.live.example", ".env.backup.example"])
+@pytest.mark.parametrize(
+    "name", [".env.example", ".env.live.example", ".env.paper.example", ".env.backup.example"]
+)
 def test_every_env_example_is_tracked_not_ignored(name: str) -> None:
     assert _check_ignore(name) == 1
+
+
+# ------------------------------------------- Plan 24-36: the paper file and the backup file
+
+
+PAPER_SERVICES = ("paper", "paper-pin")
+BACKUP_SERVICES = ("backup", "ops")
+
+
+def test_compose_gives_the_shadow_telegram_names_to_the_paper_services_only(
+    tmp_path: Path,
+) -> None:
+    services, _base, _live = _render(tmp_path)
+
+    for service in PAPER_SERVICES:
+        names = _environment(services, service)
+        missing = sorted(PAPER_FILE_NAMES - names)
+        assert not missing, f"{service} did not receive its paper-file names: {missing}"
+
+    for service in ("collector", "db-upgrade", *BACKUP_SERVICES):
+        names = _environment(services, service)
+        shadow = sorted(names & PAPER_FILE_NAMES)
+        assert not shadow, f"{service} received shadow Telegram names: {shadow}"
+    live = _environment(services, "live")
+    shadow_in_live = sorted(live & SHADOW_ONLY_NAMES)
+    assert not shadow_in_live, f"live received shadow Telegram names: {shadow_in_live}"
+
+
+def test_compose_gives_the_backup_names_to_the_backup_services_only(tmp_path: Path) -> None:
+    services, _base, _live = _render(tmp_path)
+
+    for service in BACKUP_SERVICES:
+        names = _environment(services, service)
+        missing = sorted(BACKUP_FILE_NAMES - names)
+        assert not missing, f"{service} did not receive its backup-file names: {missing}"
+
+    for service in ("collector", "db-upgrade", *PAPER_SERVICES, "live"):
+        names = _environment(services, service)
+        leaked = sorted(n for n in names if n.startswith("BACKUP_") or n in BACKUP_FILE_NAMES)
+        assert not leaked, f"{service} received backup names: {leaked}"
+
+
+def test_the_collector_holds_no_telegram_token_no_backup_secret_and_no_binance_key(
+    tmp_path: Path,
+) -> None:
+    """WR-06 in one assertion: the internet-facing collector gets the shared names only."""
+    services, _base, _live = _render(tmp_path)
+    names = _environment(services, "collector")
+    assert names <= COLLECTOR_READER_NAMES | SHARED_FILE_NAMES | DATABASE_VALUES, sorted(names)
+    forbidden = sorted(
+        n
+        for n in names
+        if n.startswith(("BACKUP_", "BINANCE_", "TELEGRAM_")) or n in BACKUP_FILE_NAMES
+    )
+    assert not forbidden, f"collector received: {forbidden}"
+
+
+def test_paper_and_backup_files_are_optional_so_every_compose_command_still_runs(
+    tmp_path: Path,
+) -> None:
+    services, _base, _live = _render(tmp_path, with_split_files=False)
+    for service in PAPER_SERVICES:
+        assert not (_environment(services, service) & PAPER_FILE_NAMES)
+    for service in BACKUP_SERVICES:
+        assert not (_environment(services, service) & BACKUP_FILE_NAMES)
+
+
+def test_the_compose_file_names_the_paper_and_backup_env_file_variables() -> None:
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert "${TRADING_PAPER_ENV_FILE:-.env.paper}" in text
+    assert "${TRADING_BACKUP_ENV_FILE:-.env.backup}" in text
+    assert text.count("required: false") >= 3
+
+
+def test_the_selected_paper_and_backup_files_are_the_ones_compose_reads(tmp_path: Path) -> None:
+    """TRADING_PAPER_ENV_FILE and TRADING_BACKUP_ENV_FILE move the file, as the soak needs."""
+    _require_compose()
+    project = tmp_path / "project"
+    project.mkdir()
+    shutil.copyfile(COMPOSE_FILE, project / "docker-compose.yml")
+    (project / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8", newline="\n")
+    _fake_env_file(ENV_EXAMPLE, project / ".env")
+    # the default-named files exist but hold no names of the example, only a marker name
+    (project / ".env.paper").write_text("DEFAULT_PAPER_MARKER=x\n", encoding="utf-8", newline="\n")
+    (project / ".env.backup").write_text(
+        "DEFAULT_BACKUP_MARKER=x\n", encoding="utf-8", newline="\n"
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+    _fake_env_file(ENV_PAPER_EXAMPLE, other / "soak-paper.env")
+    _fake_env_file(ENV_BACKUP_EXAMPLE, other / "soak-backup.env")
+    env = _hermetic_env()
+    env["TRADING_PAPER_ENV_FILE"] = (other / "soak-paper.env").as_posix()
+    env["TRADING_BACKUP_ENV_FILE"] = (other / "soak-backup.env").as_posix()
+    cmd = ["docker", "compose", "--project-directory", str(project)]
+    cmd += ["-f", str(project / "docker-compose.yml")]
+    for profile in ("paper", "paper-pin", "ops"):
+        cmd += ["--profile", profile]
+    cmd += ["config", "--format", "json"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False, env=env)
+    assert proc.returncode == 0, f"compose config failed: {proc.stderr.strip()[:400]}"
+    services = json.loads(proc.stdout)["services"]
+    for service in PAPER_SERVICES:
+        names = _environment(services, service)
+        assert PAPER_FILE_NAMES <= names and "DEFAULT_PAPER_MARKER" not in names, service
+    for service in BACKUP_SERVICES:
+        names = _environment(services, service)
+        assert BACKUP_FILE_NAMES <= names and "DEFAULT_BACKUP_MARKER" not in names, service
+
+
+def test_the_paper_file_example_carries_only_the_shadow_names() -> None:
+    active, commented = _example_names(ENV_PAPER_EXAMPLE)
+    assert set(active) == PAPER_FILE_NAMES
+    outside = sorted({*active, *commented} - frozenset(ALLOWED_ENV_NAMES))
+    assert not outside, (
+        f".env.paper.example names variables the paper runtime never reads: {outside}"
+    )
+    assert not [n for n in {*active, *commented} if n.startswith(TRADE_KEY_PREFIX)]
+
+
+def test_the_backup_file_example_carries_only_the_backup_names() -> None:
+    active, commented = _example_names(ENV_BACKUP_EXAMPLE)
+    assert set(active) == BACKUP_FILE_NAMES
+    # a prose line such as "OFFSITE_COPY=skipped" in a comment is not a variable; the check is
+    # that no moved or trading name hides in the comments either
+    foreign = sorted(n for n in commented if n.startswith(("BINANCE_", "TELEGRAM_", "PAPER_")))
+    assert not foreign, f".env.backup.example comments name foreign variables: {foreign}"
+
+
+def test_the_shared_example_has_no_telegram_or_backup_name_at_all() -> None:
+    active, commented = _example_names(ENV_EXAMPLE)
+    moved = sorted(
+        n
+        for n in {*active, *commented}
+        if n.startswith(("BACKUP_", "TELEGRAM_", "PAPER_")) or n in BACKUP_FILE_NAMES
+    )
+    assert not moved, f".env.example still names moved variables: {moved}"
+
+
+@pytest.mark.parametrize("example", [ENV_PAPER_EXAMPLE, ENV_BACKUP_EXAMPLE], ids=lambda p: p.name)
+def test_the_split_examples_have_names_only_and_are_lf(example: Path) -> None:
+    for number, line in enumerate(example.read_text(encoding="utf-8").splitlines(), 1):
+        match = _ASSIGNMENT.match(line) or _COMMENTED_ASSIGNMENT.match(line)
+        if not match:
+            continue
+        name, value = match.groups()
+        if name == "OFF_HOST_BACKUP_TARGET":
+            assert value == "data/backup", f"line {number}: {name} keeps its default path"
+            continue
+        assert value == "", f"line {number}: {name} must be an empty assignment (names only)"
+    raw = example.read_bytes()
+    assert b"\r" not in raw
+    assert raw.endswith(b"\n")
+
+
+def test_every_moved_name_is_in_exactly_one_example() -> None:
+    examples = {
+        "shared": ENV_EXAMPLE,
+        "live": ENV_LIVE_EXAMPLE,
+        "paper": ENV_PAPER_EXAMPLE,
+        "backup": ENV_BACKUP_EXAMPLE,
+    }
+    active = {label: set(_example_names(path)[0]) for label, path in examples.items()}
+    for name in sorted(BACKUP_FILE_NAMES | SHADOW_ONLY_NAMES):
+        homes = sorted(label for label, names in active.items() if name in names)
+        assert len(homes) == 1, f"{name} is active in {homes}"

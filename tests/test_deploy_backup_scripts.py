@@ -170,6 +170,7 @@ class Rig:
             }
         )
         full_env.pop("TRADING_ENV_FILE", None)
+        full_env.pop("TRADING_BACKUP_ENV_FILE", None)
         full_env.pop("COMPOSE_PROJECT_NAME", None)
         full_env.update(env or {})
         return subprocess.run(
@@ -240,9 +241,12 @@ def test_backup_uses_the_env_file_and_project_from_the_environment(
 
 
 def _remote_env(rig: Rig, text: str = "BACKUP_S3_BUCKET=b\n") -> dict[str, str]:
-    """TRADING_ENV_FILE pointing at a test env file (never the checkout's own .env)."""
+    """TRADING_BACKUP_ENV_FILE pointing at a test backup env file (never the checkout's own).
+
+    Plan 24-36 (D-29): the BACKUP_ names live in the backup env file, not in TRADING_ENV_FILE.
+    """
     path = _write(rig.base / "backup.env", text)
-    return {"TRADING_ENV_FILE": path.as_posix()}
+    return {"TRADING_BACKUP_ENV_FILE": path.as_posix()}
 
 
 def test_init_remote_makes_a_bundle_then_creates_the_sentinel(rig: Rig) -> None:
@@ -661,6 +665,10 @@ def test_the_soak_backup_units_select_the_soak_project_and_env_file() -> None:
     assert re.search(r"^WorkingDirectory=@TRADING_DIR@$", service, re.MULTILINE)
     assert re.search(r"^Environment=COMPOSE_PROJECT_NAME=trading-soak$", service, re.MULTILINE)
     assert re.search(r"^Environment=TRADING_ENV_FILE=@SOAK_ENV_FILE@$", service, re.MULTILINE)
+    # plan 24-36: the backup service and the wrapper read the BACKUP_ names from the soak file too
+    assert re.search(
+        r"^Environment=TRADING_BACKUP_ENV_FILE=@SOAK_ENV_FILE@$", service, re.MULTILINE
+    )
     assert re.search(
         r"^ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/backup\.sh$", service, re.M
     )
@@ -713,6 +721,7 @@ def test_install_soak_timer_writes_the_soak_units_and_enables_their_timer(rig: R
         assert "@TRADING_DIR@" not in text and "@SOAK_ENV_FILE@" not in text
     assert f"WorkingDirectory={checkout}" in service
     assert f"Environment=TRADING_ENV_FILE={soak.as_posix()}" in service
+    assert f"Environment=TRADING_BACKUP_ENV_FILE={soak.as_posix()}" in service
     assert "Environment=COMPOSE_PROJECT_NAME=trading-soak" in service
     assert not (unit_dir / "trading-backup.service").exists(), "the trading pair is untouched"
     calls = [ln for ln in rig.lines() if ln.startswith("systemctl ")]
@@ -1024,6 +1033,7 @@ def test_install_soak_timer_in_local_only_mode_needs_no_bucket_and_warns(rig: Ri
     unit_dir = rig.prefix / "etc" / "systemd" / "system"
     service = (unit_dir / "trading-soak-backup.service").read_text(encoding="utf-8")
     assert f"Environment=TRADING_ENV_FILE={soak.as_posix()}" in service
+    assert f"Environment=TRADING_BACKUP_ENV_FILE={soak.as_posix()}" in service
 
 
 def test_install_soak_timer_in_local_only_mode_still_refuses_the_trading_bucket(rig: Rig) -> None:
@@ -1073,4 +1083,144 @@ def test_the_help_and_the_docs_describe_the_local_only_mode(rig: Rig) -> None:
         lines = (DEPLOY / name).read_text(encoding="utf-8").splitlines()
         assert "BACKUP_REMOTE=" in lines, name
     env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
-    assert "BACKUP_REMOTE=" in env_example
+    assert "BACKUP_REMOTE=" not in env_example, "BACKUP_ names moved to .env.backup.example"
+    backup_example = (REPO_ROOT / ".env.backup.example").read_text(encoding="utf-8").splitlines()
+    assert "BACKUP_REMOTE=" in backup_example
+
+
+# --- Plan 24-36 (D-29, WR-06): the BACKUP_ names are read from the backup env file ------------
+
+
+def test_init_remote_reads_the_backup_env_file_and_not_the_shared_one(rig: Rig) -> None:
+    """A local-only mode in the shared file is not seen; the backup file decides."""
+    shared = _write(rig.base / "shared.env", "BACKUP_REMOTE=none\n")
+    backup = _write(rig.base / "backup-own.env", "BACKUP_REMOTE=s3\n")
+    proc = rig.run(
+        "backup.sh",
+        "--init-remote",
+        env={
+            "TRADING_ENV_FILE": shared.as_posix(),
+            "TRADING_BACKUP_ENV_FILE": backup.as_posix(),
+        },
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert len(rig.docker_lines()) == 2
+
+
+def test_init_remote_refuses_local_only_mode_set_in_the_backup_env_file(rig: Rig) -> None:
+    shared = _write(rig.base / "shared.env", "POSTGRES_USER=x\n")
+    backup = _write(rig.base / "backup-own.env", "BACKUP_REMOTE=none\n")
+    proc = rig.run(
+        "backup.sh",
+        "--init-remote",
+        env={
+            "TRADING_ENV_FILE": shared.as_posix(),
+            "TRADING_BACKUP_ENV_FILE": backup.as_posix(),
+        },
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "nothing to initialise" in proc.stderr
+    assert rig.lines() == []
+
+
+def test_a_backup_env_file_value_is_never_printed_on_refusal(rig: Rig) -> None:
+    secret_like = "fake-s3-secret-do-not-print"
+    backup = _write(
+        rig.base / "backup-own.env",
+        f"BACKUP_S3_SECRET_ACCESS_KEY={secret_like}\nBACKUP_REMOTE=azure\n",
+    )
+    proc = rig.run("backup.sh", "--init-remote", env={"TRADING_BACKUP_ENV_FILE": backup.as_posix()})
+    assert proc.returncode != 0
+    assert "BACKUP_REMOTE" in proc.stderr
+    assert secret_like not in proc.stdout + proc.stderr
+
+
+def test_the_scripts_default_to_the_checkout_backup_file_and_not_to_dot_env() -> None:
+    for name in ("backup.sh", "backup-drill.sh", "backup-real-s3-gate.sh"):
+        text = (DEPLOY / name).read_text(encoding="utf-8")
+        header = "\n".join(line for line in text.splitlines() if line.startswith("#"))
+        assert "TRADING_BACKUP_ENV_FILE" in header, name
+        assert ".env.backup" in header, name
+    code = _strip_comments((DEPLOY / "backup.sh").read_text(encoding="utf-8"))
+    assert "$REPO_ROOT/.env.backup" in code
+    assert "$REPO_ROOT/.env}" not in code, "backup.sh must not default to the shared .env"
+
+
+def test_the_help_names_the_backup_env_file(rig: Rig) -> None:
+    proc = rig.run("backup.sh", "--help")
+    assert proc.returncode == 0
+    assert "TRADING_BACKUP_ENV_FILE" in proc.stderr and ".env.backup" in proc.stderr
+    for name in ("backup-drill.sh", "backup-real-s3-gate.sh"):
+        helped = rig.run(name, "--help")
+        assert helped.returncode == 0, name
+        assert "TRADING_BACKUP_ENV_FILE" in helped.stderr, name
+
+
+def test_the_soak_template_says_the_soak_file_serves_the_backup_service_too() -> None:
+    text = (DEPLOY / "soak.env.example").read_text(encoding="utf-8")
+    assert "TRADING_BACKUP_ENV_FILE" in text
+
+
+def _compose_init_exports(extra_env: dict[str, str]) -> list[str]:
+    """TRADING_PAPER_ENV_FILE and TRADING_BACKUP_ENV_FILE after `compose_init` (lib.sh)."""
+    bash = find_bash()
+    if bash is None:
+        infra_skip("bash not found; the wrapper tests need Git Bash or Linux bash")
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"TRADING_ENV_FILE", "TRADING_PAPER_ENV_FILE", "TRADING_BACKUP_ENV_FILE"}
+    }
+    env.update(extra_env)
+    proc = subprocess.run(
+        [
+            bash,
+            "-c",
+            'source "$1"; compose_init; printf "%s\\n%s\\n%s\\n" '
+            '"${COMPOSE[*]}" "${TRADING_PAPER_ENV_FILE-unset}" "${TRADING_BACKUP_ENV_FILE-unset}"',
+            "lib",
+            (DEPLOY / "lib.sh").as_posix(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr.strip()[:300]
+    return proc.stdout.splitlines()
+
+
+def test_a_project_env_file_is_also_its_paper_and_backup_file_unless_they_are_set() -> None:
+    project = "/outside/project.env"
+    command, paper, backup = _compose_init_exports({"TRADING_ENV_FILE": project})
+    assert command == f"docker compose --env-file {project}"
+    assert (paper, backup) == (project, project)
+
+
+def test_an_explicit_paper_or_backup_file_is_kept() -> None:
+    project = "/outside/project.env"
+    _command, paper, backup = _compose_init_exports(
+        {
+            "TRADING_ENV_FILE": project,
+            "TRADING_PAPER_ENV_FILE": "/outside/paper.env",
+            "TRADING_BACKUP_ENV_FILE": "/outside/backup.env",
+        }
+    )
+    assert (paper, backup) == ("/outside/paper.env", "/outside/backup.env")
+
+
+def test_the_production_stack_keeps_the_compose_defaults() -> None:
+    command, paper, backup = _compose_init_exports({})
+    assert command == "docker compose"
+    assert (paper, backup) == ("unset", "unset")
+
+
+def test_init_remote_in_a_one_file_project_reads_the_mode_from_the_project_file(rig: Rig) -> None:
+    proc = rig.run("backup.sh", "--init-remote", env=_remote_env(rig, "BACKUP_REMOTE=none\n"))
+    assert proc.returncode == 2
+    project = _write(rig.base / "project.env", "BACKUP_REMOTE=none\n")
+    proc = rig.run("backup.sh", "--init-remote", env={"TRADING_ENV_FILE": project.as_posix()})
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "nothing to initialise" in proc.stderr
+    assert rig.lines() == []

@@ -102,9 +102,19 @@ write_if_changed() {
 # COMPOSE_PROJECT_NAME is read by compose itself; TRADING_ENV_FILE (another env file, as used by
 # the docker tests to run several projects from one checkout) must also feed interpolation, so it
 # is passed as --env-file as well. Nothing here ever prints the file.
+#
+# Plan 24-36 (D-29): the compose file reads the SHADOW Telegram names from TRADING_PAPER_ENV_FILE
+# and the BACKUP_ names from TRADING_BACKUP_ENV_FILE, on top of the shared file. A project that
+# selects its own env file (the soak, the rehearsal, the cutover and drill tests) keeps that one
+# file: when TRADING_ENV_FILE is set and one of the two is not, it defaults to TRADING_ENV_FILE
+# and is exported for compose, so such a project never falls back to the checkout's own
+# .env.paper / .env.backup. The production stack (TRADING_ENV_FILE unset) reads those two files
+# and the shared .env. The live service is deliberately not defaulted: it reads .env.live only.
 compose_init() {
   COMPOSE=(docker compose)
   if [[ -n ${TRADING_ENV_FILE:-} ]]; then
     COMPOSE+=(--env-file "$TRADING_ENV_FILE")
+    export TRADING_PAPER_ENV_FILE="${TRADING_PAPER_ENV_FILE:-$TRADING_ENV_FILE}"
+    export TRADING_BACKUP_ENV_FILE="${TRADING_BACKUP_ENV_FILE:-$TRADING_ENV_FILE}"
   fi
 }

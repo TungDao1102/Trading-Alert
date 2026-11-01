@@ -170,6 +170,10 @@ def _wrapper(
     secrets_: list[str],
 ) -> Run:
     env = dict(os.environ)
+    # plan 24-36 (D-29): the throwaway project keeps one file, so deploy/lib.sh compose_init makes
+    # it the backup env file too; a value inherited from the developer's shell must not win
+    env.pop("TRADING_BACKUP_ENV_FILE", None)
+    env.pop("TRADING_PAPER_ENV_FILE", None)
     env.update(
         {
             "MSYS_NO_PATHCONV": "1",
