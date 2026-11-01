@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -200,10 +200,18 @@ MoneyFor = Callable[[SignalRequest], MoneyAtStake | None]
 ReservationRegistrar = Callable[[SignalRequest, MoneyAtStake, datetime], None]
 JournalSink = Callable[[JournalEvent], None]
 Clock = Callable[[], datetime]
+# Plan 24-27B (D-25): the store seam. `run(fn, *args, **kwargs)` awaits a synchronous store call
+# off the event loop (`StoreExecutor.write` for writes, `StoreExecutor.read` for reads).
+RunSync = Callable[..., Awaitable[Any]]
 
 
 class ApprovalRequestSender:
     """Issues and sends DEMO approval cards, one request at a time (see the module docstring).
+
+    `run_sync` / `run_read` (plan 24-27B) are the optional store seam of the live process
+    (`StoreExecutor.write` / `.read`): every synchronous store call of the flow (the desk's issue,
+    the reservation, the signal transition, the journal rows and the conflict reads) is awaited off
+    the event loop. Without them the calls stay inline (the unit tests).
 
     `register_reservation(request, money, now_utc)` is optional: the composition binds it to the
     Phase 21 reservation store's `register_request` (REQUESTED row) so the approval transaction
@@ -227,8 +235,12 @@ class ApprovalRequestSender:
         sleep: SleepFn,
         journal: JournalSink,
         register_reservation: ReservationRegistrar | None = None,
+        run_sync: RunSync | None = None,
+        run_read: RunSync | None = None,
     ) -> None:
         self._desk = desk
+        self._run_sync = run_sync
+        self._run_read = run_read if run_read is not None else run_sync
         self._bot = bot
         self._chat_id = chat_id
         self._entities = entities
@@ -245,6 +257,16 @@ class ApprovalRequestSender:
         # written its rows.
         self._lock = asyncio.Lock()
 
+    async def _write(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        if self._run_sync is None:
+            return fn(*args, **kwargs)
+        return await self._run_sync(fn, *args, **kwargs)
+
+    async def _read(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        if self._run_read is None:
+            return fn(*args, **kwargs)
+        return await self._run_read(fn, *args, **kwargs)
+
     async def send_request(self, request: SignalRequest) -> SendOutcome:
         """Refuse, or issue and send one approval card. Never approves, never places."""
         async with self._lock:
@@ -257,22 +279,23 @@ class ApprovalRequestSender:
         signal, plan = request.signal, request.plan
         invalid = _invalid_reason(request, now)
         if invalid is not None:
-            return self._refuse(request, now, invalid, ())
+            return await self._refuse(request, now, invalid, ())
 
         conflicts, failures = await self._conflict_sources(signal.symbol, now)
         if conflicts:
-            return self._refuse(request, now, REASON_CONFLICT, (*conflicts, *failures))
+            return await self._refuse(request, now, REASON_CONFLICT, (*conflicts, *failures))
         if failures:
-            return self._refuse(request, now, REASON_UNCERTAIN, failures)
+            return await self._refuse(request, now, REASON_UNCERTAIN, failures)
 
         try:
             money = self._money_for(request)
         except Exception as exc:  # noqa: BLE001 - journaled by class name only
-            return self._not_issued(request, now, type(exc).__name__)
+            return await self._not_issued(request, now, type(exc).__name__)
         if money is None:
-            return self._not_issued(request, now, REASON_MONEY_MISSING)
+            return await self._not_issued(request, now, REASON_MONEY_MISSING)
         try:
-            issued = self._desk.issue(
+            issued = await self._write(
+                self._desk.issue,
                 signal=signal,
                 plan=plan,
                 money=money,
@@ -281,12 +304,14 @@ class ApprovalRequestSender:
                 now_utc=now,
             )
         except Exception as exc:  # noqa: BLE001 - journaled by class name only
-            return self._not_issued(request, now, f"{REASON_ISSUE_FAILED}:{type(exc).__name__}")
+            return await self._not_issued(
+                request, now, f"{REASON_ISSUE_FAILED}:{type(exc).__name__}"
+            )
         if self._register_reservation is not None:
             try:
-                self._register_reservation(request, money, now)
+                await self._write(self._register_reservation, request, money, now)
             except Exception as exc:  # noqa: BLE001 - journaled by class name only
-                return self._not_issued(
+                return await self._not_issued(
                     request,
                     now,
                     f"{REASON_RESERVATION_FAILED}:{type(exc).__name__}",
@@ -301,7 +326,7 @@ class ApprovalRequestSender:
                 self._bot, chat_id=self._chat_id, issued=issued, sleep=self._sleep
             )
         except Exception as exc:  # noqa: BLE001 - the card was not delivered; nothing approved
-            self._record(
+            await self._record(
                 request,
                 EVENT_REQUEST_NOT_ISSUED,
                 "send_raised",
@@ -313,20 +338,23 @@ class ApprovalRequestSender:
             # The desk journaled the classified failure; both approvals stay PENDING (APRV-02).
             kind = sent.failure.kind.value if sent.failure is not None else "UNKNOWN"
             return SendOutcome(SendStatus.SEND_FAILED, kind, short_id=short_id)
-        notified = self._mark_notified(request)
+        notified = await self._mark_notified(request)
         return SendOutcome(
             SendStatus.SENT, short_id=short_id, message_id=sent.message_id, notified=notified
         )
 
-    def _mark_notified(self, request: SignalRequest) -> bool:
+    async def _mark_notified(self, request: SignalRequest) -> bool:
         """DETECTED -> NOTIFIED once the card is out. A failure leaves the card unapprovable."""
         now = self._clock()
         try:
-            self._entities.transition_signal(
-                request.signal.signal_id, SignalStatus.NOTIFIED, now_utc=now
+            await self._write(
+                self._entities.transition_signal,
+                request.signal.signal_id,
+                SignalStatus.NOTIFIED,
+                now_utc=now,
             )
         except Exception as exc:  # noqa: BLE001 - journaled by class name only
-            self._record(
+            await self._record(
                 request,
                 EVENT_SIGNAL_NOTIFY_FAILED,
                 "notify_failed",
@@ -359,7 +387,7 @@ class ApprovalRequestSender:
         try:
             if any(
                 record.symbol == symbol and record.role == OrderRole.ENTRY.value
-                for record in self._intents.list_unresolved_intents()
+                for record in await self._read(self._intents.list_unresolved_intents)
             ):
                 conflicts.append(SOURCE_ENTRY_INTENT)
         except Exception as exc:  # noqa: BLE001
@@ -377,7 +405,8 @@ class ApprovalRequestSender:
         try:
             # An approval counts while its plan can still be confirmed; a plan past its expiry is
             # either unfilled (the entry is gone) or filled (the position source covers it).
-            if any(item.symbol == symbol and item.expiry_utc > now for item in self._approvals()):
+            open_approvals = await self._read(lambda: list(self._approvals()))
+            if any(item.symbol == symbol and item.expiry_utc > now for item in open_approvals):
                 conflicts.append(SOURCE_OPEN_APPROVAL)
         except Exception as exc:  # noqa: BLE001
             failed(SOURCE_OPEN_APPROVAL, exc)
@@ -385,10 +414,10 @@ class ApprovalRequestSender:
 
     # ---- outcomes and journal ----------------------------------------------------- #
 
-    def _refuse(
+    async def _refuse(
         self, request: SignalRequest, now: datetime, reason: str, sources: tuple[str, ...]
     ) -> SendOutcome:
-        self._record(
+        await self._record(
             request,
             EVENT_REQUEST_REFUSED,
             "refused",
@@ -398,10 +427,10 @@ class ApprovalRequestSender:
         )
         return SendOutcome(SendStatus.REFUSED, reason, sources)
 
-    def _not_issued(
+    async def _not_issued(
         self, request: SignalRequest, now: datetime, reason: str, *, short_id: str | None = None
     ) -> SendOutcome:
-        self._record(
+        await self._record(
             request,
             EVENT_REQUEST_NOT_ISSUED,
             "not_issued",
@@ -411,7 +440,7 @@ class ApprovalRequestSender:
         )
         return SendOutcome(SendStatus.NOT_ISSUED, reason, short_id=short_id)
 
-    def _record(
+    async def _record(
         self,
         request: SignalRequest,
         event_type: str,
@@ -426,7 +455,8 @@ class ApprovalRequestSender:
         correlation = f"demo-request:{signal_id}"
         body = {**payload, "mode": _DEMO_MODE, "signal_id": signal_id, "trade_plan_id": plan_id}
         try:
-            self._journal(
+            await self._write(
+                self._journal,
                 JournalEvent(
                     journal_event_id=correlated_event_id(
                         prefix=_JOURNAL_PREFIX,
@@ -443,7 +473,7 @@ class ApprovalRequestSender:
                     signal_id=signal_id if link_rows else None,
                     trade_plan_id=plan_id if link_rows else None,
                     payload_json=json.dumps(body, sort_keys=True, separators=(",", ":")),
-                )
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - a journal failure never turns a refusal into a send
             log.warning("demo_request_journal_failed", error_class=type(exc).__name__)

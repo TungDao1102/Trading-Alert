@@ -160,3 +160,39 @@ async def test_a_refused_confirm_off_the_loop_places_nothing(executor: StoreExec
 
     assert not result.ok
     assert rig.confirmed == []
+
+
+async def test_cancel_and_the_ttl_sweep_run_on_the_writer_thread(
+    executor: StoreExecutor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 24-27B: `handle_cancel` and the expire step of the sweep leave the loop too."""
+    from datetime import timedelta
+
+    from tests.shadow_fakes import T0
+
+    rig = Rig()
+    flow = rig.make_flow(run_sync=executor.write)
+    threads: dict[str, str] = {}
+    real_cancel, real_expire = flow.book.handle_cancel, flow.book.expire_due
+
+    def handle_cancel(**kwargs: Any) -> Any:
+        threads["cancel"] = threading.current_thread().name
+        return real_cancel(**kwargs)
+
+    def expire_due(now: datetime) -> Any:
+        threads["expire"] = threading.current_thread().name
+        return real_expire(now)
+
+    monkeypatch.setattr(flow.book, "handle_cancel", handle_cancel)
+    monkeypatch.setattr(flow.book, "expire_due", expire_due)
+
+    issued = await rig.issue_and_send()
+    short = issued.mapping.short_id
+    assert (await rig.tap("APR", short, query_id="q-apr", flow=flow)).ok
+    rig.now = T0 + timedelta(seconds=10)
+    assert (await rig.tap("CXL", short, query_id="q-cxl", flow=flow)).ok
+    await flow.finalize_expired(T0 + timedelta(seconds=61))
+
+    assert threads["cancel"].startswith(WRITER_THREAD_PREFIX)
+    assert threads["expire"].startswith(WRITER_THREAD_PREFIX)
+    assert rig.confirmed == []

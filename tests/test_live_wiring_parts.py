@@ -401,6 +401,32 @@ def test_restorable_entries_selects_entry_rows_in_sent_unknown_and_acked() -> No
     assert "ORDER BY" in sql
 
 
+def test_restorable_entries_excludes_ended_plans_by_a_correlated_journal_test() -> None:
+    """D093: no age number; an ended plan (a transition into FLAT / ENTRY_ENDED_NO_FILL) goes."""
+    from src.execution.protection import _CORRELATION_PREFIX, EVENT_PROTECTION_TRANSITION
+    from src.persistence import execution_state as module
+
+    assert module.PROTECTION_CORRELATION_PREFIX == _CORRELATION_PREFIX
+    assert module.PROTECTION_TRANSITION_EVENT == EVENT_PROTECTION_TRANSITION
+    from src.domain.transitions import _PROTECTION
+
+    terminal = {state for state, successors in _PROTECTION.items() if not successors}
+    assert terminal == set(module.PROTECTION_ENDED_STATES), "the ended states are the terminals"
+    db = _CapturingDb()
+    PgExecutionStateStore(db).restorable_entries()  # type: ignore[arg-type]
+    statement = db.statements[0]
+    sql = _sql(statement)
+    assert "NOT (EXISTS" in sql and "journal_events.correlation_id" in sql
+    assert "journal_events.event_type" in sql and "journal_events.payload_json" in sql
+    compiled = statement.compile(dialect=postgresql.dialect())
+    values = {str(v) for v in compiled.params.values() if not isinstance(v, list | tuple)}
+    assert "PROTECTION_TRANSITION" in values
+    assert any(v.endswith('"to":"FLAT"%') for v in values) or any(
+        '"to":"FLAT"' in v for v in values
+    )
+    assert not any("age" in k for k in compiled.params), "no age number is introduced"
+
+
 def test_intent_for_client_id_matches_the_entry_id_or_the_algo_id() -> None:
     db = _CapturingDb()
     store = PgExecutionStateStore(db)  # type: ignore[arg-type]
@@ -459,7 +485,10 @@ async def test_the_completed_wiring_registers_the_commands_on_the_application(
         commands = [h for h in application.handlers if isinstance(h, CommandHandler)]
         callbacks = [h for h in application.handlers if isinstance(h, CallbackQueryHandler)]
         assert len(callbacks) == 1, "one on_callback handler only (T-24-47)"
-        assert {next(iter(h.commands)) for h in commands} == set(wiring.operator.handlers())
+        assert {next(iter(h.commands)) for h in commands} == {
+            *wiring.operator.handlers(),
+            "demo_signal",
+        }
         assert "message" in application.updater.kwargs["allowed_updates"]
         assert "callback_query" in application.updater.kwargs["allowed_updates"]
     finally:
