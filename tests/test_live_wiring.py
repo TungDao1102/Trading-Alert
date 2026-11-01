@@ -26,6 +26,7 @@ from src.live.wiring import (
     LINK_CALLBACK_HANDLER,
     LINK_CLOSER,
     LINK_COMMANDS,
+    LINK_DEMO_SIGNAL,
     LINK_DRIFT_GUARD,
     LINK_EXECUTION_SERVICE,
     LINK_HEALTH_TASK,
@@ -171,13 +172,14 @@ async def test_the_coordinator_holds_the_closer_restore_required_and_the_watch(
     assert complete.safe_mode.is_durable
 
 
-async def test_the_runner_registers_the_five_operator_commands_and_polls_messages(
+async def test_the_runner_registers_the_operator_commands_and_the_demo_signal_and_polls_messages(
     complete: CompleteLiveWiring,
 ) -> None:
     from src.live.telegram_runner import ALLOWED_UPDATES
 
-    assert set(complete.runner._command_handlers) == set(complete.operator.handlers())
-    assert len(complete.runner._command_handlers) == 5
+    # The five operator commands plus the DEMO-only owner-triggered smoke injection (24-27B).
+    assert set(complete.runner._command_handlers) == {*complete.operator.handlers(), "demo_signal"}
+    assert len(complete.operator.handlers()) == 5
     assert "message" in ALLOWED_UPDATES
     assert "callback_query" in ALLOWED_UPDATES
 
@@ -420,6 +422,41 @@ async def test_negative_control_runner_without_operator_commands(
         assert check_wiring(complete) == [LINK_COMMANDS]
     finally:
         complete.runner._command_handlers.update(handlers)
+
+
+async def test_negative_control_the_demo_signal_command_is_not_registered(
+    complete: CompleteLiveWiring,
+) -> None:
+    handler = complete.runner._command_handlers.pop("demo_signal")
+    try:
+        assert check_wiring(complete) == [LINK_COMMANDS]
+    finally:
+        complete.runner._command_handlers["demo_signal"] = handler
+
+
+async def test_negative_control_the_demo_signal_feeds_another_queue(
+    complete: CompleteLiveWiring,
+) -> None:
+    from src.live.signal_source import DemoSmokeSignalSource
+
+    assert complete.demo_signal is not None
+    original = complete.demo_signal._source
+    complete.demo_signal._source = DemoSmokeSignalSource(
+        run_id="other", parameter_set=complete.demo_signal._source._parameter_set
+    )
+    try:
+        assert check_wiring(complete) == [LINK_DEMO_SIGNAL]
+    finally:
+        complete.demo_signal._source = original
+
+
+async def test_negative_control_a_non_demo_wiring_must_not_carry_the_command(
+    complete: CompleteLiveWiring,
+) -> None:
+    from src.adapters.binance_client import Environment
+
+    live = dataclasses.replace(complete, mode=Environment.LIVE)
+    assert LINK_DEMO_SIGNAL in check_wiring(live)
 
 
 # --------------------------------------------------------------------------- #

@@ -33,6 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
+from src.adapters.binance_client import Environment
 from src.adapters.binance_limits import BinanceLimits
 from src.adapters.telegram_callbacks import on_callback
 from src.adapters.telegram_notify import TelegramTextBot
@@ -111,6 +112,11 @@ from src.live.risk_inputs import (
 from src.live.scheduled_cancel import cancel_expired_entries_once
 from src.live.scheduler import LiveCadences, Scheduler, TaskSpec
 from src.live.signal_source import DemoSmokeSignalSource, SignalSource, build_request_money
+from src.live.smoke_injection import (
+    COMMAND_DEMO_SIGNAL,
+    DemoSignalCommand,
+    build_demo_signal_command,
+)
 from src.live.startup import (
     RecoveryPorts,
     StartupPorts,
@@ -216,6 +222,7 @@ LINK_LIQUIDATION_WATCH = "coordinator_liquidation_watch"
 LINK_SAFE_MODE = "durable_safe_mode_controller"
 LINK_SCHEDULER_SPECS = "scheduler_task_set"
 LINK_COMMANDS = "operator_commands_registered"
+LINK_DEMO_SIGNAL = "demo_signal_command_demo_only"
 
 
 class LiveStores(DeskStores, ConfirmStores, Protocol):
@@ -428,6 +435,7 @@ class CompleteLiveWiring:
     reconcile: ReconcileBundle
     runner: LiveTelegramRunner
     operator: OperatorCommands
+    demo_signal: DemoSignalCommand | None
     sender: ApprovalRequestSender
     health: LiveHealthProducer
     rest_errors: RestErrorCounter
@@ -473,6 +481,7 @@ class LiveAssembly:
         session_id: str,
         engine: Any,
         signal_source: SignalSource,
+        exchange_edge: Callable[[ExchangeBundle], ExchangeBundle] | None = None,
     ) -> None:
         if not symbols:
             raise ValueError("a live process needs at least one symbol")
@@ -536,6 +545,10 @@ class LiveAssembly:
             on_gate_alert=self.alerts.gate_alert,
             sdk_factory=sdk_factory,
         )
+        if exchange_edge is not None:
+            # The one test seam of the exchange edge (D-04 "fakes only at the edges"): production
+            # passes None. It may replace the signed adapter and the public reader, never the gate.
+            self.exchange = exchange_edge(self.exchange)
         adapter = self.exchange.adapter
         ttl = timedelta(seconds=int(self.params["commission_rate_ttl_seconds"]))
         self.commission = CommissionCache(
@@ -814,6 +827,24 @@ class LiveAssembly:
             reply=reply,
         )
 
+        # Plan 24-27B: the owner-triggered Demo smoke injection (DEMO only; None elsewhere).
+        demo_signal = build_demo_signal_command(
+            mode=self.config.mode,
+            source=self.signal_source,
+            authorized_chat_id=self.config.authorized_chat_id,
+            authorized_user_ids=self.config.authorized_user_ids,
+            adapter=adapter,
+            equity=self.equity,
+            risk_rate=self.params["risk_rate"],
+            symbol=self.symbols[0],
+            record=self.record,
+            clock=clock,
+            reply=reply,
+        )
+        command_handlers: dict[str, Callable[..., Awaitable[Any]]] = dict(operator.handlers())
+        if demo_signal is not None:
+            command_handlers[COMMAND_DEMO_SIGNAL] = demo_signal.handle
+
         async def prefetch(signal: Any, plan: Any) -> None:
             context = self.signal_book.lookup(plan)
             readings = await read_pre_placement_inputs(adapter, signal.symbol, clock)  # type: ignore[arg-type]
@@ -860,7 +891,7 @@ class LiveAssembly:
             ),
             recheck=make_confirm_recheck(prefetched_provider(self.holder)),
             prefetch=prefetch,
-            command_handlers=operator.handlers(),
+            command_handlers=command_handlers,
         )
 
         sender = ApprovalRequestSender(
@@ -941,6 +972,7 @@ class LiveAssembly:
             reconcile=reconcile,
             runner=runner,
             operator=operator,
+            demo_signal=demo_signal,
             sender=sender,
             health=health,
             rest_errors=self.rest_errors,
@@ -1204,6 +1236,7 @@ def build_wiring(
     session_id: str,
     stores: LiveStoreSet | None = None,
     signal_source: SignalSource | None = None,
+    exchange_edge: Callable[[ExchangeBundle], ExchangeBundle] | None = None,
 ) -> LiveAssembly:
     """Construct the live process from explicit arguments (D-04).
 
@@ -1233,6 +1266,7 @@ def build_wiring(
         session_id=session_id,
         engine=engine,
         signal_source=source,
+        exchange_edge=exchange_edge,
     )
 
 
@@ -1353,10 +1387,19 @@ def check_wiring(wiring: CompleteLiveWiring) -> list[str]:
     )
     need(names == TASK_NAMES and scheduler_names == TASK_NAMES, LINK_SCHEDULER_SPECS)
     registered = set(getattr(wiring.runner, "_command_handlers", {}))
-    need(
-        registered == set(wiring.operator.handlers()) and bool(registered),
-        LINK_COMMANDS,
+    expected = set(wiring.operator.handlers())
+    if wiring.demo_signal is not None:
+        expected.add(COMMAND_DEMO_SIGNAL)
+    need(registered == expected and bool(registered), LINK_COMMANDS)
+    # The Demo smoke injection exists in DEMO only and feeds the very queue the pump reads.
+    demo_ok = (
+        wiring.demo_signal is not None
+        and wiring.mode is Environment.DEMO
+        and _same(wiring.demo_signal.source, wiring.signal_source)
+        if wiring.mode is Environment.DEMO
+        else wiring.demo_signal is None and COMMAND_DEMO_SIGNAL not in registered
     )
+    need(demo_ok, LINK_DEMO_SIGNAL)
     return broken
 
 
@@ -1368,6 +1411,7 @@ __all__ = [
     "LINK_CALLBACK_HANDLER",
     "LINK_CLOSER",
     "LINK_COMMANDS",
+    "LINK_DEMO_SIGNAL",
     "LINK_DRIFT_GUARD",
     "LINK_EXECUTION_SERVICE",
     "LINK_HEALTH_TASK",

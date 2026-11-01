@@ -459,7 +459,10 @@ async def test_the_completed_wiring_registers_the_commands_on_the_application(
         commands = [h for h in application.handlers if isinstance(h, CommandHandler)]
         callbacks = [h for h in application.handlers if isinstance(h, CallbackQueryHandler)]
         assert len(callbacks) == 1, "one on_callback handler only (T-24-47)"
-        assert {next(iter(h.commands)) for h in commands} == set(wiring.operator.handlers())
+        assert {next(iter(h.commands)) for h in commands} == {
+            *wiring.operator.handlers(),
+            "demo_signal",
+        }
         assert "message" in application.updater.kwargs["allowed_updates"]
         assert "callback_query" in application.updater.kwargs["allowed_updates"]
     finally:

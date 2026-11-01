@@ -61,6 +61,7 @@ from src.risk.cost_rates import (
 from src.risk.gating import evaluate_risk
 from src.risk.live_commission import AccountCommission, resolve_live_cost_rates
 from src.risk.money_at_stake import (
+    EQUITY_SOURCE_ACCOUNT_LIVE,
     EQUITY_SOURCE_PAPER_CONFIG,
     LEVERAGE_SOURCE_PAPER_CONFIG,
     MoneyAtStake,
@@ -260,6 +261,20 @@ def _risk_kwargs(
     }
 
 
+def _passes_minimums(
+    filters: SymbolFilters, quantity: Decimal, entry: Decimal, tp1: Decimal, step: Decimal
+) -> bool:
+    """The exchange minimums of the entry and of the TP1 leg (the same rule as the search)."""
+    tp1_quantity = _floor_to_step(quantity * TP1_QUANTITY_FRACTION, step)
+    return (
+        quantity * entry >= filters.min_notional
+        and quantity >= filters.min_quantity
+        and tp1_quantity >= filters.min_quantity
+        and tp1_quantity * tp1 >= filters.min_notional
+        and (filters.max_quantity is None or quantity <= filters.max_quantity)
+    )
+
+
 def _json(payload: Mapping[str, str]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -315,6 +330,7 @@ class DemoSmokeSignalSource:
         commission: CommissionRates,
         observed_at: datetime,
         latest_closed_bar_close: datetime,
+        account_equity: Decimal | None = None,
     ) -> SignalRequest:
         """Derive one request and queue it. Returns the queued request."""
         request = self.derive_request(
@@ -324,6 +340,7 @@ class DemoSmokeSignalSource:
             commission=commission,
             observed_at=observed_at,
             latest_closed_bar_close=latest_closed_bar_close,
+            account_equity=account_equity,
         )
         self.inject(request)
         return request
@@ -340,6 +357,7 @@ class DemoSmokeSignalSource:
         commission: CommissionRates,
         observed_at: datetime,
         latest_closed_bar_close: datetime,
+        account_equity: Decimal | None = None,
     ) -> SignalRequest:
         """Derive the plan and prove the unmodified risk pipeline sizes exactly it.
 
@@ -434,9 +452,16 @@ class DemoSmokeSignalSource:
         risk_per_unit = (entry_max - stop) + per_unit_round_trip_cost(
             side="LONG", entry_price=entry_max, stop_price=stop, rates=rates
         )
-        # The pipeline sizes from equity, so back-solve the equity that makes it return exactly
-        # this quantity, rounded UP to the cent. It is a smoke input, not an account reading.
-        equity = _ceil_to_step(quantity * risk_per_unit / risk_rate, Decimal("0.01"))
+        if account_equity is None:
+            # The pipeline sizes from equity, so back-solve the equity that makes it return
+            # exactly this quantity, rounded UP to the cent. It is a smoke input, not an account
+            # reading.
+            equity = _ceil_to_step(quantity * risk_per_unit / risk_rate, Decimal("0.01"))
+        else:
+            # Plan 24-27B: the live producer sizes from the ACCOUNT equity at placement and the
+            # binding never clips (`QUANTITY_ABOVE_APPROVED`), so a request meant to be placed
+            # is sized from that same equity: the pipeline's quantity for it is the approved one.
+            equity = account_equity
         risk = entry - stop
         rr1 = ((tp1 - entry) / risk).quantize(_RR_PLACES, rounding=ROUND_DOWN)
         rr2 = ((tp2 - entry) / risk).quantize(_RR_PLACES, rounding=ROUND_DOWN)
@@ -460,28 +485,32 @@ class DemoSmokeSignalSource:
             invalidation_rule_json=invalidation_rule_json,
             expiry_utc=expiry_utc,
         )
-        trade_plan = TradePlan(
-            trade_plan_id=demo_smoke_trade_plan_id(signal_id),
-            signal_id=signal_id,
-            trade_plan_version=DEMO_SMOKE_PLAN_VERSION,
-            entry_model="LIMIT_ZONE",
-            entry_min_price=entry_min,
-            entry_max_price=entry_max,
-            stop_loss_price=stop,
-            take_profit_json=take_profit_json,
-            invalidation_rule_json=invalidation_rule_json,
-            expiry_utc=expiry_utc,
-            expected_rr_json=_json({"tp1_rr": str(rr1), "tp2_rr": str(rr2)}),
-            risk_rate=risk_rate,
-            risk_budget=equity * risk_rate,
-            suggested_quantity=quantity,
-            quantity_before_rounding=quantity,
-            quantity_after_rounding=quantity,
-            quantization_decision=QuantizationDecision.ACCEPTED.value,
-            plan_hash=plan_hash,
-            status=TradePlanStatus.APPROVAL_PENDING,
-            created_at_utc=observed_at,
-        )
+
+        def build_plan(plan_quantity: Decimal) -> TradePlan:
+            return TradePlan(
+                trade_plan_id=demo_smoke_trade_plan_id(signal_id),
+                signal_id=signal_id,
+                trade_plan_version=DEMO_SMOKE_PLAN_VERSION,
+                entry_model="LIMIT_ZONE",
+                entry_min_price=entry_min,
+                entry_max_price=entry_max,
+                stop_loss_price=stop,
+                take_profit_json=take_profit_json,
+                invalidation_rule_json=invalidation_rule_json,
+                expiry_utc=expiry_utc,
+                expected_rr_json=_json({"tp1_rr": str(rr1), "tp2_rr": str(rr2)}),
+                risk_rate=risk_rate,
+                risk_budget=equity * risk_rate,
+                suggested_quantity=plan_quantity,
+                quantity_before_rounding=plan_quantity,
+                quantity_after_rounding=plan_quantity,
+                quantization_decision=QuantizationDecision.ACCEPTED.value,
+                plan_hash=plan_hash,
+                status=TradePlanStatus.APPROVAL_PENDING,
+                created_at_utc=observed_at,
+            )
+
+        trade_plan = build_plan(quantity)
         constraints = ConstraintSnapshot(
             symbol=symbol,
             price_tick_size=tick,
@@ -502,6 +531,31 @@ class DemoSmokeSignalSource:
             )
         )
         sized = verdict.sized
+        if account_equity is not None:
+            if verdict.is_no_trade or sized is None:
+                raise SignalDerivationError(
+                    f"the risk pipeline did not size the account equity: {verdict.reason_code}"
+                )
+            if sized.quantity is None:
+                raise SignalDerivationError("the risk pipeline returned no quantity")
+            quantity = sized.quantity
+            if not _passes_minimums(filters, quantity, entry, tp1, step):
+                raise SignalDerivationError(
+                    "the quantity sized from the account equity fails the exchange minimums"
+                )
+            trade_plan = build_plan(quantity)
+            verdict = evaluate_risk(
+                **_risk_kwargs(
+                    parameter_set=params,
+                    trade_plan=trade_plan,
+                    constraints=constraints,
+                    cost_rates=rates,
+                    equity=equity,
+                    risk_rate=risk_rate,
+                    now_utc=observed_at,
+                )
+            )
+            sized = verdict.sized
         if verdict.is_no_trade or sized is None or sized.quantity != quantity:
             raise SignalDerivationError(
                 f"the risk pipeline did not size the derived quantity: {verdict.reason_code}"
@@ -533,7 +587,11 @@ class DemoSmokeSignalSource:
                 cost_rates=rates,
                 equity=equity,
                 equity_observed_at_utc=observed_at,
-                equity_source=EQUITY_SOURCE_PAPER_CONFIG,
+                equity_source=(
+                    EQUITY_SOURCE_PAPER_CONFIG
+                    if account_equity is None
+                    else EQUITY_SOURCE_ACCOUNT_LIVE
+                ),
                 leverage=self._leverage,
                 leverage_source=LEVERAGE_SOURCE_PAPER_CONFIG,
             ),
