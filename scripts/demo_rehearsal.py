@@ -56,7 +56,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, NoReturn, Protocol, TypeVar, cast
+from typing import Any, NoReturn, Protocol, TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -109,7 +109,6 @@ from src.adapters.telegram_notify import (  # noqa: E402
     build_decision_keyboard,
     format_approve,
 )
-from src.approval.binding import Callback  # noqa: E402
 from src.approval.mapping import ShortIdMapping, derive_short_id  # noqa: E402
 from src.approval.tokens import issue_one_time_token, token_hash_of  # noqa: E402
 from src.backtest.semantics import TP1_QUANTITY_FRACTION  # noqa: E402
@@ -120,51 +119,27 @@ from src.domain.canonical import sha256_hex  # noqa: E402
 from src.domain.enums import (  # noqa: E402
     ApprovalAction,
     ApprovalResult,
-    KillGateState,
+    ExecutionIntentStatus,
     OrderRole,
     QuantizationDecision,
     RejectionReason,
-    SignalStatus,
     TradePlanStatus,
 )
 from src.domain.ids import derive_child_id  # noqa: E402
 from src.domain.journal import JournalEvent, content_hash_event_id  # noqa: E402
 from src.domain.lot_filters import LotFilters  # noqa: E402
 from src.domain.registry import ParameterSet, load_parameter_set  # noqa: E402
-from src.domain.signal import Signal  # noqa: E402
 from src.domain.trade_plan import TradePlan  # noqa: E402
-from src.execution.constraint_snapshot import (  # noqa: E402
-    ExchangeFilterExtras,
-    build_plan_constraint_snapshot,
-)
-from src.execution.emergency_close import MarketEmergencyCloser  # noqa: E402
-from src.execution.enablement import LiveEnablementController  # noqa: E402
-from src.execution.execution_limits import (  # noqa: E402
-    ExecutionLimits,
-    ExecutionLimitsInvalid,
-    load_execution_limits,
-)
-from src.execution.intent_store import ExecutionIntentStore  # noqa: E402
-from src.execution.live_context import LivePlacementContext  # noqa: E402
 from src.execution.manager import (  # noqa: E402
     LIVE5_SYMBOLS,
-    cancel_untriggered_protectives,
-    execute_approved_plan,
-    expire_pending_entry,
 )
-from src.execution.margin_guard import MarginGuard, MarginGuardPort  # noqa: E402
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id  # noqa: E402
 from src.execution.placement import (  # noqa: E402
     PRICE_ROUND_DOWN,
     PRICE_ROUND_UP,
     quantize_price,
 )
-from src.execution.pre_placement import LIMITS_NOT_CONFIGURED  # noqa: E402
 from src.execution.protection import (  # noqa: E402
-    ALERT_TP_UNAVAILABLE,
-    EVENT_PROTECTION_TRANSITION,
-    PlanProtection,
-    ProtectionCoordinator,
     ProtectionState,
 )
 from src.ops.health import (  # noqa: E402
@@ -175,6 +150,7 @@ from src.ops.health import (  # noqa: E402
     STATUS_DEGRADED,
     STATUS_FAIL,
     HealthCheckResult,
+    HealthRuntimeMode,
     HealthVerdict,
     check_last_closed_candle_time,
     check_market_feed_freshness,
@@ -187,7 +163,6 @@ from src.ops.health import (  # noqa: E402
 )
 from src.ops.redaction import Redactor  # noqa: E402
 from src.paper.runtime_config import parse_authorized_user_ids  # noqa: E402
-from src.reconcile.safe_mode import SafeModeController  # noqa: E402
 from src.risk.cost_rates import (  # noqa: E402
     FEE_SOURCE_PARAMETER,
     CostRates,
@@ -217,10 +192,6 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".planning" / "phases" / "09-live-execution-r
 # Plan 18-13: the ratified limits file (plan 18-09). Its signed-call policy gives every
 # signed request an explicit recvWindow; no number is chosen here.
 DEFAULT_LIMITS_FILE = REPO_ROOT / "config" / "binance" / "binance-limits-v1.toml"
-# Plan 19-13: the owner's execution limits (plan 19-01; seven keys since quick task 261020-l4p).
-# Every value is NOT_CONFIGURED in the committed file, so a run that reaches the order path
-# aborts before any mutation.
-DEFAULT_EXECUTION_LIMITS_FILE = REPO_ROOT / "config" / "execution" / "execution-limits-v1.toml"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -231,13 +202,9 @@ OUTCOME_COMPLETE = "COMPLETE"
 OUTCOME_COMPLETE_WITH_GAPS = "COMPLETE_WITH_GAPS"
 OUTCOME_ABORTED = "ABORTED_NO_ORDER"
 OUTCOME_FAILED = "FAILED"
-# Plan 22-15 (D-17): the abort code of a run whose margin guard was not composed (Phase 24).
-MARGIN_GUARD_NOT_COMPOSED = "MARGIN_GUARD_NOT_COMPOSED"
-# 22-REVIEW WR-08: a real MarginGuard handed in directly could have been built over the raw
-# adapter, around the DRY_RUN rule and the host guard; it must come from `margin_guard_factory`.
-MARGIN_GUARD_NOT_GUARDED = "MARGIN_GUARD_NOT_GUARDED"
 
-SCENARIOS = ("taps", "far", "fill")
+SCENARIO_SMOKE = "smoke"
+SCENARIOS = (SCENARIO_SMOKE, "taps")
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 300
 DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 120
 SDK_TIMEOUT_MS = 10000
@@ -547,6 +514,24 @@ class EvidenceRecorder:
         if message is not None:
             entry["message"] = message
         self.failures.append(entry)
+
+    def record_ids(
+        self,
+        step: str,
+        *,
+        order_ids: Sequence[str] = (),
+        client_order_ids: Sequence[str] = (),
+        algo_client_ids: Sequence[str] = (),
+    ) -> None:
+        """Per step: the exchange order ids and the deterministic client ids (D-33; no secret)."""
+        self.details.setdefault("order_ids", []).append(
+            {
+                "step": step,
+                "demo_order_ids": list(order_ids),
+                "client_order_ids": list(client_order_ids),
+                "algo_client_ids": list(algo_client_ids),
+            }
+        )
 
     def record_planned_request(self, method: str, request: Mapping[str, Any]) -> None:
         self.planned_requests.append({"method": method, "request": _jsonable(request)})
@@ -1087,7 +1072,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Binance Demo Trading rehearsal runner (dry run by default).",
         allow_abbrev=False,
     )
-    parser.add_argument("--scenario", choices=SCENARIOS, default="far")
+    parser.add_argument("--scenario", choices=SCENARIOS, default=SCENARIO_SMOKE)
+    parser.add_argument(
+        "--initialize-gate-state",
+        action="store_true",
+        help="first install of the smoke host only: create the REST gate state file (smoke)",
+    )
     parser.add_argument(
         "--execute",
         action="store_true",
@@ -1346,25 +1336,6 @@ class RunContext:
     journal: RunJournal
     book: ApprovalBook
     run_id: str
-    controller: LiveEnablementController | None = None
-    health: HealthVerdict | None = None
-    # Plan 19-13. None loads the committed file (execution limits) or the ratified Binance
-    # limits file (drift limits); a test injects a value instead.
-    execution_limits: ExecutionLimits | None = None
-    drift_limits: DriftLimits | None = None
-    # Plan 19-16. The coordinator `build_live_context` built (the fill scenario steps it).
-    coordinator: ProtectionCoordinator | None = None
-    # Plan 19-16, TEST SEAM only (no CLI flag): margin_type, leverage and equity_used for the
-    # rehearsal's own PRE-GUARD plan snapshot. Since Phase 22 (plan 22-15) the manager's margin
-    # guard supplies the exchange-verified values of the snapshot it hands to protection, so this
-    # seam no longer decides whether the placed entry can have its take-profit orders.
-    snapshot_live_inputs: Mapping[str, Any] | None = None
-    # Plan 22-15. The Phase 22 margin guard the manager calls at gate 5f2. None is the real
-    # behavior today: composing the live guard (adapter, account source, configuration guard,
-    # bracket cache, claims reader, owner limits) into a process is Phase 24 (D-17), so a run that
-    # reaches `build_live_context` without one aborts with MARGIN_GUARD_NOT_COMPOSED. A test
-    # injects a scripted guard.
-    margin_guard: MarginGuardPort | None = None
 
 
 def build_context(
@@ -1380,28 +1351,7 @@ def build_context(
     approval_timeout_seconds: int,
     discovery_timeout_seconds: int,
     token_factory: Callable[[], str],
-    execution_limits: ExecutionLimits | None = None,
-    drift_limits: DriftLimits | None = None,
-    snapshot_live_inputs: Mapping[str, Any] | None = None,
-    margin_guard: MarginGuardPort | None = None,
-    margin_guard_factory: Callable[[GuardedAdapter], MarginGuardPort] | None = None,
 ) -> RunContext:
-    # 22-REVIEW WR-08. A real guard talks to the exchange (three account reads, the symbol
-    # configuration, the brackets) and may POST the account configuration. It is only allowed
-    # when it was built over `guarded` (the factory receives it), so DRY_RUN never reaches a
-    # mutating method and the host guard, the error log and the evidence record see every call.
-    # A scripted guard (a test double) is not a `MarginGuard` and is accepted as before.
-    if margin_guard_factory is not None:
-        if margin_guard is not None:
-            raise RehearsalAbort(
-                f"{MARGIN_GUARD_NOT_GUARDED}: give either margin_guard or margin_guard_factory"
-            )
-        margin_guard = margin_guard_factory(guarded)
-    elif isinstance(margin_guard, MarginGuard):
-        raise RehearsalAbort(
-            f"{MARGIN_GUARD_NOT_GUARDED}: a real MarginGuard must be built over the guarded "
-            "adapter (margin_guard_factory); no order was attempted"
-        )
     journal = RunJournal()
     return RunContext(
         guarded=guarded,
@@ -1418,10 +1368,6 @@ def build_context(
         journal=journal,
         book=ApprovalBook(journal),
         run_id=f"{scenario}-{_utc_stamp(clock())}",
-        execution_limits=execution_limits,
-        drift_limits=drift_limits,
-        snapshot_live_inputs=snapshot_live_inputs,
-        margin_guard=margin_guard,
     )
 
 
@@ -1531,7 +1477,11 @@ async def run_health_preflight(ctx: RunContext) -> HealthVerdict:
         results[name] = _degraded_result(ctx, name, detail, now)
 
     ordered = [results[name] for name in ALL_CHECK_NAMES]
-    verdict = run_health_checks(results=ordered)
+    # D056 (2): the taps scenario is the explicit Demo/Rehearsal mode; its three DEGRADED probes
+    # (no WebSocket, no user-data stream, no database) are recorded verbatim, never hidden.
+    verdict = run_health_checks(
+        results=ordered, mode=HealthRuntimeMode.DEMO, demo_degraded_allowed=True
+    )
     ctx.health = verdict
     ctx.recorder.details["health"] = [
         {"check_name": r.check_name, "status": r.status, "detail": r.detail} for r in ordered
@@ -1937,188 +1887,6 @@ async def prepare_plan(ctx: RunContext, scenario: str) -> DerivedPlan:
 # --------------------------------------------------------------------------- #
 
 
-def _resolved_execution_limits(ctx: RunContext) -> ExecutionLimits:
-    """The injected limits, or the committed file. A missing or invalid file aborts the run."""
-    if ctx.execution_limits is None:
-        try:
-            ctx.execution_limits = load_execution_limits(DEFAULT_EXECUTION_LIMITS_FILE)
-        except ExecutionLimitsInvalid as exc:
-            raise RehearsalAbort(f"the execution limits file is unusable: {exc}") from None
-    return ctx.execution_limits
-
-
-def require_execution_limits_set(ctx: RunContext) -> ExecutionLimits:
-    """Abort before any mutation while any execution limit is NOT_CONFIGURED (D-07, D-13).
-
-    The failed step names the unset keys and never a value. With the committed file (every value
-    NOT_CONFIGURED) every order scenario ends here, recorded honestly.
-    """
-    limits = _resolved_execution_limits(ctx)
-    unset = limits.unset_keys()
-    if unset:
-        detail = f"{LIMITS_NOT_CONFIGURED}: {', '.join(unset)}"
-        ctx.recorder.add_step("execution_limits", STEP_FAILED, detail)
-        raise RehearsalAbort(detail)
-    ctx.recorder.add_step("execution_limits", STEP_PASSED, "all execution limits are set")
-    return limits
-
-
-def _resolved_drift_limits(ctx: RunContext) -> DriftLimits:
-    if ctx.drift_limits is None:
-        ctx.drift_limits = load_drift_limits(DEFAULT_LIMITS_FILE)
-    return ctx.drift_limits
-
-
-class RehearsalAlertSink:
-    """`CriticalAlertSink` of the rehearsal: evidence plus an operator instruction.
-
-    Telegram alert UX is Phase 23, so a critical alert is recorded in the evidence file and
-    printed as an operator instruction at the end of the run; nothing is sent.
-    """
-
-    def __init__(self, ctx: RunContext) -> None:
-        self._ctx = ctx
-
-    def critical(
-        self, *, event: str, plan_hash: str, symbol: str, reason: str, now_utc: datetime
-    ) -> None:
-        alerts = self._ctx.recorder.details.setdefault("critical_alerts", [])
-        alerts.append(
-            _jsonable(
-                {
-                    "event": event,
-                    "plan_hash": plan_hash,
-                    "symbol": symbol,
-                    "reason": reason,
-                    "now_utc": now_utc,
-                }
-            )
-        )
-        _instruct(
-            self._ctx,
-            f"CRITICAL {event} on {symbol} ({reason}): check the Binance Demo UI and close any "
-            "position by hand.",
-        )
-
-
-async def _latest_closed_bar_close(ctx: RunContext, now: datetime) -> Decimal | None:
-    """The close of the latest CLOSED 1h kline, or None when it cannot be read (fail closed)."""
-    try:
-        bars = await ctx.guarded.klines(SYMBOL, "1h", limit=2)
-    except Exception:  # noqa: BLE001 - an unreadable bar means "not available": the gate refuses
-        return None
-    closed = [bar for bar in bars if bar.close_time_utc <= now]
-    return closed[-1].close if closed else None
-
-
-async def build_live_context(
-    ctx: RunContext,
-    plan: DerivedPlan,
-    filters: SymbolFilters,
-    constraints: ConstraintSnapshot,
-    now: datetime,
-    *,
-    safe_mode: SafeModeController,
-    intent_store: ExecutionIntentStore,
-) -> LivePlacementContext:
-    """The `LivePlacementContext` of one rehearsal placement (plan 19-13).
-
-    The Signal is the one the plan is bound to (same id, symbol, LONG, strategy version and
-    parameter set); the constraint snapshot comes from the re-checked filters with the MARK_PRICE
-    working type; the limits are the injected ones or the committed file; the protection
-    coordinator and its emergency closer run over the same guarded adapter; the bar close is read
-    through it; the GTD margin is the larger of the ratified drift limits.
-    """
-    limits = _resolved_execution_limits(ctx)
-    unset = limits.unset_keys()
-    if unset:
-        raise RehearsalAbort(f"{LIMITS_NOT_CONFIGURED}: {', '.join(unset)}")
-    # Plan 22-15 (D-17, T-22-56): the manager requires the margin guard. Composing the live one
-    # is Phase 24, so the rehearsal never invents one: no guard, no placement, nothing is sent.
-    if ctx.margin_guard is None:
-        raise RehearsalAbort(
-            f"{MARGIN_GUARD_NOT_COMPOSED}: the Phase 22 margin guard is not composed into this "
-            "rehearsal (Phase 24); no order was attempted"
-        )
-    drift = _resolved_drift_limits(ctx)
-    params = plan.parameter_set
-    bar_close = await _latest_closed_bar_close(ctx, now)
-    signal = Signal(
-        signal_id=plan.signal_id,
-        strategy_id=params.strategy_id,
-        strategy_version=params.strategy_version,
-        parameter_set_id=params.parameter_set_id,
-        parameter_set_hash=params.parameter_set_hash,
-        symbol=SYMBOL,
-        direction="LONG",
-        setup_type="DEMO_REHEARSAL",
-        source_timeframe="1h",
-        source_candle_close_utc=plan.observed_at,
-        detected_at_utc=plan.observed_at,
-        status=SignalStatus.APPROVED,
-        expires_at_utc=plan.trade_plan.expiry_utc,
-    )
-    snapshot = build_plan_constraint_snapshot(
-        plan.trade_plan.trade_plan_id,
-        constraints,
-        ExchangeFilterExtras(
-            market_lot_min_quantity=filters.market_lot_min_quantity,
-            market_lot_max_quantity=filters.market_lot_max_quantity,
-            market_lot_step_size=filters.market_lot_step_size,
-            percent_price_multiplier_up=filters.percent_price_multiplier_up,
-            percent_price_multiplier_down=filters.percent_price_multiplier_down,
-            percent_price_multiplier_decimals=filters.percent_price_multiplier_decimals,
-        ),
-        filters.max_quantity,
-        "MARK_PRICE",
-        captured_at_utc=now,
-        **dict(ctx.snapshot_live_inputs or {}),
-    )
-    alerts = RehearsalAlertSink(ctx)
-    closer = MarketEmergencyCloser(
-        adapter=cast(Any, ctx.guarded),
-        journal=ctx.journal,
-        safe_mode_controller=safe_mode,
-        alert_sink=alerts,
-        clock=ctx.clock,
-        limits=limits,
-    )
-    coordinator = ProtectionCoordinator(
-        adapter=cast(Any, ctx.guarded),
-        intent_store=intent_store,
-        journal=ctx.journal,
-        safe_mode_controller=safe_mode,
-        alert_sink=alerts,
-        emergency_closer=closer,
-        limits=limits,
-        clock=ctx.clock,
-    )
-    margin = timedelta(milliseconds=max(drift.ahead_limit_ms, drift.behind_limit_ms))
-    ctx.recorder.details["live_context"] = _jsonable(
-        {
-            "latest_closed_bar_close": bar_close,
-            "gtd_clock_margin_ms": int(margin.total_seconds() * 1000),
-            "tp1_quantity_fraction": TP1_QUANTITY_FRACTION,
-            "working_type": snapshot.working_type,
-            "plan_snapshot_status": snapshot.live_inputs_status.value,
-        }
-    )
-    ctx.coordinator = coordinator
-    return LivePlacementContext(
-        signal=signal,
-        plan_constraint_snapshot=snapshot,
-        execution_limits=limits,
-        protection_registry=coordinator,
-        latest_closed_bar_close=bar_close,
-        gtd_clock_margin=margin,
-        tp1_quantity_fraction=TP1_QUANTITY_FRACTION,
-        # 19-REVIEW CR-01: the manager reads this clock after the mark-price read; the local
-        # clock's drift from Binance's is bounded by the drift guard and `margin`.
-        clock=ctx.clock,
-        margin_guard=ctx.margin_guard,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Approvals and taps (SR-7, SR-11): APPROVED only ever comes from dispatch_callback.
 # --------------------------------------------------------------------------- #
@@ -2455,102 +2223,6 @@ async def run_taps(ctx: RunContext) -> str:
     return OUTCOME_COMPLETE if rehearsed else OUTCOME_COMPLETE_WITH_GAPS
 
 
-async def _confirm_clean(ctx: RunContext) -> bool:
-    guarded = ctx.guarded
-    orders = await guarded.snapshot_open_normal_orders(symbol=SYMBOL)
-    algos = await guarded.snapshot_open_algo_orders(symbol=SYMBOL)
-    positions = await guarded.snapshot_positions(symbol=SYMBOL)
-    clean = not (orders or algos or positions)
-    ctx.recorder.add_step(
-        "account_clean",
-        STEP_PASSED if clean else STEP_FAILED,
-        f"open orders {len(orders)}, open algo orders {len(algos)}, "
-        f"open positions {len(positions)}",
-    )
-    return clean
-
-
-async def _cancel_everything(
-    ctx: RunContext, plan: DerivedPlan, *, entry: bool, protectives: bool = True
-) -> bool:
-    """Cancel the entry and/or every protective leg by deterministic id."""
-    now = ctx.clock()
-    plan_hash = plan.trade_plan.plan_hash
-    ok = True
-    if entry:
-        try:
-            await expire_pending_entry(
-                plan_hash=plan_hash,
-                symbol=SYMBOL,
-                adapter=cast(Any, ctx.guarded),
-                journal=ctx.journal,
-                now_utc=now,
-                trigger_reason="expiry_time",
-            )
-        except Exception:  # noqa: BLE001 - recorded through the guarded error log
-            ok = False
-    if protectives:
-        try:
-            await cancel_untriggered_protectives(
-                plan_hash=plan_hash,
-                symbol=SYMBOL,
-                adapter=cast(Any, ctx.guarded),
-                journal=ctx.journal,
-                now_utc=now,
-            )
-        except ExceptionGroup:
-            # TP1 and TP2 were never placed on an unfilled entry, so their cancels may fail.
-            pass
-    return ok
-
-
-async def _entry_probe(ctx: RunContext, plan: DerivedPlan) -> OrderProbe:
-    """Read back the entry and the open orders. No stop is read: none exists at entry time (D-10).
-
-    The closePosition stop is placed after the first fill by the protection coordinator, which
-    the fill scenario steps (plan 19-16), so a rehearsal that has only placed the entry has
-    nothing protective to probe.
-    """
-    plan_hash = plan.trade_plan.plan_hash
-    entry_probe = await ctx.guarded.query_order_by_client(
-        symbol=SYMBOL,
-        orig_client_order_id=derive_client_order_id(
-            plan_hash=plan_hash, role=OrderRole.ENTRY.value
-        ),
-    )
-    snaps_orders = await ctx.guarded.snapshot_open_normal_orders(symbol=SYMBOL)
-    snaps_algos = await ctx.guarded.snapshot_open_algo_orders(symbol=SYMBOL)
-    for snapshot in (*snaps_orders, *snaps_algos):
-        ctx.recorder.record_exchange_record(snapshot)
-    return entry_probe
-
-
-async def _far_cleanup(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderProbe) -> str:
-    if not (entry_probe.found and entry_probe.status == "NEW"):
-        ctx.recorder.add_step(
-            "cleanup",
-            STEP_FAILED,
-            f"entry status is {entry_probe.status!r}, not NEW: nothing was cancelled",
-        )
-        _instruct(
-            ctx,
-            "The entry is no longer NEW: close the Demo position and cancel leftover orders "
-            "in the Binance Demo UI.",
-        )
-        return OUTCOME_FAILED
-    cancelled = await _cancel_everything(ctx, plan, entry=True, protectives=False)
-    ctx.recorder.add_step(
-        "cleanup",
-        STEP_PASSED if cancelled else STEP_FAILED,
-        "entry cancelled by deterministic id; no protective leg exists to cancel (D-10)",
-    )
-    clean = await _confirm_clean(ctx)
-    if not (cancelled and clean):
-        _instruct(ctx, "Check the Binance Demo UI and cancel any leftover order.")
-        return OUTCOME_FAILED
-    return OUTCOME_COMPLETE
-
-
 _FINAL_PROTECTION_STATES = frozenset(
     {
         ProtectionState.COMPLETE,
@@ -2563,392 +2235,748 @@ _FINAL_PROTECTION_STATES = frozenset(
 _KNOWN_GAP_PREFIX = "plan snapshot is INCOMPLETE"
 
 
-def _protection_view(ctx: RunContext, plan: DerivedPlan) -> PlanProtection | None:
-    coordinator = ctx.coordinator
-    if coordinator is None:
-        return None
-    return coordinator.protection_of(plan.trade_plan.plan_hash)
-
-
-def _protection_transitions(ctx: RunContext, plan: DerivedPlan) -> list[dict[str, str]]:
-    """The journaled protection transitions of this plan, in order (from, to, reason)."""
-    plan_hash = plan.trade_plan.plan_hash
-    transitions: list[dict[str, str]] = []
-    for event in ctx.journal.events:
-        if event.event_type != EVENT_PROTECTION_TRANSITION or event.entity_id != plan_hash:
-            continue
-        payload = json.loads(event.payload_json)
-        transitions.append(
-            {"from": payload["from"], "to": payload["to"], "reason": payload["reason"]}
-        )
-    return transitions
-
-
-def _record_protection_flow(ctx: RunContext, plan: DerivedPlan) -> None:
-    view = _protection_view(ctx, plan)
-    ctx.recorder.details["protection_flow"] = {
-        "final_state": None if view is None else view.state.value,
-        "transitions": _protection_transitions(ctx, plan),
-    }
-
-
-async def _drive_protection(ctx: RunContext, plan: DerivedPlan) -> ProtectionState | None:
-    """Step the coordinator (REST-only: no user-data stream) until the plan settles or the bound.
-
-    Each iteration is one `coordinator.step()` followed by the injected sleep; the loop ends at
-    COMPLETE, TP_UNAVAILABLE, FLAT, CLOSE_FAILED, ENTRY_ENDED_NO_FILL or after FILL_MAX_POLLS
-    sleeps. The coordinator's own deadlines run on the context clock.
-    """
-    coordinator = ctx.coordinator
-    if coordinator is None:
-        raise RehearsalAbort("the protection coordinator was not built")
-    state: ProtectionState | None = None
-    for poll in range(FILL_MAX_POLLS + 1):
-        await coordinator.step()
-        view = coordinator.protection_of(plan.trade_plan.plan_hash)
-        state = None if view is None else view.state
-        if state in _FINAL_PROTECTION_STATES:
-            break
-        if poll < FILL_MAX_POLLS:
-            await ctx.sleep(FILL_POLL_SECONDS)
-    return state
-
-
-async def _record_leg_echoes(ctx: RunContext, plan: DerivedPlan) -> None:
-    """Record the open algo legs the exchange echoes back (stop, and TP1 and TP2 when placed)."""
-    roles = {
-        derive_algo_client_id(plan_hash=plan.trade_plan.plan_hash, role=role.value): role.value
-        for role in (OrderRole.STOP_LOSS, OrderRole.TAKE_PROFIT_1, OrderRole.TAKE_PROFIT_2)
-    }
-    echoes: list[dict[str, Any]] = []
-    for snapshot in await ctx.guarded.snapshot_open_algo_orders(symbol=SYMBOL):
-        ctx.recorder.record_exchange_record(snapshot)
-        echoes.append(
-            _jsonable(
-                {
-                    "role": roles.get(snapshot.client_algo_id, "UNKNOWN"),
-                    "client_algo_id": snapshot.client_algo_id,
-                    "algo_id": snapshot.algo_id,
-                    "order_type": snapshot.order_type,
-                    "reduce_only": snapshot.reduce_only,
-                    "close_position": snapshot.close_position,
-                    "quantity": snapshot.quantity,
-                    "trigger_price": snapshot.trigger_price,
-                    "algo_status": snapshot.algo_status,
-                }
-            )
-        )
-    ctx.recorder.details["leg_echoes"] = echoes
-
-
-def _tp_unavailable_reason(ctx: RunContext) -> str:
-    """The reason of the last TP_UNAVAILABLE critical alert (fixed project text)."""
-    alerts = ctx.recorder.details.get("critical_alerts", [])
-    reasons = [a["reason"] for a in alerts if a.get("event") == ALERT_TP_UNAVAILABLE]
-    return str(reasons[-1]) if reasons else "no reason was recorded"
-
-
-async def _fill_flow(ctx: RunContext, plan: DerivedPlan, entry_probe: OrderProbe) -> str:
-    """The fill scenario, driven end to end by the protection coordinator (plan 19-16).
-
-    After `execute_approved_plan` handed the GTD entry to the coordinator, this loop only steps
-    it: the coordinator detects the fill by REST, places the closePosition stop after it, confirms
-    the stop by REST, ends the entry remainder, then places TP1 and TP2 from the real position
-    (or goes TP_UNAVAILABLE). Every final state is recorded as a step with an honest status; a
-    TP_UNAVAILABLE caused by the INCOMPLETE plan snapshot is a known gap, never a pass.
-    """
-    if ctx.mode is RunMode.DRY_RUN:
-        ctx.recorder.add_step(
-            "fill_wait", STEP_SKIPPED_DRY_RUN, "a dry run never fills; the entry is only simulated"
-        )
-        ctx.recorder.add_step(
-            "attach_protectives", STEP_NOT_REHEARSED, "dry run: no fill, nothing to attach"
-        )
-        outcome = await _far_cleanup(ctx, plan, entry_probe)
-        return OUTCOME_COMPLETE_WITH_GAPS if outcome == OUTCOME_COMPLETE else outcome
-
-    recorder = ctx.recorder
-    state = await _drive_protection(ctx, plan)
-    cancelled = True
-    if state is ProtectionState.AWAITING_FILL:
-        # No fill within the bound: end the entry, then let the coordinator observe the end (or a
-        # fill that raced the cancel).
-        cancelled = await _cancel_everything(ctx, plan, entry=True, protectives=False)
-        state = await _drive_protection(ctx, plan)
-    view = _protection_view(ctx, plan)
-    _record_protection_flow(ctx, plan)
-    filled = view is not None and view.first_fill_at_utc is not None
-    transitions = " -> ".join(t["to"] for t in _protection_transitions(ctx, plan))
-    recorder.add_step(
-        "fill_wait",
-        STEP_PASSED if filled else STEP_NOT_REHEARSED,
-        f"protection path {transitions or 'none'}; final state "
-        f"{'none' if state is None else state.value}",
-    )
-
-    if not filled:
-        recorder.add_step(
-            "protection_stop", STEP_NOT_REHEARSED, "the entry never filled; no stop was placed"
-        )
-        recorder.add_step(
-            "attach_protectives", STEP_NOT_REHEARSED, "the entry never filled; nothing to attach"
-        )
-        if state is not ProtectionState.ENTRY_ENDED_NO_FILL:
-            # The plan is neither filled nor observed as ended: do not claim a clean account.
-            _instruct(
-                ctx,
-                "The entry state is unknown: check the Binance Demo UI for a position and any "
-                "open order, and close them by hand.",
-            )
-            return OUTCOME_FAILED
-        clean = await _confirm_clean(ctx)
-        return OUTCOME_COMPLETE_WITH_GAPS if (cancelled and clean) else OUTCOME_FAILED
-
-    stop_confirmed = view is not None and view.stop_confirmed_at_utc is not None
-    recorder.add_step(
-        "protection_stop",
-        STEP_PASSED if stop_confirmed else STEP_FAILED,
-        "stop placed after the first fill and confirmed ACTIVE by REST"
-        if stop_confirmed
-        else "the stop was not confirmed by REST",
-    )
-    await _record_leg_echoes(ctx, plan)
-    closed_by_emergency = any(
-        t["to"] == ProtectionState.CLOSE_REQUIRED.value for t in _protection_transitions(ctx, plan)
-    )
-    if state is ProtectionState.COMPLETE:
-        recorder.add_step(
-            "attach_protectives",
-            STEP_PASSED,
-            f"SL, TP1 (fraction {TP1_QUANTITY_FRACTION}) and TP2 confirmed by REST",
-        )
-        _instruct(
-            ctx,
-            "Protective legs are left in place; close the Demo position and cancel leftover "
-            "orders in the Binance Demo UI.",
-        )
-        return OUTCOME_COMPLETE
-    if state is ProtectionState.TP_UNAVAILABLE:
-        reason = _tp_unavailable_reason(ctx)
-        _instruct(
-            ctx,
-            "The stop is in place but no take profit is: close the Demo position and cancel "
-            "leftover orders in the Binance Demo UI.",
-        )
-        if reason.startswith(_KNOWN_GAP_PREFIX):
-            recorder.add_step(
-                "attach_protectives",
-                STEP_NOT_REHEARSED,
-                f"known gap: {reason} (margin type, leverage and equity stay unknown until "
-                "Phases 21-22); the stop is kept and TP1 and TP2 were not placed",
-            )
-            return OUTCOME_COMPLETE_WITH_GAPS
-        recorder.add_step("attach_protectives", STEP_FAILED, f"TP_UNAVAILABLE: {reason}")
-        return OUTCOME_FAILED
-    if state is ProtectionState.FLAT and not closed_by_emergency:
-        recorder.add_step(
-            "attach_protectives",
-            STEP_NOT_REHEARSED,
-            "the position was already flat when the take profits were due",
-        )
-        _instruct(ctx, "Check the Binance Demo UI for leftover orders.")
-        return OUTCOME_COMPLETE_WITH_GAPS
-    detail = (
-        "the position was closed by the emergency market close"
-        if state is ProtectionState.FLAT
-        else f"protection ended in {'none' if state is None else state.value}"
-    )
-    recorder.add_step("attach_protectives", STEP_NOT_REHEARSED, detail)
-    recorder.add_step("protection_outcome", STEP_FAILED, detail)
-    if state is not ProtectionState.FLAT:
-        _instruct(
-            ctx, "A position exists without confirmed protection: close it NOW in the Demo UI."
-        )
-    else:
-        _instruct(ctx, "Check the Binance Demo UI: the position was closed by market.")
-    return OUTCOME_FAILED
-
-
-async def run_order_scenario(ctx: RunContext, kind: str) -> str:
-    """far or fill: health, plan, real tap, re-check, enable in-process, place via the manager."""
-    channel = _require_channel(ctx)
-    guarded = ctx.guarded
-    recorder = ctx.recorder
-    # Plan 19-13 (D-07, D-13, T-19-34): unset execution limits end the run here, before the
-    # channel opens, before any approval is requested and before any exchange mutation.
-    require_execution_limits_set(ctx)
-    await channel.open(_tap_deps(ctx))
-    try:
-        verdict = await _require_healthy(ctx)
-        plan = await prepare_plan(ctx, kind)
-        issued = await request_approve_tap(
-            ctx,
-            plan,
-            step_name="approval_tap",
-            title=f"DEMO {kind.upper()} REHEARSAL: tap APPROVE to place the Demo orders",
-        )
-        now = await guarded.server_time()
-        filters = select_symbol(await guarded.exchange_info())
-        drift = [
-            name
-            for name, value in constraint_values(filters).items()
-            if value != constraint_values_of_plan(plan)[name]
-        ]
-        if drift:
-            recorder.add_step(
-                "constraint_recheck", STEP_FAILED, f"constraints changed: {', '.join(drift)}"
-            )
-            raise RehearsalAbort("exchange constraints changed after the plan was derived")
-        recorder.add_step("constraint_recheck", STEP_PASSED, "tick, step, minimums unchanged")
-        commission = await guarded.user_commission_rate(SYMBOL)
-        rates = resolve_rates(
-            parameter_set=plan.parameter_set, commission=commission, observed_at=now
-        )
-        constraints = ConstraintSnapshot(
-            symbol=SYMBOL,
-            price_tick_size=filters.price_tick_size,
-            quantity_step_size=filters.quantity_step_size,
-            min_quantity=filters.min_quantity,
-            min_notional=filters.min_notional,
-            metadata_observed_at_utc=now,
-        )
-        approved_plan = dataclasses.replace(plan.trade_plan, status=TradePlanStatus.APPROVED)
-        params = plan.parameter_set
-        callback = Callback(
-            raw_token=issued.raw_token,
-            chat_id=ctx.credentials.telegram_chat_id,
-            plan_hash=plan.trade_plan.plan_hash,
-            strategy_version=params.strategy_version,
-            parameter_set_id=params.parameter_set_id,
-            parameter_set_hash=params.parameter_set_hash,
-            callback_at_utc=now,
-            action=ApprovalAction.APPROVE,
-        )
-        controller = LiveEnablementController(journal=ctx.journal)
-        ctx.controller = controller
-        enablement: dict[str, Any] = {
-            "operator_id": OPERATOR_ID,
-            "enabled_in_run": False,
-            "disabled_after_run": False,
-        }
-        recorder.details["enablement"] = enablement
-        try:
-            controller.enable(
-                operator_id=OPERATOR_ID,
-                now_utc=now,
-                health_verdict=verdict,
-                kill_gate_state=KillGateState.WITHIN_BUDGET,
-            )
-            enablement["enabled_in_run"] = True
-            safe_mode = SafeModeController(adapter=guarded, journal=ctx.journal)
-            from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
-
-            intent_store = InMemoryExecutionIntentStore()
-            live_context = await build_live_context(
-                ctx,
-                plan,
-                filters,
-                constraints,
-                now,
-                safe_mode=safe_mode,
-                intent_store=intent_store,
-            )
-            open_algos = await guarded.snapshot_open_algo_orders()
-            outcome = await execute_approved_plan(
-                callback=callback,
-                approval=issued.approval,
-                authorized_chat_id=ctx.credentials.telegram_chat_id,
-                expiry_utc=plan.trade_plan.expiry_utc,
-                approval_strategy_version=params.strategy_version,
-                approval_parameter_set_id=params.parameter_set_id,
-                approval_parameter_set_hash=params.parameter_set_hash,
-                now_utc=now,
-                adapter=cast(Any, guarded),
-                risk_kwargs=build_risk_kwargs(
-                    plan,
-                    trade_plan=approved_plan,
-                    constraints=constraints,
-                    cost_rates=rates,
-                    now_utc=now,
-                ),
-                safe_mode_controller=safe_mode,
-                journal=ctx.journal,
-                enablement=controller,
-                gate_kwargs={
-                    "open_algo_count": len(open_algos),
-                    "planned_leg_count": 3,
-                    "positions_reconciled": _probe_passed(verdict, "reconciliation_drift"),
-                },
-                intent_store=intent_store,
-                live_context=live_context,
-            )
-            result = await _after_placement(ctx, plan, kind, outcome)
-        finally:
-            if not controller.is_disabled:
-                controller.disable(operator_id=OPERATOR_ID, now_utc=ctx.clock())
-            enablement["disabled_after_run"] = controller.is_disabled
-    finally:
-        await channel.close()
-    return result
-
-
-def _probe_passed(verdict: HealthVerdict, name: str) -> bool:
-    return any(r.check_name == name and r.status == "PASS" for r in verdict.results)
-
-
-def constraint_values_of_plan(plan: DerivedPlan) -> dict[str, Decimal]:
-    snapshot = plan.constraints
-    return {
-        "price_tick_size": snapshot.price_tick_size,
-        "quantity_step_size": snapshot.quantity_step_size,
-        "min_quantity": snapshot.min_quantity,
-        "min_notional": snapshot.min_notional,
-    }
-
-
-async def _after_placement(ctx: RunContext, plan: DerivedPlan, kind: str, outcome: Any) -> str:
-    recorder = ctx.recorder
-    guarded = ctx.guarded
-    if outcome.is_no_trade:
-        recorder.add_step(
-            "place_entry", STEP_FAILED, f"execute_approved_plan: {outcome.reason_code}"
-        )
-        if guarded.mutating_attempts == 0:
-            raise RehearsalAbort(f"no order was attempted: {outcome.reason_code}")
-        await _cancel_everything(ctx, plan, entry=True, protectives=False)
-        _instruct(ctx, "Check the Binance Demo UI for any leftover order or position.")
-        return OUTCOME_FAILED
-    if ctx.mode is RunMode.DRY_RUN:
-        recorder.add_step(
-            "place_entry",
-            STEP_SKIPPED_DRY_RUN,
-            f"simulated only, {len(recorder.planned_requests)} planned request(s), no order sent",
-        )
-    else:
-        recorder.add_step(
-            "place_entry",
-            STEP_PASSED,
-            "entry LIMIT (GTD) placed through the manager; the stop follows the first fill (D-10)",
-        )
-    entry_probe = await _entry_probe(ctx, plan)
-    recorder.add_step(
-        "readback",
-        STEP_PASSED,
-        f"entry status {entry_probe.status!r}; no stop at entry time (D-10)"
-        + (" (simulated)" if ctx.mode is RunMode.DRY_RUN else ""),
-    )
-    if kind == "far":
-        return await _far_cleanup(ctx, plan, entry_probe)
-    return await _fill_flow(ctx, plan, entry_probe)
-
-
 async def run_rehearsal(ctx: RunContext) -> str:
     """Dispatch one scenario. Raises RehearsalAbort for a fail-closed stop."""
     if ctx.scenario == "taps":
         return await run_taps(ctx)
-    if ctx.scenario in ("far", "fill"):
-        return await run_order_scenario(ctx, ctx.scenario)
     raise UsageError(f"unknown scenario {ctx.scenario!r}")
+
+
+# --------------------------------------------------------------------------- #
+# Composed smoke (plan 24-29, D-33): the whole sequence over the composed live process.
+#
+# `build_wiring` constructs the process (stores, exchange edge, desk, sender, runner, confirm
+# flow, execution service, coordinator, closer, reconcile, stream, scheduler); `run_start_sequence`
+# starts it; this section only OBSERVES it and, in a real run, tells the owner which button to
+# press. Nothing here steps the coordinator or places an order by hand. The same flow runs on
+# the Binance-semantics fake with fake presses (`tests/support/live_smoke_env.py`): every step
+# of such a run is labelled SYNTHETIC and none counts as Demo-observed.
+# --------------------------------------------------------------------------- #
+
+EVIDENCE_KIND_SYNTHETIC = "SYNTHETIC"
+EVIDENCE_KIND_DEMO = "DEMO_OBSERVED"
+LISTEN_KEY_MARKER = "<LISTEN_KEY_REDACTED>"
+# The documented path form of the user-data connection (docs/SOURCES.md, Phase 18). The SDK owns the
+# transport (D-16); the form is recorded once for Phase 25, never a key.
+USER_DATA_PATH_FORM = f"/private/ws/{LISTEN_KEY_MARKER}"
+SMOKE_POLL_SECONDS = 2
+SMOKE_LAG_POLLS = 4
+SMOKE_LAG_GAP_SECONDS = 0.5
+SMOKE_REPLAY_SETTLE_TICKS = 5
+_SMOKE_STEPS = (
+    "start",
+    "wiring_check",
+    "startup_safe_mode_exit",
+    "demo_enable",
+    "signal",
+    "card",
+    "approve",
+    "confirm_entry",
+    "stream_fill",
+    "stop_confirmed",
+    "tp_legs",
+    "reconcile_clean",
+    "safe_mode_drill",
+    "restart_rehydrate",
+    "replays_place_nothing",
+    "close_cleanup",
+    "account_clean",
+)
+
+
+class SmokeHalt(Exception):  # noqa: N818 - a stop of the smoke after the step was recorded
+    """The smoke stops here; the failed step is already in the evidence."""
+
+
+class SmokeOwner(Protocol):
+    """What only the owner can do on the live bot (a real run) or a fake does (tests)."""
+
+    async def act(self, action: str, **context: Any) -> None: ...
+
+
+@dataclass
+class SmokeEnv:
+    """One composed process and the edges around it.
+
+    `tick` advances the process by one poll (a real run sleeps while the scheduler works; the
+    fake runs the task bodies and moves the virtual clock). `restart` builds a second wiring over
+    the same stores and the same exchange.
+    """
+
+    assembly: Any
+    clock: Callable[[], datetime]
+    tick: Callable[[], Awaitable[None]]
+    pause: Callable[[float], Awaitable[None]]
+    owner: SmokeOwner
+    synthetic: bool
+    wait_ticks: int
+    ports_transform: Callable[[Any], Any] = field(default=lambda ports: ports)
+    deliver_fill: Callable[[Any], Awaitable[None]] | None = None
+    placements: Callable[[], int] | None = None
+    restart: Callable[[], Awaitable[SmokeEnv]] | None = None
+    initialize_gate_state: bool = False
+
+    @property
+    def wiring(self) -> Any:
+        return self.assembly.wiring
+
+    @property
+    def label(self) -> str:
+        return EVIDENCE_KIND_SYNTHETIC if self.synthetic else EVIDENCE_KIND_DEMO
+
+
+def demo_guarded_sdk_factory(**kwargs: Any) -> Any:
+    """The SDK factory of the smoke: DEMO only, and the host is re-read after the build.
+
+    `build_wiring(sdk_factory=...)` hands every SDK object of the process through here, so the
+    Demo-host guard wraps the one place a client is made. A LIVE environment never gets a client.
+    """
+    if kwargs.get("environment") is not Environment.DEMO:
+        raise DemoHostViolation("the smoke builds a DEMO SDK client only")
+    from src.adapters import binance_client
+
+    bundle = binance_client.build_sdk_client(**kwargs)
+    assert_demo_sdk_client(bundle.client)
+    return bundle
+
+
+class SmokeRefused(Exception):  # noqa: N818 - a refusal before any network call
+    """The environment does not admit a Demo smoke (mode, credentials, Telegram, limits)."""
+
+
+def admit_smoke_environment(environ: Mapping[str, str], *, limits_path: Path | None = None) -> Any:
+    """The `LiveConfig` of a DEMO smoke, or `SmokeRefused` (names only, never values).
+
+    The live process's own admission (`parse_live_environment`) refuses LIVE credentials next to a
+    DEMO mode, the shadow bot's token and any `NOT_CONFIGURED` limit; this adds the rule that the
+    smoke runs DEMO and nothing else.
+    """
+    from src.live.config import LiveRefusal, parse_live_environment
+
+    try:
+        config = parse_live_environment(environ, repo_root=REPO_ROOT, limits_path=limits_path)
+    except LiveRefusal as exc:
+        raise SmokeRefused(exc.reason) from None
+    if config.mode is not Environment.DEMO:
+        raise SmokeRefused("the smoke runs in DEMO mode only")
+    return config
+
+
+class ConsoleOwner:
+    """The real owner: told what to press on the live bot; the flow waits for the effect."""
+
+    _TEXT: Mapping[str, str] = {
+        "approve": "On the live Demo bot tap APPROVE on the card {note}(short id {short_id}).",
+        "confirm": "Tap CONFIRM on the confirm prompt that follows {note}(short id {short_id}).",
+        "safemode_exit": (
+            "Send /safemode_exit to the live Demo bot, then send the '/confirm <token>' line "
+            "it answers with, within the token lifetime."
+        ),
+        "replay_approve": "Tap APPROVE on the FIRST card again (a replay; it must place nothing).",
+        "replay_confirm": "Tap CONFIRM on the FIRST confirm prompt again (a replay; it must "
+        "place nothing).",
+    }
+
+    def __init__(self, recorder: EvidenceRecorder) -> None:
+        self._recorder = recorder
+
+    async def act(self, action: str, **context: Any) -> None:
+        text = self._TEXT[action].format(
+            note=str(context.get("note", "")), short_id=str(context.get("short_id", ""))
+        )
+        self._recorder.details.setdefault("operator_instructions", []).append(text)
+        print(f"OPERATOR: {text}", flush=True)
+
+
+def _smoke_record(
+    env: SmokeEnv, recorder: EvidenceRecorder, name: str, status: str, text: str
+) -> None:
+    prefix = "SYNTHETIC: " if env.synthetic else ""
+    recorder.add_step(name, status, prefix + text)
+
+
+def _smoke_fail(env: SmokeEnv, recorder: EvidenceRecorder, name: str, text: str) -> SmokeHalt:
+    _smoke_record(env, recorder, name, STEP_FAILED, text)
+    return SmokeHalt(name)
+
+
+async def _smoke_read(env: SmokeEnv, fn: Callable[..., Any], *args: Any) -> Any:
+    return await env.assembly.executor.read(fn, *args)
+
+
+async def _wait_until(
+    env: SmokeEnv, predicate: Callable[[], Awaitable[bool]], *, ticks: int | None = None
+) -> bool:
+    for _ in range(env.wait_ticks if ticks is None else ticks):
+        if await predicate():
+            return True
+        await env.tick()
+    return await predicate()
+
+
+def _authorized_update(config: Any) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        update_id=None,
+        effective_chat=SimpleNamespace(id=config.authorized_chat_id, type="private"),
+        effective_user=SimpleNamespace(id=min(config.authorized_user_ids)),
+    )
+
+
+@dataclass
+class _Request:
+    """The ids of one injected request (what the evidence and the presses need)."""
+
+    signal_id: str
+    trade_plan_id: str
+    plan_hash: str
+    short_id: str
+    entry_client_id: str
+    quantity: Decimal
+    scenario: str
+
+
+async def _inject(env: SmokeEnv, recorder: EvidenceRecorder, scenario: str, step: str) -> _Request:
+    """The Demo injector: the `/demo_signal` handler of the process, called as the owner."""
+    from types import SimpleNamespace
+
+    wiring = env.wiring
+    command = wiring.demo_signal
+    if command is None:
+        raise _smoke_fail(env, recorder, step, "this process has no Demo signal command")
+    queued = await command.handle(
+        _authorized_update(env.assembly.config), SimpleNamespace(args=[scenario])
+    )
+    request = command.source.peek()
+    if not queued or request is None:
+        raise _smoke_fail(env, recorder, step, "no request was queued by the Demo injector")
+    ids = _Request(
+        signal_id=request.signal.signal_id,
+        trade_plan_id=request.plan.trade_plan_id,
+        plan_hash=request.plan.plan_hash,
+        short_id=derive_short_id(request.signal.signal_id),
+        entry_client_id=derive_client_order_id(
+            plan_hash=request.plan.plan_hash, role=OrderRole.ENTRY.value
+        ),
+        quantity=request.plan.quantity_after_rounding,
+        scenario=scenario,
+    )
+    _smoke_record(
+        env,
+        recorder,
+        step,
+        STEP_PASSED,
+        f"{scenario} request queued by the Demo injector; quantity {ids.quantity}",
+    )
+    return ids
+
+
+def _protection(env: SmokeEnv, ids: _Request) -> Any:
+    return env.wiring.coordinator.protection_of(ids.plan_hash)
+
+
+async def _record_order_ids(
+    env: SmokeEnv,
+    recorder: EvidenceRecorder,
+    step: str,
+    ids: _Request,
+    *,
+    legs: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Per step: the exchange order id and client ids of the entry and the named algo legs."""
+    adapter = env.assembly.exchange.adapter
+    probe = await adapter.query_order_by_client(
+        symbol=SYMBOL, orig_client_order_id=ids.entry_client_id
+    )
+    algo_ids = [derive_algo_client_id(plan_hash=ids.plan_hash, role=role) for role in legs]
+    algo_status: dict[str, str | None] = {}
+    for algo_id in algo_ids:
+        algo = await adapter.query_algo_order_by_client(client_algo_id=algo_id)
+        algo_status[algo_id] = algo.algo_status if algo.found else None
+    recorder.record_ids(
+        step,
+        order_ids=[probe.order_id] if probe.order_id is not None else [],
+        client_order_ids=[ids.entry_client_id],
+        algo_client_ids=algo_ids,
+    )
+    return {"entry": probe, "algo": algo_status}
+
+
+async def _record_start_facts(env: SmokeEnv, recorder: EvidenceRecorder) -> None:
+    """D-22 (commission rates per tracked symbol) and D-16 (the user-data URL form, once)."""
+    assembly = env.assembly
+    rates: dict[str, Any] = {}
+    for symbol in assembly.symbols:
+        rate = await assembly.exchange.adapter.user_commission_rate(symbol)
+        rates[symbol] = {"maker_rate": rate.maker_rate, "taker_rate": rate.taker_rate}
+    recorder.details["commission_rates"] = _jsonable(rates)
+    recorder.details["user_data_url_form"] = {
+        "stream_base": str(assembly.exchange.stream_configuration.stream_url),
+        "path_form": USER_DATA_PATH_FORM,
+        "listen_key": LISTEN_KEY_MARKER,
+        "observation": "documented form recorded; the SDK owns the transport (D-16)",
+    }
+
+
+async def _bring_up(env: SmokeEnv, recorder: EvidenceRecorder, label: str) -> Any:
+    """Start the process (the D-08 sequence) and leave it admitted, SAFE_MODE exited, enabled."""
+    from src.adapters.binance_userdata_supervisor import StreamState
+    from src.live.enablement import enable_demo
+    from src.live.startup import run_start_sequence
+    from src.live.wiring import check_wiring
+
+    assembly = env.assembly
+    ports = env.ports_transform(
+        assembly.startup_ports(
+            initialize_gate_state=env.initialize_gate_state, operator_id=OPERATOR_ID
+        )
+    )
+    outcome = await run_start_sequence(ports, now_utc=env.clock())
+    steps = ", ".join(f"{s.name}={s.outcome}" for s in outcome.steps)
+    recovery = outcome.recovery
+    recorder.details.setdefault("start_sequences", []).append(
+        {
+            "label": label,
+            "admitted": outcome.admitted,
+            "steps": steps,
+            "safe_mode_reasons": list(outcome.safe_mode_reasons),
+            "recovery_failed_steps": [] if recovery is None else list(recovery.failed_steps),
+            "recovery_safe_mode_reasons": []
+            if recovery is None
+            else list(recovery.safe_mode_reasons),
+            "plans_restored": None if recovery is None else recovery.plans_restored,
+        }
+    )
+    if not outcome.admitted:
+        raise _smoke_fail(
+            env,
+            recorder,
+            "start" if label == "start" else f"{label}_start",
+            f"held at {outcome.held_step} ({outcome.held_code})",
+        )
+    if recovery is not None and recovery.failed_steps:
+        # Finding F3 (24-29): nothing in `src` records the plan constraint snapshot, so the
+        # recovery of a restart cannot rebuild a live plan; it fails closed (SAFE_MODE DB_FAILURE).
+        raise _smoke_fail(
+            env,
+            recorder,
+            "start" if label == "start" else "restart_rehydrate",
+            "recovery failed at "
+            + ", ".join(recovery.failed_steps)
+            + " (SAFE_MODE "
+            + ",".join(recovery.safe_mode_reasons)
+            + "): a restorable plan has no persisted snapshot (F3)",
+        )
+    _smoke_record(env, recorder, label, STEP_PASSED, f"admitted; {steps}")
+    broken = check_wiring(assembly.wiring)
+    if broken:
+        raise _smoke_fail(env, recorder, "wiring_check", f"broken links: {', '.join(broken)}")
+    if label == "start":
+        _smoke_record(env, recorder, "wiring_check", STEP_PASSED, "check_wiring is empty")
+        await _record_start_facts(env, recorder)
+    wiring = env.wiring
+    exit_name = "startup_safe_mode_exit" if label == "start" else f"{label}_safe_mode_exit"
+    if outcome.in_safe_mode:
+        # Finding F1 (24-29): the D-08 order runs the reconcile tick (step 8) before the stream
+        # starts (step 9), so every start enters SAFE_MODE STALE_FEED and skips HEALTH and ENABLE.
+        live = await _wait_until(
+            env, lambda: _async_value(wiring.stream.supervisor.state is StreamState.LIVE)
+        )
+        if not live:
+            raise _smoke_fail(env, recorder, exit_name, "the stream never went LIVE")
+        await env.owner.act("safemode_exit")
+        left = await _wait_until(env, lambda: _async_value(not wiring.safe_mode.in_safe_mode))
+        if not left:
+            raise _smoke_fail(env, recorder, exit_name, "SAFE_MODE was not left")
+        _smoke_record(
+            env,
+            recorder,
+            exit_name,
+            STEP_PASSED,
+            "start-up SAFE_MODE ("
+            + ",".join(outcome.safe_mode_reasons or ("STALE_FEED",))
+            + ") left by the operator exit",
+        )
+    if not outcome.enabled:
+        verdict = ports.health_verdict()
+        if hasattr(verdict, "__await__"):
+            verdict = await verdict
+        kill = ports.kill_gate_state()
+        if hasattr(kill, "__await__"):
+            kill = await kill
+        result = await enable_demo(
+            mode=assembly.config.mode,
+            controller=wiring.enablement,
+            health_verdict=verdict,
+            kill_gate_state=kill,
+            now_utc=env.clock(),
+            record=ports.record,
+            persist=ports.persist_enablement,
+        )
+        name = "demo_enable" if label == "start" else f"{label}_enable"
+        if not result.enabled:
+            raise _smoke_fail(env, recorder, name, f"entries stay disabled: {result.reason}")
+        _smoke_record(env, recorder, name, STEP_PASSED, "entries enabled in process (DEMO)")
+    return outcome
+
+
+async def _async_value(value: bool) -> bool:
+    return value
+
+
+async def run_composed_smoke(env: SmokeEnv, recorder: EvidenceRecorder) -> str:
+    """The D-33 sequence; returns the outcome. Raises `SmokeHalt` after recording a failed step.
+
+    Whatever happens, the process that is running at the end is stopped in order.
+    """
+    from src.live.runtime import shutdown_in_order
+
+    current = [env]
+    try:
+        return await _smoke_sequence(env, recorder, current)
+    finally:
+        try:
+            await shutdown_in_order(current[-1].assembly)
+        except Exception:  # noqa: BLE001 - shutdown is best effort at the end of a smoke
+            pass
+
+
+async def _smoke_sequence(
+    env: SmokeEnv, recorder: EvidenceRecorder, current: list[SmokeEnv]
+) -> str:
+    from src.live.reconcile import reconcile_tick_once
+
+    recorder.details["evidence_kind"] = env.label
+    if env.synthetic:
+        recorder.add_synthetic_input(
+            "SYNTHETIC run: the exchange is the Binance-semantics fake, the presses are fake and "
+            "every id, price and time is a test value; nothing here is Demo-observed"
+        )
+    await _bring_up(env, recorder, "start")
+    record_user_data_liveness(env, recorder)
+
+    # ---- signal, card, APPROVE, CONFIRM, the GTD LIMIT entry with no entry-time stop --------- #
+    first = await _inject(env, recorder, "fill", "signal")
+    wiring = env.wiring
+    shown = await _wait_until(
+        env,
+        lambda: _async_value(
+            wiring.demo_signal is not None and wiring.demo_signal.source.pending == 0
+        ),
+    )
+    plan_row = await _smoke_read(env, wiring.stores.entities.get_trade_plan, first.trade_plan_id)
+    if not shown or plan_row is None:
+        raise _smoke_fail(env, recorder, "card", "the approval card was not issued")
+    _smoke_record(env, recorder, "card", STEP_PASSED, "the composed pump sent the approval card")
+
+    await env.owner.act("approve", short_id=first.short_id, note="")
+
+    async def approved() -> bool:
+        row = await _smoke_read(env, wiring.stores.entities.get_trade_plan, first.trade_plan_id)
+        return row is not None and row.status is TradePlanStatus.APPROVED
+
+    if not await _wait_until(env, approved):
+        raise _smoke_fail(env, recorder, "approve", "no APPROVE was seen before the timeout")
+    _smoke_record(env, recorder, "approve", STEP_PASSED, "the plan is APPROVED by the owner press")
+
+    await env.owner.act("confirm", short_id=first.short_id, note="")
+
+    async def entry_acked() -> bool:
+        row = await _smoke_read(
+            env, wiring.stores.execution_state.intent_for_client_id, first.entry_client_id
+        )
+        return row is not None and row.intent_status is ExecutionIntentStatus.ACKED
+
+    if not await _wait_until(env, entry_acked):
+        raise _smoke_fail(env, recorder, "confirm_entry", "the entry was not acknowledged")
+    before_fill = _protection(env, first)
+    open_algos = await env.assembly.exchange.adapter.snapshot_open_algo_orders(symbol=SYMBOL)
+    recorder.details["entry_acked"] = _jsonable(
+        {
+            "protection_state": None if before_fill is None else before_fill.state,
+            "open_algo_orders_at_ack": len(open_algos),
+        }
+    )
+    await _record_order_ids(env, recorder, "confirm_entry", first)
+    _smoke_record(
+        env,
+        recorder,
+        "confirm_entry",
+        STEP_PASSED,
+        "one GTD LIMIT entry acknowledged; no entry-time stop (D079)",
+    )
+
+    # ---- the fill is seen on the user-data stream; the coordinator places the stop --------- #
+    if env.deliver_fill is not None:
+        await env.deliver_fill(first)
+
+    async def filled() -> bool:
+        view = _protection(env, first)
+        return view is not None and view.state not in (
+            ProtectionState.AWAITING_FILL,
+            ProtectionState.ENTRY_ENDED_NO_FILL,
+        )
+
+    if not await _wait_until(env, filled):
+        raise _smoke_fail(env, recorder, "stream_fill", "no fill reached the coordinator")
+    _smoke_record(env, recorder, "stream_fill", STEP_PASSED, "the fill reached the coordinator")
+
+    async def stop_confirmed() -> bool:
+        view = _protection(env, first)
+        return view is not None and view.stop_confirmed_at_utc is not None
+
+    if not await _wait_until(env, stop_confirmed):
+        raise _smoke_fail(env, recorder, "stop_confirmed", "the stop was not confirmed by REST")
+    stop_role = OrderRole.STOP_LOSS.value
+    record_user_data_liveness(env, recorder)
+    seen = await _record_order_ids(env, recorder, "stop_confirmed", first, legs=(stop_role,))
+    _smoke_record(
+        env,
+        recorder,
+        "stop_confirmed",
+        STEP_PASSED,
+        f"stop confirmed by REST (algo status {next(iter(seen['algo'].values()), None)})",
+    )
+
+    async def complete() -> bool:
+        view = _protection(env, first)
+        return view is not None and view.state in (
+            ProtectionState.COMPLETE,
+            ProtectionState.TP_UNAVAILABLE,
+        )
+
+    gaps = 0
+    await _wait_until(env, complete)
+    tp_roles = (OrderRole.TAKE_PROFIT_1.value, OrderRole.TAKE_PROFIT_2.value)
+    seen = await _record_order_ids(env, recorder, "tp_legs", first, legs=(stop_role, *tp_roles))
+    view = _protection(env, first)
+    if view is not None and view.state is ProtectionState.COMPLETE:
+        _smoke_record(
+            env, recorder, "tp_legs", STEP_PASSED, "TP1 and TP2 placed (complete snapshot)"
+        )
+    else:
+        gaps += 1
+        _smoke_record(
+            env,
+            recorder,
+            "tp_legs",
+            STEP_NOT_REHEARSED,
+            "take-profit legs not placed: "
+            + str(None if view is None else (view.state.value, view.last_reason)),
+        )
+    await _record_fill_sample(env, recorder, first)
+    await _record_entry_price(env, recorder)
+
+    # ---- reconcile clean, then the SAFE_MODE drill ------------------------------------------ #
+    report = await reconcile_tick_once(wiring.reconcile, env.clock())
+    clean = report.agreement is True and not report.divergences and report.failed_source is None
+    recorder.details["reconcile_after_fill"] = _jsonable(
+        {"agreement": report.agreement, "divergences": len(report.divergences)}
+    )
+    if not clean:
+        raise _smoke_fail(env, recorder, "reconcile_clean", "the reconcile compare was not clean")
+    _smoke_record(env, recorder, "reconcile_clean", STEP_PASSED, "reconcile agrees, no divergence")
+
+    await _safe_mode_drill(env, recorder, first)
+
+    # ---- restart and rehydrate over the same stores, then the replays ------------------------ #
+    if env.restart is None:
+        raise _smoke_fail(env, recorder, "restart_rehydrate", "no restart is available")
+    from src.live.runtime import shutdown_in_order
+
+    failed_steps = await shutdown_in_order(env.assembly)
+    recorder.details["first_process_shutdown_failed_steps"] = failed_steps
+    second = await env.restart()
+    current.append(second)
+    await _bring_up(second, recorder, "restart")
+    restored = _protection(second, first)
+    if restored is None or restored.state is not ProtectionState.COMPLETE:
+        state = None if restored is None else restored.state.value
+        raise _smoke_fail(second, recorder, "restart_rehydrate", f"plan not rehydrated: {state}")
+    _smoke_record(
+        second, recorder, "restart_rehydrate", STEP_PASSED, "the second wiring rehydrated the plan"
+    )
+    await _replays(second, recorder, first)
+
+    # ---- close and clean up ------------------------------------------------------------------ #
+    from src.execution.manager import operator_close_position
+
+    record_user_data_liveness(second, recorder)
+    closed = await operator_close_position(
+        coordinator=second.wiring.coordinator, plan_hash=first.plan_hash, operator_id=OPERATOR_ID
+    )
+    if not closed.accepted:
+        raise _smoke_fail(second, recorder, "close_cleanup", f"close refused: {closed.code}")
+
+    async def flat() -> bool:
+        view = _protection(second, first)
+        return view is not None and view.state is ProtectionState.FLAT
+
+    if not await _wait_until(second, flat):
+        raise _smoke_fail(second, recorder, "close_cleanup", "the plan did not end FLAT")
+    await _record_cancel_lag(second, recorder, first, (stop_role, *tp_roles))
+    _smoke_record(second, recorder, "close_cleanup", STEP_PASSED, "closed by the operator close")
+    adapter = second.assembly.exchange.adapter
+    left = (
+        len(await adapter.snapshot_open_normal_orders(symbol=SYMBOL)),
+        len(await adapter.snapshot_open_algo_orders(symbol=SYMBOL)),
+        len(await adapter.snapshot_positions(symbol=SYMBOL)),
+    )
+    if any(left):
+        raise _smoke_fail(
+            second,
+            recorder,
+            "account_clean",
+            f"orders {left[0]}, algos {left[1]}, positions {left[2]}",
+        )
+    _smoke_record(
+        second, recorder, "account_clean", STEP_PASSED, "no order, algo order or position"
+    )
+    return OUTCOME_COMPLETE_WITH_GAPS if gaps else OUTCOME_COMPLETE
+
+
+async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, first: _Request) -> None:
+    """Enter SAFE_MODE, show a CONFIRM refused, leave it through the operator exit."""
+    wiring = env.wiring
+    wiring.safe_mode.enter_safe_mode(reason="DEMO_SMOKE_DRILL", now_utc=env.clock())
+    second = await _inject(env, recorder, "far", "safe_mode_drill_signal")
+    await _wait_until(
+        env,
+        lambda: _async_value(
+            wiring.demo_signal is not None and wiring.demo_signal.source.pending == 0
+        ),
+    )
+    await env.owner.act("approve", short_id=second.short_id, note="of the SECOND request ")
+    await env.owner.act("confirm", short_id=second.short_id, note="of the SECOND request ")
+    for _ in range(SMOKE_REPLAY_SETTLE_TICKS):
+        await env.tick()
+    adapter = env.assembly.exchange.adapter
+    placed = await env.assembly.executor.read(
+        wiring.stores.execution_state.intent_for_client_id, second.entry_client_id
+    )
+    orders = await adapter.snapshot_open_normal_orders(symbol=SYMBOL)
+    if placed is not None or orders:
+        raise _smoke_fail(env, recorder, "safe_mode_drill", "an entry was placed in SAFE_MODE")
+    await env.owner.act("safemode_exit")
+    if not await _wait_until(env, lambda: _async_value(not wiring.safe_mode.in_safe_mode)):
+        raise _smoke_fail(env, recorder, "safe_mode_drill", "SAFE_MODE was not left")
+    _smoke_record(
+        env,
+        recorder,
+        "safe_mode_drill",
+        STEP_PASSED,
+        "entered; a CONFIRM placed nothing; left through /safemode_exit",
+    )
+
+
+async def _replays(env: SmokeEnv, recorder: EvidenceRecorder, first: _Request) -> None:
+    """Replayed APPROVE and CONFIRM presses of the first card place nothing."""
+    adapter = env.assembly.exchange.adapter
+    positions_before = await adapter.snapshot_positions(symbol=SYMBOL)
+    placed_before = None if env.placements is None else env.placements()
+    await env.owner.act("replay_approve", short_id=first.short_id)
+    await env.owner.act("replay_confirm", short_id=first.short_id)
+    for _ in range(SMOKE_REPLAY_SETTLE_TICKS):
+        await env.tick()
+    orders = await adapter.snapshot_open_normal_orders(symbol=SYMBOL)
+    positions_after = await adapter.snapshot_positions(symbol=SYMBOL)
+    same = [p.position_amt for p in positions_before] == [p.position_amt for p in positions_after]
+    placed_after = None if env.placements is None else env.placements()
+    if orders or not same or placed_before != placed_after:
+        raise _smoke_fail(env, recorder, "replays_place_nothing", "a replay changed the account")
+    _smoke_record(
+        env, recorder, "replays_place_nothing", STEP_PASSED, "the replays placed no order"
+    )
+
+
+async def _record_fill_sample(env: SmokeEnv, recorder: EvidenceRecorder, ids: _Request) -> None:
+    """D-23: one fill's realizedPnl and commission side by side, as evidence only (D086)."""
+    now = env.clock()
+    rows = await env.assembly.exchange.adapter.user_trades_in_window(
+        symbol=SYMBOL, start_utc=now - timedelta(hours=1), end_utc=now + timedelta(minutes=1)
+    )
+    sample = None if not rows else rows[-1]
+    recorder.details["fill_pnl_sample"] = (
+        None
+        if sample is None
+        else {
+            "realized_pnl": format(sample.realized_pnl, "f"),
+            "commission": format(sample.commission, "f"),
+            "commission_asset": sample.commission_asset,
+            "note": "evidence only, D086: LIVE_NET_PNL_SEMANTICS_VERIFIED stays False",
+        }
+    )
+    del ids
+
+
+async def _record_entry_price(env: SmokeEnv, recorder: EvidenceRecorder) -> None:
+    """D-34: the entry price as the adapter boundary hands it over (string/Decimal path)."""
+    positions = await env.assembly.exchange.adapter.snapshot_positions(symbol=SYMBOL)
+    if positions:
+        price = positions[0].entry_price
+        recorder.details["entry_price_raw"] = {
+            "value": format(price, "f"),
+            "type": type(price).__name__,
+            "boundary": "adapter output after the string/Decimal conversion (24-34)",
+        }
+    else:
+        recorder.details["entry_price_raw"] = None
+
+
+async def _record_cancel_lag(
+    env: SmokeEnv, recorder: EvidenceRecorder, ids: _Request, roles: Sequence[str]
+) -> None:
+    """D-34: how long a cancelled algo order still reads NEW by client id (a few quick polls)."""
+    adapter = env.assembly.exchange.adapter
+    observations: list[dict[str, Any]] = []
+    for role in roles:
+        algo_id = derive_algo_client_id(plan_hash=ids.plan_hash, role=role)
+        series: list[dict[str, Any]] = []
+        for poll in range(SMOKE_LAG_POLLS):
+            probe = await adapter.query_algo_order_by_client(client_algo_id=algo_id)
+            series.append(
+                {
+                    "after_seconds": poll * SMOKE_LAG_GAP_SECONDS,
+                    "found": probe.found,
+                    "algo_status": probe.algo_status,
+                }
+            )
+            await env.pause(SMOKE_LAG_GAP_SECONDS)
+        observations.append({"role": role, "algo_client_id": algo_id, "polls": series})
+    recorder.details["cancel_query_lag_observations"] = _jsonable(observations)
+
+
+def record_user_data_liveness(env: SmokeEnv, recorder: EvidenceRecorder) -> None:
+    """The ping and pong times the supervisor saw (reused from the process, not re-measured).
+
+    The long silence measurement stays `scripts/user_data_silence_probe.py`.
+    """
+    snapshot = env.wiring.stream.supervisor.liveness()
+    samples = recorder.details.setdefault("user_data_liveness", [])
+    samples.append(
+        _jsonable(
+            {
+                "state": snapshot.state,
+                "last_event_at_utc": snapshot.last_event_at_utc,
+                "last_ping_at_utc": snapshot.last_ping_at_utc,
+                "last_pong_at_utc": snapshot.last_pong_at_utc,
+            }
+        )
+    )
+
+
+def build_smoke_attestation(recorder: EvidenceRecorder) -> dict[str, Any]:
+    """Per step: OBSERVED only for a real run's PASSED step, SYNTHETIC for a fake one (T-24-93)."""
+    synthetic = recorder.details.get("evidence_kind") == EVIDENCE_KIND_SYNTHETIC
+    result: dict[str, Any] = {}
+    for name in _SMOKE_STEPS:
+        status = _step_status(recorder, name)
+        if status == STEP_PASSED:
+            result[name] = "SYNTHETIC_NOT_OBSERVED" if synthetic else "OBSERVED"
+        else:
+            result[name] = status or "NOT_OBSERVED"
+    return {"composed_smoke": result}
 
 
 # --------------------------------------------------------------------------- #
@@ -3055,6 +3083,145 @@ async def _default_sleep(seconds: int) -> None:
     await asyncio.sleep(seconds)
 
 
+SmokeEnvFactory = Callable[[EvidenceRecorder], Awaitable[SmokeEnv]]
+
+
+def _real_smoke_env_factory(
+    *,
+    config: Any,
+    environ: Mapping[str, str],
+    clock: Callable[[], datetime],
+    initialize_gate_state: bool,
+    approval_timeout_seconds: int,
+    sleep: Callable[[int], Awaitable[None]],
+) -> SmokeEnvFactory:
+    """The real process: `default_assemble` with the Demo-host-guarded SDK factory (D-33)."""
+    from src.live.runtime import LiveContext, default_assemble
+
+    async def poll() -> None:
+        await sleep(SMOKE_POLL_SECONDS)
+
+    async def pause(seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    async def build(recorder: EvidenceRecorder) -> SmokeEnv:
+        def make(initialize: bool) -> SmokeEnv:
+            context = LiveContext(
+                config=config,
+                env=environ,
+                clock=clock,
+                started_at_utc=clock(),
+                initialize_gate_state=initialize,
+                operator_id=OPERATOR_ID,
+            )
+            assembly = default_assemble(context, sdk_factory=demo_guarded_sdk_factory)
+
+            async def restart() -> SmokeEnv:
+                return make(False)
+
+            return SmokeEnv(
+                assembly=assembly,
+                clock=clock,
+                tick=poll,
+                pause=pause,
+                owner=ConsoleOwner(recorder),
+                synthetic=False,
+                wait_ticks=max(1, approval_timeout_seconds // SMOKE_POLL_SECONDS),
+                restart=restart,
+                initialize_gate_state=initialize,
+            )
+
+        return make(initialize_gate_state)
+
+    return build
+
+
+async def _fake_smoke_env(recorder: EvidenceRecorder) -> SmokeEnv:
+    """The default (no --execute) environment: the composed process on the fakes, SYNTHETIC."""
+    import tempfile
+
+    from tests.support.live_smoke_env import build_fake_smoke_env
+
+    del recorder
+    directory = Path(tempfile.mkdtemp(prefix="smoke-fake-"))
+    env = build_fake_smoke_env(directory)
+    assert isinstance(env, SmokeEnv)
+    return env
+
+
+async def _run_smoke(factory: SmokeEnvFactory, recorder: EvidenceRecorder) -> str:
+    env = await factory(recorder)
+    return await run_composed_smoke(env, recorder)
+
+
+def _main_smoke(
+    args: argparse.Namespace,
+    mode: RunMode,
+    env: Mapping[str, str],
+    now: Callable[[], datetime],
+    evidence_dir: Path | None,
+    smoke_env_factory: SmokeEnvFactory | None,
+    sleep: Callable[[int], Awaitable[None]] | None,
+) -> int:
+    """The composed smoke (D-33): admission first, then the sequence, then the evidence."""
+    factory: SmokeEnvFactory
+    if smoke_env_factory is not None:
+        factory = smoke_env_factory
+    elif mode is RunMode.EXECUTE:
+        try:
+            config = admit_smoke_environment(env)
+        except SmokeRefused as exc:
+            print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
+            return EXIT_REFUSED
+        factory = _real_smoke_env_factory(
+            config=config,
+            environ=env,
+            clock=now,
+            initialize_gate_state=bool(args.initialize_gate_state),
+            approval_timeout_seconds=args.approval_timeout_seconds,
+            sleep=sleep if sleep is not None else _default_sleep,
+        )
+    else:
+        factory = _fake_smoke_env
+    target_dir = evidence_dir if evidence_dir is not None else args.evidence_dir
+    if target_dir is None:
+        target_dir = DEFAULT_EVIDENCE_DIR
+    recorder = EvidenceRecorder(
+        mode=mode,
+        scenario=SCENARIO_SMOKE,
+        symbol=SYMBOL,
+        base_url=DEMO_BASE_URL,
+        environ=env,
+        clock=now,
+    )
+    outcome: str
+    try:
+        outcome = asyncio.run(_run_smoke(factory, recorder))
+    except SmokeHalt as exc:
+        recorder.record_failure("run", exc)
+        print(f"STOPPED at step {exc}", file=sys.stderr)
+        if mode is RunMode.EXECUTE:
+            recorder.details.setdefault("operator_instructions", []).append(
+                "Check the Binance Demo UI for any open position or order and close it by hand."
+            )
+        outcome = OUTCOME_FAILED
+    except (DemoHostViolation, RehearsalAbort) as exc:
+        recorder.record_failure("run", exc)
+        recorder.add_step("run", STEP_FAILED, f"aborted: {type(exc).__name__}: {exc}")
+        outcome = OUTCOME_ABORTED
+    except Exception as exc:  # noqa: BLE001 - recorded by type name, never by message
+        recorder.record_failure("run", exc)
+        recorder.add_step("run", STEP_FAILED, f"run failed: {type(exc).__name__}")
+        outcome = OUTCOME_FAILED
+    recorder.attestation_map = build_smoke_attestation(recorder)
+    recorder.outcome = outcome
+    path = recorder.write(target_dir)
+    print(f"evidence: {path}")
+    for line in recorder.details.get("operator_instructions", []):
+        print(f"OPERATOR: {line}")
+    return _outcome_exit_code(outcome)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -3068,10 +3235,7 @@ def main(
     sleep: Callable[[int], Awaitable[None]] | None = None,
     token_factory: Callable[[], str] | None = None,
     scenario_runner: Callable[[RunContext], Awaitable[str]] | None = None,
-    execution_limits: ExecutionLimits | None = None,
-    snapshot_live_inputs: Mapping[str, Any] | None = None,
-    margin_guard: MarginGuardPort | None = None,
-    margin_guard_factory: Callable[[GuardedAdapter], MarginGuardPort] | None = None,
+    smoke_env_factory: SmokeEnvFactory | None = None,
 ) -> int:
     """Single entry point. Every seam defaults to the real implementation."""
     env: Mapping[str, str] = os.environ if environ is None else environ
@@ -3087,9 +3251,10 @@ def main(
                 is_tty if is_tty is not None else sys.stdin.isatty,
                 read_confirmation if read_confirmation is not None else input,
             )
+        if args.scenario == SCENARIO_SMOKE:
+            return _main_smoke(args, mode, env, now, evidence_dir, smoke_env_factory, sleep)
         credentials = load_credentials(env)
         signed_call_policy = load_signed_call_policy(args.limits_file)
-        drift_limits = load_drift_limits(args.limits_file)
     except (UsageError, ConfirmationRefused, CredentialError, LimitsFileRefused) as exc:
         print(f"refused ({type(exc).__name__}): {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -3135,11 +3300,6 @@ def main(
             approval_timeout_seconds=args.approval_timeout_seconds,
             discovery_timeout_seconds=args.discovery_timeout_seconds,
             token_factory=token_factory if token_factory is not None else issue_one_time_token,
-            execution_limits=execution_limits,
-            drift_limits=drift_limits,
-            snapshot_live_inputs=snapshot_live_inputs,
-            margin_guard=margin_guard,
-            margin_guard_factory=margin_guard_factory,
         )
         run_ctx = ctx
 
