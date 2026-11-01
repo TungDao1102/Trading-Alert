@@ -211,6 +211,11 @@ def is_system_client_id(client_id: object) -> bool:
     return _family_prefix(client_id) is not None
 
 
+def is_close_client_id(client_id: object) -> bool:
+    """True when `client_id` has the shape of an emergency-close id (``xc-`` family)."""
+    return _family_prefix(client_id) == _CLOSE_PREFIX
+
+
 def plan_hash_prefix_of(client_id: object) -> str | None:
     """The 29-character plan-hash prefix shared by the three id families, or None.
 
@@ -247,6 +252,7 @@ def role_of_client_id(client_id: object) -> str | None:
 __all__ = [
     "ROLE_CODES",
     "SYSTEM_ID_PREFIXES",
+    "is_close_client_id",
     "is_system_client_id",
     "plan_hash_prefix_of",
     "role_of_client_id",

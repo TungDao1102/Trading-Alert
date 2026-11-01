@@ -541,8 +541,17 @@ class UserDataRouter:
 
     # -- order updates ------------------------------------------------------- #
 
+    def _is_project_close(self, client_order_id: str) -> bool:
+        check = getattr(self._lookup, "is_close_order", None)
+        return bool(check(client_order_id)) if callable(check) else False
+
     def _route_order(self, event: OrderUpdateEvent, item: TrustedItem, tally: _Tally) -> None:
         known = self._lookup.known_order(event.client_order_id)
+        if known is None and self._is_project_close(event.client_order_id):
+            # The project's own reduce-only close: the closer reads its result back over REST and
+            # the coordinator confirms flat by two REST reads, so there is nothing to route.
+            tally.ignored += 1
+            return
         if known is None:
             self._surface_anomaly(
                 kind=StreamAnomalyKind.UNKNOWN_ORDER.value,

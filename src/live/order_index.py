@@ -22,6 +22,7 @@ from src.domain.enums import OrderRole, OrderStatus
 from src.execution.order_ids import (
     derive_algo_client_id,
     derive_client_order_id,
+    is_close_client_id,
     plan_hash_prefix_of,
     role_of_client_id,
 )
@@ -56,6 +57,7 @@ class ClientIdIndex:
     def __init__(self) -> None:
         self._orders: dict[str, KnownOrder] = {}
         self._algos: dict[str, KnownOrder] = {}
+        self._plan_prefixes: set[str] = set()
 
     def register_entry(
         self,
@@ -67,6 +69,7 @@ class ClientIdIndex:
     ) -> KnownOrder:
         """Make the ENTRY id of `plan_hash` known; returns the stored record (idempotent)."""
         _check_id(client_order_id, plan_hash=plan_hash, role=OrderRole.ENTRY.value, algo=False)
+        self._plan_prefixes.add(plan_hash[:_PLAN_PREFIX_LEN])
         known = KnownOrder(
             local_order_id=local_order_id or client_order_id,
             client_id=client_order_id,
@@ -118,6 +121,19 @@ class ClientIdIndex:
 
     def known_algo(self, client_algo_id: str) -> KnownOrder | None:
         return self._algos.get(client_algo_id)
+
+    def is_close_order(self, client_order_id: str) -> bool:
+        """True for an emergency-close id (``xc-``) of a plan this process knows.
+
+        The close id carries an attempt number, so it is recognised by family and plan-hash
+        prefix, not registered one by one. The plan is known from the entry registration, which
+        both a new placement and a restore perform (first Demo run, 2026-11-01: the operator
+        close of a restored plan was an unknown stream order).
+        """
+        return (
+            is_close_client_id(client_order_id)
+            and plan_hash_prefix_of(client_order_id) in self._plan_prefixes
+        )
 
 
 __all__ = ["ClientIdIndex"]
