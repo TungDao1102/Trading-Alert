@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 # D064 real-S3 gate (261020-bkp): run the detection claims of the Parquet push against the remote
-# the backup is configured for (BACKUP_* names of the env file), under a throwaway prefix.
+# the backup is configured for (BACKUP_* names of the backup env file), under a throwaway prefix.
 #
 # Usage:
 #   deploy/backup-real-s3-gate.sh                        print the plan (prefix, claims); no remote
@@ -18,8 +18,10 @@ set -Eeuo pipefail
 # copies that output into the evidence file (default DIR: $HOME/trading-evidence, outside the
 # checkout) even when a claim fails. Exit codes: 0 every claim passed, 1 a claim failed or the run
 # was interrupted, 2 a usage or configuration error (nothing was touched). COMPOSE_PROJECT_NAME and
-# TRADING_ENV_FILE are honoured, so the soak bucket is gated with the soak env file. No value of
-# the env file is printed; the bucket name appears as <bucket>.
+# TRADING_ENV_FILE are honoured. The BACKUP_ names come from the backup env file (plan 24-36, D-29):
+# TRADING_BACKUP_ENV_FILE, default the checkout's .env.backup, which compose hands to the ops
+# service; point both TRADING_ENV_FILE and TRADING_BACKUP_ENV_FILE at the soak env file to gate the
+# soak bucket. No value of the env file is printed; the bucket name appears as <bucket>.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -36,7 +38,7 @@ EVIDENCE_FILE=""
 COMPOSE=()
 
 usage() {
-  sed -n '3,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {

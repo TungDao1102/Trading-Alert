@@ -2,7 +2,9 @@
 # `deploy/backup.sh --install-soak-timer --soak-env-file <path>`, which substitutes the checkout
 # directory and the soak env file for the two tokens below. It is the trading-backup.service pair
 # with the soak project selected: COMPOSE_PROJECT_NAME picks the trading-soak project (its own
-# pgdata volume, where the soak evidence lives) and TRADING_ENV_FILE picks the soak env file, whose
+# pgdata volume, where the soak evidence lives) and TRADING_ENV_FILE picks the soak env file (plan
+# 24-36: TRADING_BACKUP_ENV_FILE names the same file, so the backup service and the wrapper read the
+# BACKUP_ names from it and not from the checkout's .env.backup), whose
 # BACKUP_S3_BUCKET must be a bucket of its own, never the one trading-backup uses (the remote
 # layout has no project component, so two projects in one bucket would share one snapshot series
 # and retention would delete one project's daily dump; evidence/16-55-recheck.md).
@@ -18,5 +20,6 @@ User=trading
 WorkingDirectory=@TRADING_DIR@
 Environment=COMPOSE_PROJECT_NAME=trading-soak
 Environment=TRADING_ENV_FILE=@SOAK_ENV_FILE@
+Environment=TRADING_BACKUP_ENV_FILE=@SOAK_ENV_FILE@
 ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/backup.sh
 TimeoutStartSec=2h
