@@ -424,6 +424,8 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "D093",
         "D094",
         "D095",
+        "D096",
+        "D097",
     ], (
         f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
         "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
@@ -436,7 +438,9 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "wrote D092 (kill-gate state source) and D093 (REST bound edge, ACKED restore rule); "
         "the owner answer of 2026-11-01 wrote D094 (the stream starts before the first reconcile "
         "tick, plan 24-37) and D095 (the snapshot recorder in the write-ahead path and the "
-        "reservation release, plan 24-37)"
+        "reservation release, plan 24-37); the owner choice of 2026-11-01 wrote D096 (the "
+        "last-price age bound 30000 ms); the assistant proposed D097 (the reconcile skips "
+        "a placement in flight)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:

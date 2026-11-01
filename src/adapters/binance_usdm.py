@@ -631,6 +631,8 @@ class SymbolLeverageBrackets:
 # be longer than seven days.
 _MAX_WINDOW = timedelta(days=7)
 _EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+# The documented maximum of `GET /fapi/v1/income` `limit` (the default is 100).
+_INCOME_PAGE_LIMIT = 1000
 
 
 @dataclass(frozen=True)
@@ -1997,9 +1999,11 @@ class BinanceUsdmAdapter:
 
         Plan 21-08. Through the official SDK `rest_api.get_income_history` and `_sdk_call`
         (policy, shared REST gate, never retried). `income_type` must be a member of the SDK
-        income enum, else `ValueError` before any call. Pages 1, 2, ... are read until an empty
-        page; `tranId` is unique within one income type, so a repeated one raises (the page
-        parameter is the documented way to page; a server that ignored it could otherwise loop).
+        income enum, else `ValueError` before any call. A page shorter than the limit ends the
+        read; a full page is followed by a read from the newest time seen (a time cursor, see the
+        loop). `tranId` is unique within one income type: a repeat within one page raises, a
+        repeat across pages is dropped, and a full page with no new row raises, so a server that
+        ignored the cursor cannot make this loop.
         Funding is read as `income_type="FUNDING_FEE"`; that source is UNVERIFIED on Demo (0 rows
         in four recorded tries, demo-observed, not mainnet). The free-text `info` field is never
         read and nothing about the response is logged (D-21 secret-free logging; OPS-02 itself
@@ -2011,31 +2015,43 @@ class BinanceUsdmAdapter:
         except ValueError:
             raise ValueError("income_type is not a member of the SDK income enum") from None
         start_ms, end_ms = _window_ms(start_utc, end_utc)
-        found: list[IncomeRow] = []
-        seen: set[int] = set()
-        page_number = 1
+        found: dict[int, IncomeRow] = {}
+        cursor_ms = start_ms
         while True:
             response = await self._sdk_call(
                 CallKind.QUERY,
                 self._sdk.rest_api.get_income_history,
                 income_type=income_enum,
-                start_time=start_ms,
+                start_time=cursor_ms,
                 end_time=end_ms,
-                page=page_number,
+                limit=_INCOME_PAGE_LIMIT,
             )
             page = response.data()
             if not isinstance(page, list):
                 raise ValueError("income page is not a list: refusing to fabricate")
-            if not page:
-                break
+            in_page: set[int] = set()
+            fresh = 0
+            newest_ms = cursor_ms
             for item in page:
                 row = _row_to_income(item, income_type)
-                if row.tran_id in seen:
-                    raise ValueError("income tranId repeated across pages: refusing a bad read")
-                seen.add(row.tran_id)
-                found.append(row)
-            page_number += 1
-        return tuple(sorted(found, key=lambda row: (row.time_utc, row.tran_id)))
+                if row.tran_id in in_page:
+                    raise ValueError("income tranId repeated within one page: refusing a bad read")
+                in_page.add(row.tran_id)
+                newest_ms = max(newest_ms, (row.time_utc - _EPOCH_UTC) // timedelta(milliseconds=1))
+                if row.tran_id not in found:
+                    found[row.tran_id] = row
+                    fresh += 1
+            # A page shorter than the limit is the last one. A full page is followed by a read
+            # that starts at the newest time seen (a time cursor: the `page` parameter is not
+            # used, Demo answered the same rows to every page, first Demo run 2026-11-01); the
+            # rows of that instant come back again and are dropped by transaction id. A full page
+            # that adds no new row cannot advance the cursor: refuse rather than loop.
+            if len(page) < _INCOME_PAGE_LIMIT:
+                break
+            if fresh == 0:
+                raise ValueError("income page made no progress: refusing a partial read")
+            cursor_ms = newest_ms
+        return tuple(sorted(found.values(), key=lambda row: (row.time_utc, row.tran_id)))
 
 
 # --------------------------------------------------------------------------- #

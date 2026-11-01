@@ -442,14 +442,14 @@ async def test_the_recorded_empty_income_answer_is_an_empty_tuple_after_one_call
             "income_type": GetIncomeHistoryIncomeTypeEnum.FUNDING_FEE,
             "start_time": _ms(WINDOW_START),
             "end_time": _ms(WINDOW_END),
-            "page": 1,
+            "limit": 1000,
             "recv_window": RECV_WINDOW,
         }
     ]
 
 
-async def test_a_synthetic_funding_row_is_read_and_the_next_page_is_asked_for() -> None:
-    adapter, rest, _ = _adapter({"get_income_history": [[_income()], []]})
+async def test_a_synthetic_funding_row_is_read_and_a_short_page_ends_the_read() -> None:
+    adapter, rest, _ = _adapter({"get_income_history": [[_income()]]})
     rows = await _funding(adapter)
     assert rows == (
         IncomeRow(
@@ -463,40 +463,65 @@ async def test_a_synthetic_funding_row_is_read_and_the_next_page_is_asked_for() 
         ),
     )
     assert isinstance(rows[0].income, Decimal)
-    assert [call["page"] for call in rest.kwargs["get_income_history"]] == [1, 2]
+    assert rest.calls("get_income_history") == 1
+    assert all("page" not in call for call in rest.kwargs["get_income_history"])
 
 
 async def test_account_level_rows_have_no_symbol_and_a_trade_id_is_kept_as_text() -> None:
     page = [_income(symbol="", tranId=2, tradeId="77"), _income(symbol=None, tranId=1, time=1)]
-    adapter, _, _ = _adapter({"get_income_history": [page, []]})
+    adapter, _, _ = _adapter({"get_income_history": [page]})
     rows = await _funding(adapter)
     assert [row.tran_id for row in rows] == [1, 2]  # ordered by (time, tran_id)
     assert rows[0].symbol is None and rows[0].trade_id is None
     assert rows[1].symbol is None and rows[1].trade_id == "77"
 
 
-async def test_rows_of_several_pages_are_ordered_by_time_then_transaction_id() -> None:
-    adapter, _, _ = _adapter(
+async def test_full_pages_are_followed_from_the_newest_time_and_ordered(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The page size is 2 here. Demo ignored the `page` parameter (first Demo run, 2026-11-01), so
+    # a full page is followed by a read that starts at the newest time seen; the rows of that
+    # instant come back and are dropped by transaction id.
+    monkeypatch.setattr("src.adapters.binance_usdm._INCOME_PAGE_LIMIT", 2)
+    base = _ms(WINDOW_START)
+    adapter, rest, _ = _adapter(
         {
             "get_income_history": [
-                [_income(tranId=5, time=300)],
-                [_income(tranId=3, time=100), _income(tranId=4, time=100)],
-                [],
+                [_income(tranId=3, time=base + 100), _income(tranId=4, time=base + 100)],
+                [_income(tranId=4, time=base + 100), _income(tranId=5, time=base + 300)],
+                [_income(tranId=5, time=base + 300)],
             ]
         }
     )
     assert [(r.time_utc, r.tran_id) for r in await _funding(adapter)] == [
-        (_utc(100), 3),
-        (_utc(100), 4),
-        (_utc(300), 5),
+        (_utc(base + 100), 3),
+        (_utc(base + 100), 4),
+        (_utc(base + 300), 5),
     ]
+    starts = [call["start_time"] for call in rest.kwargs["get_income_history"]]
+    assert starts == [base, base + 100, base + 300]
+    assert all("page" not in call for call in rest.kwargs["get_income_history"])
 
 
-async def test_a_repeated_transaction_id_across_pages_raises_and_cannot_loop() -> None:
+async def test_a_full_page_with_no_new_row_raises_and_cannot_loop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("src.adapters.binance_usdm._INCOME_PAGE_LIMIT", 1)
     adapter, rest, _ = _adapter({"get_income_history": [[_income()], [_income()]]})
-    with pytest.raises(ValueError, match="tranId"):
+    with pytest.raises(ValueError, match="no progress"):
         await _funding(adapter)
     assert rest.calls("get_income_history") == 2
+
+
+async def test_a_repeated_transaction_id_within_one_page_raises() -> None:
+    adapter, _, _ = _adapter({"get_income_history": [[_income(), _income()]]})
+    with pytest.raises(ValueError, match="tranId"):
+        await _funding(adapter)
+
+
+async def test_a_server_that_answers_the_same_rows_to_every_request_ends_after_one_read() -> None:
+    # The Demo behaviour that broke the day-risk backfill: two rows, any `page`. With the limit
+    # of 1000 the short page is the last page, so no second request is made.
+    rows = [_income(tranId=1, time=100), _income(tranId=2, time=200)]
+    adapter, rest, _ = _adapter({"get_income_history": [rows, rows, rows]})
+    assert [r.tran_id for r in await _funding(adapter)] == [1, 2]
+    assert rest.calls("get_income_history") == 1
 
 
 async def test_an_income_type_outside_the_sdk_enum_raises_before_any_call() -> None:

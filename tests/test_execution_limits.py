@@ -82,7 +82,7 @@ D089_DECIDED = {
     "protection.emergency_close_poll_timeout_ms": 30000,
     "pre_placement.min_remaining_validity_seconds": 900,
     "pre_placement.max_mark_price_age_ms": 5000,
-    "pre_placement.max_last_price_age_ms": 5000,
+    "pre_placement.max_last_price_age_ms": 30000,
     "reconcile.tick_interval_ms": 15000,
     "reconcile.entry_unknown_probe_count": 3,
     "reconcile.entry_unknown_probe_interval_ms": 5000,

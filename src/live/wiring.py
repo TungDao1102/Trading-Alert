@@ -810,6 +810,9 @@ class LiveAssembly:
             on_state_change=divergences.note_state,
             on_failure=divergences.note_failure,
         )
+        # A fill that beats the plan's registration is adopted when the plan registers; the wake
+        # runs the protection step at once instead of at the next tick.
+        coordinator.set_wake(stream.wake.set)
         supervisor = stream.supervisor
 
         feeds = LiveFeedSource(
@@ -972,6 +975,8 @@ class LiveAssembly:
             stream=stream,
             enablement=enablement,
             safe_mode=safe_mode,
+            producer=producer,
+            service=service,
         )
         specs = self._specs(partial_wiring)
         scheduler = Scheduler(clock=clock, sleep=self.sleep, record=self._record_task, specs=specs)
@@ -1035,6 +1040,9 @@ class LiveAssembly:
         protection = errors.wrap(make_protection_step(coordinator, parts.stream.fanout))
 
         async def reconcile() -> None:
+            service = parts.service
+            if service.outstanding or service.take_settling():
+                return  # a placement is in flight or has just ended: its rows are catching up
             await self._reconcile_tick(clock())
 
         async def drift() -> None:
@@ -1048,6 +1056,8 @@ class LiveAssembly:
 
         async def day_risk() -> None:
             await backfill_day_risk(self.day_risk, clock())
+            # The day opens here, not at placement: the reservation at APPROVE needs its row.
+            await parts.producer.open_day()
 
         async def confirm_sweep() -> None:
             await parts.runner.finalize_expired_once(clock())
@@ -1268,6 +1278,8 @@ class _Parts:
     stream: StreamBundle
     enablement: Any
     safe_mode: SafeModeController
+    producer: LiveRiskInputProducer
+    service: ExecutionService
 
 
 def build_wiring(
@@ -1299,7 +1311,11 @@ def build_wiring(
     source: SignalSource = (
         signal_source
         if signal_source is not None
-        else DemoSmokeSignalSource(run_id=session_id, parameter_set=parameter_set)
+        else DemoSmokeSignalSource(
+            run_id=session_id,
+            parameter_set=parameter_set,
+            min_remaining_validity_seconds=execution_limits.min_remaining_validity_seconds,
+        )
     )
     return LiveAssembly(
         config=config,

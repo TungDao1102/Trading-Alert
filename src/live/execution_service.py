@@ -138,6 +138,8 @@ class ExecutionService:
         self._clock = clock
         self._authorized_chat_id = authorized_chat_id
         self._tasks: set[asyncio.Task[None]] = set()
+        # True from the end of a placement until `take_settling` is read once (see there).
+        self._settling = False
 
     # ---- the sync hook ------------------------------------------------------------------- #
 
@@ -164,6 +166,7 @@ class ExecutionService:
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
+        self._settling = True
         if task.cancelled():
             return
         error = task.exception()
@@ -194,6 +197,17 @@ class ExecutionService:
     def outstanding(self) -> int:
         return len(self._tasks)
 
+    def take_settling(self) -> bool:
+        """True once after a placement ended, then False until the next one ends.
+
+        The scheduled reconcile skips its tick while a placement is outstanding and for one tick
+        after (first Demo run, 2026-11-01, twice): the entry fills on the exchange before the
+        local rows and the protection coordinator have caught up, so a tick in that window judged
+        a healthy placement as UNSYNCED_NORMAL and POSITION_WITHOUT_STOP and entered SAFE_MODE.
+        """
+        was, self._settling = self._settling, False
+        return was
+
     # ---- the placement ------------------------------------------------------------------- #
 
     async def _place(self, approval: Approval, plan: TradePlan, confirmed_at: datetime) -> None:
@@ -221,6 +235,13 @@ class ExecutionService:
             plan_hash=plan.plan_hash,
             client_order_id=entry_id,
             symbol=resolved.live_context.signal.symbol,
+        )
+        # The protective ids are deterministic too, and the coordinator places them while this
+        # process runs: without them every ALGO_UPDATE of the stop and the take-profits was an
+        # unknown stream order, and the reconcile entered SAFE_MODE (UNTRACKED_SYSTEM_ORDER) on
+        # the first Demo run. Only a restart registered them before.
+        self._index.register_protective_algos(
+            plan_hash=plan.plan_hash, symbol=resolved.live_context.signal.symbol
         )
         outcome: ExecutionOutcome = await execute_approved_plan(
             callback=callback,

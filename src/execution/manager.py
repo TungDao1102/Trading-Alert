@@ -56,6 +56,7 @@ guard; the deterministic ids only let a probe find an order whose response was l
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -66,7 +67,11 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from src.approval.binding import check_binding_full, check_binding_identity
-from src.domain.algo_status import is_protection_confirmed
+from src.domain.algo_status import (
+    AlgoStatusClass,
+    classify_algo_status,
+    is_protection_confirmed,
+)
 from src.domain.approval import Approval
 from src.domain.enums import (
     ApprovalAction,
@@ -1702,6 +1707,9 @@ def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
 # supersedes D-02: the automatic close is src/execution/emergency_close.py.
 # --------------------------------------------------------------------------- #
 
+_CONFIRM_REREADS = 3
+_CONFIRM_REREAD_DELAY_SECONDS = 0.5
+
 _REQUIRED_PROTECTIVE_ROLES: frozenset[str] = frozenset(
     {OrderRole.STOP_LOSS.value, OrderRole.TAKE_PROFIT_1.value, OrderRole.TAKE_PROFIT_2.value}
 )
@@ -1912,15 +1920,30 @@ async def _confirm_leg_by_rest(
     """REST-confirm one leg (D-11): `(failure_detail, algo_status)`; ACTIVE class only.
 
     A placement response, HTTP success or an ALGO_UPDATE alone never counts as protection.
+
+    The leg was accepted a moment ago and Demo did not always answer a query by client id at
+    once (first Demo run, 2026-11-01: TAKE_PROFIT_2 was on the exchange and not confirmed). A
+    query that answers "not found" or a status that is not ACTIVE yet is therefore read again,
+    at most `_CONFIRM_REREADS` times; an unreadable answer, an unknown shape and a terminal
+    failure are never read again, and the leg stays unconfirmed when the last read does not
+    confirm it. Reads only: nothing is placed or cancelled here.
     """
-    try:
-        probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
-    except Exception as exc:  # noqa: BLE001 — an unreadable leg is unconfirmed
-        return (f"{role}: confirm probe {type(exc).__name__}", None)
-    status = _get_attr_or_key(probe, "algo_status")
-    if _get_attr_or_key(probe, "found") is True and is_protection_confirmed(status):
-        return (None, None if status is None else str(status))
-    return (f"{role}: not confirmed by REST", None)
+    detail = f"{role}: not confirmed by REST"
+    for attempt in range(1 + _CONFIRM_REREADS):
+        try:
+            probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
+        except Exception as exc:  # noqa: BLE001 — an unreadable leg is unconfirmed
+            return (f"{role}: confirm probe {type(exc).__name__}", None)
+        found = _get_attr_or_key(probe, "found")
+        status = _get_attr_or_key(probe, "algo_status")
+        if found is True and is_protection_confirmed(status):
+            return (None, None if status is None else str(status))
+        detail = f"{role}: not confirmed by REST (found={found!r}, status={status!r})"
+        terminal = classify_algo_status(status) is AlgoStatusClass.TERMINAL_FAILED
+        if found is None or terminal or attempt == _CONFIRM_REREADS:
+            break
+        await asyncio.sleep(_CONFIRM_REREAD_DELAY_SECONDS)
+    return (detail, None)
 
 
 @dataclass(frozen=True)

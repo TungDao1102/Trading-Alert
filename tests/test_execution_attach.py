@@ -509,7 +509,9 @@ async def test_a_placed_leg_that_rest_does_not_show_active_is_unconfirmed() -> N
 
     assert_held(rig, outcome)
     assert outcome.placed_legs == ("STOP_LOSS",)
-    assert outcome.failure_detail == "TAKE_PROFIT_1: not confirmed by REST"
+    assert outcome.failure_detail is not None
+    assert outcome.failure_detail.startswith("TAKE_PROFIT_1: not confirmed by REST")
+    assert calls_for_tp1 == 1 + 1 + 3  # the placement probe, the confirm read, three re-reads
     assert row(rig, "TAKE_PROFIT_1").intent_status is ExecutionIntentStatus.UNKNOWN
     assert len(rig.fake.calls_to("place_algo_protective")) == 1
 
@@ -809,3 +811,29 @@ def test_resting_entry_helper_matches_the_tracer_ids() -> None:
     entry = resting_entry_for_tests()
     assert entry.plan_hash == TEST_ONLY_PLAN_HASH
     assert entry.symbol == TEST_ONLY_SYMBOL
+
+
+async def test_a_leg_that_rest_shows_active_on_the_second_read_is_confirmed() -> None:
+    # First Demo run (2026-11-01): TAKE_PROFIT_2 was on the exchange and the first confirm read
+    # did not see it. A leg the next read shows ACTIVE is confirmed; nothing is placed twice.
+    rig = await protected_rig()
+    original = rig.fake.query_algo_order_by_client
+    calls_for_tp1 = 0
+
+    async def late_tp1(**kwargs: Any) -> Any:
+        nonlocal calls_for_tp1
+        if kwargs["client_algo_id"] == TP1_ID:
+            calls_for_tp1 += 1
+            if calls_for_tp1 == 2:  # the first confirmation read only
+                return AlgoOrderProbe(
+                    client_algo_id=TP1_ID, found=False, algo_status=None, update_time_utc=None
+                )
+        return await original(**kwargs)
+
+    rig.fake.query_algo_order_by_client = late_tp1  # type: ignore[method-assign]
+
+    outcome = await run_attach(rig)
+
+    assert outcome.failure_detail is None
+    assert "TAKE_PROFIT_1" in outcome.placed_legs
+    assert len(rig.fake.calls_to("place_algo_protective")) == 2  # TP1 and TP2, once each

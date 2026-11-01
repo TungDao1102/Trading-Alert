@@ -133,7 +133,7 @@ The owner answered the 24-01 limits checkpoint on 2026-10-31 ("theo recommend cá
 | `protection.emergency_close_poll_timeout_ms` | 30000 | ms | D089 |
 | `pre_placement.min_remaining_validity_seconds` | 900 | s | D089 |
 | `pre_placement.max_mark_price_age_ms` | 5000 | ms | D089 |
-| `pre_placement.max_last_price_age_ms` | 5000 | ms | D089 |
+| `pre_placement.max_last_price_age_ms` | 30000 | ms | D096 |
 | `reconcile.tick_interval_ms` | 15000 | ms | D089 |
 | `reconcile.entry_unknown_probe_count` | 3 | count | D089 |
 | `reconcile.entry_unknown_probe_interval_ms` | 5000 | ms | D089 |

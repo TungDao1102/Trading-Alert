@@ -27,6 +27,11 @@ from src.execution.order_ids import (
 )
 
 _PLAN_PREFIX_LEN = 29  # the plan-hash characters shared by the three id families
+_PROTECTIVE_ROLES: tuple[OrderRole, ...] = (
+    OrderRole.STOP_LOSS,
+    OrderRole.TAKE_PROFIT_1,
+    OrderRole.TAKE_PROFIT_2,
+)
 
 
 def _check_id(client_id: str, *, plan_hash: str, role: str, algo: bool) -> None:
@@ -92,6 +97,21 @@ class ClientIdIndex:
             local_status=OrderStatus.NEW,
         )
         return self._algos.setdefault(client_algo_id, known)
+
+    def register_protective_algos(self, *, plan_hash: str, symbol: str) -> None:
+        """Make the stop and both take-profit ids of `plan_hash` known before they are placed.
+
+        The ids are deterministic, so the index can know them when the entry is sent: the
+        ALGO_UPDATE of a leg the coordinator places while the process runs is then a known order
+        (first Demo run, 2026-11-01: each leg was an unknown stream order). Idempotent.
+        """
+        for role in _PROTECTIVE_ROLES:
+            self.register_algo(
+                plan_hash=plan_hash,
+                client_algo_id=derive_algo_client_id(plan_hash=plan_hash, role=role.value),
+                symbol=symbol,
+                role=role,
+            )
 
     def known_order(self, client_order_id: str) -> KnownOrder | None:
         return self._orders.get(client_order_id)

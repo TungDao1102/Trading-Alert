@@ -70,7 +70,11 @@ from src.risk.money_at_stake import (
 from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, SizedResult
 
-DEMO_SMOKE_SETUP: Final = "DEMO_SMOKE"
+# The persisted `setup_type` must be one of the six values the database allows
+# (`ck_signals_setup_type`), so it cannot carry the smoke label. The label travels in the
+# namespaced ids and in `DEMO_SMOKE_REASON_CODES`; a long pullback matches the LONG plan (the same
+# choice as `src/paper/rehearsal.py` TEST_SETUP_TYPE).
+DEMO_SMOKE_SETUP: Final = "TREND_PULLBACK_LONG"
 DEMO_SMOKE_NAMESPACE: Final = "demo-smoke:v1"
 DEMO_SMOKE_PLAN_VERSION: Final = "demo-smoke-v1"
 DEMO_SMOKE_REASON_CODES: Final[tuple[str, ...]] = ("DEMO_ONLY", "DEMO_SMOKE")
@@ -89,6 +93,7 @@ SL_DISTANCE_RATE: Final = Decimal("0.015")
 TP1_DISTANCE_RATE: Final = Decimal("0.03")
 TP2_DISTANCE_RATE: Final = Decimal("0.06")
 PLAN_EXPIRY_MARGIN: Final = timedelta(minutes=10)
+_VALIDITY_SLACK: Final = timedelta(seconds=60)
 SIGNAL_TIMEFRAME: Final = "1h"
 _QUANTITY_SEARCH_LIMIT: Final = 10000
 _PORTFOLIO_KEYS: Final = (
@@ -295,6 +300,7 @@ class DemoSmokeSignalSource:
         parameter_set: ParameterSet,
         symbol: str = "BTCUSDT",
         approval_timeout_seconds: int = 300,
+        min_remaining_validity_seconds: int | None = None,
         leverage: int = TARGET_LEVERAGE,
     ) -> None:
         if not run_id:
@@ -303,12 +309,15 @@ class DemoSmokeSignalSource:
             raise SignalDerivationError(f"{symbol} is not in the live-5 universe")
         if approval_timeout_seconds <= 0:
             raise ValueError("approval_timeout_seconds must be positive")
+        if min_remaining_validity_seconds is not None and min_remaining_validity_seconds < 0:
+            raise ValueError("min_remaining_validity_seconds must not be negative")
         if leverage < 1 or leverage > TARGET_LEVERAGE:
             raise ValueError(f"leverage must be within 1..{TARGET_LEVERAGE}")
         self._run_id = run_id
         self._parameter_set = parameter_set
         self._symbol = symbol
         self._approval_timeout_seconds = approval_timeout_seconds
+        self._min_remaining_validity_seconds = min_remaining_validity_seconds
         self._leverage = leverage
         self._sequence = 0
         self._queue: deque[SignalRequest] = deque()
@@ -316,6 +325,20 @@ class DemoSmokeSignalSource:
     @property
     def pending(self) -> int:
         return len(self._queue)
+
+    def _plan_lifetime(self) -> timedelta:
+        """How long a smoke plan lives: the approval window plus what placement still needs.
+
+        The owner's `pre_placement.min_remaining_validity_seconds` (900) must remain at CONFIRM,
+        and the operator may take the whole timeout for each of the two taps; a plan that lives
+        only `approval_timeout + 10 min` can never pass that check (first Demo run, 2026-11-01).
+        With no owner minimum the lifetime is the original `approval_timeout + 10 min`.
+        """
+        approval = timedelta(seconds=self._approval_timeout_seconds)
+        if not self._min_remaining_validity_seconds:
+            return approval + PLAN_EXPIRY_MARGIN
+        needed = timedelta(seconds=self._min_remaining_validity_seconds) + _VALIDITY_SLACK
+        return approval * 2 + max(PLAN_EXPIRY_MARGIN, needed)
 
     def peek(self) -> SignalRequest | None:
         """The oldest queued request without taking it (the Demo smoke reads its ids, 24-29)."""
@@ -477,9 +500,7 @@ class DemoSmokeSignalSource:
         # pre-placement check reads a CANDLE_CLOSE invalidation rule (a bar closing below the
         # stop invalidates a LONG), so the plan carries both.
         invalidation_rule_json = _json({"basis": "CANDLE_CLOSE", "level": str(stop)})
-        expiry_utc = (
-            observed_at + timedelta(seconds=self._approval_timeout_seconds) + PLAN_EXPIRY_MARGIN
-        )
+        expiry_utc = observed_at + self._plan_lifetime()
         plan_hash = plan_hash_from_fields(
             signal_id=signal_id,
             entry_min_price=entry_min,

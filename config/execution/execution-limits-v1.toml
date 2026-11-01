@@ -41,7 +41,7 @@ emergency_close_poll_timeout_ms = 30000
 [pre_placement]
 min_remaining_validity_seconds = 900
 max_mark_price_age_ms = 5000
-max_last_price_age_ms = 5000
+max_last_price_age_ms = 30000
 
 [reconcile]
 tick_interval_ms = 15000

@@ -374,6 +374,14 @@ FILLED_ENTRY_STATUSES: frozenset[str] = frozenset({"PARTIALLY_FILLED", "FILLED"}
 
 _ZERO = Decimal("0")
 _CORRELATION_PREFIX = "protection_"
+
+# A stream fill can arrive in the few milliseconds between the exchange accepting the entry and
+# `register_resting_entry` (first Demo run, 2026-11-01: the fill came 23 ms before the
+# registration, was journaled as unknown and dropped, and the stop waited for the next REST pass).
+# Such a fill is kept and handed to the plan registered next on the same symbol and side, if it
+# is younger than this; older ones belong to some other order and are never attributed.
+_ORPHAN_FILL_MAX_AGE = timedelta(seconds=60)
+_ORPHAN_FILL_LIMIT = 64
 _TRANSITION_ID_PREFIX = "ptr"
 _REJECTED_ID_PREFIX = "ptx"
 _NO_STATE = "NONE"
@@ -880,6 +888,8 @@ class ProtectionCoordinator:
         # of writing them (set and cleared inside one synchronous stretch, never across an await).
         self._deferred_journal: list[tuple[JournalEvent, datetime]] | None = None
         self._unknown_fills_journaled: set[tuple[str, str]] = set()
+        self._orphan_fills: deque[tuple[datetime, _QueuedFill]] = deque(maxlen=_ORPHAN_FILL_LIMIT)
+        self._wake: Callable[[], None] | None = None
         self.fill_sink_failures = 0
         # Plan 20-14 (D-19, Q4): the durable intent of an action the REST gate refused.
         self._pending = pending_actions
@@ -920,11 +930,42 @@ class ProtectionCoordinator:
             raise ValueError(f"plan {entry.plan_hash} is already registered")
         tracked = _Tracked(entry)
         self._tracked[entry.plan_hash] = tracked
+        self._adopt_orphan_fills(entry)
         if entry.entry_state_unknown:
             reason = REASON_REGISTERED_ENTRY_STATE_UNKNOWN
         else:
             reason = REASON_REGISTERED
         self._transition(tracked, ProtectionState.AWAITING_FILL, reason, self._now())
+
+    def set_wake(self, wake: Callable[[], None] | None) -> None:
+        """Set the callback that asks the owner of `step` to run it now (the scheduler's wake)."""
+        self._wake = wake
+
+    def _adopt_orphan_fills(self, entry: RestingEntry) -> None:
+        """Hand the recent fills no plan owned to the plan just registered, and wake `step`."""
+        if not self._orphan_fills:
+            return
+        now = self._now()
+        kept: deque[tuple[datetime, _QueuedFill]] = deque(maxlen=_ORPHAN_FILL_LIMIT)
+        adopted: list[_QueuedFill] = []
+        for seen_at, fill in self._orphan_fills:
+            if (
+                fill.symbol == entry.symbol
+                and fill.side == entry.entry_side
+                and now - seen_at <= _ORPHAN_FILL_MAX_AGE
+            ):
+                adopted.append(fill)
+            else:
+                kept.append((seen_at, fill))
+        self._orphan_fills = kept
+        if not adopted:
+            return
+        self._fills.extendleft(reversed(adopted))
+        if self._wake is not None:
+            try:
+                self._wake()
+            except Exception:  # noqa: BLE001 - a failed wake only delays the next step
+                pass
 
     def blocks_new_entries(self) -> bool:
         """True while a position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, or a PENDING
@@ -1426,6 +1467,7 @@ class ProtectionCoordinator:
             owner = self._owner_of(fill)
             if owner is None:
                 self._journal_unknown_fill(fill)
+                self._orphan_fills.append((self._now(), fill))
                 continue
             if owner.state in (ProtectionState.AWAITING_FILL, ProtectionState.ENTRY_UNRESOLVED):
                 evidence.setdefault(owner.entry.plan_hash, fill)

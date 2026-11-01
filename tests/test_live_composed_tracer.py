@@ -90,6 +90,11 @@ async def test_confirm_places_one_entry_and_its_stream_fill_ends_in_a_protected_
     protection = wiring.coordinator.protection_of(request.plan.plan_hash)
     assert protection is not None and protection.state is ProtectionState.AWAITING_FILL
     assert wiring.index.known_order(rig.entry_id(request)) is not None
+    # The protective ids are known BEFORE the coordinator places them (first Demo run: their
+    # ALGO_UPDATE frames were unknown stream orders and the reconcile entered SAFE_MODE).
+    for role in ("STOP_LOSS", "TAKE_PROFIT_1", "TAKE_PROFIT_2"):
+        algo_id = derive_algo_client_id(plan_hash=request.plan.plan_hash, role=role)
+        assert wiring.index.known_algo(algo_id) is not None, role
     entry = rig.memory.execution_state.get_entry(approval_id=approve.approval_id)
     assert entry is not None and entry.intent_status is ExecutionIntentStatus.ACKED
 

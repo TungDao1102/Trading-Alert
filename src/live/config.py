@@ -267,6 +267,10 @@ def parse_live_environment(
         )
 
     directory = state_dir if state_dir is not None else DEFAULT_STATE_DIR
+    if not directory.is_absolute():
+        # The rate gate refuses a relative state path (GateStatePathInvalid); the default is
+        # relative, so it is anchored at the repository root, not at the caller's cwd.
+        directory = repo_root / directory
     return LiveConfig(
         mode=mode,
         credentials=credentials,

@@ -103,7 +103,7 @@ from src.execution.pre_placement import PrePlacementInputs
 from src.execution.protection import ProtectionRegistry
 from src.live.execution_service import PlacementInputs, PlacementRefusal
 from src.reconcile.feed_freshness import DriftLimitsLike
-from src.risk.daily_loss import DayRiskState
+from src.risk.daily_loss import DayRiskState, utc_day_of
 from src.risk.live_commission import LiveCostRatesResult
 from src.risk.reservations import CountedReservation, ExchangeExposure, ReservationStatus
 from src.risk.types import ConstraintSnapshot
@@ -527,6 +527,44 @@ class LiveRiskInputProducer:
         except Exception as exc:  # noqa: BLE001 - any unexpected failure is a refusal, never a pass
             self._last_error_type = type(exc).__name__
             return PlacementRefusal(reason=REFUSAL_PRODUCER_ERROR)
+
+    async def open_day(self) -> str | None:
+        """Open and evaluate today's day state before any approval, when D-07/D-08 allow it.
+
+        The reservation taken at APPROVE needs today's `daily_risk_days` row, and `ensure_day`
+        was only called while assembling the placement inputs, after CONFIRM: on a store that
+        holds no day yet, every APPROVE was refused UNCERTAIN_ACCOUNT_STATE (first Demo run,
+        2026-11-01). The exposure is read as the placement reads it (positions, open orders and
+        counted reservations); an unusable read leaves it unknown, and `day_open_action` then
+        refuses a first-ever day. Never raises; returns the exception class name or None.
+        """
+        try:
+            positions = await _read_or_none(lambda: self._adapter.snapshot_positions())
+            normal = await _read_or_none(lambda: self._adapter.snapshot_open_normal_orders())
+            algo = await _read_or_none(lambda: self._adapter.snapshot_open_algo_orders())
+            exposures = _exposures(positions)
+            normal_count, algo_count = _count_of(normal), _count_of(algo)
+            exposure: bool | None = None
+            if exposures is not None and normal_count is not None and algo_count is not None:
+                counted = tuple(await _settled(self._reservations.list_counted()))
+                exposure = bool(
+                    exposures
+                    or algo_count
+                    or normal_count
+                    or any(row.status in _COUNTED_ON_EXCHANGE for row in counted)
+                )
+            # `evaluate` opens the day AND marks it evaluated; without that mark
+            # `current_daily_loss_quote` is None and the APPROVE reservation still refuses. It
+            # runs only while the loss is unknown (once per process and day, or after a stale
+            # backfill): `evaluate` also latches a stop and stamps a warning, and the alert and
+            # entry cancels for those belong to the placement path, which keeps calling it.
+            now = self._clock()
+            if self._day_risk.current_daily_loss_quote(utc_day_of(now)) is None:
+                await self._day_risk.evaluate(now_utc=now, exposure=exposure)
+        except Exception as exc:  # noqa: BLE001 - the scheduler must never see a raise
+            self._last_error_type = type(exc).__name__
+            return self._last_error_type
+        return None
 
     # ---- the assembly -------------------------------------------------------------------- #
 

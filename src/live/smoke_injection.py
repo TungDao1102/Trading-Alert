@@ -252,8 +252,10 @@ class DemoSignalCommand:
         if _is_int(update_id):
             correlation = f"upd:{update_id}"
         else:
+            # The in-process smoke has no Telegram update id. The counter restarts with every
+            # process, so the time is part of the id: otherwise run two collides with run one.
             self._seq += 1
-            correlation = f"local:{self._seq}"
+            correlation = f"local:{self._clock().strftime('%Y%m%dT%H%M%S%fZ')}:{self._seq}"
         try:
             await self._record(
                 JournalEvent(
