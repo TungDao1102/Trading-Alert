@@ -73,7 +73,6 @@ from tests.support.live_risk_rig import btc_filters
 from tests.support.live_store_set import MemoryStoreHandles, build_memory_stores
 from tests.support.live_wiring_rig import (
     TEST_ONLY_SYMBOLS,
-    FakeApplication,
     make_config,
 )
 from tests.support.margin_guard_fakes import CompositeRest
@@ -153,6 +152,44 @@ class ComposedExchangeEdge:
         if name in _FAKE_SERVED:
             return getattr(self._fake, name)
         return getattr(self._real, name)
+
+
+class StartableFakeApplication:
+    """A PTB application stand-in the runner can start and stop (plan 24-29: the start sequence).
+
+    It registers handlers, polls nothing and carries the rig's FakeBot as its bot.
+    """
+
+    def __init__(self, bot: Any) -> None:
+        self.bot = bot
+        self.handlers: list[Any] = []
+        self.error_handlers: list[Any] = []
+        self.started = False
+        self.updater = SimpleNamespace(start_polling=self._start_polling, stop=self._stop_polling)
+
+    def add_handler(self, handler: Any) -> None:
+        self.handlers.append(handler)
+
+    def add_error_handler(self, handler: Any) -> None:
+        self.error_handlers.append(handler)
+
+    async def initialize(self) -> None:
+        return None
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.started = False
+
+    async def shutdown(self) -> None:
+        return None
+
+    async def _start_polling(self, **_kwargs: Any) -> None:
+        return None
+
+    async def _stop_polling(self) -> None:
+        return None
 
 
 class FakePublic:
@@ -298,11 +335,18 @@ class ComposedRig:
 
 
 def make_composed_rig(
-    tmp_path: Path, *, stores: tuple[LiveStoreSet, MemoryStoreHandles] | None = None
+    tmp_path: Path,
+    *,
+    stores: tuple[LiveStoreSet, MemoryStoreHandles] | None = None,
+    clock: VirtualTime | None = None,
+    fake: BinanceSemanticsFakeAdapter | None = None,
+    session_id: str = "composed-rig",
 ) -> ComposedRig:
-    clock = VirtualTime(T0)
-    fake = BinanceSemanticsFakeAdapter(now_utc=clock.now(), enforce_flat_stop_rejection=True)
-    fake.set_lot_filters(TEST_ONLY_SYMBOL, lot_filters_for_tests())
+    """One composed process; a restart passes the SAME `stores`, `clock` and `fake` (plan 24-29)."""
+    clock = clock if clock is not None else VirtualTime(T0)
+    if fake is None:
+        fake = BinanceSemanticsFakeAdapter(now_utc=clock.now(), enforce_flat_stop_rejection=True)
+        fake.set_lot_filters(TEST_ONLY_SYMBOL, lot_filters_for_tests())
     day_reader = ScriptedDayRiskReader()
     rest = CompositeRest(clock=None)
     store_set, memory = stores if stores is not None else build_memory_stores()
@@ -338,7 +382,7 @@ def make_composed_rig(
 
     bot = FakeBot(text_check=check_text)
     parameter_set = load_parameter_set("trend-pullback", "baseline-v5")
-    source = DemoSmokeSignalSource(run_id="composed-rig", parameter_set=parameter_set)
+    source = DemoSmokeSignalSource(run_id=session_id, parameter_set=parameter_set)
     assembly = build_wiring(
         config=config,
         execution_limits=config.limits,
@@ -347,12 +391,12 @@ def make_composed_rig(
         clock=clock,
         sleep=clock.sleep,
         sdk_factory=sdk_factory,
-        application_factory=FakeApplication,
+        application_factory=lambda: StartableFakeApplication(bot),
         bot=LiveBotProxy(bot),
         engine=sqlalchemy.create_engine("postgresql+psycopg://rig:rig@127.0.0.1:1/rig"),
         repo_root=Path(__file__).resolve().parents[2],
         symbols=TEST_ONLY_SYMBOLS,
-        session_id="composed-rig",
+        session_id=session_id,
         stores=store_set,
         signal_source=source,
         exchange_edge=edge,
@@ -377,5 +421,6 @@ __all__ = [
     "ComposedExchangeEdge",
     "ComposedRig",
     "FakePublic",
+    "StartableFakeApplication",
     "make_composed_rig",
 ]

@@ -437,8 +437,17 @@ def _sqlalchemy_url(database_url: str) -> Any:
     return url
 
 
-def default_assemble(context: LiveContext, *, repo_root: Path = REPO_ROOT) -> Any:
+def default_assemble(
+    context: LiveContext,
+    *,
+    repo_root: Path = REPO_ROOT,
+    sdk_factory: Callable[..., Any] | None = None,
+) -> Any:
     """Build the live process for real: PostgreSQL engine, SDK, PTB application, parameter set.
+
+    `sdk_factory` is None in production (the official SDK client of the mode's environment);
+    the Demo smoke (`scripts/demo_rehearsal.py`, plan 24-29) passes a factory that re-checks the
+    Demo host.
 
     Raises:
         DatabaseUrlMissing: no database URL variable is set.
@@ -468,7 +477,7 @@ def default_assemble(context: LiveContext, *, repo_root: Path = REPO_ROOT) -> An
         parameter_set=load_parameter_set(STRATEGY_ID, PARAMETER_SET_ID),
         clock=context.clock,
         sleep=asyncio.sleep,
-        sdk_factory=None,
+        sdk_factory=sdk_factory,
         application_factory=application_factory,
         bot=LiveBotProxy(),
         engine=create_engine(_sqlalchemy_url(url), pool_pre_ping=True),

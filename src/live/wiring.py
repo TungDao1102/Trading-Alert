@@ -929,7 +929,10 @@ class LiveAssembly:
         )
         health = LiveHealthProducer(
             mode=self.config.mode,
-            demo_degraded_allowed=False,
+            # D056 (2): DEMO is the explicit Demo mode in which DEGRADED may run; the candle check
+            # is DEGRADED by design here (no candle feed), so without the flag no DEMO enables.
+            # LIVE can never carry the flag (the producer refuses it).
+            demo_degraded_allowed=self.config.mode is Environment.DEMO,
             symbols=self.symbols,
             marks=marks,
             stream=supervisor,
