@@ -125,8 +125,24 @@ async def test_the_protected_entry_is_restorable_until_its_plan_ends_d093(tmp_pa
     assert (await rig.press("APR", short_id, query_id="q-apr")).ok
     await rig.clock.advance(30)
     rig.set_prices()
+    import threading
+
+    from src.ops.store_executor import WRITER_THREAD_PREFIX
+
+    outcome_threads: list[str] = []
+    real_record = rig.memory.journal.record
+
+    def record(event: object) -> None:
+        if getattr(event, "event_type", "") == EVENT_PLACEMENT_OUTCOME:
+            outcome_threads.append(threading.current_thread().name)
+        real_record(event)  # type: ignore[arg-type]
+
+    rig.memory.journal.record = record  # type: ignore[method-assign]
     assert (await rig.press("CNF", short_id, query_id="q-cnf")).ok
     await wiring.service.drain()
+    # Plan 24-27B: the placement service's own journal row left the loop (the manager's
+    # write-ahead intent and journal calls are NOT behind the seam: see the 24-27B summary).
+    assert len(outcome_threads) == 1 and outcome_threads[0].startswith(WRITER_THREAD_PREFIX)
     intents = rig.memory.execution_state
     assert [e.plan_hash for e in intents.restorable_entries()] == [request.plan.plan_hash]
 
@@ -144,3 +160,35 @@ async def test_the_protected_entry_is_restorable_until_its_plan_ends_d093(tmp_pa
         )
     )
     assert intents.restorable_entries() == ()
+
+
+async def test_the_sender_store_calls_run_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 24-27B (D-25): desk issue, reservation, signal transition and journal leave the loop."""
+    import threading
+
+    from src.ops.store_executor import WRITER_THREAD_PREFIX
+
+    rig = make_composed_rig(tmp_path)
+    wiring = await rig.prepare()
+    threads: dict[str, str] = {}
+    sender = wiring.sender
+
+    def spy(owner: object, attr: str, label: str) -> None:
+        original = getattr(owner, attr)
+
+        def wrapped(*args: object, **kwargs: object) -> object:
+            threads.setdefault(label, threading.current_thread().name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(owner, attr, wrapped)
+
+    spy(wiring.desk, "issue", "issue")
+    spy(sender, "_register_reservation", "reservation")
+    spy(sender._entities, "transition_signal", "transition")
+    await rig.derive_request()
+    await _run_pump(rig)
+    assert set(threads) == {"issue", "reservation", "transition"}
+    for name, thread in threads.items():
+        assert thread.startswith(WRITER_THREAD_PREFIX), f"{name} ran on {thread}"

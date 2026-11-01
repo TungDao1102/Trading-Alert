@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -115,7 +115,9 @@ class ExecutionService:
         index: ClientIdIndex,
         clock: Callable[[], datetime],
         authorized_chat_id: int,
+        run_sync: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
+        self._run_sync = run_sync
         self._loop = loop
         self._token_for = token_for
         self._inputs = inputs
@@ -160,13 +162,20 @@ class ExecutionService:
         if error is None:
             return
         approval_id = task.get_name().removeprefix(_TASK_NAME_PREFIX)
-        self._record(
-            event_type=EVENT_PLACEMENT_TASK_FAILED,
-            step="task_failed",
-            entity_id=approval_id,
-            correlation=f"{_JOURNAL_PREFIX}:{approval_id}",
-            payload={"error_class": type(error).__name__},
-        )
+        fields: dict[str, Any] = {
+            "event_type": EVENT_PLACEMENT_TASK_FAILED,
+            "step": "task_failed",
+            "entity_id": approval_id,
+            "correlation": f"{_JOURNAL_PREFIX}:{approval_id}",
+            "payload": {"error_class": type(error).__name__},
+        }
+        if self._run_sync is None:
+            self._record(**fields)
+            return
+        # A done-callback cannot await: the row is written by a tracked task off the loop.
+        row = self._loop.create_task(self._arecord(**fields))
+        self._tasks.add(row)
+        row.add_done_callback(self._tasks.discard)
 
     async def drain(self) -> None:
         """Wait for every outstanding placement task (shutdown and tests)."""
@@ -182,11 +191,11 @@ class ExecutionService:
     async def _place(self, approval: Approval, plan: TradePlan, confirmed_at: datetime) -> None:
         raw_token = self._token_for(approval.approval_id)
         if raw_token is None:
-            self._journal_refusal(approval, plan, REFUSAL_TOKEN_UNAVAILABLE)
+            await self._journal_refusal(approval, plan, REFUSAL_TOKEN_UNAVAILABLE)
             return
         resolved = await self._inputs.for_plan(approval, plan, confirmed_at)
         if isinstance(resolved, PlacementRefusal):
-            self._journal_refusal(approval, plan, resolved.reason)
+            await self._journal_refusal(approval, plan, resolved.reason)
             return
         callback = Callback(
             raw_token=raw_token,
@@ -222,7 +231,7 @@ class ExecutionService:
             intent_store=self._intent_store,
             live_context=resolved.live_context,
         )
-        self._record(
+        await self._arecord(
             event_type=EVENT_PLACEMENT_OUTCOME,
             step="outcome",
             entity_id=approval.approval_id,
@@ -234,8 +243,8 @@ class ExecutionService:
 
     # ---- journal ------------------------------------------------------------------------- #
 
-    def _journal_refusal(self, approval: Approval, plan: TradePlan, reason: str) -> None:
-        self._record(
+    async def _journal_refusal(self, approval: Approval, plan: TradePlan, reason: str) -> None:
+        await self._arecord(
             event_type=EVENT_PLACEMENT_REFUSED,
             step="refused",
             entity_id=approval.approval_id,
@@ -245,7 +254,7 @@ class ExecutionService:
             plan=plan,
         )
 
-    def _record(
+    def _event(
         self,
         *,
         event_type: str,
@@ -255,29 +264,40 @@ class ExecutionService:
         payload: dict[str, Any],
         approval: Approval | None = None,
         plan: TradePlan | None = None,
-    ) -> None:
-        """Append one journal row; a journal that fails is logged by class name, never raised."""
+    ) -> JournalEvent:
+        return JournalEvent(
+            journal_event_id=correlated_event_id(
+                prefix=_JOURNAL_PREFIX,
+                correlation_id=correlation,
+                event_type=event_type,
+                entity_id=entity_id,
+                step=step,
+            ),
+            occurred_at_utc=self._clock(),
+            event_type=event_type,
+            entity_type=_ENTITY_TYPE,
+            entity_id=entity_id,
+            correlation_id=correlation,
+            signal_id=None if approval is None else approval.signal_id,
+            trade_plan_id=None if plan is None else plan.trade_plan_id,
+            approval_id=None if approval is None else approval.approval_id,
+            payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+
+    def _record(self, **fields: Any) -> None:
+        """Append one journal row inline; a journal that fails is logged, never raised."""
         try:
-            self._journal.record(
-                JournalEvent(
-                    journal_event_id=correlated_event_id(
-                        prefix=_JOURNAL_PREFIX,
-                        correlation_id=correlation,
-                        event_type=event_type,
-                        entity_id=entity_id,
-                        step=step,
-                    ),
-                    occurred_at_utc=self._clock(),
-                    event_type=event_type,
-                    entity_type=_ENTITY_TYPE,
-                    entity_id=entity_id,
-                    correlation_id=correlation,
-                    signal_id=None if approval is None else approval.signal_id,
-                    trade_plan_id=None if plan is None else plan.trade_plan_id,
-                    approval_id=None if approval is None else approval.approval_id,
-                    payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
-                )
-            )
+            self._journal.record(self._event(**fields))
+        except Exception as exc:  # noqa: BLE001 - an audit row must not break the loop
+            log.warning("live.execution_service.journal_failed", error_class=type(exc).__name__)
+
+    async def _arecord(self, **fields: Any) -> None:
+        """Append one journal row; off the loop when the store seam is set (plan 24-27B, D-25)."""
+        if self._run_sync is None:
+            self._record(**fields)
+            return
+        try:
+            await self._run_sync(self._journal.record, self._event(**fields))
         except Exception as exc:  # noqa: BLE001 - an audit row must not break the loop
             log.warning("live.execution_service.journal_failed", error_class=type(exc).__name__)
 

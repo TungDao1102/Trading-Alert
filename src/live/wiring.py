@@ -739,6 +739,7 @@ class LiveAssembly:
             index=self.index,
             clock=clock,
             authorized_chat_id=self.config.authorized_chat_id,
+            run_sync=self.executor.write,
         )
 
         persistence = StreamPersistence(
@@ -908,6 +909,8 @@ class LiveAssembly:
             sleep=self.sleep,
             journal=journal.record,
             register_reservation=make_reservation_registrar(stores.reservations),
+            run_sync=self.executor.write,
+            run_read=self.executor.read,
         )
 
         thresholds = LiveHealthThresholds.from_limits(

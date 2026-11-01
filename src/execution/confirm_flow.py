@@ -416,14 +416,19 @@ class ConfirmFlow:
                 result = await self._run_sync(self._book.handle_confirm, **confirm_kwargs)
             ok = result.outcome is ConfirmOutcome.CONFIRMED
         elif kind is CallbackKind.CANCEL:
-            result = self._book.handle_cancel(
-                short_id=short_id,
-                chat_id=press.chat_id,
-                authorized_chat_id=press.authorized_chat_id,
-                from_user_id=press.from_user_id,
-                now_utc=press.callback_at_utc,
-                correlation_id=press.correlation_id,
-            )
+            cancel_kwargs: dict[str, Any] = {
+                "short_id": short_id,
+                "chat_id": press.chat_id,
+                "authorized_chat_id": press.authorized_chat_id,
+                "from_user_id": press.from_user_id,
+                "now_utc": press.callback_at_utc,
+                "correlation_id": press.correlation_id,
+            }
+            if self._run_sync is None:
+                result = self._book.handle_cancel(**cancel_kwargs)
+            else:
+                # Plan 24-27B: the cancel journals its decision too; off the loop like CONFIRM.
+                result = await self._run_sync(self._book.handle_cancel, **cancel_kwargs)
             ok = result.outcome is ConfirmOutcome.CANCELLED
         else:
             raise ValueError(f"not a confirm press: {kind!r}")
@@ -770,7 +775,12 @@ class ConfirmFlow:
         second call expires and edits nothing. Returns the short ids whose card was edited.
         """
         finalized: list[str] = []
-        for approval_id in self._book.expire_due(now_utc):
+        if self._run_sync is None:
+            expired = self._book.expire_due(now_utc)
+        else:
+            # Plan 24-27B: the expire step journals each EXPIRED row; off the loop.
+            expired = await self._run_sync(self._book.expire_due, now_utc)
+        for approval_id in expired:
             short_id = self._short_by_approval.get(approval_id)
             entry = None if short_id is None else self._book.get(short_id)
             if (
