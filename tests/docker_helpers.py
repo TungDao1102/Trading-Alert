@@ -125,6 +125,7 @@ class ComposeProject:
         profiles: Sequence[str] = (),
         check: bool = True,
         timeout: float = DEFAULT_TIMEOUT_S,
+        env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         cmd = [
             "compose",
@@ -146,10 +147,12 @@ class ComposeProject:
             timeout=timeout,
             # One file per throwaway project (plan 24-36, D-29): the paper and backup env files
             # of the compose file are the project file too, as deploy/lib.sh compose_init does.
+            # `env` adds to that (plan 24-35: TRADING_LIVE_ENV_FILE of the live hold test).
             env={
                 "TRADING_ENV_FILE": str(self.env_file),
                 "TRADING_PAPER_ENV_FILE": str(self.env_file),
                 "TRADING_BACKUP_ENV_FILE": str(self.env_file),
+                **(env or {}),
             },
         )
 
