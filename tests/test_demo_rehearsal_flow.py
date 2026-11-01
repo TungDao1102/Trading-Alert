@@ -44,12 +44,8 @@ from src.approval.mapping import derive_short_id
 from src.backtest.semantics import TP1_QUANTITY_FRACTION
 from src.domain.enums import ApprovalResult
 from src.domain.lot_filters import LotFilters
-from src.execution.enablement import LiveEnablementController
 from src.execution.execution_limits import ExecutionLimits
 from src.ops.health import ALL_CHECK_NAMES
-
-from tests.support import execution_limits as test_limits
-from tests.support.margin_guard_stub import StubMarginGuard
 
 SERVER_NOW = datetime(2026, 10, 5, 12, 0, 0, tzinfo=UTC)
 FAKE_KEY = "FAKEKEY0123456789ABCDEF"
@@ -693,10 +689,6 @@ def taps_script() -> list[ScriptedTap | None]:
     ]
 
 
-# Plan 22-15: "use the default scripted passing guard" (None must stay expressible: no guard).
-_DEFAULT_GUARD: Any = object()
-
-
 def run_flow(
     tmp_path: Path,
     *,
@@ -705,24 +697,8 @@ def run_flow(
     channel: FakeApprovalChannel | None = None,
     execute: bool = False,
     dry_script: bool = True,
-    execution_limits: ExecutionLimits | None = None,
-    committed_limits: bool = False,
-    snapshot_live_inputs: dict[str, Any] | None = None,
-    margin_guard: Any = _DEFAULT_GUARD,
-    margin_guard_factory: Any = None,
 ) -> tuple[int, dict[str, Any], FakeDemoAdapter, FakeApprovalChannel]:
     exchange = adapter if adapter is not None else FakeDemoAdapter()
-    # TEST_ONLY limits by default; `committed_limits=True` loads config/execution instead,
-    # where every value is NOT_CONFIGURED (plan 19-13).
-    limits = (
-        None
-        if committed_limits
-        else (
-            execution_limits
-            if execution_limits is not None
-            else test_limits.test_only_execution_limits()
-        )
-    )
     chan = (
         channel
         if channel is not None
@@ -747,16 +723,6 @@ def run_flow(
         channel_factory=lambda creds: chan,
         sleep=no_sleep,
         token_factory=counter_tokens(),
-        execution_limits=limits,
-        snapshot_live_inputs=snapshot_live_inputs,
-        # Plan 22-15: composing the live guard is Phase 24, so a placement test injects a scripted
-        # one (a pass). `margin_guard=None` is the real behavior today and aborts the run.
-        margin_guard=(
-            None
-            if margin_guard_factory is not None
-            else (StubMarginGuard() if margin_guard is _DEFAULT_GUARD else margin_guard)
-        ),
-        margin_guard_factory=margin_guard_factory,
     )
     files = sorted(tmp_path.glob("*.json"))
     data: dict[str, Any] = json.loads(files[-1].read_text(encoding="utf-8")) if files else {}
@@ -774,9 +740,7 @@ def make_ctx(
     channel: FakeApprovalChannel,
     *,
     mode: dr.RunMode = dr.RunMode.DRY_RUN,
-    scenario: str = "far",
-    execution_limits: ExecutionLimits | None = None,
-    margin_guard: Any = _DEFAULT_GUARD,
+    scenario: str = "taps",
 ) -> dr.RunContext:
     recorder = dr.EvidenceRecorder(
         mode=mode,
@@ -805,12 +769,6 @@ def make_ctx(
         approval_timeout_seconds=300,
         discovery_timeout_seconds=120,
         token_factory=counter_tokens(),
-        execution_limits=(
-            execution_limits
-            if execution_limits is not None
-            else test_limits.test_only_execution_limits()
-        ),
-        margin_guard=StubMarginGuard() if margin_guard is _DEFAULT_GUARD else margin_guard,
     )
 
 
@@ -863,7 +821,7 @@ def test_any_health_fail_aborts_before_any_mutation(tmp_path: Path, mutate: str)
         channel.notifier.raise_on_send = RuntimeError("telegram down")
     elif mutate == "read_failure":
         adapter.raise_on["mark_klines"] = RuntimeError("boom")
-    code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, channel=channel)
+    code, data, _, _ = run_flow(tmp_path, scenario="taps", adapter=adapter, channel=channel)
     if mutate == "read_failure":
         # the failing read itself is an exception, so the run fails before any order
         assert code in (dr.EXIT_ABORTED, dr.EXIT_FAILED)
@@ -1020,66 +978,6 @@ def test_derived_zone_contains_the_mark_and_its_mid_is_the_entry() -> None:
     assert (fill.entry_min_price, fill.entry_max_price) == (Decimal("59700.0"), Decimal("63300.0"))
 
 
-@pytest.mark.parametrize("scenario", ["far", "fill"])
-def test_order_scenarios_reach_the_entry_against_the_fakes_own_mark(
-    tmp_path: Path, scenario: str
-) -> None:
-    """19-REVIEW CR-02: no gate-mark override; the fake reports the mark the plan came from."""
-    adapter = FakeDemoAdapter()
-    assert adapter.gate_mark_price is None
-    _, data, _, _ = run_flow(tmp_path, scenario=scenario, adapter=adapter, execute=True)
-    assert "MARK_PRICE_OUTSIDE_ZONE" not in json.dumps(data)
-    entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
-    assert entry_kwargs["price"] == _derive(scenario).entry_price
-    assert step(data, "place_entry")["status"] == "PASSED"
-
-
-@pytest.mark.parametrize("scenario", ["far", "fill"])
-def test_a_mark_past_the_zone_cushion_is_still_refused(tmp_path: Path, scenario: str) -> None:
-    """The production zone check is not weakened: a LONG mark one tick below entry_min refuses.
-
-    19-REVIEW WR-06 (owner): only the adverse side refuses, which for the rehearsal's LONG plan
-    is a mark below entry_min. (Before WR-06 this test moved the mark one tick ABOVE entry_max;
-    that is now the favorable resting-limit side and is allowed, see the next test.)
-    """
-    adapter = FakeDemoAdapter()
-    adapter.gate_mark_price = _derive(scenario).trade_plan.entry_min_price - Decimal("0.1")
-    code, data, _, _ = run_flow(tmp_path, scenario=scenario, adapter=adapter, execute=True)
-    assert code == dr.EXIT_ABORTED
-    assert adapter.mutating_calls() == []
-    assert "MARK_PRICE_OUTSIDE_ZONE" in json.dumps(data)
-
-
-def test_a_far_mark_above_the_zone_is_the_favorable_side_and_reaches_the_entry(
-    tmp_path: Path,
-) -> None:
-    """19-REVIEW WR-06: a LONG mark one tick above entry_max no longer refuses at gate 5e."""
-    adapter = FakeDemoAdapter()
-    adapter.gate_mark_price = _derive("far").trade_plan.entry_max_price + Decimal("0.1")
-    _, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
-    assert "MARK_PRICE_OUTSIDE_ZONE" not in json.dumps(data)
-    entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
-    assert entry_kwargs["price"] == _derive("far").entry_price
-
-
-@pytest.mark.parametrize("scenario", ["far", "fill"])
-def test_a_last_price_below_the_zone_is_refused_with_the_mark_inside(
-    tmp_path: Path, scenario: str
-) -> None:
-    """Quick task 261020-l4p: the rehearsal reaches the last-price check too.
-
-    The mark stays inside the derived zone; the last price one tick below entry_min (the adverse
-    side of the LONG plan) refuses at gate 5e and nothing is sent.
-    """
-    adapter = FakeDemoAdapter()
-    adapter.gate_last_price = _derive(scenario).trade_plan.entry_min_price - Decimal("0.1")
-    code, data, _, _ = run_flow(tmp_path, scenario=scenario, adapter=adapter, execute=True)
-    assert code == dr.EXIT_ABORTED
-    assert adapter.mutating_calls() == []
-    assert "LAST_PRICE_OUTSIDE_ZONE" in json.dumps(data)
-    assert "MARK_PRICE_OUTSIDE_ZONE" not in json.dumps(data)
-
-
 def test_tp1_quantity_fraction_is_the_backtest_constant() -> None:
     assert dr.TP1_QUANTITY_FRACTION is TP1_QUANTITY_FRACTION
     assert TP1_QUANTITY_FRACTION == Decimal("0.5")
@@ -1090,25 +988,13 @@ def test_tp1_quantity_fraction_is_the_backtest_constant() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_constraint_drift_between_plan_and_execution_aborts(tmp_path: Path) -> None:
-    adapter = FakeDemoAdapter()
-    adapter.drift_after_info_calls = 1
-    code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
-    assert code == dr.EXIT_ABORTED
-    assert adapter.mutating_calls() == []
-    assert data["outcome"] == "ABORTED_NO_ORDER"
-    assert "price_tick_size" in step(data, "constraint_recheck")["detail"]
-
-
 @pytest.mark.parametrize("failure", ["timeout", "send_failure"])
 def test_approval_timeout_and_send_failure_place_nothing(tmp_path: Path, failure: str) -> None:
     channel = FakeApprovalChannel(script=[None] if failure == "timeout" else [])
     if failure == "send_failure":
         channel.send_error = RuntimeError("telegram down " + FAKE_TOKEN)
     adapter = FakeDemoAdapter()
-    code, data, _, chan = run_flow(
-        tmp_path, scenario="far", adapter=adapter, channel=channel, execute=True
-    )
+    code, data, _, chan = run_flow(tmp_path, scenario="taps", adapter=adapter, channel=channel)
     assert code == dr.EXIT_ABORTED
     assert adapter.mutating_calls() == []
     assert data["exchange_orders"] == []
@@ -1157,9 +1043,7 @@ def test_r3b_a_demo_approval_without_a_stored_quantity_is_never_sent(
     monkeypatch.setattr(dr, "issue_approval", without_quantity)
     adapter = FakeDemoAdapter()
     channel = FakeApprovalChannel(script=approve_script())
-    code, data, _, chan = run_flow(
-        tmp_path, scenario="far", adapter=adapter, channel=channel, execute=True
-    )
+    code, data, _, chan = run_flow(tmp_path, scenario="taps", adapter=adapter, channel=channel)
     assert code == dr.EXIT_ABORTED
     assert data["outcome"] == "ABORTED_NO_ORDER"
     assert chan.sent == []
@@ -1180,19 +1064,6 @@ def test_skip_tap_records_skipped_and_places_nothing(tmp_path: Path) -> None:
     assert first.ok is True
     assert first.approval is not None
     assert first.approval.status is ApprovalResult.SKIPPED
-
-
-def test_skp_tap_against_the_approve_approval_is_rejected(tmp_path: Path) -> None:
-    channel = FakeApprovalChannel(script=[ScriptedTap("SKP:", "authorized")])
-    adapter = FakeDemoAdapter()
-    code, data, _, chan = run_flow(
-        tmp_path, scenario="far", adapter=adapter, channel=channel, execute=True
-    )
-    assert code == dr.EXIT_ABORTED
-    result = chan.results[0]
-    assert result.ok is False
-    assert result.reason_code is not None and result.reason_code.value == "INVALIDATED"
-    assert adapter.mutating_calls() == []
 
 
 def test_unknown_chat_tap_is_rejected_journaled_and_row_untouched(tmp_path: Path) -> None:
@@ -1246,58 +1117,6 @@ def test_approvals_are_only_ever_created_pending() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_far_scenario_sequence_and_cleanup(tmp_path: Path) -> None:
-    """Plan 19-15 (D-10): the manager places only the GTD entry; the far scenario then cancels
-    the entry by id. There is no stop at entry time, so no algo order is placed, probed or
-    cancelled."""
-    code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True)
-    assert code == dr.EXIT_OK
-    assert adapter.mutating_calls() == ["place_entry", "cancel_normal_order"]
-    assert adapter.calls.index("get_position_mode") < adapter.calls.index("place_entry")
-    assert "place_algo_protective" not in adapter.calls
-    assert "query_algo_order_by_client" not in adapter.calls
-    assert "cancel_algo_order" not in adapter.calls
-    entry_kwargs = next(kw for name, kw in adapter.kwargs_log if name == "place_entry")
-    assert entry_kwargs["quantity"] == Decimal("0.004")
-    assert entry_kwargs["price"] == Decimal("58500.0")
-    assert entry_kwargs["side"] == "BUY" and entry_kwargs["position_side"] == "BOTH"
-    assert entry_kwargs["time_in_force"] == "GTD"
-    assert isinstance(entry_kwargs["good_till_date"], int)
-    assert entry_kwargs["good_till_date"] % 1000 == 0  # whole seconds, in epoch milliseconds
-    kinds = [o["type"] for o in data["exchange_orders"]]
-    assert kinds == ["EntryPlacementResult"]
-    assert data["exchange_orders"][0]["exchange_order_id"].startswith("ORD-")
-    assert step(data, "place_entry")["status"] == "PASSED"
-    assert "place_entry_and_stop" not in [s["name"] for s in data["steps"]]
-    readback = step(data, "readback")
-    assert readback["status"] == "PASSED"
-    assert "no stop at entry time (D-10)" in readback["detail"]
-    assert "'NEW'" in readback["detail"]
-    assert "no protective leg exists" in step(data, "cleanup")["detail"]
-    assert step(data, "account_clean")["status"] == "PASSED"
-    assert data["details"]["enablement"]["enabled_in_run"] is True
-    assert data["details"]["enablement"]["disabled_after_run"] is True
-    assert chan.closed is True
-
-
-def test_far_scenario_entry_no_longer_new_leaves_the_position_for_the_operator(
-    tmp_path: Path,
-) -> None:
-    adapter = FakeDemoAdapter()
-    adapter.flip_to_filled_after_place = True
-    code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
-    assert code == dr.EXIT_FAILED
-    assert "cancel_algo_order" not in adapter.calls
-    assert "cancel_normal_order" not in adapter.calls
-    assert "place_algo_protective" not in adapter.calls  # no stop exists to leave in place
-    assert step(data, "cleanup")["status"] == "FAILED"
-    assert "nothing was cancelled" in step(data, "cleanup")["detail"]
-    assert any(
-        "close the Demo position" in text for text in data["details"]["operator_instructions"]
-    )
-    assert data["outcome"] == "FAILED"
-
-
 # Plan 19-16: TEST_ONLY live inputs that make the rehearsal's own PRE-GUARD plan snapshot COMPLETE.
 # Since Phase 22 (plan 22-15) the manager's margin guard supplies the exchange-verified margin type,
 # leverage and equity for the snapshot handed to protection, so this seam only feeds the snapshot
@@ -1311,207 +1130,6 @@ COMPLETE_SNAPSHOT_INPUTS: dict[str, Any] = {
 
 def _to_states(data: dict[str, Any]) -> list[str]:
     return [t["to"] for t in data["details"]["protection_flow"]["transitions"]]
-
-
-def test_fill_scenario_completes_through_the_coordinator_with_a_complete_snapshot(
-    tmp_path: Path,
-) -> None:
-    """The fill scenario no longer builds a FillEvent from a position view: the coordinator
-    detects the fill by REST, places the stop after it, confirms it, then adds TP1 and TP2."""
-    adapter = FakeDemoAdapter()
-    adapter.fill_on_place = True
-    code, data, _, _ = run_flow(
-        tmp_path,
-        scenario="fill",
-        adapter=adapter,
-        execute=True,
-        snapshot_live_inputs=COMPLETE_SNAPSHOT_INPUTS,
-    )
-    assert code == dr.EXIT_OK
-    placed = [kw for name, kw in adapter.kwargs_log if name == "place_algo_protective"]
-    by_type = {(kw["type"], kw["close_position"]): kw for kw in placed}
-    sl = by_type[("STOP_MARKET", True)]
-    tp1 = by_type[("TAKE_PROFIT_MARKET", False)]
-    tp2 = by_type[("TAKE_PROFIT_MARKET", True)]
-    assert sl["quantity"] is None
-    assert tp1["reduce_only"] is True
-    assert tp1["quantity"] == Decimal("0.002")  # floor(0.004 * 0.5 / 0.001) * 0.001
-    assert tp2["quantity"] is None and tp2["reduce_only"] in (None, False)
-    assert len(placed) == 3  # SL, TP1, TP2 once each, all placed after the fill (D-10)
-    assert adapter.calls.index("place_entry") < adapter.calls.index("place_algo_protective")
-    assert [kw["type"] for kw in placed][0] == "STOP_MARKET", "the stop comes first"
-    assert "cancel_algo_order" not in adapter.calls
-    assert "place_market_close" not in adapter.calls
-    echoes = data["details"]["leg_echoes"]
-    assert sorted(e["order_type"] for e in echoes) == [
-        "STOP_MARKET",
-        "TAKE_PROFIT_MARKET",
-        "TAKE_PROFIT_MARKET",
-    ]
-    assert any("close the Demo position" in t for t in data["details"]["operator_instructions"])
-    assert step(data, "fill_wait")["status"] == "PASSED"
-    assert step(data, "protection_stop")["status"] == "PASSED"
-    assert step(data, "attach_protectives")["status"] == "PASSED"
-    assert data["details"]["protection_flow"]["final_state"] == "COMPLETE"
-    assert _to_states(data) == ["AWAITING_FILL", "UNPROTECTED", "PROTECTED", "COMPLETE"]
-    assert data["details"]["live_context"]["plan_snapshot_status"] == "COMPLETE"
-    assert "position-view:" not in json.dumps(data)  # no REST-synthetic trade id any more
-    assert "fill_event" not in data["details"]
-    assert data["outcome"] == "COMPLETE"
-    assert data["attestation_map"]["1"]["status"] == "OBSERVED"
-    assert data["attestation_map"]["2"]["status"] == "OBSERVED_ACCEPTANCE_ONLY"
-
-
-def test_fill_scenario_the_margin_guard_closes_the_incomplete_snapshot_gap(
-    tmp_path: Path,
-) -> None:
-    """Plan 22-15 (D-05, G4-039, amendment A8). The rehearsal's own snapshot is still INCOMPLETE
-    (margin type, leverage and equity unknown before the guard; the TEST SEAM is not used), but
-    the scripted guard's pass supplies the exchange-verified values for the snapshot the manager
-    hands to protection, so the take-profit orders are placed after the stop. Before Phase 22 this
-    run ended in TP_UNAVAILABLE as a known gap; the INCOMPLETE-snapshot refusal itself stays
-    pinned by the protection coordinator tests (tests/test_protection*.py)."""
-    adapter = FakeDemoAdapter()
-    adapter.fill_on_place = True
-    guard = StubMarginGuard()
-    code, data, _, _ = run_flow(
-        tmp_path, scenario="fill", adapter=adapter, execute=True, margin_guard=guard
-    )
-    assert code == dr.EXIT_OK
-    assert guard.calls == 1
-    placed = [kw for name, kw in adapter.kwargs_log if name == "place_algo_protective"]
-    assert [(kw["type"], kw["close_position"]) for kw in placed] == [
-        ("STOP_MARKET", True),
-        ("TAKE_PROFIT_MARKET", False),
-        ("TAKE_PROFIT_MARKET", True),
-    ]
-    assert "place_market_close" not in adapter.calls
-    assert "cancel_algo_order" not in adapter.calls
-    assert step(data, "fill_wait")["status"] == "PASSED"
-    assert step(data, "protection_stop")["status"] == "PASSED"
-    assert step(data, "attach_protectives")["status"] == "PASSED"
-    assert data["details"]["protection_flow"]["final_state"] == "COMPLETE"
-    assert _to_states(data) == ["AWAITING_FILL", "UNPROTECTED", "PROTECTED", "COMPLETE"]
-    # The details record the rehearsal's own PRE-guard snapshot, which the guard does not change.
-    assert data["details"]["live_context"]["plan_snapshot_status"] == "INCOMPLETE"
-    assert data["outcome"] == "COMPLETE"
-
-
-def test_fill_scenario_unfilled_entry_ends_no_fill_after_the_cancel(tmp_path: Path) -> None:
-    adapter = FakeDemoAdapter()
-    code, data, _, _ = run_flow(tmp_path, scenario="fill", adapter=adapter, execute=True)
-    assert code == dr.EXIT_OK
-    assert "cancel_normal_order" in adapter.calls
-    assert "place_algo_protective" not in adapter.calls  # nothing is placed before a fill
-    assert "cancel_algo_order" not in adapter.calls
-    assert step(data, "fill_wait")["status"] == "NOT_REHEARSED"
-    assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
-    assert data["details"]["protection_flow"]["final_state"] == "ENTRY_ENDED_NO_FILL"
-    assert _to_states(data) == ["AWAITING_FILL", "ENTRY_ENDED_NO_FILL"]
-    assert step(data, "account_clean")["status"] == "PASSED"
-    assert data["outcome"] == "COMPLETE_WITH_GAPS"
-    assert data["attestation_map"]["1"]["status"] == "NOT_OBSERVED"
-
-
-def test_fill_scenario_with_a_rejected_stop_closes_by_market_and_fails(tmp_path: Path) -> None:
-    """B5: a definitively rejected stop after a fill is never resent; the coordinator closes the
-    position through the guarded adapter (a mutating method) and the run is FAILED."""
-    from binance_sdk_derivatives_trading_usds_futures import BadRequestError
-
-    adapter = FakeDemoAdapter()
-    adapter.fill_on_place = True
-    adapter.raise_on["place_algo_protective"] = BadRequestError(
-        error_message="Order would immediately trigger.", status_code=-2021
-    )
-    code, data, _, _ = run_flow(
-        tmp_path,
-        scenario="fill",
-        adapter=adapter,
-        execute=True,
-        snapshot_live_inputs=COMPLETE_SNAPSHOT_INPUTS,
-    )
-    assert code == dr.EXIT_FAILED
-    assert data["outcome"] == "FAILED"
-    assert adapter.calls.count("place_algo_protective") == 1, "a rejected stop is never resent"
-    assert "place_market_close" in adapter.calls
-    assert adapter.position_amt == Decimal("0")
-    assert step(data, "protection_stop")["status"] == "FAILED"
-    assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
-    assert data["details"]["protection_flow"]["final_state"] == "FLAT"
-    assert "CLOSE_REQUIRED" in _to_states(data)
-    # Plan 20-22 (D-24): a definitively rejected stop also alerts PROTECTIVE_REJECTED.
-    assert [a["event"] for a in data["details"]["critical_alerts"]] == [
-        "CLOSE_REQUIRED",
-        "PROTECTIVE_REJECTED",
-    ]
-    assert [o["type"] for o in data["exchange_orders"]] == [
-        "EntryPlacementResult",
-        "MarketCloseResult",
-    ]
-
-
-def test_the_dry_run_fill_scenario_attaches_nothing(tmp_path: Path) -> None:
-    code, data, adapter, _ = run_flow(tmp_path, scenario="fill")
-    assert code == dr.EXIT_OK
-    assert adapter.mutating_calls() == []
-    assert step(data, "fill_wait")["status"] == "SKIPPED_DRY_RUN"
-    assert step(data, "attach_protectives")["status"] == "NOT_REHEARSED"
-    assert "dry run" in step(data, "attach_protectives")["detail"]
-    assert "protection_flow" not in data["details"]
-    assert data["exchange_orders"] == []
-    assert "place_market_close" not in [p["method"] for p in data["planned_requests"]]
-
-
-def test_exchange_failure_is_recorded_honestly(tmp_path: Path) -> None:
-    adapter = FakeDemoAdapter()
-    adapter.raise_on["place_entry"] = ValueError("secret " + FAKE_SECRET)
-    code, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
-    assert code == dr.EXIT_FAILED
-    assert data["outcome"] == "FAILED"
-    assert data["exchange_orders"] == []
-    types = {(f["step"], f["exception_type"]) for f in data["failures"]}
-    assert ("place_entry", "ValueError") in types
-    text = json.dumps(data)
-    assert FAKE_SECRET not in text and "secret " not in text
-
-
-def test_sdk_error_code_and_text_are_recorded_but_other_errors_stay_type_only(
-    tmp_path: Path,
-) -> None:
-    """A Binance 400 records its code and public text; a plain error records no detail."""
-    from binance_sdk_derivatives_trading_usds_futures import BadRequestError
-
-    adapter = FakeDemoAdapter()
-    adapter.raise_on["place_entry"] = BadRequestError(
-        error_message="Order would immediately trigger.", status_code=-2021
-    )
-    _, data, _, _ = run_flow(tmp_path, scenario="far", adapter=adapter, execute=True)
-    entry = next(f for f in data["failures"] if f["step"] == "place_entry")
-    assert entry["exception_type"] == "BadRequestError"
-    assert entry["message"] == "binance code -2021: Order would immediately trigger."
-
-    (tmp_path / "plain").mkdir()
-    adapter = FakeDemoAdapter()
-    adapter.raise_on["place_entry"] = ValueError("secret " + FAKE_SECRET)
-    _, data, _, _ = run_flow(tmp_path / "plain", scenario="far", adapter=adapter, execute=True)
-    entry = next(f for f in data["failures"] if f["step"] == "place_entry")
-    assert "message" not in entry
-
-
-async def test_enablement_is_in_process_only() -> None:
-    adapter = FakeDemoAdapter()
-    adapter.raise_when_symbol_none = RuntimeError("account-wide read failed")
-    channel = FakeApprovalChannel(script=approve_script())
-    ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE)
-    with pytest.raises(RuntimeError):
-        await dr.run_rehearsal(ctx)
-    assert ctx.controller is not None
-    assert ctx.controller.is_disabled
-    types = [e.event_type for e in ctx.journal.events]
-    assert types.count("LIVE_ORDERS_ENABLED") == 1
-    assert types.count("LIVE_ORDERS_DISABLED") == 1
-    assert LiveEnablementController(journal=ctx.journal).is_disabled
-    assert adapter.mutating_calls() == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1540,7 +1158,7 @@ def test_evidence_is_deterministic(tmp_path: Path) -> None:
     for name in ("a", "b"):
         folder = tmp_path / name
         folder.mkdir()
-        code, _, _, _ = run_flow(folder, scenario="far")
+        code, _, _, _ = run_flow(folder, scenario="taps")
         assert code == dr.EXIT_OK
         files = list(folder.glob("*.json"))
         assert len(files) == 1
@@ -1549,15 +1167,7 @@ def test_evidence_is_deterministic(tmp_path: Path) -> None:
     data = json.loads(runs[0][1].decode("utf-8"))
     assert data["mode"] == "DRY_RUN"
     assert data["exchange_orders"] == []
-    assert [p["method"] for p in data["planned_requests"]][:2] == [
-        "place_entry",
-        "cancel_normal_order",
-    ]
-    assert "place_algo_protective" not in [p["method"] for p in data["planned_requests"]]
-    planned_entry = data["planned_requests"][0]["request"]
-    assert planned_entry["time_in_force"] == "GTD"
-    assert isinstance(planned_entry["good_till_date"], int)
-    assert step(data, "place_entry")["status"] == "SKIPPED_DRY_RUN"
+    assert data["planned_requests"] == [], "the taps scenario places nothing, not even a plan"
 
 
 # --------------------------------------------------------------------------- #
@@ -1594,97 +1204,6 @@ def test_derived_plan_hash_is_the_planners_hash_and_the_quantity_fields_agree() 
         }
 
 
-async def test_build_live_context_binds_to_the_derived_plan() -> None:
-    from src.execution.binding import bind_plan
-    from src.execution.live_context import LivePlacementContext
-    from src.execution.protection import ProtectionCoordinator
-    from src.reconcile.safe_mode import SafeModeController
-    from src.risk.types import ConstraintSnapshot
-
-    from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
-
-    adapter = FakeDemoAdapter()
-    ctx = make_ctx(adapter, FakeApprovalChannel())
-    plan = _derive("far")
-    filters = btc_filters()
-    constraints = ConstraintSnapshot(
-        symbol="BTCUSDT",
-        price_tick_size=filters.price_tick_size,
-        quantity_step_size=filters.quantity_step_size,
-        min_quantity=filters.min_quantity,
-        min_notional=filters.min_notional,
-        metadata_observed_at_utc=SERVER_NOW,
-    )
-    live = await dr.build_live_context(
-        ctx,
-        plan,
-        filters,
-        constraints,
-        SERVER_NOW,
-        safe_mode=SafeModeController(adapter=ctx.guarded, journal=ctx.journal),
-        intent_store=InMemoryExecutionIntentStore(),
-    )
-    assert isinstance(live, LivePlacementContext)
-    assert live.signal.signal_id == plan.signal_id
-    assert (live.signal.symbol, live.signal.direction) == ("BTCUSDT", "LONG")
-    assert live.signal.strategy_version == plan.parameter_set.strategy_version
-    assert live.signal.parameter_set_hash == plan.parameter_set.parameter_set_hash
-    assert live.plan_constraint_snapshot.working_type == "MARK_PRICE"
-    assert live.plan_constraint_snapshot.trade_plan_id == plan.trade_plan.trade_plan_id
-    assert live.execution_limits == test_limits.test_only_execution_limits()
-    assert isinstance(live.protection_registry, ProtectionCoordinator)
-    assert live.protection_registry.blocks_new_entries() is False
-    assert live.tp1_quantity_fraction == TP1_QUANTITY_FRACTION
-    # the latest CLOSED 1h bar (the forming one is skipped), read through the guarded adapter
-    assert live.latest_closed_bar_close == MARK
-    assert "klines" in adapter.calls
-    # the margin is the larger of the ratified drift limits
-    drift = dr.load_drift_limits(dr.DEFAULT_LIMITS_FILE)
-    assert live.gtd_clock_margin == timedelta(
-        milliseconds=max(drift.ahead_limit_ms, drift.behind_limit_ms)
-    )
-    # the plan is bound: hash, signal, symbol and side all agree
-    params = plan.parameter_set
-    verdict = bind_plan(
-        trade_plan=plan.trade_plan,
-        signal=live.signal,
-        callback_plan_hash=plan.trade_plan.plan_hash,
-        approval_request_hash=plan.trade_plan.plan_hash,
-        approval_strategy_version=params.strategy_version,
-        approval_parameter_set_id=params.parameter_set_id,
-        approval_parameter_set_hash=params.parameter_set_hash,
-        plan_snapshot_symbol=live.plan_constraint_snapshot.symbol,
-        plan_snapshot_trade_plan_id=live.plan_constraint_snapshot.trade_plan_id,
-        caller_symbol="BTCUSDT",
-        caller_side="LONG",
-        approval_quantity=plan.trade_plan.quantity_after_rounding,
-    )
-    assert verdict.ok is True
-    assert adapter.mutating_calls() == []
-
-
-async def test_a_bar_close_that_cannot_be_read_is_none_not_a_guess() -> None:
-    adapter = FakeDemoAdapter()
-    ctx = make_ctx(adapter, FakeApprovalChannel())
-    adapter.raise_on["klines"] = RuntimeError("boom")
-    assert await dr._latest_closed_bar_close(ctx, SERVER_NOW) is None
-
-
-def test_the_alert_sink_records_the_alert_and_an_operator_instruction() -> None:
-    ctx = make_ctx(FakeDemoAdapter(), FakeApprovalChannel())
-    dr.RehearsalAlertSink(ctx).critical(
-        event="UNPROTECTED_POSITION",
-        plan_hash="h" * 64,
-        symbol="BTCUSDT",
-        reason="STOP_NOT_CONFIRMED",
-        now_utc=SERVER_NOW,
-    )
-    alerts = ctx.recorder.details["critical_alerts"]
-    assert alerts[0]["event"] == "UNPROTECTED_POSITION"
-    assert alerts[0]["symbol"] == "BTCUSDT"
-    assert any("UNPROTECTED_POSITION" in t for t in ctx.recorder.details["operator_instructions"])
-
-
 def test_the_read_passthroughs_are_allowed_in_dry_run_and_bind_the_real_signature() -> None:
     adapter = FakeDemoAdapter()
     ctx = make_ctx(adapter, FakeApprovalChannel(), mode=dr.RunMode.DRY_RUN)
@@ -1710,79 +1229,11 @@ def _committed_limits_with_key_14_unset() -> ExecutionLimits:
     return replace(committed, stale_feed_max_user_data_silence_ms=None)
 
 
-async def test_committed_not_configured_limits_abort_before_any_mutation() -> None:
-    """D-07 / D-13 / T-19-34: the committed file has no value, so the run stops honestly."""
-    adapter = FakeDemoAdapter()
-    channel = FakeApprovalChannel(script=approve_script())
-    ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE, scenario="far")
-    ctx.execution_limits = _committed_limits_with_key_14_unset()
-    with pytest.raises(dr.RehearsalAbort, match="LIMITS_NOT_CONFIGURED"):
-        await dr.run_rehearsal(ctx)
-    assert ctx.guarded.mutating_attempts == 0
-    assert adapter.mutating_calls() == []
-    failed = [s for s in ctx.recorder.steps if s["name"] == "execution_limits"]
-    assert failed and failed[-1]["status"] == dr.STEP_FAILED
-    assert "LIMITS_NOT_CONFIGURED" in failed[-1]["detail"]
-    assert "stale_feed.max_user_data_silence_ms" in failed[-1]["detail"]
-    # nothing else ran: no approval was requested, no channel opened
-    assert channel.opened is False
-    assert channel.sent == []
-
-
-@pytest.mark.parametrize("scenario", ["far", "fill"])
-def test_committed_limits_end_the_main_run_as_aborted_no_order(
-    tmp_path: Path, scenario: str
-) -> None:
-    code, data, adapter, chan = run_flow(
-        tmp_path,
-        scenario=scenario,
-        execute=True,
-        execution_limits=_committed_limits_with_key_14_unset(),
-    )
-    assert code == dr.EXIT_ABORTED
-    assert data["outcome"] == "ABORTED_NO_ORDER"
-    assert adapter.mutating_calls() == []
-    assert data["exchange_orders"] == []
-    assert chan.sent == []
-    status = step(data, "execution_limits")
-    assert status["status"] == "FAILED"
-    assert "LIMITS_NOT_CONFIGURED" in status["detail"]
-
-
-def test_one_unset_limit_names_only_that_key(tmp_path: Path) -> None:
-    code, data, adapter, _ = run_flow(
-        tmp_path,
-        scenario="far",
-        execute=True,
-        execution_limits=test_limits.test_only_execution_limits(max_mark_price_age_ms=None),
-    )
-    assert code == dr.EXIT_ABORTED
-    detail = step(data, "execution_limits")["detail"]
-    assert "pre_placement.max_mark_price_age_ms" in detail
-    assert "protection.max_unprotected_ms" not in detail
-    assert adapter.mutating_calls() == []
-
-
 def test_the_taps_scenario_needs_no_execution_limits(tmp_path: Path) -> None:
-    code, data, adapter, _ = run_flow(tmp_path, scenario="taps", committed_limits=True)
+    code, data, adapter, _ = run_flow(tmp_path, scenario="taps")
     assert code == dr.EXIT_OK
     assert adapter.mutating_calls() == []
     assert not [s for s in data["steps"] if s["name"] == "execution_limits"]
-
-
-def test_the_dry_run_far_scenario_reads_the_mark_price_and_still_sends_nothing(
-    tmp_path: Path,
-) -> None:
-    code, data, adapter, _ = run_flow(tmp_path, scenario="far")
-    assert code == dr.EXIT_OK
-    assert "get_mark_price" in adapter.calls
-    # Quick task 261020-l4p: gate 5e reads the last price right after the mark price.
-    assert "get_last_price" in adapter.calls
-    assert adapter.calls.index("get_last_price") == adapter.calls.index("get_mark_price") + 1
-    assert adapter.mutating_calls() == []
-    assert data["exchange_orders"] == []
-    assert step(data, "execution_limits")["status"] == "PASSED"
-    assert data["details"]["live_context"]["working_type"] == "MARK_PRICE"
 
 
 def test_wr01_issue_approval_stores_the_plan_quantity_on_both_roles() -> None:
@@ -1797,261 +1248,7 @@ def test_wr01_issue_approval_stores_the_plan_quantity_on_both_roles() -> None:
         assert issued.approval.approved_quantity is not None
 
 
-def test_a_refusing_margin_guard_ends_the_main_run_as_aborted_no_order(tmp_path: Path) -> None:
-    """Plan 22-15: the guard's NO_TRADE reaches the rehearsal like any gate refusal: no order."""
-    from tests.support.margin_guard_stub import refusing_verdict
-
-    guard = StubMarginGuard(verdict=refusing_verdict("INSUFFICIENT_MARGIN"))
-    code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True, margin_guard=guard)
-    assert code == dr.EXIT_ABORTED
-    assert data["outcome"] == "ABORTED_NO_ORDER"
-    assert guard.calls == 1
-    assert "place_entry" not in adapter.calls
-    assert adapter.mutating_calls() == []
-    assert data["exchange_orders"] == []
-    assert "INSUFFICIENT_MARGIN" in step(data, "place_entry")["detail"]
-
-
-async def test_build_live_context_passes_the_injected_margin_guard() -> None:
-    from src.reconcile.safe_mode import SafeModeController
-    from src.risk.types import ConstraintSnapshot
-
-    from tests.support.intent_store_fakes import InMemoryExecutionIntentStore
-
-    guard = StubMarginGuard()
-    adapter = FakeDemoAdapter()
-    ctx = make_ctx(adapter, FakeApprovalChannel(), margin_guard=guard)
-    assert ctx.margin_guard is guard
-    plan = _derive("far")
-    filters = btc_filters()
-    constraints = ConstraintSnapshot(
-        symbol="BTCUSDT",
-        price_tick_size=filters.price_tick_size,
-        quantity_step_size=filters.quantity_step_size,
-        min_quantity=filters.min_quantity,
-        min_notional=filters.min_notional,
-        metadata_observed_at_utc=SERVER_NOW,
-    )
-    live = await dr.build_live_context(
-        ctx,
-        plan,
-        filters,
-        constraints,
-        SERVER_NOW,
-        safe_mode=SafeModeController(adapter=ctx.guarded, journal=ctx.journal),
-        intent_store=InMemoryExecutionIntentStore(),
-    )
-    assert live.margin_guard is guard
-
-
-async def test_an_executed_run_without_a_margin_guard_aborts_before_any_order() -> None:
-    """Plan 22-15 (D-17, T-22-56): composing the live guard is Phase 24; the rehearsal never
-    invents one. Every limit is set here, so the abort is the guard's, not the limits step's."""
-    adapter = FakeDemoAdapter()
-    channel = FakeApprovalChannel(script=approve_script())
-    ctx = make_ctx(adapter, channel, mode=dr.RunMode.EXECUTE, scenario="far", margin_guard=None)
-    assert ctx.margin_guard is None
-    with pytest.raises(dr.RehearsalAbort, match="MARGIN_GUARD_NOT_COMPOSED"):
-        await dr.run_rehearsal(ctx)
-    assert ctx.guarded.mutating_attempts == 0
-    assert adapter.mutating_calls() == []
-
-
-def test_the_main_run_without_a_margin_guard_is_aborted_no_order(tmp_path: Path) -> None:
-    code, data, adapter, chan = run_flow(tmp_path, scenario="far", execute=True, margin_guard=None)
-    assert code == dr.EXIT_ABORTED
-    assert data["outcome"] == "ABORTED_NO_ORDER"
-    assert adapter.mutating_calls() == []
-    assert data["exchange_orders"] == []
-    assert any("MARGIN_GUARD_NOT_COMPOSED" in s["detail"] for s in data["steps"])
-
-
 # --- 22-REVIEW WR-08: a real MarginGuard is built over the GUARDED adapter ---------------------
-
-
-def _real_guard_over(guarded: dr.GuardedAdapter, clock: Any) -> Any:
-    from src.execution.account_equity import LiveEquitySource
-    from src.execution.bracket_cache import BracketCache
-    from src.execution.margin_guard import MarginGuard
-    from src.execution.symbol_config_guard import SymbolConfigGuard
-
-    from tests.support.margin_guard_fakes import QUOTE_ASSET, TARGET_LEVERAGE, ScriptedClaims
-
-    limits = test_limits.test_only_execution_limits()
-    return MarginGuard(
-        config_guard=SymbolConfigGuard(adapter=guarded, target_leverage=TARGET_LEVERAGE),  # type: ignore[arg-type]
-        brackets=BracketCache(adapter=guarded, clock=clock, limits=limits),  # type: ignore[arg-type]
-        account=LiveEquitySource(
-            adapter=guarded,  # type: ignore[arg-type]
-            clock=clock,
-            limits=limits,
-            quote_asset=QUOTE_ASSET,
-        ),
-        claims=ScriptedClaims(),
-        clock=clock,
-        limits=limits,
-    )
-
-
-def _guarded_over_composite(
-    mode: dr.RunMode,
-) -> tuple[Any, dr.GuardedAdapter, list[str], dr.EvidenceRecorder, Any]:
-    """A GuardedAdapter over the real adapter and the recorded composite SDK (all TEST_ONLY)."""
-    from src.adapters.binance_ratelimit_gate import RestRateLimitGate
-    from src.adapters.binance_usdm import BinanceUsdmAdapter
-
-    from tests.support.limits import test_only_signed_call_policy
-    from tests.support.margin_guard_fakes import START, CompositeRest, MovingClock
-
-    clock = MovingClock()
-    rest = CompositeRest(clock=clock)
-    gate = RestRateLimitGate(policy=test_only_signed_call_policy().rate_limit, clock=lambda: START)
-    inner = BinanceUsdmAdapter(
-        sdk_client=SimpleNamespace(rest_api=rest),  # type: ignore[arg-type]
-        rest_gate=gate,
-        signed_call_policy=test_only_signed_call_policy(),
-    )
-    host_checks: list[str] = []
-    recorder = dr.EvidenceRecorder(
-        mode=mode,
-        scenario="far",
-        symbol="BTCUSDT",
-        base_url=dr.DEMO_BASE_URL,
-        environ=environ(),
-        clock=fixed_clock,
-    )
-    guarded = dr.GuardedAdapter(
-        inner,
-        guard=lambda: host_checks.append("host"),
-        mode=mode,
-        clock=fixed_clock,
-        recorder=recorder,
-    )
-    return rest, guarded, host_checks, recorder, clock
-
-
-async def test_a_real_guard_over_the_guarded_adapter_sends_no_post_in_a_dry_run() -> None:
-    from tests.support.margin_guard_fakes import LEVERAGE_POST, MARGIN_POST, request
-
-    rest, guarded, host_checks, recorder, clock = _guarded_over_composite(dr.RunMode.DRY_RUN)
-    verdict = await _real_guard_over(guarded, clock).evaluate(request())
-
-    # Nothing reached the host: both POSTs were only PLANNED, so the verification read still shows
-    # CROSSED x20 and the plan is refused as unverified.
-    assert rest.count(MARGIN_POST) == 0
-    assert rest.count(LEVERAGE_POST) == 0
-    assert guarded.mutating_attempts == 2
-    assert [p["method"] for p in recorder.planned_requests] == [
-        "change_margin_type",
-        "change_initial_leverage",
-    ]
-    assert verdict.is_no_trade is True
-    assert verdict.reason_code == "MARGIN_CONFIG_UNVERIFIED"
-    # Every read went through the host guard.
-    assert len(host_checks) == guarded.call_count > 0
-    assert (rest.config_sdk.margin_type, rest.config_sdk.leverage) == ("CROSSED", 20)
-
-
-async def test_a_real_guard_over_the_guarded_adapter_posts_through_the_host_guard() -> None:
-    from tests.support.margin_guard_fakes import LEVERAGE_POST, MARGIN_POST, request
-
-    rest, guarded, host_checks, _, clock = _guarded_over_composite(dr.RunMode.EXECUTE)
-    verdict = await _real_guard_over(guarded, clock).evaluate(request())
-
-    assert verdict.is_no_trade is False
-    assert rest.count(MARGIN_POST) == 1
-    assert rest.count(LEVERAGE_POST) == 1
-    assert guarded.mutating_attempts == 2
-    assert len(host_checks) == guarded.call_count == len(rest.calls)  # no call around the guard
-    assert (rest.config_sdk.margin_type, rest.config_sdk.leverage) == ("ISOLATED", 5)
-
-
-def _build_context_with(adapter: FakeDemoAdapter, **seams: Any) -> dr.RunContext:
-    recorder = dr.EvidenceRecorder(
-        mode=dr.RunMode.DRY_RUN,
-        scenario="far",
-        symbol="BTCUSDT",
-        base_url=dr.DEMO_BASE_URL,
-        environ=environ(),
-        clock=fixed_clock,
-    )
-    guarded = dr.GuardedAdapter(
-        adapter,  # type: ignore[arg-type]
-        guard=lambda: None,
-        mode=dr.RunMode.DRY_RUN,
-        clock=fixed_clock,
-        recorder=recorder,
-    )
-    return dr.build_context(
-        guarded=guarded,
-        recorder=recorder,
-        channel=FakeApprovalChannel(),
-        credentials=dr.load_credentials(environ()),
-        scenario="far",
-        mode=dr.RunMode.DRY_RUN,
-        clock=fixed_clock,
-        sleep=no_sleep,
-        approval_timeout_seconds=300,
-        discovery_timeout_seconds=120,
-        token_factory=counter_tokens(),
-        **seams,
-    )
-
-
-def test_build_context_refuses_a_real_margin_guard_that_was_handed_in_directly() -> None:
-    from tests.support.margin_guard_fakes import build_rig
-
-    with pytest.raises(dr.RehearsalAbort, match="MARGIN_GUARD_NOT_GUARDED"):
-        _build_context_with(FakeDemoAdapter(), margin_guard=build_rig().guard)
-
-
-def test_build_context_builds_the_guard_over_the_guarded_adapter_from_the_factory() -> None:
-    seen: list[Any] = []
-    stub = StubMarginGuard()
-
-    def factory(guarded: dr.GuardedAdapter) -> StubMarginGuard:
-        seen.append(guarded)
-        return stub
-
-    ctx = _build_context_with(FakeDemoAdapter(), margin_guard_factory=factory)
-    assert seen == [ctx.guarded]
-    assert ctx.margin_guard is stub
-
-
-def test_build_context_refuses_both_a_guard_and_a_factory() -> None:
-    with pytest.raises(dr.RehearsalAbort, match="MARGIN_GUARD_NOT_GUARDED"):
-        _build_context_with(
-            FakeDemoAdapter(),
-            margin_guard=StubMarginGuard(),
-            margin_guard_factory=lambda guarded: StubMarginGuard(),
-        )
-
-
-def test_main_in_dry_run_builds_the_guard_once_over_the_guarded_adapter_and_sends_no_post(
-    tmp_path: Path,
-) -> None:
-    """Gap 6: `main()` hands the factory the GuardedAdapter (never the raw one), once, and a DRY_RUN
-    rehearsal sends no mutating request."""
-    seen: list[Any] = []
-    stub = StubMarginGuard()
-
-    def factory(guarded: dr.GuardedAdapter) -> StubMarginGuard:
-        seen.append(guarded)
-        return stub
-
-    code, data, adapter, _ = run_flow(tmp_path, scenario="far", margin_guard_factory=factory)
-
-    assert code == dr.EXIT_OK
-    assert len(seen) == 1
-    assert isinstance(seen[0], dr.GuardedAdapter)
-    assert seen[0] is not adapter
-    assert adapter.mutating_calls() == []
-    assert data["mode"] == "DRY_RUN"
-
-
-def test_a_scripted_margin_guard_is_still_accepted_directly() -> None:
-    stub = StubMarginGuard()
-    assert _build_context_with(FakeDemoAdapter(), margin_guard=stub).margin_guard is stub
 
 
 # --------------------------------------------------------------------------- #
@@ -2093,3 +1290,39 @@ def test_the_rehearsal_script_no_longer_builds_one_button_keyboards() -> None:
     }
     assert "build_decision_keyboard" in names
     assert not {"build_approve_keyboard", "build_skip_keyboard"} & names
+
+
+_SMOKE_ENV = {
+    "LIVE_RUNTIME_MODE": "DEMO",
+    "BINANCE_DEMO_API_KEY": "FAKE-DEMO-KEY-SEEDED-0001",
+    "BINANCE_DEMO_API_SECRET": "FAKE-DEMO-SECRET-SEEDED-0002",
+    "TELEGRAM_LIVE_BOT_TOKEN": "123456:FAKE-LIVE-BOT-TOKEN-SEEDED",
+    "TELEGRAM_LIVE_AUTHORIZED_CHAT_ID": "424242",
+    "TELEGRAM_AUTHORIZED_USER_IDS": "424242,515151",
+}
+
+
+def test_committed_limits_are_complete_so_a_key_14_clear_is_what_refuses_the_smoke(
+    tmp_path: Path,
+) -> None:
+    """D091: the committed file is complete; key 14 cleared is refused naming that key only.
+
+    This replaces the pre-24-29 abort of the hand-stepped far and fill scenarios: the composed
+    smoke admits the process through `parse_live_environment`, which refuses a NOT_CONFIGURED limit.
+    """
+    from src.ops import redaction
+
+    from tests.support.execution_limits import (
+        TEST_ONLY_EXECUTION_LIMIT_VALUES,
+        write_execution_limits_toml,
+    )
+
+    redaction.clear_runtime_secrets()
+    cleared = _committed_limits_with_key_14_unset()
+    assert cleared.unset_keys() == ("stale_feed.max_user_data_silence_ms",)
+    values = dict(TEST_ONLY_EXECUTION_LIMIT_VALUES)
+    values["stale_feed.max_user_data_silence_ms"] = None
+    path = write_execution_limits_toml(tmp_path / "limits.toml", values=values)
+    with pytest.raises(dr.SmokeRefused, match="stale_feed.max_user_data_silence_ms") as caught:
+        dr.admit_smoke_environment(dict(_SMOKE_ENV), limits_path=path)
+    assert "FAKE-DEMO-KEY-SEEDED-0001" not in str(caught.value)

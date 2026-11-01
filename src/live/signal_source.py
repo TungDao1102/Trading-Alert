@@ -317,6 +317,10 @@ class DemoSmokeSignalSource:
     def pending(self) -> int:
         return len(self._queue)
 
+    def peek(self) -> SignalRequest | None:
+        """The oldest queued request without taking it (the Demo smoke reads its ids, 24-29)."""
+        return self._queue[0] if self._queue else None
+
     def inject(self, request: SignalRequest) -> None:
         """Queue one request (the smoke feeds the source; nothing is persisted or sent here)."""
         self._queue.append(request)
