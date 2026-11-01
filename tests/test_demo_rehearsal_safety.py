@@ -328,7 +328,7 @@ def test_runner_never_opens_an_environment_file(
     monkeypatch.setattr(builtins, "open", spy_open)
     monkeypatch.setattr(pathlib.Path, "open", spy_path_open)
     monkeypatch.setattr(pathlib.Path, "read_text", spy_read_text)
-    code, _ = run_main(["--scenario", "far"], tmp_path)
+    code, _ = run_main(["--scenario", "taps"], tmp_path)
     assert code == 0
 
 
@@ -537,16 +537,16 @@ def test_execute_requires_tty_and_exact_phrase(tmp_path: Path) -> None:
         raise EOFError
 
     cases: list[tuple[bool, Callable[[str], str] | None]] = [
-        (False, lambda _p: "DEMO FAR BTCUSDT"),
+        (False, lambda _p: "DEMO SMOKE BTCUSDT"),
         (True, raises_eof),
-        (True, lambda _p: "demo far btcusdt"),
-        (True, lambda _p: "DEMO FAR BTCUSDT please"),
+        (True, lambda _p: "demo smoke btcusdt"),
+        (True, lambda _p: "DEMO SMOKE BTCUSDT please"),
         (True, lambda _p: ""),
     ]
     for is_tty, confirmation in cases:
         factory = CountingFactory()
         code, _ = run_main(
-            ["--scenario", "far", "--execute"],
+            ["--scenario", "smoke", "--execute"],
             tmp_path,
             factory,
             is_tty=is_tty,
@@ -557,18 +557,20 @@ def test_execute_requires_tty_and_exact_phrase(tmp_path: Path) -> None:
         assert factory.inner.calls == []
     assert list(tmp_path.iterdir()) == []
 
+    # The exact phrase on a terminal passes the gate; the composed smoke then admits the live
+    # process's own environment (LIVE_RUNTIME_MODE=DEMO and the live names). This one has none,
+    # so the run is refused before any adapter, SDK object or network call (plan 24-29).
     factory = CountingFactory()
     code, _ = run_main(
-        ["--scenario", "far", "--execute"],
+        ["--scenario", "smoke", "--execute"],
         tmp_path,
         factory,
         is_tty=True,
-        confirmation=lambda _p: "DEMO FAR BTCUSDT",
+        confirmation=lambda _p: "DEMO SMOKE BTCUSDT",
     )
-    assert code == 0
-    assert factory.builds == 1
-    written = list(tmp_path.glob("09-DEMO-REHEARSAL-EVIDENCE-far-*.json"))
-    assert len(written) == 1
+    assert code == dr.EXIT_REFUSED
+    assert factory.builds == 0
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_execute_with_the_taps_scenario_is_a_usage_error(tmp_path: Path) -> None:
@@ -594,7 +596,7 @@ def test_no_host_symbol_or_base_url_option_exists(tmp_path: Path) -> None:
 def test_missing_credentials_refuse_before_any_adapter_is_built(tmp_path: Path) -> None:
     env = fake_environ()
     del env["BINANCE_DEMO_API_SECRET"]
-    code, factory = run_main(["--scenario", "far"], tmp_path, environ=env)
+    code, factory = run_main(["--scenario", "taps"], tmp_path, environ=env)
     assert code == dr.EXIT_REFUSED
     assert factory.builds == 0
 
@@ -605,7 +607,7 @@ def test_missing_user_allow_list_refuses_before_any_adapter_is_built(
     """Phase 23 (D-02): no allow-list, no rehearsal; the refusal names the variable only."""
     env = fake_environ()
     del env["TELEGRAM_AUTHORIZED_USER_IDS"]
-    code, factory = run_main(["--scenario", "far"], tmp_path, environ=env)
+    code, factory = run_main(["--scenario", "taps"], tmp_path, environ=env)
     assert code == dr.EXIT_REFUSED
     assert factory.builds == 0
     assert "TELEGRAM_AUTHORIZED_USER_IDS" in capsys.readouterr().err
@@ -620,7 +622,7 @@ def test_missing_limits_file_refuses_before_any_adapter_is_built(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     missing = tmp_path / "absent-limits.toml"
-    code, factory = run_main(["--scenario", "far", "--limits-file", str(missing)], tmp_path)
+    code, factory = run_main(["--scenario", "taps", "--limits-file", str(missing)], tmp_path)
     assert code == dr.EXIT_REFUSED
     assert factory.builds == 0
     err = capsys.readouterr().err
@@ -634,7 +636,7 @@ def test_invalid_limits_file_refuses_and_names_the_path_only(
 ) -> None:
     broken = tmp_path / "broken-limits.toml"
     broken.write_text("[signed_calls]\nrecv_window_ms = \n", encoding="utf-8")
-    code, factory = run_main(["--scenario", "far", "--limits-file", str(broken)], tmp_path)
+    code, factory = run_main(["--scenario", "taps", "--limits-file", str(broken)], tmp_path)
     assert code == dr.EXIT_REFUSED
     assert factory.builds == 0
     err = capsys.readouterr().err
@@ -819,21 +821,21 @@ def test_live_orders_stay_disabled_by_default(tmp_path: Path) -> None:
     assert journal.events == []
     # The rehearsal runner (tracer path) never enables live orders: nothing mutating is sent
     # and its evidence carries no enablement record (review WR-11).
-    code, factory = run_main(["--scenario", "far"], tmp_path)
+    code, factory = run_main(["--scenario", "taps"], tmp_path)
     assert code == 0
     assert not set(factory.inner.calls) & set(MUTATING_METHODS)
-    (written,) = tmp_path.glob("09-DEMO-REHEARSAL-DRYRUN-far-*.json")
+    (written,) = tmp_path.glob("09-DEMO-REHEARSAL-DRYRUN-taps-*.json")
     data = json.loads(written.read_text(encoding="utf-8"))
     assert "enablement" not in data.get("details", {})
     assert data["exchange_orders"] == []
 
 
 def test_tracer_dry_run_main_end_to_end(tmp_path: Path) -> None:
-    code, factory = run_main(["--scenario", "far"], tmp_path)
+    code, factory = run_main(["--scenario", "taps"], tmp_path)
     assert code == 0
     assert factory.builds == 1
     assert not set(factory.inner.calls) & set(MUTATING_METHODS)
-    written = list(tmp_path.glob("09-DEMO-REHEARSAL-DRYRUN-far-*.json"))
+    written = list(tmp_path.glob("09-DEMO-REHEARSAL-DRYRUN-taps-*.json"))
     assert len(written) == 1
     data = json.loads(written[0].read_text(encoding="utf-8"))
     assert data["schema"] == "demo-rehearsal-evidence/schema-1"
@@ -859,8 +861,142 @@ def test_tracer_fails_closed_when_btcusdt_is_not_a_trading_perpetual(tmp_path: P
 
     factory = CountingFactory()
     factory.inner = Halted()
-    code, _ = run_main(["--scenario", "far"], tmp_path, factory)
+    code, _ = run_main(["--scenario", "taps"], tmp_path, factory)
     assert code == dr.EXIT_ABORTED == 3
     data = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
     assert data["outcome"] == "ABORTED_NO_ORDER"
     assert data["exchange_orders"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-29: the guards of the composed smoke (T-24-91, T-24-92, T-24-93).
+# --------------------------------------------------------------------------- #
+
+SMOKE_ENV = {
+    "LIVE_RUNTIME_MODE": "DEMO",
+    "BINANCE_DEMO_API_KEY": "FAKE-DEMO-KEY-SEEDED-0001",
+    "BINANCE_DEMO_API_SECRET": "FAKE-DEMO-SECRET-SEEDED-0002",
+    "TELEGRAM_LIVE_BOT_TOKEN": "123456:FAKE-LIVE-BOT-TOKEN-SEEDED",
+    "TELEGRAM_LIVE_AUTHORIZED_CHAT_ID": "424242",
+    "TELEGRAM_AUTHORIZED_USER_IDS": "424242,515151",
+}
+
+
+@pytest.fixture
+def _clean_runtime_secrets() -> None:
+    from src.ops import redaction
+
+    redaction.clear_runtime_secrets()
+
+
+def test_the_smoke_admits_a_complete_demo_environment(_clean_runtime_secrets: None) -> None:
+    config = dr.admit_smoke_environment(dict(SMOKE_ENV))
+    assert config.mode.value == "DEMO"
+    assert config.limits.unset_keys() == ()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"LIVE_RUNTIME_MODE": "LIVE"},
+        {"LIVE_RUNTIME_MODE": "TESTNET"},
+        {"BINANCE_LIVE_API_KEY": "FAKE-LIVE-KEY-SEEDED-0003"},
+        {"BINANCE_LIVE_API_SECRET": "FAKE-LIVE-SECRET-SEEDED-0004"},
+        {"TELEGRAM_BOT_TOKEN": "654321:FAKE-SHADOW-BOT-TOKEN-SEEDED"},
+    ],
+)
+def test_live_credentials_a_live_mode_or_the_shadow_bot_refuse_the_smoke(
+    change: dict[str, str], _clean_runtime_secrets: None
+) -> None:
+    with pytest.raises(dr.SmokeRefused) as caught:
+        dr.admit_smoke_environment({**SMOKE_ENV, **change})
+    for value in change.values():
+        if "SEEDED" in value:
+            assert value not in str(caught.value)
+
+
+def test_a_missing_variable_is_named_by_the_refusal_and_never_its_value(
+    _clean_runtime_secrets: None,
+) -> None:
+    env = dict(SMOKE_ENV)
+    del env["TELEGRAM_LIVE_BOT_TOKEN"]
+    with pytest.raises(dr.SmokeRefused, match="TELEGRAM_LIVE_BOT_TOKEN"):
+        dr.admit_smoke_environment(env)
+
+
+def test_the_demo_sdk_factory_wraps_the_one_place_a_client_is_made(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.adapters import binance_client
+    from src.adapters.binance_client import Environment
+
+    def bundle_for(base_path: str) -> Any:
+        rest = SimpleNamespace(configuration=SimpleNamespace(base_path=base_path))
+        return SimpleNamespace(client=SimpleNamespace(rest_api=rest))
+
+    built: list[dict[str, Any]] = []
+
+    def fake_build(**kwargs: Any) -> Any:
+        built.append(kwargs)
+        return bundle_for(dr.DEMO_BASE_URL)
+
+    monkeypatch.setattr(binance_client, "build_sdk_client", fake_build)
+    assert dr.demo_guarded_sdk_factory(environment=Environment.DEMO, surfaces=frozenset())
+    assert len(built) == 1
+
+    # LIVE (or any other environment) never reaches the SDK builder.
+    for environment in (Environment.LIVE, Environment.TESTNET):
+        with pytest.raises(dr.DemoHostViolation):
+            dr.demo_guarded_sdk_factory(environment=environment, surfaces=frozenset())
+    assert len(built) == 1
+
+    # A client whose host is not the Demo host is refused after the build.
+    monkeypatch.setattr(
+        binance_client, "build_sdk_client", lambda **_k: bundle_for("https://fapi.binance.com")
+    )
+    with pytest.raises(dr.DemoHostViolation):
+        dr.demo_guarded_sdk_factory(environment=Environment.DEMO, surfaces=frozenset())
+
+
+def test_the_smoke_path_has_no_rehearsal_sink_and_no_hand_stepped_protection() -> None:
+    text = Path(dr.__file__).read_text(encoding="utf-8")
+    assert "RehearsalAlertSink(" not in text
+    assert "_drive_protection" not in text
+    assert "build_wiring" not in text or "default_assemble" in text
+    assert "ProtectionCoordinator(" not in text and "MarketEmergencyCloser(" not in text
+
+
+def test_a_refused_smoke_environment_writes_no_evidence_and_builds_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], _clean_runtime_secrets: None
+) -> None:
+    built: list[object] = []
+    env = {**SMOKE_ENV, "LIVE_RUNTIME_MODE": "LIVE"}
+    code = dr.main(
+        ["--scenario", "smoke", "--execute"],
+        environ=env,
+        is_tty=lambda: True,
+        read_confirmation=lambda _p: "DEMO SMOKE BTCUSDT",
+        evidence_dir=tmp_path,
+        adapter_factory=lambda creds: built.append(creds),  # type: ignore[arg-type,return-value]
+    )
+    assert code == dr.EXIT_REFUSED
+    assert built == []
+    assert list(tmp_path.iterdir()) == []
+    assert "LIVE" in capsys.readouterr().err
+
+
+def test_execute_without_a_terminal_or_the_exact_phrase_refuses_before_admission(
+    tmp_path: Path,
+) -> None:
+    for is_tty, typed in ((False, "DEMO SMOKE BTCUSDT"), (True, "yes"), (True, "")):
+        code = dr.main(
+            ["--scenario", "smoke", "--execute"],
+            environ=dict(SMOKE_ENV),
+            is_tty=lambda tty=is_tty: tty,
+            read_confirmation=lambda _p, text=typed: text,
+            evidence_dir=tmp_path,
+        )
+        assert code == dr.EXIT_REFUSED
+    assert list(tmp_path.iterdir()) == []
