@@ -1342,6 +1342,30 @@ async def test_refusal_before_send_is_no_trade_without_probe_retry_or_safe_mode(
     assert entry.outcome.reason_code == "ENTRY_REFUSED_BEFORE_SEND"
 
 
+@pytest.mark.parametrize(("label", "refusal"), _refusals(), ids=[r[0] for r in _refusals()])
+async def test_refusal_before_send_is_journaled_with_its_class_and_fixed_message(
+    label: str, refusal: BaseException
+) -> None:
+    """The outcome carries only ENTRY_REFUSED_BEFORE_SEND; the journal says which refusal it was
+    (first Demo rehearsal: the REST gate and the drift guard could not be told apart)."""
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(refusal)
+    journal = FakeJournal()
+
+    await _run_plan(
+        adapter,
+        journal=journal,
+        intent_store=InMemoryExecutionIntentStore(),
+        live_context=_build_live_context(case_input, protection_registry=StubProtectionRegistry()),
+    )
+
+    rows = [e for e in journal.events if e.event_type == "ENTRY_REFUSED_BEFORE_SEND"]
+    assert len(rows) == 1, label
+    payload = json.loads(rows[0].payload_json)
+    assert payload["refusal"] == f"{type(refusal).__name__}: {refusal}", label
+
+
 @pytest.mark.parametrize("code", [-1106, -4016, -4024])
 async def test_a_definitive_rejection_is_no_trade_without_probe_or_second_attempt(
     code: int,

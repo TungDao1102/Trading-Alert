@@ -293,6 +293,8 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Plain NO_TRADE reason: a request the gate, the drift guard or a missing signed-call policy
 # refused before anything reached the exchange (src/WR-02).
 ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
+# The journal event that names the refusal (the outcome above carries only the reason code).
+EVENT_ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
 
 # Plain NO_TRADE reason (D078 (5), quick task 261020-q2d): the approval row read inside the
 # consume transaction stores no approved quantity, one that differs from the quantity bound at
@@ -308,6 +310,8 @@ class _EntryPlacement:
     state: str
     exchange_order_id: str | None = None
     exchange_status: str | None = None
+    # A PreSendRefusal: its class name and project-fixed message (never SDK text), for the journal.
+    refusal: str | None = None
 
 
 def _text_or_none(value: Any) -> str | None:
@@ -370,8 +374,10 @@ async def _place_entry_no_blind_retry(
     """
     try:
         response = await adapter.place_entry(**entry_kwargs)
-    except PreSendRefusal:
-        return _EntryPlacement(state=_ENTRY_STATE_REFUSED)
+    except PreSendRefusal as exc:
+        return _EntryPlacement(
+            state=_ENTRY_STATE_REFUSED, refusal=f"{type(exc).__name__}: {str(exc)[:200]}"
+        )
     except Exception as exc:  # noqa: BLE001 — classified by facts; ambiguous ones are probed
         category = _placement_failure_category(adapter, exc)
         if category is ExchangeErrorCategory.REJECTED_DEFINITIVE:
@@ -1382,6 +1388,9 @@ async def execute_approved_plan(
     if entry_state == _ENTRY_STATE_REFUSED:
         # Nothing was sent (a PreSendRefusal): no probe, no SAFE_MODE, nothing to hand off.
         # The ENTRY intent was SENT before the call, so it is closed as REJECTED.
+        _journal_entry_refused(
+            journal, trade_plan=trade_plan, refusal=entry_placement.refusal, now_utc=now_utc
+        )
         _store_write(
             lambda: intent_store.record_result(
                 approval_id=approval.approval_id,
@@ -1567,6 +1576,43 @@ def _symbol_is_flat(
     if position_symbols is None or open_order_symbols is None:
         return False
     return symbol not in position_symbols and symbol not in open_order_symbols
+
+
+def _journal_entry_refused(
+    journal: Any, *, trade_plan: Any, refusal: str | None, now_utc: datetime
+) -> None:
+    """Journal WHY a placement was refused before anything was sent. Best-effort evidence.
+
+    The outcome carries only `ENTRY_REFUSED_BEFORE_SEND`; the first Demo rehearsal could not tell
+    the REST gate from the clock-drift guard. The text is the refusal's class name and its
+    project-fixed message. A journal that raises never changes the outcome.
+    """
+    try:
+        body = json.dumps(
+            {"refusal": refusal, "trade_plan_id": trade_plan.trade_plan_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        journal.record(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="enrf",
+                    event_type=EVENT_ENTRY_REFUSED_BEFORE_SEND,
+                    entity_id=trade_plan.plan_hash,
+                    occurred_at_utc=now_utc,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now_utc,
+                event_type=EVENT_ENTRY_REFUSED_BEFORE_SEND,
+                entity_type="TradePlan",
+                entity_id=trade_plan.plan_hash,
+                correlation_id=f"execution_entry_refused_{trade_plan.plan_hash}",
+                trade_plan_id=trade_plan.trade_plan_id,
+                payload_json=body,
+            )
+        )
+    except Exception:  # noqa: BLE001, S110 - evidence is best effort; the outcome stands
+        pass
 
 
 def _journal_margin_config_changed(
