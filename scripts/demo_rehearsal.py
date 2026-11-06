@@ -2617,6 +2617,23 @@ async def _bring_up(env: SmokeEnv, recorder: EvidenceRecorder, label: str) -> An
             + "; ENABLE "
             + ("missing" if enable_row is None else f"{enable_row.outcome} {enable_row.code}"),
         )
+    # The CLOCK_DRIFT step passes when the MEASUREMENT works, not when the clock is inside the
+    # limits; a guard that blocks entries would refuse the placement after the owner's two taps
+    # and leave the approved plan blocking the symbol for its whole lifetime (first Demo run,
+    # 2026-11-06: host 540 ms ahead of Binance, limit 500 ms).
+    # A synthetic run measures nothing real (the fake exchange has no server time).
+    guard = getattr(getattr(env.wiring, "exchange", None), "drift_guard", None)
+    drift_reason = None if guard is None or env.synthetic else guard.blocked_reason(env.clock())
+    if drift_reason is not None:
+        verdict = guard.last_verdict
+        raise _smoke_fail(
+            env,
+            recorder,
+            name,
+            f"the clock drift guard blocks new entries ({drift_reason}; offset_ms="
+            f"{None if verdict is None else verdict.offset_ms}): fix the host clock "
+            "(w32tm /resync) before a rehearsal; nothing was sent",
+        )
     _smoke_record(
         env, recorder, name, STEP_PASSED, "entries enabled by the start sequence (DEMO), last step"
     )

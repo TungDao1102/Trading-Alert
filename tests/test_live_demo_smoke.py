@@ -419,3 +419,28 @@ async def test_the_refused_drill_reservation_is_released_by_the_sweep_at_its_exp
         for event in env.rig.memory.journal.by_type("LIVE_PLACEMENT_OUTCOME")
     ]
     assert outcomes[0] == "OK" and outcomes[-1] != "OK", outcomes
+
+
+async def test_a_start_whose_clock_drift_guard_blocks_entries_stops_before_any_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First Demo run, 2026-11-06: the host clock was 540 ms ahead, the start sequence passed, and
+    the run lost 5 minutes and left an approved plan blocking the symbol for 26 minutes."""
+    from src.adapters.binance_clock import ClockDriftGuard, DriftBlockReason
+
+    recorder = _recorder()
+    env = build_fake_smoke_env(tmp_path)
+    monkeypatch.setattr(env, "synthetic", False)  # the check is for the real (Demo) process only
+    monkeypatch.setattr(
+        ClockDriftGuard, "blocked_reason", lambda self, now_utc: DriftBlockReason.OUT_OF_LIMITS
+    )
+
+    with pytest.raises(dr.SmokeHalt):
+        await dr.run_composed_smoke(env, recorder)
+
+    statuses = _statuses(recorder)
+    assert statuses["demo_enable"] == dr.STEP_FAILED
+    assert "signal" not in statuses
+    failed = next(s for s in recorder.steps if s["name"] == "demo_enable")
+    assert "OUT_OF_LIMITS" in failed["detail"]
+    assert env.fake.calls_to("place_entry") == []
