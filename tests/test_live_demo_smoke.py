@@ -395,6 +395,27 @@ def test_the_console_owner_prints_one_instruction_per_action_and_records_it(
     assert any("/safemode_exit" in line for line in lines)
 
 
+async def test_the_console_owner_also_sends_each_instruction_to_the_owner_and_survives_a_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nobody should have to watch the terminal: the instruction reaches the owner's phone, and a
+    failed message changes nothing (first Demo rehearsals: the drill prompt was missed)."""
+    sent: list[str] = []
+
+    async def notify(text: str) -> None:
+        sent.append(text)
+
+    owner = dr.ConsoleOwner(_recorder(), notify=notify)
+    await owner.act("safemode_exit", short_id="abc123", note="")
+    assert len(sent) == 1 and "/safemode_exit" in sent[0] and sent[0].startswith("REHEARSAL: ")
+
+    async def failing(text: str) -> None:
+        raise RuntimeError("telegram is down")
+
+    await dr.ConsoleOwner(_recorder(), notify=failing).act("approve", short_id="x", note="")
+    assert "OPERATOR: " in capsys.readouterr().out
+
+
 async def test_the_refused_drill_reservation_is_released_by_the_sweep_at_its_expiry_f4(
     tmp_path: Path,
 ) -> None:

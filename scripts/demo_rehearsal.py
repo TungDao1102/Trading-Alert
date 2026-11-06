@@ -2398,8 +2398,13 @@ class ConsoleOwner:
         "place nothing).",
     }
 
-    def __init__(self, recorder: EvidenceRecorder) -> None:
+    def __init__(
+        self,
+        recorder: EvidenceRecorder,
+        notify: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self._recorder = recorder
+        self._notify = notify
 
     async def act(self, action: str, **context: Any) -> None:
         text = self._TEXT[action].format(
@@ -2407,6 +2412,13 @@ class ConsoleOwner:
         )
         self._recorder.details.setdefault("operator_instructions", []).append(text)
         print(f"OPERATOR: {text}", flush=True)
+        if self._notify is not None:
+            # The same instruction on the owner's phone, so nobody has to watch the terminal.
+            # Best effort: a failed message never changes the run.
+            try:
+                await self._notify(f"REHEARSAL: {text}")
+            except Exception:  # noqa: BLE001, S110
+                pass
 
 
 def _smoke_record(
@@ -2857,7 +2869,7 @@ async def _smoke_sequence(
     _smoke_record(
         second, recorder, "account_clean", STEP_PASSED, "no order, algo order or position"
     )
-    await _safe_mode_drill(second, recorder, after=first.expiry_utc)
+    await _safe_mode_drill(second, recorder, main_plan_id=first.trade_plan_id)
     return OUTCOME_COMPLETE_WITH_GAPS if gaps else OUTCOME_COMPLETE
 
 
@@ -2873,7 +2885,7 @@ async def _wait_for_expiry(env: SmokeEnv, expiry_utc: datetime) -> None:
         await env.tick()
 
 
-async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, *, after: datetime) -> None:
+async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, *, main_plan_id: str) -> None:
     """Enter SAFE_MODE, show the owner's CONFIRM refused, leave it through the operator exit.
 
     It runs after the close, on an idle symbol, once the main plan has expired. It cannot sit
@@ -2885,7 +2897,18 @@ async def _safe_mode_drill(env: SmokeEnv, recorder: EvidenceRecorder, *, after: 
     scheduler's reservation sweep released the reservation, so the next entry is not counted out.
     """
     wiring = env.wiring
-    await _wait_for_expiry(env, after)
+    # The main plan stays APPROVED after its position closed (D051 item i), so its approval would
+    # hold the symbol for the rest of its 26 minutes. It is closed the official way (DOMN-04
+    # APPROVED -> EXPIRED), the same transition `scripts/demo_clear.py` makes, not waited for.
+    await env.assembly.executor.write(
+        wiring.stores.entities.transition_trade_plan,
+        main_plan_id,
+        TradePlanStatus.EXPIRED,
+        now_utc=env.clock(),
+    )
+    recorder.details["main_plan_closed_by"] = "DOMN-04 transition APPROVED -> EXPIRED"
+    for _ in range(SMOKE_REPLAY_SETTLE_TICKS):
+        await env.tick()
     drill = await _inject(env, recorder, "far", "safe_mode_drill_signal")
     shown = await _wait_until(
         env,
@@ -3258,6 +3281,9 @@ def _real_smoke_env_factory(
             )
             assembly = default_assemble(context, sdk_factory=demo_guarded_sdk_factory)
 
+            async def notify(text: str) -> None:
+                await assembly.bot.send_message(chat_id=config.authorized_chat_id, text=text)
+
             async def restart() -> SmokeEnv:
                 return make(False)
 
@@ -3266,7 +3292,7 @@ def _real_smoke_env_factory(
                 clock=clock,
                 tick=poll,
                 pause=pause,
-                owner=ConsoleOwner(recorder),
+                owner=ConsoleOwner(recorder, notify=notify),
                 synthetic=False,
                 wait_ticks=max(1, approval_timeout_seconds // SMOKE_POLL_SECONDS),
                 restart=restart,
