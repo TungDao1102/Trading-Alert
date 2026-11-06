@@ -108,6 +108,12 @@ CONFLICT_SOURCES: Final[tuple[str, ...]] = (
     SOURCE_OPEN_APPROVAL,
 )
 
+# A plan in one of these statuses can never be confirmed (pre-placement refuses it as
+# PLAN_STATUS_INVALID), so its approval does not block the symbol until the plan's expiry time.
+_CLOSED_PLAN_STATUSES: Final = frozenset(
+    {TradePlanStatus.EXPIRED, TradePlanStatus.INVALIDATED, TradePlanStatus.SUPERSEDED}
+)
+
 # A tracked plan in one of these protection states holds nothing and does not block the symbol.
 _INACTIVE_PROTECTION_STATES: Final = frozenset(
     {ProtectionState.FLAT, ProtectionState.ENTRY_ENDED_NO_FILL}
@@ -540,6 +546,8 @@ def make_open_demo_approvals_reader(stores: ApprovalLookupStores) -> ApprovalsRe
             signal = stores.get_signal(approval.signal_id)
             if plan is None or signal is None:
                 raise LookupError(f"plan or signal of approval {approval.approval_id} not found")
+            if plan.status in _CLOSED_PLAN_STATUSES:
+                continue  # its plan can no longer be confirmed: the approval holds nothing
             found[approval.trade_plan_id] = OpenApproval(
                 approval_id=approval.approval_id,
                 symbol=signal.symbol,

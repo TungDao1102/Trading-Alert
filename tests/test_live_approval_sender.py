@@ -853,6 +853,36 @@ def test_the_open_approvals_reader_needs_demo_scoped_stores() -> None:
         make_open_demo_approvals_reader(DemoStores(confirm_mode=None))
 
 
+def test_an_approval_of_a_closed_plan_does_not_count_as_open_until_its_expiry() -> None:
+    """A plan moved to EXPIRED can never be confirmed, so it must not block the symbol for the rest
+    of its lifetime (first Demo rehearsals: 26 minutes of waiting after a refused placement)."""
+    stores = DemoStores(confirm_mode="DEMO")
+    request = derive(new_source("closed"))
+    stores.insert_signal(request.signal)
+    stores.insert_trade_plan(request.plan)
+    stores.insert_pending(
+        Approval(
+            approval_id="apv-closed",
+            trade_plan_id=request.plan.trade_plan_id,
+            signal_id=request.signal.signal_id,
+            action=ApprovalAction.APPROVE,
+            result=ApprovalResult.PENDING,
+            status=ApprovalResult.PENDING,
+            approval_token_hash="e" * 64,
+            requested_at_utc=NOW,
+            request_hash=request.plan.plan_hash,
+        )
+    )
+    reader = make_open_demo_approvals_reader(stores)
+    assert [a.approval_id for a in reader()] == ["apv-closed"]
+
+    FakeEntities(stores, []).transition_trade_plan(
+        request.plan.trade_plan_id, TradePlanStatus.EXPIRED, now_utc=NOW
+    )
+
+    assert reader() == []
+
+
 async def test_a_shadow_pending_approval_does_not_block_a_demo_request() -> None:
     shared = DemoStores(confirm_mode="SHADOW")
     rig = Rig(stores=shared.scoped("DEMO"))  # type: ignore[arg-type]
