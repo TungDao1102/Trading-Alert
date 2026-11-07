@@ -92,7 +92,6 @@ async def test_a_db_outage_during_the_close_still_closes_spills_and_enters_safe_
         s11_db_outage.STEP_SAFE_MODE,
         s11_db_outage.STEP_ENTRY_REFUSED,
         s11_db_outage.STEP_EXIT,
-        s11_db_outage.STEP_ENTRY_ALLOWED,
         s11_db_outage.STEP_REPLAYED,
         "account_clean",
     ):
@@ -147,11 +146,12 @@ async def test_the_spill_is_replayed_at_the_next_start_every_row_present_once(
 async def test_finding_f1_a_restart_after_an_outage_close_starts_in_safe_mode(
     tmp_path: Path,
 ) -> None:
-    """Finding F1 (25-14 SUMMARY), pinned as observed: the closed plan's PROTECTION_TRANSITION rows
-    were not spilled (RUNBOOK 21.2), so the restart rebuilds the plan as live and the reconcile
-    enters SAFE_MODE. A src change that spills them would change this step on purpose."""
+    """Finding F1 b (25-14 SUMMARY), pinned as observed: the closed plan's PROTECTION_TRANSITION
+    rows were not spilled (RUNBOOK 21.2), so the restart rebuilds the plan as live and the
+    reconcile enters SAFE_MODE. A src change that spills them would change this step on purpose."""
     _env, recorder, outcome = await _run(tmp_path)
-    restart = recorder.details["db_outage"]["restart"]
+    facts = recorder.details["db_outage"]
+    restart = facts["restart"]
     statuses = _status(recorder)
     assert restart["admitted"] is True
     assert restart["in_safe_mode"] is True and restart["enabled"] is False
@@ -159,6 +159,40 @@ async def test_finding_f1_a_restart_after_an_outage_close_starts_in_safe_mode(
     assert statuses[s11_db_outage.STEP_RESTART_CLEAN] == dr.STEP_NOT_REHEARSED
     assert outcome == dr.OUTCOME_COMPLETE_WITH_GAPS
     assert statuses.get(s11_db_outage.STEP_SECOND_EXIT) == dr.STEP_PASSED
+    # The restart settles it: the reconcile writes the end row to a healthy journal and the sweep
+    # releases the reservation.
+    assert facts["counted_reservations_after_the_restart"] == []
+
+
+async def test_finding_f1_a_the_closed_plans_reservation_stays_counted_after_the_exit(
+    tmp_path: Path,
+) -> None:
+    """Finding F1 a (25-14 SUMMARY), pinned as observed: the reservation sweep reads the FLAT row
+    from the journal, and that row was lost in the outage, so the reservation stays RESERVED."""
+    _env, recorder, _outcome = await _run(tmp_path)
+    facts = recorder.details["db_outage"]
+    statuses = _status(recorder)
+    assert facts["entry_after_exit_placed"] is False
+    assert facts["entry_after_exit_refusal_reason"] == "CLUSTER_CAP_REJECT"
+    assert facts["counted_reservations_after_the_exit"] == ["RESERVED"]
+    assert statuses[s11_db_outage.STEP_ENTRY_ALLOWED] == dr.STEP_NOT_REHEARSED
+    assert facts["place_entry_calls_at_refusal"] == 1, "the refused request sent nothing"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "F1 a: the coordinator's PROTECTION_TRANSITION rows are not spilled while the journal is "
+        "down, so the reservation sweep never sees the FLAT row and the next request on the "
+        "cluster is refused CLUSTER_CAP_REJECT until a restart (plan truth: the documented exit "
+        "restores entries)"
+    ),
+)
+async def test_after_the_database_returns_and_the_exit_a_new_request_is_placed(
+    tmp_path: Path,
+) -> None:
+    _env, recorder, _outcome = await _run(tmp_path)
+    assert recorder.details["db_outage"]["entry_after_exit_placed"] is True
 
 
 async def test_the_injection_is_labelled_fault_injected_on_demo() -> None:
