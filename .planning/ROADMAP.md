@@ -1424,7 +1424,7 @@ Plans:
 - [R-25 / 24-REVIEW IN-02] The health tick writes 11 journal rows every 15 s (about 63,000 a day): reduce the cadence or write on change only before the multi-week soak (source: 24-REVIEW.md IN-02, 24-DEFERRED.md R-25; decision: none required)
 - [R-28 / 24-REVIEW IN-01, IN-03, IN-04, IN-05] Info-level review items: `xc-` close-order updates journaled as stream failures, liveness and heartbeat ignore per-task PASS/FAIL, `CommissionCache` without `record`, `heartbeat.sh --install-timer` path validation and global `LC_ALL=C` (source: 24-REVIEW.md, 24-DEFERRED.md R-28; decision: none required)
 
-**Plans:** 16/25 plans executed
+**Plans:** 18/25 plans executed
 
 Plans:
 
@@ -1453,8 +1453,8 @@ Plans:
 - [x] 25-16-PLAN.md - Scenarios S15 foreign order and doubled position, S16 manual close outside the system
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 25-17-PLAN.md - Phase 25 gate, scenario inventory, inherited-item register (D-14)
-- [ ] 25-18-PLAN.md - Owner campaign runbook and owner decision packet Q-AB to Q-G (D-01)
+- [x] 25-17-PLAN.md - Phase 25 gate, scenario inventory, inherited-item register (D-14)
+- [x] 25-18-PLAN.md - Owner campaign runbook and owner decision packet Q-AB to Q-G (D-01)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 25-19-PLAN.md - Owner decisions Q-AB soak shape and Q-C healthy reading *(checkpoint: owner decision)*
@@ -1567,7 +1567,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
 | 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
-| 25. Binance Demo Integration Test Campaign | 16/25 | In Progress | - |
+| 25. Binance Demo Integration Test Campaign | 18/25 | In Progress | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
 
