@@ -5,11 +5,11 @@ current_phase: 24
 current_phase_name: Live Runtime Composition + Demo Rehearsal
 current_plan: 33
 status: executing
-stopped_at: Plan 24-33 owner runbook written; owner host steps pending
-last_updated: "2026-11-07T00:00:00.000Z"
+stopped_at: Phase 25 context gathered
+last_updated: "2026-11-07T06:13:23.005Z"
 last_activity: 2026-11-07
 last_activity_desc: Phase 24 code complete (35 of 36 plans have a SUMMARY); 24-33 waits for owner results
-state_head: fc3812d7cab10a360eead033a0e1a838c5c33747
+state_head: 10dc431099a98797903305aeab1657b0f72a00c0
 progress:
   total_phases: 29
   completed_phases: 19
@@ -686,6 +686,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-31T05:37:18.748Z
-Stopped at: Completed 24-04-PLAN.md
-Resume file: None
+Last session: 2026-11-07T06:13:13.794Z
+Stopped at: Phase 25 context gathered
+Resume file: .planning/phases/25-demo-integration-test-campaign/25-CONTEXT.md
