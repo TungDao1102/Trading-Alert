@@ -706,3 +706,14 @@ def test_the_s01_demo_test_imports_the_shared_scenario_and_requests_both_fixture
         arguments = {a.arg for a in test.args.args}
         assert {"scenario_recorder", "make_demo_env"} <= arguments
     assert "pytestmark" in path.read_text(encoding="utf-8")
+
+
+def test_the_gate_initialization_is_handed_out_once_when_requested() -> None:
+    once = demo_env.GateInitializer({demo_env.INITIALIZE_GATE_STATE_VARIABLE: "1"})
+    assert [once.take(), once.take(), once.take()] == [True, False, False]
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true"])
+def test_the_gate_initialization_is_never_handed_out_unless_exactly_one(value: str | None) -> None:
+    environ = {} if value is None else {demo_env.INITIALIZE_GATE_STATE_VARIABLE: value}
+    assert demo_env.GateInitializer(environ).take() is False

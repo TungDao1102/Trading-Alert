@@ -475,8 +475,25 @@ def initialize_gate_state_requested(environ: Mapping[str, str] | None = None) ->
     return source.get(INITIALIZE_GATE_STATE_VARIABLE) == "1"
 
 
+class GateInitializer:
+    """Hands out the gate-state initialization exactly once per session.
+
+    The start sequence refuses `initialize_gate_state` when a gate state file already exists, so
+    only the first env built in a session may ask for it; every later env (and every restart)
+    starts plain.
+    """
+
+    def __init__(self, environ: Mapping[str, str] | None = None) -> None:
+        self._pending = initialize_gate_state_requested(environ)
+
+    def take(self) -> bool:
+        pending, self._pending = self._pending, False
+        return pending
+
+
 __all__ = [
     "EVIDENCE_DIR",
+    "GateInitializer",
     "DemoScenarioEnv",
     "ProgrammaticOwner",
     "ProgrammaticOwnerError",
