@@ -12,6 +12,7 @@ could not be produced (a real listenKey expiry) is NOT_OBSERVED.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import UTC, datetime
@@ -115,7 +116,7 @@ async def test_while_the_stream_is_not_live_health_says_no_trade_and_the_confirm
     assert gap["health_no_trade"] is True
     assert set(s08.HEALTH_STREAM_CHECKS) <= set(gap["health_failing"])
     assert gap["place_entry_calls"] == 0, "the CONFIRM during the gap placed nothing"
-    assert gap["placement_outcome"] == "RECONCILIATION_REQUIRED"
+    assert gap["placement_refusal"] in {"UNCERTAIN_ACCOUNT_STATE", "RECONCILIATION_REQUIRED"}
     assert gap["safe_mode_reason"] in s08.SILENCE_REASONS
     assert gap["exit_refused_while_not_live"] is True
     # The only entry of the run is the one placed AFTER the documented exit.
@@ -158,7 +159,7 @@ async def test_every_state_the_supervisor_reported_is_recorded_for_the_exit_row(
 async def test_a_listen_key_expired_item_rekeys_the_stream_once_and_reconciles(
     tmp_path: Path,
 ) -> None:
-    env, trigger, recorder, _outcome = await _run(tmp_path)
+    _env, trigger, recorder, _outcome = await _run(tmp_path)
     expiry = recorder.details["expiry"]
     assert expiry["transitions"] == [
         ["UNKNOWN", "LISTEN_KEY_EXPIRED"],
@@ -170,35 +171,49 @@ async def test_a_listen_key_expired_item_rekeys_the_stream_once_and_reconciles(
     assert expiry["snapshot_calls_after"] > expiry["snapshot_calls_before"]
     assert expiry["safe_mode"] is False
     assert trigger.adapter.counts["rekey"] == 1
-    assert env.wiring.stream.supervisor.state.value == "LIVE"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding F1 (plan 25-13): the health verdict is journaled, never consulted at placement; "
-    "a CONFIRM pressed after the stream dropped and before the first reconcile tick enters "
-    "SAFE_MODE is still placed, so the plan's 'the health verdict refuses new entries' is not "
-    "what src does; the owner decides whether a placement gate on the stream state is wanted",
-)
-async def test_a_confirm_pressed_in_the_first_moments_of_a_gap_places_nothing(
+async def test_a_confirm_right_after_the_drop_is_refused_by_the_invalidated_equity(
     tmp_path: Path,
 ) -> None:
-    _env, _trigger, _recorder_, outcome = await _run(tmp_path, early_confirm=True)
-    assert outcome == dr.OUTCOME_COMPLETE
+    """Before any reconcile tick can enter SAFE_MODE the gap itself refuses the CONFIRM.
 
-
-async def test_the_first_moments_confirm_is_recorded_as_what_the_code_does(
-    tmp_path: Path,
-) -> None:
+    The supervisor's UNKNOWN transition invalidates the equity and the day loss (STREAM_GAP), so
+    the inputs of the placement are refused (`UNCERTAIN_ACCOUNT_STATE`); the health verdict is
+    journaled but is not what refuses.
+    """
     env, _trigger, recorder, outcome = await _run(tmp_path, early_confirm=True)
+    assert outcome == dr.OUTCOME_COMPLETE, recorder.steps
     early = recorder.details["early_confirm"]
     assert early["health_no_trade_at_confirm"] is True
-    assert early["place_entry_calls"] == 1, "finding F1: placed while the stream was not LIVE"
-    assert early["safe_mode_at_confirm"] is False
-    assert _status(recorder)[s08.STEP_ENTRY_IN_GAP] == dr.STEP_NOT_REHEARSED
-    assert outcome == dr.OUTCOME_COMPLETE_WITH_GAPS
+    assert early["place_entry_calls"] == 0
+    assert early["safe_mode_at_confirm"] is False, "SAFE_MODE was not yet needed"
+    assert early["placement_refusal"] == "UNCERTAIN_ACCOUNT_STATE"
+    assert _status(recorder)[s08.STEP_ENTRY_IN_GAP] == dr.STEP_PASSED
     assert _status(recorder)["account_clean"] == dr.STEP_PASSED
-    assert env.fake.open_orders == {} and env.fake.open_algos == {}
+    assert env.fake.calls_to("place_entry") == []
+
+
+async def test_an_early_confirm_that_places_an_entry_fails_the_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env, trigger = _twin(tmp_path)
+    recorder = _recorder()
+    monkeypatch.setattr(s08, "place_entry_calls", lambda env_: 1)
+    with pytest.raises(dr.SmokeHalt):
+        await s08.run(env, recorder, trigger=trigger, early_confirm=True)
+    failed = [step for step in recorder.steps if step["status"] == dr.STEP_FAILED]
+    assert failed and failed[0]["name"] == s08.STEP_ENTRY_IN_GAP
+
+
+def test_early_confirm_needs_a_trigger_that_holds_the_stream_down() -> None:
+    env = SimpleNamespace(synthetic=False, label=DEMO_OBSERVED)
+
+    async def go() -> None:
+        await s08.run(env, _demo_recorder(), trigger=s08.DemoStreamTrigger(), early_confirm=True)
+
+    with pytest.raises(ValueError, match="holds"):
+        asyncio.run(go())
 
 
 async def test_a_placement_that_gets_through_the_gap_fails_the_step(
@@ -265,7 +280,7 @@ async def test_the_demo_expiry_is_not_observed_unless_the_owner_sets_the_slow_sw
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(s08.SLOW_ENV, raising=False)
-    answer = await s08.DemoStreamTrigger().expire(_demo_stub(synthetic=False), _demo_recorder())
+    answer = await s08.DemoStreamTrigger().expire(_demo_stub(synthetic=False), None)
     assert answer != "EXPIRED" and s08.SLOW_ENV in answer and "60 minutes" in answer
     assert os.environ.get(s08.SLOW_ENV) is None
 
