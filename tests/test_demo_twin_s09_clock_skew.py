@@ -9,8 +9,8 @@ request that is approved and confirmed places nothing; the refusal is journaled.
 
 Twin-only shim (stated, not hidden): the fake serves `place_entry`, so the real adapter's own
 guard method (`_require_entries_allowed`) is called ahead of it, in the order
-`BinanceUsdmAdapter.place_entry` runs it. The exchange-side -1021 stays with the owner opt-in probe case
-`timestamp_outside_recv_window`.
+`BinanceUsdmAdapter.place_entry` runs it. The exchange-side -1021 stays with the owner opt-in
+probe case `timestamp_outside_recv_window`.
 
 On the twin every step is SYNTHETIC. On Demo the injected skew is DEMO_FAULT_INJECTED.
 """
@@ -141,7 +141,9 @@ async def test_the_refused_confirm_is_journaled_before_anything_is_sent(tmp_path
     env, recorder, _outcome = await _run(tmp_path)
     facts = recorder.details["clock_skew"]
     assert facts["refusal_refused"] is True
-    assert facts["refusal_reason"], "the refusal reason is journaled and recorded"
+    # The twin's observation: the manager reads the adapter's EntriesBlocked (a PreSendRefusal).
+    assert facts["refusal_event"] == "LIVE_PLACEMENT_OUTCOME"
+    assert facts["refusal_reason"] == "ENTRY_REFUSED_BEFORE_SEND"
     calls = env.faults.calls_to("place_entry")
     assert len(calls) == 1 and calls[0]["mode"] == "override", "the guard refused the one call"
 
