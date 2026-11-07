@@ -59,45 +59,45 @@ Filled by the planner. Requirement-to-test map (from research): EXEC-01/02/03, A
 | 25-08-03 | 08 | 2 | EXEC-01 | unit | `uv run pytest -m "not docker" tests/test_demo_harness.py tests/test_demo_twin_s01_happy.py -x -q` | ❌ W0 | ⬜ pending |
 | 25-09-01 | 09 | 3 | OPS-02, D-08 | unit (build_wiring stubbed) | `uv run pytest -m "not docker" tests/test_demo_env_factory.py tests/test_demo_same_code_path.py -x -q` | ❌ W0 | ⬜ pending |
 | 25-09-02 | 09 | 3 | APRV-01 | unit + collection | `uv run pytest -m "not docker" tests/test_demo_env_factory.py tests/test_demo_marker_guard.py tests/demo -x -q -rs` | ❌ W0 | ⬜ pending |
-| 25-10-01 | 10 | 3 | EXEC-03, APRV-02 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s06_replay.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-10-02 | 10 | 3 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s02_partial_fill.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-10-03 | 10 | 3 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s05_cancel_race.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-11-01 | 11 | 3 | EXEC-01 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s04_stop_rejected.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-11-02 | 11 | 3 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s03_crossed_stop.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-11-03 | 11 | 3 | OPS-01, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s18_unprotected.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-12-01 | 12 | 3 | EXEC-03 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s07_restart_cuts.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-12-02 | 12 | 3 | EXEC-03, D080 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s07_restart_cuts.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-12-03 | 12 | 3 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s07_restart_cuts.py tests/test_live_restart_rehydrate.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-13-01 | 13 | 3 | EXEC-02, D-07 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s08_stream_loss.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-13-02 | 13 | 3 | OPS-01, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s17_stale_feed.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-13-03 | 13 | 3 | OPS-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s09_clock_skew.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-14-01 | 14 | 3 | OPS-01, D-07 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s10_rate_limit.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-14-02 | 14 | 3 | OPS-01, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s19_rest_gate_cli.py tests/test_rest_gate_cli.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-14-03 | 14 | 3 | OPS-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s11_db_outage.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-15-01 | 15 | 3 | OPS-01 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s14_safe_mode.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-15-02 | 15 | 3 | OPS-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s12_daily_stop.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-15-03 | 15 | 3 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s13_margin_liquidation.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-16-01 | 16 | 3 | EXEC-02 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s15_foreign_order.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-16-02 | 16 | 3 | EXEC-02, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s16_manual_close.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-17-01 | 17 | 4 | all seven | structural gate | `uv run pytest -m "not docker" tests/test_phase25_gate.py tests/test_phase24_gate.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-17-02 | 17 | 4 | all seven, D-01..D-14 | structural gate | `uv run pytest -m "not docker" tests/test_phase25_gate.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-17-03 | 17 | 4 | inherited items | structural gate | `uv run pytest -m "not docker" tests/test_phase25_gate.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-18-01 | 18 | 4 | OPS-02, D-01 | doc check | runbook term check in 25-18 Task 1 | ❌ W0 | ⬜ pending |
-| 25-18-02 | 18 | 4 | OPS-01, D-06, D-07 | doc check | runbook id check in 25-18 Task 2 | ❌ W0 | ⬜ pending |
-| 25-18-03 | 18 | 4 | criterion 3 | doc check | packet heading check in 25-18 Task 3 | ❌ W0 | ⬜ pending |
-| 25-19-01/02 | 19 | 5 | criterion 3 (decisions a, b, c) | owner checkpoint | manual (owner decision) | n/a | ⬜ pending |
-| 25-19-03 | 19 | 5 | criterion 3 | doc check | answer check in 25-19 Task 3 | n/a | ⬜ pending |
-| 25-20-01 | 20 | 5 | all seven | owner Demo run | manual (owner, `pytest -m demo`) | n/a | ⬜ pending |
-| 25-20-02/03 | 20 | 5 | all seven | doc check + gate | evidence-path check; DVM check + `uv run pytest -m "not docker" tests/test_phase25_gate.py -x -q` | n/a | ⬜ pending |
-| 25-21-01 | 21 | 5 | EXEC-01 (R-21, decision f) | owner checkpoint | manual (owner decision) | n/a | ⬜ pending |
-| 25-21-02 | 21 | 5 | EXEC-01 | gate | `uv run python scripts/verify_decision_alignment.py all && uv run pytest -m "not docker" tests/test_phase25_gate.py -x -q` | n/a | ⬜ pending |
-| 25-22-01/02 | 22 | 6 | OPS-01 (decisions d, e) | owner checkpoint | manual (owner decision) | n/a | ⬜ pending |
-| 25-22-03 | 22 | 6 | OPS-01 | doc check | answer check in 25-22 Task 3 | n/a | ⬜ pending |
-| 25-23-01..03 | 23 | 6 | EXEC-01 (R-21) | unit TDD | `uv run pytest -m "not docker" tests/test_live_reservation_stamping.py tests/test_live_reservation_release.py tests/test_live_wiring.py -x -q` | ❌ W0 | ⬜ pending |
-| 25-24-01/03 | 24 | 7 | criterion 3, D-09 | script check | `uv run python scripts/evaluate_demo_soak.py verify-registration --registration .planning/phases/25-demo-integration-test-campaign/25-SOAK-REGISTRATION.md --hash-file .planning/phases/25-demo-integration-test-campaign/25-SOAK-REGISTRATION.sha256` | n/a | ⬜ pending |
-| 25-24-02 | 24 | 7 | criterion 3 | owner checkpoint | manual (owner approves the registration) | n/a | ⬜ pending |
-| 25-25-01 | 25 | 8 | criterion 3 | owner soak | manual (owner, at least 21 days) | n/a | ⬜ pending |
-| 25-25-02 | 25 | 8 | criterion 3 | doc check | results hash and verdict check in 25-25 Task 2 | n/a | ⬜ pending |
+| 25-10-01 | 10 | 4 | EXEC-03, APRV-02 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s06_replay.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-10-02 | 10 | 4 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s02_partial_fill.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-10-03 | 10 | 4 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s05_cancel_race.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-11-01 | 11 | 4 | EXEC-01 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s04_stop_rejected.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-11-02 | 11 | 4 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s03_crossed_stop.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-11-03 | 11 | 4 | OPS-01, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s18_unprotected.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-12-01 | 12 | 4 | EXEC-03 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s07_restart_cuts.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-12-02 | 12 | 4 | EXEC-03, D080 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s07_restart_cuts.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-12-03 | 12 | 4 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s07_restart_cuts.py tests/test_live_restart_rehydrate.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-13-01 | 13 | 4 | EXEC-02, D-07 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s08_stream_loss.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-13-02 | 13 | 4 | OPS-01, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s17_stale_feed.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-13-03 | 13 | 4 | OPS-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s09_clock_skew.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-14-01 | 14 | 4 | OPS-01, D-07 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s10_rate_limit.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-14-02 | 14 | 4 | OPS-01, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s19_rest_gate_cli.py tests/test_rest_gate_cli.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-14-03 | 14 | 4 | OPS-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s11_db_outage.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-15-01 | 15 | 4 | OPS-01 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s14_safe_mode.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-15-02 | 15 | 4 | OPS-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s12_daily_stop.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-15-03 | 15 | 4 | EXEC-01 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s13_margin_liquidation.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-16-01 | 16 | 4 | EXEC-02 | twin (tracer) | `uv run pytest -m "not docker" tests/test_demo_twin_s15_foreign_order.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-16-02 | 16 | 4 | EXEC-02, D-06 | twin | `uv run pytest -m "not docker" tests/test_demo_twin_s16_manual_close.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-17-01 | 17 | 5 | all seven | structural gate | `uv run pytest -m "not docker" tests/test_phase25_gate.py tests/test_phase24_gate.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-17-02 | 17 | 5 | all seven, D-01..D-14 | structural gate | `uv run pytest -m "not docker" tests/test_phase25_gate.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-17-03 | 17 | 5 | inherited items | structural gate | `uv run pytest -m "not docker" tests/test_phase25_gate.py tests/test_demo_marker_guard.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-18-01 | 18 | 5 | OPS-02, D-01 | doc check | runbook term check in 25-18 Task 1 | ❌ W0 | ⬜ pending |
+| 25-18-02 | 18 | 5 | OPS-01, D-06, D-07 | doc check | runbook id check in 25-18 Task 2 | ❌ W0 | ⬜ pending |
+| 25-18-03 | 18 | 5 | criterion 3 | doc check | packet heading check in 25-18 Task 3 | ❌ W0 | ⬜ pending |
+| 25-19-01/02 | 19 | 6 | criterion 3 (decisions a, b, c) | owner checkpoint | manual (owner decision) | n/a | ⬜ pending |
+| 25-19-03 | 19 | 6 | criterion 3 | doc check | answer check in 25-19 Task 3 | n/a | ⬜ pending |
+| 25-20-01 | 20 | 6 | all seven | owner Demo run | manual (owner, `pytest -m demo`) | n/a | ⬜ pending |
+| 25-20-02/03 | 20 | 6 | all seven | doc check + gate | evidence-path check; DVM check + `uv run pytest -m "not docker" tests/test_phase25_gate.py -x -q` | n/a | ⬜ pending |
+| 25-21-01 | 21 | 6 | EXEC-01 (R-21, decision f) | owner checkpoint | manual (owner decision) | n/a | ⬜ pending |
+| 25-21-02 | 21 | 6 | EXEC-01 | gate | `uv run python scripts/verify_decision_alignment.py all && uv run pytest -m "not docker" tests/test_phase25_gate.py -x -q` | n/a | ⬜ pending |
+| 25-22-01/02 | 22 | 7 | OPS-01 (decisions d, e) | owner checkpoint | manual (owner decision) | n/a | ⬜ pending |
+| 25-22-03 | 22 | 7 | OPS-01 | doc check | answer check in 25-22 Task 3 | n/a | ⬜ pending |
+| 25-23-01..03 | 23 | 7 | EXEC-01 (R-21) | unit TDD | `uv run pytest -m "not docker" tests/test_live_reservation_stamping.py tests/test_live_reservation_release.py tests/test_live_wiring.py -x -q` | ❌ W0 | ⬜ pending |
+| 25-24-01/03 | 24 | 8 | criterion 3, D-09 | script check | `uv run python scripts/evaluate_demo_soak.py verify-registration --registration .planning/phases/25-demo-integration-test-campaign/25-SOAK-REGISTRATION.md --hash-file .planning/phases/25-demo-integration-test-campaign/25-SOAK-REGISTRATION.sha256` | n/a | ⬜ pending |
+| 25-24-02 | 24 | 8 | criterion 3 | owner checkpoint | manual (owner approves the registration) | n/a | ⬜ pending |
+| 25-25-01 | 25 | 9 | criterion 3 | owner soak | manual (owner, at least 21 days) | n/a | ⬜ pending |
+| 25-25-02 | 25 | 9 | criterion 3 | doc check | results hash and verdict check in 25-25 Task 2 | n/a | ⬜ pending |
 
 ## Wave 0 Requirements
 
