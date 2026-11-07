@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v0.3
 current_phase: 24
 current_phase_name: Live Runtime Composition + Demo Rehearsal
-current_plan: 5
+current_plan: 33
 status: executing
-stopped_at: Completed 24-04-PLAN.md
-last_updated: "2026-10-31T05:37:25.933Z"
-last_activity: 2026-10-31
-last_activity_desc: Phase 24 execution started
+stopped_at: Plan 24-33 owner runbook written; owner host steps pending
+last_updated: "2026-11-07T00:00:00.000Z"
+last_activity: 2026-11-07
+last_activity_desc: Phase 24 code complete (35 of 36 plans have a SUMMARY); 24-33 waits for owner results
 state_head: fc3812d7cab10a360eead033a0e1a838c5c33747
 progress:
   total_phases: 29
   completed_phases: 19
   total_plans: 364
-  completed_plans: 329
+  completed_plans: 360
 milestone_name: milestone
 ---
 
@@ -33,12 +33,12 @@ See: .planning/PROJECT.md (updated 2026-09-19)
 
 Phase: 24 (Live Runtime Composition + Demo Rehearsal) — EXECUTING
 Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
-Current Plan: 5
+Current Plan: 33 (owner steps; 35 of 36 plans have a SUMMARY, 24-27B and 24-37 are extra summaries)
 Total Plans in Phase: 36
-Status: Ready to execute
-Last activity: 2026-10-31 — Phase 24 execution started
+Status: Code complete, waiting for the owner's host results (24-OWNER-RUNBOOK.md); Demo smoke 21/21 on 2026-11-06
+Last activity: 2026-11-07 — STATE synced with the disk (360 of 364 plans have a SUMMARY)
 
-Progress: [██████░░░░] 61%
+Progress: [█████████░] 99%
 
 ### Cross-phase status (2026-10-16)
 

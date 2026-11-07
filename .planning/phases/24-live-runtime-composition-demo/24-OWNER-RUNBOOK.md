@@ -102,3 +102,18 @@ Copy one row per step you ran into the results section below.
 Empty until you reply with the step outcomes and evidence paths (or "partial: steps N..M" with
 what remains). The assistant copies your reply here verbatim and sets each status above only
 from that reply and the evidence files; a step without evidence stays NOT_OBSERVED.
+
+### Notes recorded 2026-11-07 (owner session; no status above was changed)
+
+- E (heartbeat): the owner already ran the healthchecks.io monitor for the collector and paper on the
+  EC2 host in `/opt/trading` (`deploy/heartbeat.sh --set-url`, `--install-timer --interval-seconds 300`).
+  Record: `.planning/phases/16-paper-runtime-composition/evidence/16-50-operator-verification.md`
+  (owner statement of 2026-10-12, not independently observed; the alert row was waived in
+  `16-20-acceptance.json`). That check is not the live one: E1 to E3 need `--target live` with its own
+  check (period 60 s, grace 120 s) and stay NOT_OBSERVED.
+- B (host): a host exists and has run the collector and soak, but no file in the repo shows B1 to B7
+  (`chronyc`, `ufw`, `sshd -T`, backup timer). They stay NOT_OBSERVED until the owner names the ones done
+  and gives the output.
+- F1 (G2-014): the owner has no second Telegram account and will test later. Stays NOT_OBSERVED. A group
+  chat that holds only the owner and the live bot can show the chat gate; the user gate needs a second
+  person. Not run.
