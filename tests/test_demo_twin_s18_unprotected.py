@@ -1,11 +1,12 @@
 """S18 (unprotected-position drill, G2-016) on the CI twin: the fake composed process (plan 25-11).
 
-TEST_ONLY, OPS-01, D-06. A stop rejection (as in S04) plus a failing reduce-only close leave the plan
-CLOSE_FAILED: new entries stay blocked, SAFE_MODE is on, the critical alerts are journaled and the
-coordinator retries the close at every step. The operator `/close` and `/confirm` (RUNBOOK 21.1a) are
-sent through the real handler with the authorized identity; for a plan whose close is already
-required the code answers CLOSE_ALREADY_REQUIRED and sends nothing (the retry is the coordinator's).
-After the injected close failure is cleared the coordinator's own retry flattens the position.
+TEST_ONLY, OPS-01, D-06. A stop rejection (as in S04) plus a failing reduce-only close leave the
+plan CLOSE_FAILED: new entries stay blocked, SAFE_MODE is on, the critical alerts are journaled and
+the coordinator retries the close at every step. The operator `/close` and `/confirm` (RUNBOOK
+21.1a) are sent through the real handler with the authorized identity; for a plan whose close is
+already required the code answers CLOSE_ALREADY_REQUIRED and sends nothing (the retry is the
+coordinator's). After the injected close failure is cleared the coordinator's own retry flattens
+the position.
 
 On the twin every step is SYNTHETIC. On Demo the steps inside the fault window are
 DEMO_FAULT_INJECTED and only the final close is a real Demo order (DEMO_OBSERVED).
@@ -62,6 +63,27 @@ def _status(recorder: ScenarioRecorder) -> dict[str, str]:
     return {step["name"]: step["status"] for step in recorder.steps}
 
 
+def _twin_env(tmp_path: Path) -> Any:
+    """The fake composed env, with the rig's bot text check relaxed for the `/close` replies only.
+
+    `live_composed_rig` demands `Mode: DEMO` and +07/UTC time pairs in every text that names
+    BTCUSDT (cards and prompts). The operator's short replies ("Close the BTCUSDT position ...",
+    "Close BTCUSDT: <code>") name the symbol but are command replies without either, and the
+    operator drops a reply that the check refuses, so the token would never arrive. Only texts
+    that start with "Close " or "Nothing to close" skip the check; every other text keeps it.
+    """
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    bot = env.rig.bot
+    inner = bot._text_check
+
+    def check(text: str) -> None:
+        if not text.startswith(("Close ", "Nothing to close")):
+            inner(text)
+
+    bot._text_check = check
+    return env
+
+
 def _plan_hash(env: Any) -> str:
     (protection,) = env.wiring.coordinator.protections()
     return str(protection.plan_hash)
@@ -80,7 +102,7 @@ async def test_a_rejected_stop_and_a_failing_close_end_close_failed_then_flat(
     tmp_path: Path,
 ) -> None:
     recorder = _recorder()
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env = _twin_env(tmp_path)
     outcome = await s18_unprotected.run(env, recorder)
     assert outcome == dr.OUTCOME_COMPLETE, recorder.steps
     assert {step["label"] for step in recorder.steps} == {SYNTHETIC}
@@ -104,7 +126,7 @@ async def test_close_failed_blocks_entries_and_the_coordinator_retries_the_close
     tmp_path: Path,
 ) -> None:
     recorder = _recorder()
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env = _twin_env(tmp_path)
     await s18_unprotected.run(env, recorder)
     failed = recorder.details["close_failed"]
     assert failed["state"] == ProtectionState.CLOSE_FAILED.value
@@ -120,7 +142,7 @@ async def test_close_failed_blocks_entries_and_the_coordinator_retries_the_close
 async def test_every_close_before_the_fault_is_cleared_was_injected_and_one_close_flattens(
     tmp_path: Path,
 ) -> None:
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env = _twin_env(tmp_path)
     await s18_unprotected.run(env, _recorder())
     plan_hash = _plan_hash(env)
     closes = env.faults.calls_to("place_market_close")
@@ -141,23 +163,29 @@ async def test_the_operator_close_is_answered_already_required_and_sends_nothing
     tmp_path: Path,
 ) -> None:
     recorder = _recorder()
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env = _twin_env(tmp_path)
     await s18_unprotected.run(env, recorder)
     operator = recorder.details["operator_close"]
     assert operator["ask_code"] == "CONFIRM_REQUIRED"
     assert operator["confirm_code"] == "CLOSE_ALREADY_REQUIRED"
     assert operator["plan_state"] == ProtectionState.CLOSE_FAILED.value
     assert operator["close_calls_before"] == operator["close_calls_after"], "the command sent none"
-    assert "token" not in json.dumps(recorder.details, default=str).lower()
+    tokens = [
+        message.text.rsplit("/confirm ", 1)[1].split()[0]
+        for message in env.rig.bot.sent
+        if "/confirm " in message.text
+    ]
+    assert len(tokens) >= 2, "the /close token and the SAFE_MODE exit token were both sent"
+    evidence = json.dumps([recorder.details, recorder.steps], default=str)
+    assert not any(token in evidence for token in tokens), "a token never reaches the evidence"
 
 
 async def test_the_alerts_name_the_rejected_stop_and_the_failed_close(tmp_path: Path) -> None:
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env = _twin_env(tmp_path)
     await s18_unprotected.run(env, _recorder())
     plan_hash = _plan_hash(env)
     alerts = {
-        (row["event"], row["reason"])
-        for row in s04.alert_rows(env.rig.stores.journal, plan_hash)
+        (row["event"], row["reason"]) for row in s04.alert_rows(env.rig.stores.journal, plan_hash)
     }
     assert ("CLOSE_REQUIRED", "B5_STOP_REJECTED") in alerts
     assert ("PROTECTIVE_REJECTED", "B5_STOP_REJECTED") in alerts
@@ -168,7 +196,7 @@ async def test_a_close_that_never_recovers_halts_and_names_demo_clear(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recorder = _recorder()
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env = _twin_env(tmp_path)
     monkeypatch.setattr(env.faults, "clear", lambda method: None)  # the fault is never lifted
     with pytest.raises(dr.SmokeHalt):
         await s18_unprotected.run(env, recorder)
@@ -202,7 +230,11 @@ def test_on_demo_the_fault_window_is_fault_injected_and_only_the_final_close_is_
 
 def test_the_confirm_token_is_read_from_either_bot_shape() -> None:
     fake_bot = SimpleNamespace(
-        sent=[SimpleNamespace(chat_id=7, text="Close the BTCUSDT position? Within 60 s: /confirm tok1")]
+        sent=[
+            SimpleNamespace(
+                chat_id=7, text="Close the BTCUSDT position? Within 60 s: /confirm tok1"
+            )
+        ]
     )
     recording_bot = SimpleNamespace(sent=[(7, "other"), (7, "Close? send: /confirm tok2 now")])
     assert s18_unprotected.confirm_token(fake_bot, 7, 0) == "tok1"
@@ -213,7 +245,7 @@ def test_the_confirm_token_is_read_from_either_bot_shape() -> None:
 
 async def test_the_evidence_file_has_the_scenario_schema_and_one_kind(tmp_path: Path) -> None:
     recorder = _recorder()
-    await s18_unprotected.run(build_fake_scenario_env(tmp_path, EnvOptions()), recorder)
+    await s18_unprotected.run(_twin_env(tmp_path), recorder)
     document: dict[str, Any] = json.loads(
         recorder.write(tmp_path / "evidence").read_text(encoding="utf-8")
     )
