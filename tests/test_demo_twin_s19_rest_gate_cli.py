@@ -2,10 +2,11 @@
 
 TEST_ONLY, OPS-01, D-06. A false 418 is injected under the REAL adapter and persisted by the real
 gate; the process is stopped in order (RUNBOOK 22.5); `rest_gate_cli status` shows the persisted
-ban; `clear` refuses the future deadline without `--force`; `clear --force` writes a fresh record and
-its audit lines in `<state file>.clear-audit.jsonl`; the restarted process restores a clear gate and
-places a request. The commands run in process through `rest_gate_cli.main`; the state file is never
-edited by hand. The same `s19_rest_gate_cli.run(env, recorder)` is what the owner's Demo test calls.
+ban; `clear` refuses the future deadline without `--force`; `clear --force` writes a fresh record
+and its audit lines in `<state file>.clear-audit.jsonl`; the restarted process restores a clear
+gate and places a request. The commands run in process through `rest_gate_cli.main`; the state
+file is never edited by hand. The same `s19_rest_gate_cli.run(env, recorder)` is what the owner's
+Demo test calls.
 
 On the twin every step is SYNTHETIC and the one clock read of the CLI is the env's virtual clock
 (the gate deadline is virtual time; on Demo the CLI reads the wall clock). On Demo the injection
