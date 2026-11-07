@@ -1043,3 +1043,119 @@ def test_the_script_imports_its_event_names_and_never_retypes_them() -> None:
 
     assert literals.isdisjoint(producer_names)
     assert "from src." in text and "EVENT_OPERATIONAL_ALERT" in text and "RECONCILE_TICK" in text
+
+
+# --------------------------------------------------------------------------- #
+# Task 3: export never reveals the database URL (T-25-17); the database half is in
+# tests/test_evaluate_demo_soak_pg.py.
+# --------------------------------------------------------------------------- #
+
+SENTINEL_URL = "postgresql+psycopg://soak_user:SENTINEL-pw-8841@db.invalid:5432/soak"
+URL_ENV = "SOAK_EXPORT_TEST_URL"
+
+
+def export_argv(out: Path, *, since: datetime = T0, until: datetime | None = None) -> list[str]:
+    return [
+        "export",
+        "--database-url-env",
+        URL_ENV,
+        "--since",
+        since.isoformat(),
+        "--until",
+        (until or day(30)).isoformat(),
+        "--out",
+        str(out),
+    ]
+
+
+def assert_no_secret(out: Path, *texts: str) -> None:
+    if out.exists():
+        texts = (*texts, out.read_text(encoding="utf-8"))
+    for text in texts:
+        assert SENTINEL_URL not in text
+        assert "SENTINEL-pw-8841" not in text
+        assert "soak_user" not in text
+
+
+def test_export_with_a_missing_variable_exits_2_naming_only_the_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv(URL_ENV, raising=False)
+    out = tmp_path / "journal.jsonl"
+
+    code = soak.main(export_argv(out), clock=lambda: NOW)
+
+    assert code == 2
+    assert URL_ENV in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_export_never_prints_the_url_when_the_connection_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(URL_ENV, SENTINEL_URL)
+
+    def refuse(url: str, **_: object) -> object:
+        raise RuntimeError(f"could not connect to {url}")
+
+    monkeypatch.setattr(soak, "make_sync_engine", refuse)
+    out = tmp_path / "journal.jsonl"
+
+    code = soak.main(export_argv(out), clock=lambda: NOW)
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "RuntimeError" in captured.err
+    assert not out.exists()
+    assert_no_secret(out, captured.out, captured.err)
+
+
+def test_export_writes_the_rows_create_only_and_never_the_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(URL_ENV, SENTINEL_URL)
+    events = [healthy(T0), outcome(day(1), "plan-1"), healthy(day(22))]
+    seen: dict[str, Any] = {}
+
+    def fake_fetch(url: str, since: datetime, until: datetime) -> list[JournalEvent]:
+        seen.update(url=url, since=since, until=until)
+        return events
+
+    monkeypatch.setattr(soak, "fetch_events", fake_fetch)
+    out = tmp_path / "journal.jsonl"
+
+    code = soak.main(export_argv(out), clock=lambda: NOW)
+
+    assert code == 0
+    assert seen == {"url": SENTINEL_URL, "since": T0, "until": day(30)}
+    raw = out.read_bytes()
+    assert raw.endswith(b"\n") and b"\r" not in raw
+    assert soak.parse_journal(raw) == sorted(
+        events, key=lambda e: (e.occurred_at_utc, e.journal_event_id)
+    )
+    captured = capsys.readouterr()
+    assert_no_secret(out, captured.out, captured.err)
+
+    assert soak.main(export_argv(out), clock=lambda: NOW) == 2
+    assert out.read_bytes() == raw
+
+
+def test_export_refuses_an_empty_or_reversed_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(URL_ENV, SENTINEL_URL)
+    monkeypatch.setattr(soak, "fetch_events", lambda *_: [])
+    out = tmp_path / "journal.jsonl"
+
+    assert soak.main(export_argv(out, since=day(5), until=day(5)), clock=lambda: NOW) == 2
+    assert soak.main(export_argv(out, since=day(5), until=day(2)), clock=lambda: NOW) == 2
+    assert soak.main(export_argv(out), clock=lambda: NOW) == 2
+    assert not out.exists()
+
+
+def test_help_names_export(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        soak.main(["--help"], clock=lambda: NOW)
+
+    assert raised.value.code == 0
+    assert "export" in capsys.readouterr().out
