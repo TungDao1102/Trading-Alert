@@ -427,16 +427,6 @@ class DatabaseUrlMissing(Exception):  # noqa: N818 - a refusal of the start, not
 AssembleFn = Callable[[LiveContext], Any]
 
 
-def _sqlalchemy_url(database_url: str) -> Any:
-    """SQLAlchemy URL object; a bare ``postgresql://`` gets the psycopg 3 driver."""
-    from sqlalchemy.engine import make_url
-
-    url = make_url(database_url)
-    if url.drivername in ("postgresql", "postgres"):
-        url = url.set(drivername="postgresql+psycopg")
-    return url
-
-
 def default_assemble(
     context: LiveContext,
     *,
@@ -445,6 +435,12 @@ def default_assemble(
 ) -> Any:
     """Build the live process for real: PostgreSQL engine, SDK, PTB application, parameter set.
 
+    The engine is `make_sync_engine` (as in the paper runtime), never a bare `create_engine`:
+    the placement and protection paths call the stores on the event loop and rely on its bounded
+    connect, lock, statement and pool waits, TCP keepalives and the verified UTC session pin
+    (24-REVIEW CR-01). An unreachable database or a session off UTC raises here, and
+    `run_admitted` turns that into a refused start.
+
     `sdk_factory` is None in production (the official SDK client of the mode's environment);
     the Demo smoke (`scripts/demo_rehearsal.py`, plan 24-29) passes a factory that re-checks the
     Demo host.
@@ -452,12 +448,11 @@ def default_assemble(
     Raises:
         DatabaseUrlMissing: no database URL variable is set.
     """
-    from sqlalchemy import create_engine
-
     from src.adapters.binance_limits import load_binance_limits
     from src.domain.registry import load_parameter_set
     from src.live.wiring import build_wiring
     from src.live.wiring_parts import LiveBotProxy
+    from src.persistence.engine import make_sync_engine
 
     url = next((context.env[n] for n in DATABASE_URL_VARIABLES if context.env.get(n)), None)
     if url is None:
@@ -480,7 +475,7 @@ def default_assemble(
         sdk_factory=sdk_factory,
         application_factory=application_factory,
         bot=LiveBotProxy(),
-        engine=create_engine(_sqlalchemy_url(url), pool_pre_ping=True),
+        engine=make_sync_engine(url),  # bounded waits, UTC verified (CR-01)
         repo_root=repo_root,
         symbols=DEMO_SYMBOLS,
         session_id=context.started_at_utc.strftime("%Y%m%dT%H%M%SZ"),
