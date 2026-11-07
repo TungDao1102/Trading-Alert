@@ -145,7 +145,17 @@ DOCKER_STUB = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >>"$FAKE_DOCKER_LOG"
 case ${1:-} in
   image) printf '%s\\n' "$FAKE_IMAGE_ID" ;;
-  compose) printf '%s\\n' "${TRADING_APP_REVISION-unset}" >>"$FAKE_DOCKER_ENV_LOG" ;;
+  compose)
+    # A `compose ... ps` probe (the update.sh live guard) answers from FAKE_PS_OUTPUT and
+    # FAKE_PS_STATUS and is not logged to the env log, so the build stays the first logged call.
+    case " $* " in
+      *" ps "*)
+        if [ -n "${FAKE_PS_OUTPUT:-}" ]; then printf '%s\\n' "$FAKE_PS_OUTPUT"; fi
+        exit "${FAKE_PS_STATUS:-0}"
+        ;;
+    esac
+    printf '%s\\n' "${TRADING_APP_REVISION-unset}" >>"$FAKE_DOCKER_ENV_LOG"
+    ;;
   run) exit "${FAKE_DOCKER_RUN_STATUS:-0}" ;;
 esac
 exit 0
@@ -347,7 +357,9 @@ class _UpdateRig:
         self.driver = tmp_path / "driver.sh"
         self.driver.write_text(UPDATE_DRIVER, encoding="utf-8", newline="\n")
 
-    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, *args: str, ps_output: str = "", ps_status: int = 0
+    ) -> subprocess.CompletedProcess[str]:
         bash = find_bash()
         if bash is None:
             infra_skip("bash not found")
@@ -363,6 +375,8 @@ class _UpdateRig:
         env["FAKE_DOCKER_ENV_LOG"] = self.env_log.as_posix()
         env["FAKE_IMAGE_ID"] = FAKE_IMAGE_ID
         env["FAKE_REF_SHA"] = UPDATE_REF_SHA
+        env["FAKE_PS_OUTPUT"] = ps_output
+        env["FAKE_PS_STATUS"] = str(ps_status)
         env["FAKE_HEAD_FILE"] = self.head.as_posix()
         env["TRADING_APP_REVISION"] = STALE_REVISION  # an ambient value must be replaced
         env["TRADING_DEPLOY_STATE_DIR"] = self.state.as_posix()
@@ -398,3 +412,68 @@ def test_update_dry_run_announces_the_stamp_and_exports_nothing(tmp_path: Path) 
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert f"+ export TRADING_APP_REVISION={UPDATE_REF_SHA}" in proc.stdout.splitlines()
     assert not rig.env_log.exists()
+
+
+def test_update_refuses_while_the_live_service_runs(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup", ps_output="postgres\nlive\n")
+    assert proc.returncode != 0
+    assert "the live service is running" in proc.stderr
+    assert "RUNBOOK 22.5" in proc.stderr
+    # Nothing was changed: no checkout, the head file still holds the old commit.
+    assert "+ git checkout" not in proc.stdout
+    assert rig.head.read_text(encoding="utf-8").strip() == UPDATE_OLD_SHA
+
+
+def test_update_proceeds_when_the_live_service_is_not_among_the_running_ones(
+    tmp_path: Path,
+) -> None:
+    rig = _UpdateRig(tmp_path)
+    # A service whose name merely contains "live" must not count as the live service.
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup", ps_output="postgres\nlive-probe\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "+ git checkout --detach v0.3.1" in proc.stdout.splitlines()
+
+
+def test_update_force_live_proceeds_with_a_warning(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup", "--force-live", ps_output="live\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "WARNING: the live service is running; continuing because of --force-live" in proc.stderr
+    assert "+ git checkout --detach v0.3.1" in proc.stdout.splitlines()
+
+
+def test_update_refuses_when_the_live_probe_fails(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup", ps_status=1)
+    assert proc.returncode != 0
+    assert "could not tell whether the live service runs" in proc.stderr
+    assert "+ git checkout" not in proc.stdout
+    forced = rig.run("--ref", "v0.3.1", "--skip-backup", "--force-live", ps_status=1)
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert "continuing because of --force-live" in forced.stderr
+
+
+def test_update_dry_run_prints_the_live_check_and_skips_it(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    proc = rig.run("--ref", "v0.3.1", "--skip-backup", "--dry-run", ps_output="live\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert any(
+        line.startswith("+ check that the live service is not running: ")
+        and "--profile live ps --status running --services" in line
+        for line in proc.stdout.splitlines()
+    )
+
+
+def test_rollback_refuses_while_the_live_service_runs(tmp_path: Path) -> None:
+    rig = _UpdateRig(tmp_path)
+    rig.state.mkdir(parents=True)
+    (rig.state / "last-good.env").write_text(
+        f"GIT_SHA={UPDATE_OLD_SHA}\nAPP_IMAGE_ID={FAKE_IMAGE_ID}\nOPS_IMAGE_ID={FAKE_IMAGE_ID}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    proc = rig.run("--rollback", ps_output="live\n")
+    assert proc.returncode != 0
+    assert "the live service is running" in proc.stderr
+    assert "+ git checkout" not in proc.stdout

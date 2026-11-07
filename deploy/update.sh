@@ -3,8 +3,13 @@ set -Eeuo pipefail
 # Update the running stack to a git ref, or roll back to the images that ran before (13.1-10, D-16).
 #
 # Usage:
-#   deploy/update.sh --ref REF [--skip-backup] [--dry-run]
-#   deploy/update.sh --rollback [--dry-run]
+#   deploy/update.sh --ref REF [--skip-backup] [--force-live] [--dry-run]
+#   deploy/update.sh --rollback [--force-live] [--dry-run]
+#
+# Both modes refuse to run while the `live` compose service is running (review WR-04, RUNBOOK 22.5):
+# protection is fill-driven, so a resting entry can fill unprotected while the process restarts.
+# Stop it as RUNBOOK 22.5 describes first. A probe that fails also refuses (fail closed).
+# --force-live accepts that window and only warns. --dry-run prints the check and skips it.
 #
 # --ref refuses a dirty working tree, records the current commit and the IDs of both images in
 # .deploy/last-good.env (the previous record is kept as last-good.env.prev), runs
@@ -39,12 +44,13 @@ OPS_REPO=trading-alert-ops
 REF=""
 ROLLBACK=0
 SKIP_BACKUP=0
+FORCE_LIVE=0
 STATE_DIR=""
 STATE_FILE=""
 COMPOSE=()
 
 usage() {
-  sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -63,6 +69,7 @@ parse_args() {
         ;;
       --rollback) ROLLBACK=1 ;;
       --skip-backup) SKIP_BACKUP=1 ;;
+      --force-live) FORCE_LIVE=1 ;;
       --dry-run) DRY_RUN=1 ;;
       -h | --help)
         usage
@@ -89,6 +96,35 @@ parse_args() {
 # image_id TAG: the image ID behind a tag, empty when the tag does not exist.
 image_id() {
   docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true
+}
+
+# require_live_stopped: refuse while the `live` service runs (review WR-04, RUNBOOK 22.5). The probe
+# lists only the running services; it prints no environment and no secret. A probe that fails
+# (compose cannot read the project, the daemon is down) refuses too, because "not running" is
+# unproven. --force-live turns the refusal into a warning; --dry-run prints the check and skips it.
+require_live_stopped() {
+  local probe=("${COMPOSE[@]}" --profile live ps --status running --services) running
+  if [[ $DRY_RUN == 1 ]]; then
+    printf '+ check that the live service is not running: %s\n' "${probe[*]}"
+    return 0
+  fi
+  if ! running="$("${probe[@]}" 2>/dev/null)"; then
+    if ((FORCE_LIVE)); then
+      warn "could not tell whether the live service runs; continuing because of --force-live"
+      return 0
+    fi
+    die "could not tell whether the live service runs; stop it as RUNBOOK 22.5 describes, or accept" \
+      "the unprotected-entry window with --force-live"
+  fi
+  if grep -qx 'live' <<<"$running"; then
+    if ((FORCE_LIVE)); then
+      warn "the live service is running; continuing because of --force-live (a resting entry can" \
+        "fill unprotected while the process restarts, RUNBOOK 22.5)"
+      return 0
+    fi
+    die "the live service is running; stop it as RUNBOOK 22.5 describes (/disable_entries, wait for" \
+      "'protections: 0 open' in /status, then stop), or accept the window with --force-live"
+  fi
 }
 
 require_clean_tree() {
@@ -166,6 +202,7 @@ stamp_build_revision() {
 
 do_update() {
   local retry=0
+  require_live_stopped
   require_clean_tree
   if is_retry; then
     retry=1
@@ -202,6 +239,7 @@ verify_image() {
 
 do_rollback() {
   [[ -f $STATE_FILE ]] || die "no rollback state at $STATE_FILE; nothing to roll back to"
+  require_live_stopped
   local sha app_id ops_id
   sha="$(state_value GIT_SHA)"
   app_id="$(state_value APP_IMAGE_ID)"

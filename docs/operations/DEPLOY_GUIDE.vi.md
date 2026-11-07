@@ -2274,7 +2274,7 @@ deploy/update.sh --ref <commit-sha> --dry-run
 deploy/update.sh --ref <commit-sha>
 ```
 
-Thứ tự theo phần đầu của script: từ chối nếu cây bẩn; ghi commit hiện tại và ID của hai image vào `.deploy/last-good.env` (bản ghi cũ giữ lại thành `last-good.env.prev`); chạy `deploy/backup.sh` (một bản sao lưu lỗi dừng cập nhật); gắn thẻ `:rollback` cho hai image; `git fetch --tags origin`; `git checkout --detach` tới ref; `docker compose --profile ops build`; `docker compose up -d`. Cờ `--skip-backup` bỏ qua bản sao lưu và là một rủi ro bạn tự nhận, đặc biệt khi cập nhật có migration.
+Thứ tự theo phần đầu của script: từ chối nếu cây bẩn; ghi commit hiện tại và ID của hai image vào `.deploy/last-good.env` (bản ghi cũ giữ lại thành `last-good.env.prev`); chạy `deploy/backup.sh` (một bản sao lưu lỗi dừng cập nhật); gắn thẻ `:rollback` cho hai image; `git fetch --tags origin`; `git checkout --detach` tới ref; `docker compose --profile ops build`; `docker compose up -d`. Cờ `--skip-backup` bỏ qua bản sao lưu và là một rủi ro bạn tự nhận, đặc biệt khi cập nhật có migration. Trước mọi bước, script từ chối chạy (cả `--ref` lẫn `--rollback`) nếu dịch vụ compose `live` đang chạy hoặc nếu không xác định được, vì một lệnh entry đang chờ có thể khớp mà chưa có stop khi tiến trình khởi động lại; hãy dừng nó trước theo RUNBOOK 22.5. Cờ `--force-live` chấp nhận khoảng hở đó và chỉ cảnh báo.
 
 #### Bước 11.3 Kiểm tra sau cập nhật [ĐÃ XÂY] [CHƯA XÁC MINH]
 
@@ -2337,7 +2337,7 @@ deploy/update.sh --ref <commit-sha> --skip-backup
 deploy/update.sh --rollback
 ```
 
-Hai chế độ. Chế độ cập nhật: `--ref REF` (bắt buộc, không được bắt đầu bằng dấu gạch), tùy chọn `--skip-backup` (chỉ dùng với `--ref`) và `--dry-run`. Chế độ quay lại: `--rollback` (kèm `--dry-run` nếu muốn), không dùng chung với `--ref` và `--skip-backup`. `-h`/`--help` in cách dùng. Các biến môi trường `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` và `IMAGE_TAG` (mặc định `dev`) được tôn trọng.
+Hai chế độ. Chế độ cập nhật: `--ref REF` (bắt buộc, không được bắt đầu bằng dấu gạch), tùy chọn `--skip-backup` (chỉ dùng với `--ref`), `--force-live` (bỏ qua việc từ chối khi dịch vụ `live` đang chạy, chỉ cảnh báo) và `--dry-run`. Chế độ quay lại: `--rollback` (kèm `--force-live` hoặc `--dry-run` nếu muốn), không dùng chung với `--ref` và `--skip-backup`. `-h`/`--help` in cách dùng. Các biến môi trường `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` và `IMAGE_TAG` (mặc định `dev`) được tôn trọng.
 
 Tệp trạng thái: `.deploy/last-good.env` (quyền 0600, bị gitignore, được phân tích chứ không bao giờ `source`) chứa `GIT_SHA`, `APP_IMAGE_ID` và `OPS_IMAGE_ID`; bản trước là `last-good.env.prev`. Khi chạy lại một cập nhật dở (checkout đã ở REF và có bản ghi hợp lệ), script giữ nguyên bản ghi và các thẻ `:rollback` để quay lại vẫn về bản tốt cuối.
 
@@ -2353,7 +2353,7 @@ deploy/update.sh --rollback --dry-run
 
 **Dấu hiệu thành công:** cập nhật in "updated to <REF>; undo with: deploy/update.sh --rollback". Quay lại kết thúc bằng `docker compose up -d --no-build` và một cảnh báo rằng migration không bị hoàn tác.
 
-**Mã thoát:** 0 khi thành công và với `-h`. 2 khi lỗi cờ (`usage_error`): không đưa `--ref` hay `--rollback`, dùng chung `--ref` với `--rollback`, `--skip-backup` cùng `--rollback`, hoặc ref bắt đầu bằng dấu gạch. 1 cho mọi lỗi `die`: cây làm việc có thay đổi chưa commit, hai image không tồn tại cục bộ để quay lại, không có trạng thái quay lại ("no rollback state"), tệp trạng thái hỏng, hoặc ID image không khớp với bản ghi. Một lệnh con lỗi (build, up) làm script thoát với mã của lệnh đó, suy ra từ `set -e` `[CHƯA XÁC MINH]`.
+**Mã thoát:** 0 khi thành công và với `-h`. 2 khi lỗi cờ (`usage_error`): không đưa `--ref` hay `--rollback`, dùng chung `--ref` với `--rollback`, `--skip-backup` cùng `--rollback`, hoặc ref bắt đầu bằng dấu gạch. 1 cho mọi lỗi `die`: dịch vụ `live` đang chạy hoặc không xác định được (không có `--force-live`), cây làm việc có thay đổi chưa commit, hai image không tồn tại cục bộ để quay lại, không có trạng thái quay lại ("no rollback state"), tệp trạng thái hỏng, hoặc ID image không khớp với bản ghi. Một lệnh con lỗi (build, up) làm script thoát với mã của lệnh đó, suy ra từ `set -e` `[CHƯA XÁC MINH]`.
 
 **Khi lỗi:** "the working tree has uncommitted changes": commit hoặc bỏ thay đổi. "images ... must exist locally": dựng bằng `docker compose --profile ops build` (bước 4.9). "image ... is ..., recorded was ...; refusing to roll back": thẻ `:rollback` không còn trỏ vào image đã ghi nên script dừng trước khi đổi gì; lúc này hãy khôi phục từ bản sao lưu (mục 6.5). "no rollback state ...": máy chưa từng cập nhật bằng `--ref`, không có gì để quay về.
 
@@ -2482,7 +2482,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | bootstrap, chạy thử | `[MÁY EC2]` | `sudo deploy/bootstrap.sh --dry-run --secrets-file /root/secrets.env --repo git@example.com:me/trading.git --ref <commit-sha> --authorized-keys /root/authorized_keys` | 4.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | bootstrap, chạy thật với mọi cờ (`--secrets-file`, `--repo`, `--ref`, `--authorized-keys`, `--dir`, `--user`, `--deploy-key`, `--max-drift-ms`) | `[MÁY EC2]` | `sudo deploy/bootstrap.sh --secrets-file /root/secrets.env --repo git@example.com:me/trading.git --ref <commit-sha> --authorized-keys /root/authorized_keys --dir /opt/trading --user trading --deploy-key /root/deploy_key --max-drift-ms 100` | 4.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | thư viện hàm dùng chung `lib.sh` (`die`, `run`, `DRY_RUN`) | không chạy | được `source` bởi các script khác, không có cờ và không bao giờ chạy trực tiếp | thẻ `deploy/bootstrap.sh` | `[ĐÃ XÂY]` |
-| update, cập nhật (`--ref`, `--skip-backup`, `--dry-run`) | `[MÁY EC2]` | `deploy/update.sh --ref <commit-sha> --skip-backup --dry-run` | 11.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| update, cập nhật (`--ref`, `--skip-backup`, `--force-live`, `--dry-run`) | `[MÁY EC2]` | `deploy/update.sh --ref <commit-sha> --skip-backup --dry-run` | 11.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | update, quay lại (`--rollback`) | `[MÁY EC2]` | `deploy/update.sh --rollback --dry-run` | 11.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | migrate, chạy thử (`--dry-run`) | `[MÁY EC2]` | `deploy/migrate.sh --dry-run trading@old.example local` | 5.6 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | migrate, chạy thật (`--max-gap-minutes`, `--wait-seconds`, `--key-source`) | `[MÁY EC2]` | `deploy/migrate.sh --max-gap-minutes 60 --wait-seconds 900 --key-source ~/.ssh/trading-migrate trading@old.example local` | 5.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
