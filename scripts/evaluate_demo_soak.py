@@ -3,12 +3,21 @@
     python scripts/evaluate_demo_soak.py verify-registration --registration R --hash-file H
     python scripts/evaluate_demo_soak.py evaluate --registration R --hash-file H
         --registration-committed-at T --journal J.jsonl [--annotations A.md] --out REPORT.json
+    python scripts/evaluate_demo_soak.py export --database-url-env NAME
+        --since T1 --until T2 --out J.jsonl
 
 Deviation from D-10 (research Pitfall 2): the Phase 16 soak tools evaluate paper-runtime epochs,
 freeze ticks and parity; they cannot judge the live process. This evaluator is new and
 journal-based. Only the pattern of the manifest and the SHA-256 is reused. Nothing here reads a
 clock except the injected `clock` of `main`, touches the network or changes a threshold: every
 number comes from the registration.
+
+`export` is owner-run on the soak host, never by an agent against a real database: it reads
+`journal_events` rows with T1 <= occurred_at_utc < T2 from PostgreSQL, ordered by occurred_at_utc
+then journal_event_id, and writes one JSONL line per row (create-only, LF). The database URL is
+read from the environment variable named by `--database-url-env`; it is never an argument and is
+never printed, logged or written, and a failure names only the exception type. The pair of
+commands on the host is `export ... --out J.jsonl` then `evaluate ... --journal J.jsonl`.
 
 Registration (`demo-soak-registration/1`): a markdown file with exactly ONE fenced json block
 holding exactly these keys: schema, duration_days (integer, at least 21), symbols (non-empty list
@@ -74,6 +83,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -87,6 +97,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from sqlalchemy import select  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
+from src.db.mappers import journal_from_row  # noqa: E402
+from src.db.models import JournalEventRow  # noqa: E402
 from src.domain.journal import JournalEvent  # noqa: E402
 from src.execution.protection import (  # noqa: E402
     BRANCH_B2_STOP_UNCONFIRMED,
@@ -112,6 +126,7 @@ from src.execution.protection_replay import (  # noqa: E402
 from src.live.execution_service import EVENT_PLACEMENT_OUTCOME  # noqa: E402
 from src.live.health import VERDICT_EVENT_TYPE  # noqa: E402
 from src.ops.alerts import EVENT_OPERATIONAL_ALERT  # noqa: E402
+from src.persistence.engine import make_sync_engine  # noqa: E402
 from src.reconcile.compare import DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID  # noqa: E402
 from src.reconcile.loop import RECONCILE_TICK  # noqa: E402
 
@@ -952,6 +967,19 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--journal", required=True, type=Path, help="JSONL journal export")
     run.add_argument("--annotations", type=Path, default=None, help="owner annotations (markdown)")
     run.add_argument("--out", required=True, type=Path, help="report file (create-only)")
+
+    export = commands.add_parser(
+        "export", help="owner-run: export journal rows of a window from PostgreSQL as JSONL"
+    )
+    export.add_argument(
+        "--database-url-env",
+        required=True,
+        metavar="NAME",
+        help="NAME of the environment variable that holds the database URL (never the URL)",
+    )
+    export.add_argument("--since", required=True, help="inclusive start (ISO 8601, timezone aware)")
+    export.add_argument("--until", required=True, help="exclusive end (ISO 8601, timezone aware)")
+    export.add_argument("--out", required=True, type=Path, help="JSONL file (create-only)")
     return parser
 
 
@@ -1008,12 +1036,55 @@ def _cmd_evaluate(args: argparse.Namespace, clock: Callable[[], datetime]) -> in
     return EXIT_PASS if evaluation.passed else EXIT_FAIL
 
 
+def fetch_events(database_url: str, since: datetime, until: datetime) -> list[JournalEvent]:
+    """The journal rows with since <= occurred_at_utc < until, in occurred-then-id order."""
+    engine = make_sync_engine(database_url)
+    try:
+        with Session(engine) as session:
+            statement = (
+                select(JournalEventRow)
+                .where(
+                    JournalEventRow.occurred_at_utc >= since,
+                    JournalEventRow.occurred_at_utc < until,
+                )
+                .order_by(JournalEventRow.occurred_at_utc, JournalEventRow.journal_event_id)
+            )
+            return [journal_from_row(row) for row in session.scalars(statement)]
+    finally:
+        engine.dispose()
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    name: str = args.database_url_env
+    url = os.environ.get(name)
+    if not url:
+        raise InputError(f"environment variable {name} is not set")
+    since = parse_utc(args.since, "--since")
+    until = parse_utc(args.until, "--until")
+    if since >= until:
+        raise InputError("--since must be earlier than --until")
+    try:
+        events = fetch_events(url, since, until)
+    except Exception as exc:  # noqa: BLE001 - the message of a driver error may carry the URL
+        raise InputError(
+            f"cannot read the journal from the database ({type(exc).__name__})"
+        ) from None
+    if not events:
+        raise InputError("the window holds no journal rows; nothing was written")
+    events.sort(key=lambda e: (e.occurred_at_utc, e.journal_event_id))
+    write_create_only(args.out, b"".join(event_to_jsonl(e) for e in events).decode("utf-8"))
+    print(f"exported {len(events)} journal rows")
+    return EXIT_PASS
+
+
 def main(argv: Sequence[str] | None = None, *, clock: Callable[[], datetime] = _utc_now) -> int:
     """Run one subcommand. `clock` is the only time source (it stamps the report)."""
     args = _parser().parse_args(argv)
     try:
         if args.command == "verify-registration":
             return _cmd_verify(args)
+        if args.command == "export":
+            return _cmd_export(args)
         return _cmd_evaluate(args, clock)
     except InputError as exc:
         print(f"cannot evaluate: {exc}", file=sys.stderr)

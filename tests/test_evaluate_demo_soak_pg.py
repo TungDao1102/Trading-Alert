@@ -23,6 +23,7 @@ from src.persistence.engine import make_sync_engine
 from src.persistence.journal import PgJournalStore
 from src.persistence.uow import OperationalDatabase
 
+from tests.support.pg_rows import hexid, insert_and_commit, make_plan, make_signal
 from tests.test_evaluate_demo_soak import (
     COMMITTED_AT,
     NOW,
@@ -36,6 +37,22 @@ from tests.test_evaluate_demo_soak import (
 )
 
 URL_ENV = "SOAK_EXPORT_PG_TEST_URL"
+PLAN_1 = hexid(0x1001)
+PLAN_2 = hexid(0x1002)
+
+
+def seed_plans(url: str) -> None:
+    """The parent rows the journal foreign keys need: one signal and two trade plans."""
+    engine = make_sync_engine(url)
+    try:
+        insert_and_commit(
+            engine,
+            make_signal(1),
+            make_plan(1, 1, plan_hash="1" * 64),
+            make_plan(2, 1, plan_hash="2" * 64),
+        )
+    finally:
+        engine.dispose()
 
 
 def record(url: str, events: list[JournalEvent]) -> None:
@@ -128,10 +145,11 @@ def test_export_takes_the_half_open_window_in_occurred_then_id_order(
 def test_a_journal_recorded_in_postgresql_round_trips_through_export_and_evaluate(
     pg_db: str, pg_server_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    seed_plans(pg_db)
     recorded = [
         healthy(T0),
-        outcome(day(1), "plan-1"),
-        outcome(day(2), "plan-2"),
+        outcome(day(1), PLAN_1),
+        outcome(day(2), PLAN_2),
         healthy(day(22)),
     ]
     record(pg_db, recorded)
@@ -156,8 +174,9 @@ def test_a_journal_recorded_in_postgresql_round_trips_through_export_and_evaluat
 def test_a_duplicate_entry_recorded_in_postgresql_fails_the_evaluation(
     pg_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = outcome(day(1), "plan-1")
-    second = outcome(day(1.5), "plan-1")
+    first = outcome(day(1), PLAN_1)
+    second = outcome(day(1.5), PLAN_1)
+    seed_plans(pg_db)
     record(pg_db, [healthy(T0), first, second, healthy(day(22))])
     out = tmp_path / "journal.jsonl"
     assert run_export(monkeypatch, pg_db, out, since=T0, until=day(30)) == 0
