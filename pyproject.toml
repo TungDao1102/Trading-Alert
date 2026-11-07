@@ -54,6 +54,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
   "docker: needs a reachable Docker daemon and the built trading-alert images (cutover, backup drill, image checks)",
+  "demo: owner-run Binance Demo scenario; skipped unless -m demo with TRADING_DEMO_RUN=1",
 ]
 
 [tool.ruff]
