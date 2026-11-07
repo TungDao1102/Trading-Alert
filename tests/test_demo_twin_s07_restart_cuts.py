@@ -33,7 +33,8 @@ from tests.support.demo_scenarios.harness import (
     ScenarioRecorder,
     build_fake_scenario_env,
 )
-from tests.support.fault_edge import MODE_DROP_RESPONSE
+from tests.support.execution_limits import TEST_ONLY_EXECUTION_LIMIT_VALUES
+from tests.support.fault_edge import MODE_DROP_RESPONSE, MODE_HOLD
 from tests.support.live_rig import forbid_real_sleep
 
 FAKE_NOW = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
@@ -43,6 +44,8 @@ REUSES = (
     "tests/test_live_restart_rehydrate.py::test_a_protected_plan_comes_back_protected_and_its_stop_is_not_placed_again",
     "tests/test_live_restart_rehydrate.py::test_an_entry_sent_with_an_unknown_result_stays_unknown_with_safe_mode",
     "tests/test_intent_recovery_unknown_entry.py::test_a_found_order_becomes_acked_with_journaled_evidence",
+    "tests/test_live_restart_rehydrate.py::test_a_fill_for_the_rebuilt_entry_reaches_the_coordinator_as_a_known_order",
+    "tests/test_live_stream_to_protection.py::test_a_fill_frame_at_the_transport_edge_ends_in_a_rest_confirmed_stop",
 )
 
 
@@ -321,6 +324,160 @@ def test_on_demo_the_lost_answer_is_fault_injected_and_the_recovery_is_observed(
     steps = {step["name"]: step["label"] for step in recorder.steps}
     assert steps[s07_restart_cuts.STEP_A_LOST_ANSWER] == DEMO_FAULT_INJECTED
     assert steps[s07_restart_cuts.STEP_A_RECOVERY] == DEMO_OBSERVED
+
+
+# --------------------------------------------------------------------------------------------- #
+# Cut (b): the stop placement is held, the process crashes between the fill and the stop.
+# --------------------------------------------------------------------------------------------- #
+
+_CUT_B_STEPS = (
+    "precondition_clean",
+    "start",
+    "signal",
+    "card",
+    "approve",
+    "confirm_entry",
+    s07_restart_cuts.STEP_B_HELD,
+    "restart",
+    s07_restart_cuts.STEP_B_RESTORED,
+    s07_restart_cuts.STEP_B_STOP_PLACED,
+    s07_restart_cuts.STEP_B_ONE_ENTRY,
+    "close_cleanup",
+    "safe_mode_left",
+    "account_clean",
+)
+
+
+async def _run_b(tmp_path: Path, **kwargs: Any) -> tuple[Any, ScenarioRecorder]:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    outcome = await s07_restart_cuts.run(env, recorder, cut="b", **kwargs)
+    assert outcome == dr.OUTCOME_COMPLETE and recorder.outcome == outcome
+    return env, recorder
+
+
+async def test_cut_b_runs_end_to_end_and_every_step_is_synthetic(tmp_path: Path) -> None:
+    _, recorder = await _run_b(tmp_path)
+    assert {step["label"] for step in recorder.steps} == {SYNTHETIC}
+    statuses = _status(recorder)
+    for name in _CUT_B_STEPS:
+        assert statuses.get(name) == dr.STEP_PASSED, (name, recorder.steps)
+    assert recorder.details["cut"] == "b"
+
+
+async def test_cut_b_the_held_stop_never_reached_the_exchange_the_second_process_placed_it(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_b(tmp_path)
+    facts = recorder.details["cut_b"]
+    stop_id = facts["stop_client_algo_id"]
+    edge = [
+        c
+        for c in env.faults.calls_to("place_algo_protective")
+        if c["kwargs"]["client_algo_id"] == stop_id
+    ]
+    assert len(edge) == 2, "the held call of the first process and the real one"
+    assert edge[0]["mode"] == MODE_HOLD and edge[1]["injected"] is False
+    on_exchange = [
+        c["kwargs"]["client_algo_id"] for c in env.fake.calls_to("place_algo_protective")
+    ]
+    assert on_exchange.count(stop_id) == 1, "the exchange saw one stop, from the second process"
+    assert facts["stop_calls_at_exchange_before_restart"] == 0
+    assert facts["stop_confirmed_after_restart"] is True
+
+
+async def test_cut_b_the_second_process_restores_unprotected_and_blocks_entries(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_b(tmp_path)
+    facts = recorder.details["cut_b"]
+    assert facts["state_before_crash"] == ProtectionState.UNPROTECTED.value
+    assert facts["state_after_restart"] == ProtectionState.UNPROTECTED.value
+    assert facts["blocks_new_entries_after_restart"] is True
+    assert facts["restart_in_safe_mode"] is True and facts["restart_entries_enabled"] is False
+    starts = recorder.details["start_sequences"]
+    assert [s["label"] for s in starts] == ["start", "restart"]
+    assert starts[1]["plans_restored"] == 1
+    assert len(env.fake.calls_to("place_entry")) == 1, "no second entry opened"
+    assert len(env.faults.calls_to("place_entry")) == 1
+
+
+async def test_cut_b_the_protected_plan_is_closed_the_owner_leaves_safe_mode(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_b(tmp_path)
+    facts = recorder.details["cut_b"]
+    assert facts["state_after_stop"] in {"PROTECTED", "COMPLETE", "TP_UNAVAILABLE"}
+    assert facts["safe_mode_after_exit"] is False
+    assert env.rig.stores.journal.by_type("SAFE_MODE_EXIT")
+    assert env.fake.open_orders == {} and env.fake.open_algos == {}
+    assert len(env.fake.calls_to("place_market_close")) == 1, "the operator close"
+
+
+async def test_cut_b_a_late_restart_closes_at_the_deadline_instead_of_protecting(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_b(tmp_path, late_restart=True)
+    facts = recorder.details["cut_b"]
+    assert facts["branch"] == "late_restart"
+    assert (
+        facts["late_restart_seconds"] * 1000
+        > TEST_ONLY_EXECUTION_LIMIT_VALUES["protection.max_unprotected_ms"]
+    )
+    assert facts["state_after_restart"] == ProtectionState.UNPROTECTED.value
+    assert facts["first_closing_state"] == ProtectionState.CLOSE_REQUIRED.value
+    assert statuses_of(recorder)[s07_restart_cuts.STEP_B_CLOSED] == dr.STEP_PASSED
+    assert len(env.fake.calls_to("place_market_close")) == 1
+    assert len(env.fake.calls_to("place_entry")) == 1
+    assert env.fake.positions.get("BTCUSDT", 0) == 0
+
+
+def statuses_of(recorder: ScenarioRecorder) -> dict[str, str]:
+    return _status(recorder)
+
+
+async def test_cut_b_a_second_place_entry_fails_the_step(tmp_path: Path) -> None:
+    """Negative control: if the exchange saw a second entry POST the scenario must stop."""
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    original = s07_restart_cuts.place_entry_calls
+
+    def counted_twice(env_: Any) -> int:
+        return original(env_) + 1
+
+    s07_restart_cuts.place_entry_calls = counted_twice  # type: ignore[assignment]
+    try:
+        with pytest.raises(dr.SmokeHalt):
+            await s07_restart_cuts.run(env, recorder, cut="b")
+    finally:
+        s07_restart_cuts.place_entry_calls = original  # type: ignore[assignment]
+    assert _status(recorder)[s07_restart_cuts.STEP_B_ONE_ENTRY] == dr.STEP_FAILED
+
+
+async def test_cut_b_the_held_call_does_not_survive_the_crash(tmp_path: Path) -> None:
+    env, _ = await _run_b(tmp_path)
+    assert env.faults.held("place_algo_protective") is False
+
+
+async def test_cut_b_late_restart_is_only_for_the_twin_and_only_for_cut_b(
+    tmp_path: Path,
+) -> None:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    with pytest.raises(ValueError, match="late_restart"):
+        await s07_restart_cuts.run(env, _recorder(), cut="a", late_restart=True)
+    demo_like = SimpleNamespace(synthetic=False, label=DEMO_OBSERVED)
+    with pytest.raises(ValueError, match="late_restart"):
+        await s07_restart_cuts.run(demo_like, _recorder(), cut="b", late_restart=True)
+
+
+def test_on_demo_the_held_stop_is_fault_injected_and_the_restore_is_observed() -> None:
+    recorder = ScenarioRecorder("S07", mode=dr.RunMode.EXECUTE, environ={}, clock=lambda: FAKE_NOW)
+    env = SimpleNamespace(synthetic=False, label=DEMO_OBSERVED)
+    s07_restart_cuts.record_held_stop(env, recorder, "the stop placement was held")
+    s07_restart_cuts.record_restored(env, recorder, "the plan came back UNPROTECTED")
+    steps = {step["name"]: step["label"] for step in recorder.steps}
+    assert steps[s07_restart_cuts.STEP_B_HELD] == DEMO_FAULT_INJECTED
+    assert steps[s07_restart_cuts.STEP_B_RESTORED] == DEMO_OBSERVED
 
 
 async def test_the_evidence_file_has_the_scenario_schema_and_one_kind(tmp_path: Path) -> None:
