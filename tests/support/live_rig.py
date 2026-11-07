@@ -14,7 +14,9 @@ whose `OrderLookup` is the live client-id index. Presses go through `on_callback
 own callback keywords (D-17). `forbid_real_sleep` makes a real `asyncio.sleep` fail the test
 (the pattern of tests/test_protection_router_rig.py).
 
-Overrides (all optional): `token_for`, `limits`, `margin_verdict`, `inputs`.
+Overrides (all optional): `token_for`, `limits`, `margin_verdict`, `inputs`; and `stores`,
+`intents`, `journal`, which put the PostgreSQL stores in place of the in-memory ones (plan 24-28,
+`tests/support/live_pg_rig.py`).
 """
 
 from __future__ import annotations
@@ -92,7 +94,9 @@ TEST_ONLY_SYMBOL = "BTCUSDT"
 # TEST_ONLY: the sizing equity; the fake margin guard reports a larger live equity (gate 5f3).
 TEST_ONLY_SIZING_EQUITY = D("9600")
 TEST_ONLY_GUARD_EQUITY = D("10000")
-OVERRIDE_NAMES = frozenset({"token_for", "limits", "margin_verdict", "inputs"})
+OVERRIDE_NAMES = frozenset(
+    {"token_for", "limits", "margin_verdict", "inputs", "stores", "intents", "journal"}
+)
 
 
 def forbid_real_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
@@ -391,9 +395,9 @@ async def make_live_rig(**overrides: Any) -> LiveRig:
     clock = VirtualTime(T0)
     fake = BinanceSemanticsFakeAdapter(now_utc=clock.now(), enforce_flat_stop_rejection=True)
     fake.set_lot_filters(TEST_ONLY_SYMBOL, lot_filters_for_tests())
-    stores = InMemoryShadowStores()
-    intents = InMemoryExecutionIntentStore()
-    journal = RecordingJournal()
+    stores = overrides.get("stores") or InMemoryShadowStores()
+    intents = overrides.get("intents") or InMemoryExecutionIntentStore()
+    journal = overrides.get("journal") or RecordingJournal()
     limits: ExecutionLimits = overrides.get("limits") or test_only_execution_limits()
     sleep = RecordingSleep()
     bot = FakeBot.for_mode("DEMO")

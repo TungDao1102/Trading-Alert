@@ -158,7 +158,7 @@ class Restart:
             clock=rig.clock,
             restore_required=True,
         )
-        self.reader = MemoryRestoreReader(rig.intents)
+        self.reader = self._reader_for(rig)
         self.builder = restored_plans_builder(
             intents=self.reader,
             plan_for=rig.stores.plans.get,
@@ -172,6 +172,10 @@ class Restart:
             plan_hashes=lambda: [e.plan_hash for e in self.reader.restorable_entries()],
             events_for_correlation=self._events_of,
         )
+
+    def _reader_for(self, rig: LiveRig) -> Any:
+        """The restore reader; the PostgreSQL variant (plan 24-28) overrides it."""
+        return MemoryRestoreReader(rig.intents)
 
     def _events_of(self, correlation: str) -> list[JournalEvent]:
         """The journal rows of a correlation id, or of a plan hash (protection rows)."""

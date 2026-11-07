@@ -91,19 +91,21 @@ async def _press_on(
     )
 
 
-def _second_process(rig: LiveRig) -> LiveWiring:
+def _second_process(
+    rig: LiveRig, *, stores: Any = None, intents: Any = None, journal: Any = None
+) -> LiveWiring:
     """A new execution path over the first process' stores, intents, fake and SAFE_MODE state.
 
     A fresh confirm flow means a fresh confirm book: the raw tokens and the messages of run 1 are
-    gone, as after a real restart.
+    gone, as after a real restart. The PostgreSQL variant passes the stores of a second engine.
     """
     return build_execution_path(
         loop=rig.wiring.service._loop,
         clock=rig.clock,
         adapter=rig.fake,  # type: ignore[arg-type]
-        stores=rig.stores,
-        intent_store=rig.intents,
-        journal=rig.journal,
+        stores=rig.stores if stores is None else stores,
+        intent_store=rig.intents if intents is None else intents,
+        journal=rig.journal if journal is None else journal,
         safe_mode_controller=rig.safe_mode,
         enablement=rig.enablement,
         alert_sink=RecordingAlerts(),
