@@ -11,12 +11,12 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from src.domain.journal import JournalEvent, content_hash_event_id
 from src.persistence.engine import make_sync_engine
-from src.persistence.errors import PersistenceError, StoreFailure
+from src.persistence.errors import PersistenceError, StoreFailure, StoreUnavailable
 from src.persistence.journal import PgJournalStore
 from src.persistence.uow import OperationalDatabase
 
@@ -110,3 +110,22 @@ def test_the_database_stays_usable_after_a_mapped_failure(db: OperationalDatabas
 
     with db.transaction() as session:
         assert session.execute(text("SELECT 1")).scalar_one() == 1
+
+
+def test_an_exhausted_pool_becomes_store_unavailable_on_postgresql(pg_db: str) -> None:
+    """R-24 (D-13): the bounded pool wait expires as a typed outage, not a raw TimeoutError."""
+    eng = create_engine(pg_db, pool_size=1, max_overflow=0, pool_timeout=1)
+    try:
+        with eng.connect(), pytest.raises(StoreUnavailable) as info:
+            with OperationalDatabase(eng).transaction() as session:
+                session.execute(text("SELECT 1 AS pool_timeout_marker"))
+
+        assert "TimeoutError" in str(info.value)
+        assert "pool_timeout_marker" not in str(info.value)
+        assert info.value.__cause__ is None
+        assert info.value.__suppress_context__ is True
+
+        with OperationalDatabase(eng).transaction() as session:
+            assert session.execute(text("SELECT 1")).scalar_one() == 1
+    finally:
+        eng.dispose()
