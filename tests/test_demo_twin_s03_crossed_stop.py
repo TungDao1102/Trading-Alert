@@ -109,7 +109,11 @@ async def test_variant_one_refuses_at_confirm_with_the_price_check_reason_and_se
     crossed = recorder.details["crossed_mark"]
     assert crossed["reason_code"] == "MARK_PRICE_CROSSED_STOP"
     assert crossed["place_entry_calls_after_confirm"] == 0
-    assert crossed["event_type"] in ("LIVE_PLACEMENT_OUTCOME", "LIVE_PLACEMENT_REFUSED")
+    assert crossed["event_type"] in (
+        "DEMO_CONFIRM_EXPIRED",
+        "LIVE_PLACEMENT_OUTCOME",
+        "LIVE_PLACEMENT_REFUSED",
+    )
     marks = [c for c in env.faults.calls_to("get_mark_price") if c["injected"]]
     assert marks and {c["mode"] for c in marks} == {"override"}
     assert len(env.fake.calls_to("place_entry")) == 1, "only variant (ii) placed an entry"
@@ -175,13 +179,17 @@ def test_on_demo_the_injections_and_the_refusal_are_fault_injected_never_observe
     recorder = _demo_recorder()
     env = _stub_env(synthetic=False)
     s03_crossed_stop.record_mark_injection(env, recorder, "mark past the stop")
-    s03_crossed_stop.record_refusal(env, recorder, "MARK_PRICE_CROSSED_STOP", "LIVE_PLACEMENT_OUTCOME")
+    s03_crossed_stop.record_refusal(
+        env, recorder, "MARK_PRICE_CROSSED_STOP", "LIVE_PLACEMENT_OUTCOME"
+    )
     s04_stop_rejected.record_injection_step(
         env, recorder, "wrong side", name=s03_crossed_stop.STEP_WRONG_SIDE_INJECT
     )
     labels = {step["name"]: step["label"] for step in recorder.steps}
     assert labels[s03_crossed_stop.STEP_MARK_INJECT] == DEMO_FAULT_INJECTED
-    assert labels[s03_crossed_stop.STEP_REFUSED] == DEMO_FAULT_INJECTED, "driven by the injected mark"
+    assert labels[s03_crossed_stop.STEP_REFUSED] == DEMO_FAULT_INJECTED, (
+        "driven by the injected mark"
+    )
     assert labels[s03_crossed_stop.STEP_WRONG_SIDE_INJECT] == DEMO_FAULT_INJECTED
 
 
@@ -253,3 +261,45 @@ def test_the_twin_names_the_existing_tests_it_reuses() -> None:
     for reference in REUSES:
         path, _, name = reference.partition("::")
         assert name in Path(path).read_text(encoding="utf-8"), reference
+
+
+class _InnerStub:
+    """The real adapter's two calls `send_wrong_side` makes, recording what it was sent."""
+
+    def __init__(self, mark: str) -> None:
+        self._mark = D(mark)
+        self.sent: list[dict[str, Any]] = []
+
+    async def get_mark_price(self, *, symbol: str) -> Any:
+        return SimpleNamespace(symbol=symbol, mark_price=self._mark)
+
+    async def place_algo_protective(self, **kwargs: Any) -> str:
+        self.sent.append(kwargs)
+        return "placed"
+
+
+def _stop_kwargs(side: str, trigger: str) -> dict[str, Any]:
+    return {
+        "symbol": "BTCUSDT",
+        "side": side,
+        "trigger_price": D(trigger),
+        "close_position": True,
+        "client_algo_id": "a-x",
+    }
+
+
+async def test_send_wrong_side_mirrors_a_protective_stop_and_keeps_every_other_field() -> None:
+    inner = _InnerStub("100000.37")
+    env = SimpleNamespace(faults=SimpleNamespace(inner=inner))
+    await s03_crossed_stop.send_wrong_side(env, _stop_kwargs("SELL", "98000.0"))
+    (sent,) = inner.sent
+    assert sent["trigger_price"] == D("102000.7") and sent["close_position"] is True
+    assert sent["client_algo_id"] == "a-x" and sent["side"] == "SELL"
+
+
+async def test_send_wrong_side_sends_an_already_crossed_stop_unchanged() -> None:
+    inner = _InnerStub("97000.0")
+    env = SimpleNamespace(faults=SimpleNamespace(inner=inner))
+    await s03_crossed_stop.send_wrong_side(env, _stop_kwargs("SELL", "98000.0"))
+    (sent,) = inner.sent
+    assert sent["trigger_price"] == D("98000.0"), "the exchange answers for the crossed stop itself"

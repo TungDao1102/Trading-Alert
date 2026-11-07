@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 from binance_common.errors import BadRequestError
@@ -161,7 +162,9 @@ async def _sample_window(env: Any, first: Any) -> tuple[ProtectionState, bool] |
     return view.state, bool(env.wiring.coordinator.blocks_new_entries())
 
 
-async def _poll_for_window(env: Any, first: Any) -> tuple[ProtectionState, bool] | None:
+async def _poll_for_window(
+    env: Any, first: Any, stop_if: Callable[[], bool] | None = None
+) -> tuple[ProtectionState, bool] | None:
     """Tick until the plan is closing or flat; on the fake the close is held for one look.
 
     On the fake (`env.deliver_fill` is set) the reduce-only close is held at the exchange while a
@@ -177,6 +180,8 @@ async def _poll_for_window(env: Any, first: Any) -> tuple[ProtectionState, bool]
             sampled = await _sample_window(env, first)
             if sampled is not None:
                 return sampled
+            if stop_if is not None and stop_if():
+                return None
             ticking = asyncio.ensure_future(env.tick())
             if scripted:
                 for _ in range(_HOLD_POLL_ROUNDS):
@@ -197,16 +202,24 @@ async def _poll_for_window(env: Any, first: Any) -> tuple[ProtectionState, bool]
 
 
 async def observe_close_window(
-    env: Any, recorder: ScenarioRecorder, first: Any, *, step: str = STEP_CLOSE_REQUIRED
-) -> ProtectionState:
+    env: Any,
+    recorder: ScenarioRecorder,
+    first: Any,
+    *,
+    step: str = STEP_CLOSE_REQUIRED,
+    stop_if: Callable[[], bool] | None = None,
+) -> ProtectionState | None:
     """Record the first closing state seen (B5 expected) and whether entries were blocked.
 
     While the plan is CLOSE_REQUIRED the coordinator must block new entries; that window is stepped
     on the fake and best effort on Demo (T-25-25): a plan seen already FLAT leaves the blocked step
-    NOT_OBSERVED instead of PASSED.
+    NOT_OBSERVED instead of PASSED. `stop_if` ends the polling early (S03: the exchange accepted the
+    stop, so there is no close to observe); the result is then None.
     """
-    sampled = await _poll_for_window(env, first)
+    sampled = await _poll_for_window(env, first, stop_if)
     if sampled is None:
+        if stop_if is not None and stop_if():
+            return None
         raise dr._smoke_fail(env, recorder, step, "the plan never reached CLOSE_REQUIRED or FLAT")
     state, blocks = sampled
     observed = state is ProtectionState.CLOSE_REQUIRED
@@ -393,6 +406,7 @@ async def _sequence(env: Any, recorder: ScenarioRecorder) -> str:
     await drive_fill(env, first)
 
     state = await observe_close_window(env, recorder, first)
+    assert state is not None
     injected = [c for c in stop_placements(env, first.plan_hash) if c.get("injected") is True]
     if len(injected) != 1:
         raise dr._smoke_fail(
