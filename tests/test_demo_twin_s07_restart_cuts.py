@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +25,8 @@ from src.execution.protection import ProtectionState
 from tests.support.demo_scenarios import s07_restart_cuts
 from tests.support.demo_scenarios.catalog import by_id
 from tests.support.demo_scenarios.harness import (
+    DEMO_FAULT_INJECTED,
+    DEMO_OBSERVED,
     SYNTHETIC,
     EnvOptions,
     ScenarioPrecondition,
@@ -169,6 +172,153 @@ async def test_cut_c_a_dirty_account_stops_before_anything_is_placed(tmp_path: P
     with pytest.raises(ScenarioPrecondition):
         await s07_restart_cuts.run(env, _recorder(), cut="c")
     assert env.fake.calls_to("place_entry") == []
+
+
+# --------------------------------------------------------------------------------------------- #
+# Cut (a): the entry answer is lost, the probe fails, the process crashes (D080).
+# --------------------------------------------------------------------------------------------- #
+
+_CUT_A_STEPS = (
+    "precondition_clean",
+    "start",
+    "signal",
+    "card",
+    "approve",
+    s07_restart_cuts.STEP_A_LOST_ANSWER,
+    s07_restart_cuts.STEP_A_ENTRY_UNKNOWN,
+    "restart",
+    s07_restart_cuts.STEP_A_RECOVERY,
+    s07_restart_cuts.STEP_A_ONE_ENTRY,
+    "cancel_resting_entry",
+    "safe_mode_left",
+    "account_clean",
+)
+
+
+async def _run_a(tmp_path: Path, **kwargs: Any) -> tuple[Any, ScenarioRecorder]:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    outcome = await s07_restart_cuts.run(env, recorder, cut="a", **kwargs)
+    assert outcome == dr.OUTCOME_COMPLETE and recorder.outcome == outcome
+    return env, recorder
+
+
+async def test_cut_a_found_runs_end_to_end_and_every_step_is_synthetic(tmp_path: Path) -> None:
+    _, recorder = await _run_a(tmp_path)
+    assert {step["label"] for step in recorder.steps} == {SYNTHETIC}
+    statuses = _status(recorder)
+    for name in _CUT_A_STEPS:
+        assert statuses.get(name) == dr.STEP_PASSED, (name, recorder.steps)
+    assert recorder.details["cut"] == "a"
+
+
+async def test_cut_a_one_place_entry_across_both_processes(tmp_path: Path) -> None:
+    env, _ = await _run_a(tmp_path)
+    assert len(env.fake.calls_to("place_entry")) == 1, "the exchange saw one entry POST"
+    assert len(env.faults.calls_to("place_entry")) == 1, "the process sent one entry POST"
+    (record,) = env.faults.calls_to("place_entry")
+    assert record["injected"] is True and record["mode"] == "drop_response"
+    assert env.fake.calls_to("place_algo_protective") == [], "nothing filled, no stop"
+    assert env.fake.calls_to("place_market_close") == []
+
+
+async def test_cut_a_the_first_process_ends_unknown_with_safe_mode(tmp_path: Path) -> None:
+    _, recorder = await _run_a(tmp_path)
+    facts = recorder.details["cut_a"]
+    assert facts["intent_after_lost_answer"] == "UNKNOWN"
+    assert facts["safe_mode_reason_first_process"] == "ENTRY_STATE_UNKNOWN"
+    assert facts["probe_calls_first_process"] == 1
+
+
+async def test_cut_a_the_recovery_probes_once_by_client_id_and_acks_the_entry(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_a(tmp_path)
+    facts = recorder.details["cut_a"]
+    assert facts["recovery_probe_calls"] == 1, "exactly one probe in the start sequence"
+    assert facts["recovery_resolved"] == [["ENTRY", "ACKED"]]
+    assert facts["recovery_unresolved"] == []
+    assert facts["intent_after_restart"] == "ACKED"
+    assert facts["plan_tracked_after_restart"] is True
+    probes = env.faults.calls_to("query_order_by_client")
+    entry_id = env.fake.calls_to("place_entry")[0]["kwargs"]["new_client_order_id"]
+    assert probes[0]["injected"] is True, "the first probe is the injected failure"
+    assert probes[1]["kwargs"]["orig_client_order_id"] == entry_id
+    assert probes[1]["injected"] is False
+
+
+async def test_cut_a_the_second_process_starts_blocked_and_the_owner_leaves_safe_mode(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_a(tmp_path)
+    starts = recorder.details["start_sequences"]
+    assert [s["label"] for s in starts] == ["start", "restart"]
+    assert starts[1]["admitted"] is True and starts[1]["plans_restored"] == 1
+    facts = recorder.details["cut_a"]
+    assert facts["restart_in_safe_mode"] is True and facts["restart_entries_enabled"] is False
+    assert env.rig.wiring.safe_mode.in_safe_mode is False, "left through /safemode_exit"
+    assert env.rig.stores.journal.by_type("SAFE_MODE_EXIT")
+
+
+async def test_cut_a_probe_error_branch_stays_unknown_with_safe_mode_and_never_resends(
+    tmp_path: Path,
+) -> None:
+    env, recorder = await _run_a(tmp_path, probe_error=True)
+    assert {step["label"] for step in recorder.steps} == {SYNTHETIC}
+    facts = recorder.details["cut_a"]
+    assert facts["branch"] == "probe_error"
+    assert facts["recovery_resolved"] == []
+    assert facts["recovery_unresolved"] == [["ENTRY", "UNKNOWN"]]
+    assert facts["recovery_safe_mode_entered"] is True
+    assert facts["restart_in_safe_mode"] is True and facts["restart_entries_enabled"] is False
+    assert facts["safe_mode_reason_after_restart"] in {
+        "ENTRY_STATE_UNKNOWN",
+        "UNRESOLVED_EXECUTION_INTENT",
+    }
+    probes = env.faults.calls_to("query_order_by_client")
+    assert probes[0]["injected"] is True and probes[1]["injected"] is True
+    assert len(env.fake.calls_to("place_entry")) == 1
+    assert len(env.faults.calls_to("place_entry")) == 1
+    assert env.rig.wiring.safe_mode.in_safe_mode is False, "resolved the documented way"
+
+
+async def test_cut_a_a_second_place_entry_fails_the_step(tmp_path: Path) -> None:
+    """Negative control: if the exchange saw a second POST the scenario must stop, not pass."""
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    original = s07_restart_cuts.place_entry_calls
+
+    def counted_twice(env_: Any) -> int:
+        return original(env_) + 1
+
+    s07_restart_cuts.place_entry_calls = counted_twice  # type: ignore[assignment]
+    try:
+        with pytest.raises(dr.SmokeHalt):
+            await s07_restart_cuts.run(env, recorder, cut="a")
+    finally:
+        s07_restart_cuts.place_entry_calls = original  # type: ignore[assignment]
+    assert _status(recorder)[s07_restart_cuts.STEP_A_ONE_ENTRY] == dr.STEP_FAILED
+
+
+async def test_cut_a_a_probe_error_is_only_for_the_twin_and_only_for_cut_a(
+    tmp_path: Path,
+) -> None:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    with pytest.raises(ValueError, match="probe_error"):
+        await s07_restart_cuts.run(env, _recorder(), cut="c", probe_error=True)
+    demo_like = SimpleNamespace(synthetic=False, label=DEMO_OBSERVED)
+    with pytest.raises(ValueError, match="probe_error"):
+        await s07_restart_cuts.run(demo_like, _recorder(), cut="a", probe_error=True)
+
+
+def test_on_demo_the_lost_answer_is_fault_injected_and_the_recovery_is_observed() -> None:
+    recorder = ScenarioRecorder("S07", mode=dr.RunMode.EXECUTE, environ={}, clock=lambda: FAKE_NOW)
+    env = SimpleNamespace(synthetic=False, label=DEMO_OBSERVED)
+    s07_restart_cuts.record_lost_answer(env, recorder, "the entry answer was dropped")
+    s07_restart_cuts.record_recovery(env, recorder, "the recovery probed once")
+    steps = {step["name"]: step["label"] for step in recorder.steps}
+    assert steps[s07_restart_cuts.STEP_A_LOST_ANSWER] == DEMO_FAULT_INJECTED
+    assert steps[s07_restart_cuts.STEP_A_RECOVERY] == DEMO_OBSERVED
 
 
 async def test_the_evidence_file_has_the_scenario_schema_and_one_kind(tmp_path: Path) -> None:

@@ -53,3 +53,10 @@ async def test_s07_cut_c_a_restart_after_the_fill_and_the_stop_rehydrates_protec
     make_demo_env: Callable[..., Awaitable[Any]],
 ) -> None:
     await _run_cut("c", scenario_recorder, make_demo_env)
+
+
+async def test_s07_cut_a_a_lost_entry_answer_is_probed_once_and_never_resent_on_demo(
+    scenario_recorder: Callable[[str], ScenarioRecorder],
+    make_demo_env: Callable[..., Awaitable[Any]],
+) -> None:
+    await _run_cut("a", scenario_recorder, make_demo_env)
