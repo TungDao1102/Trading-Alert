@@ -23,7 +23,10 @@ orphaned_orders            ORPHAN_PROTECTIVE divergences of the last compared ti
 `run_health_checks(mode=..., demo_degraded_allowed=...)` (D056: in LIVE a DEGRADED result is never
 OK, in DEMO only with the explicit flag, which can never be given to a LIVE producer), and journals
 each result as `HEALTH_CHECK` plus one `HEALTH_VERDICT`, all carrying the mode, the Python version
-and the application revision (OPS-04, D-31).
+and the application revision (OPS-04, D-31). R-25 (D-11, D-13): the `HEALTH_VERDICT` row is written
+on every tick (each successful journal write refreshes `DbWriteTracker`, so an idle process keeps
+the `db_writes` check fresh), while the ten `HEALTH_CHECK` rows are written on the first tick of a
+producer and afterwards only for a check whose status differs from the status last journaled.
 
 Owner numbers NOT set (recorded for the orchestrator): there is no limits key for the maximum REST
 error rate or for the age of the latest database write, so `LiveHealthThresholds` takes them as
@@ -339,6 +342,9 @@ class LiveHealthProducer:
         self._telegram = telegram
         self._thresholds = thresholds
         self._latest: HealthVerdict | None = None
+        # R-25: the status last JOURNALED per check (empty at construction); advanced only after
+        # that check's row was written, so a failed write is retried on the next tick.
+        self._journaled_status: dict[str, str] = {}
 
     @property
     def mode(self) -> HealthRuntimeMode:
@@ -485,10 +491,13 @@ async def health_tick_once(
     record: Record,
     diagnostics: Diagnostics | None = None,
 ) -> HealthVerdict:
-    """One health tick: produce, judge, remember, then journal ten results and the verdict.
+    """One health tick: produce, judge, remember, then journal the changed results and the verdict.
 
     The verdict is stored on the producer BEFORE anything is written, so a journal failure
     (which propagates to the scheduler, recorded by class name) never hides a RED reading.
+    R-25: a `HEALTH_CHECK` row is journaled only on the producer's first tick or when that
+    check's status differs from the one last journaled (a failed write does not count as
+    journaled); the `HEALTH_VERDICT` row is journaled on every tick.
     `diagnostics` defaults to `src.live.runtime.diagnostic_payload` (Python version and
     application revision, OPS-04, D-31).
     """
@@ -502,7 +511,10 @@ async def health_tick_once(
         "demo_degraded_allowed": producer.demo_degraded_allowed,
     }
     for result in results:
+        if producer._journaled_status.get(result.check_name) == result.status:
+            continue
         await record(health_check_event(result, extra=extra))
+        producer._journaled_status[result.check_name] = result.status
     await record(_verdict_event(verdict, now_utc, diag))
     if verdict.is_no_trade:
         log.warning(
