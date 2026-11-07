@@ -497,3 +497,549 @@ def test_help_names_the_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
     text = capsys.readouterr().out
     for name in ("verify-registration", "evaluate"):
         assert name in text
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: annotations, divergence, unprotected positions, duplicates, alerts, restart rule.
+# --------------------------------------------------------------------------- #
+
+
+def alert(at: datetime, *, reason: str = "SOMETHING") -> JournalEvent:
+    return make_event(
+        EVENT_OPERATIONAL_ALERT,
+        at,
+        payload={"event": "X", "severity": "HIGH", "subject": "s", "reason": reason},
+        entity_id="alert-subject",
+    )
+
+
+def safe_mode_enter(at: datetime) -> JournalEvent:
+    return make_event(
+        soak.EVENT_SAFE_MODE_ENTER,
+        at,
+        payload={"reason": "FOREIGN_ORDER", "system_mode": "SAFE_MODE"},
+        entity_id="SAFE_MODE",
+    )
+
+
+def test_an_annotation_for_an_unknown_journal_id_is_refused(rig: Rig) -> None:
+    bogus = {"journal_event_id": "nope", "kind": "explained", "note": "x"}
+
+    code, _ = rig.evaluate(base_journal(), annotations=[bogus])
+
+    assert code == 2
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda a: a.update(kind="waived"),
+        lambda a: a.update(note=""),
+        lambda a: a.pop("note"),
+        lambda a: a.update(extra="x"),
+        lambda a: a.update(fixed_at_utc=day(3).isoformat()),
+        lambda a: a.update(kind="defect"),
+        lambda a: a.update(kind="defect", fixed_at_utc="2026-11-12T00:00:00"),
+        lambda a: a.update(kind="defect", fixed_at_utc=(T0 - timedelta(days=1)).isoformat()),
+    ],
+)
+def test_a_malformed_annotation_is_refused(
+    rig: Rig, mutate: Callable[[dict[str, Any]], object]
+) -> None:
+    noisy = alert(day(2))
+    annotation = explained(noisy)
+    mutate(annotation)
+
+    code, _ = rig.evaluate([noisy, *base_journal()], annotations=[annotation])
+
+    assert code == 2
+    assert not rig.out.exists()
+
+
+def test_a_duplicate_annotation_id_is_refused(rig: Rig) -> None:
+    noisy = alert(day(2))
+
+    code, _ = rig.evaluate(
+        [noisy, *base_journal()], annotations=[explained(noisy), explained(noisy)]
+    )
+
+    assert code == 2
+
+
+def test_annotations_need_exactly_one_json_list(rig: Rig) -> None:
+    journal = write_journal(rig.tmp_path, base_journal())
+    path = rig.tmp_path / "annotations.md"
+    path.write_text("no block\n", encoding="utf-8")
+
+    code = soak.main(
+        [
+            "evaluate",
+            "--registration",
+            str(rig.reg),
+            "--hash-file",
+            str(rig.hash_file),
+            "--registration-committed-at",
+            COMMITTED_AT.isoformat(),
+            "--journal",
+            str(journal),
+            "--annotations",
+            str(path),
+            "--out",
+            str(rig.out),
+        ],
+        clock=lambda: NOW,
+    )
+
+    assert code == 2
+
+
+# ---- divergence ----
+
+
+def test_a_reconcile_tick_with_a_divergence_fails_until_it_is_annotated(rig: Rig) -> None:
+    diverged = tick(day(3), {"FOREIGN_ORDER": 1})
+    events = [diverged, *base_journal()]
+
+    code, report = rig.evaluate(events)
+    assert code == 1
+    found = criterion(report, soak.CRIT_DIVERGENCE)
+    assert found["status"] == "FAIL"
+    assert found["ids"] == [diverged.journal_event_id]
+
+    rig.out.unlink()
+    code, report = rig.evaluate(events, annotations=[explained(diverged)])
+    assert code == 0
+    assert criterion(report, soak.CRIT_DIVERGENCE)["status"] == "PASS"
+
+
+def test_a_clean_reconcile_tick_needs_no_annotation(rig: Rig) -> None:
+    code, report = rig.evaluate([tick(day(3)), *base_journal()])
+
+    assert code == 0
+    assert criterion(report, soak.CRIT_DIVERGENCE)["status"] == "PASS"
+
+
+def test_an_unreadable_reconcile_tick_payload_fails_closed(rig: Rig) -> None:
+    broken = make_event(RECONCILE_TICK, day(3), payload={"outcome": "COMPARED"})
+
+    code, report = rig.evaluate([broken, *base_journal()])
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_DIVERGENCE)["ids"] == [broken.journal_event_id]
+
+
+def test_a_safe_mode_entry_fails_until_it_is_annotated(rig: Rig) -> None:
+    entered = safe_mode_enter(day(4))
+    events = [entered, *base_journal()]
+
+    code, report = rig.evaluate(events)
+    assert code == 1
+    assert criterion(report, soak.CRIT_DIVERGENCE)["ids"] == [entered.journal_event_id]
+
+    rig.out.unlink()
+    code, _ = rig.evaluate(events, annotations=[explained(entered)])
+    assert code == 0
+
+
+# ---- positions without a stop ----
+
+
+@pytest.mark.parametrize(
+    "kind", [DIVERGENCE_KIND_POSITION_WITHOUT_STOP, DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE]
+)
+def test_a_position_without_a_stop_fails_even_when_annotated_explained(rig: Rig, kind: str) -> None:
+    exposed = tick(day(3), {kind: 1})
+
+    code, report = rig.evaluate([exposed, *base_journal()], annotations=[explained(exposed)])
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_DIVERGENCE)["status"] == "PASS"
+    found = criterion(report, soak.CRIT_POSITION_WITHOUT_STOP)
+    assert found["status"] == "FAIL"
+    assert found["ids"] == [exposed.journal_event_id]
+
+
+def test_a_close_required_for_a_rejected_stop_fails_even_when_annotated(rig: Rig) -> None:
+    closing = make_event(
+        EVENT_CLOSE_REQUIRED,
+        day(3),
+        payload={"branch": BRANCH_B5_STOP_REJECTED, "symbol": "BTCUSDT"},
+    )
+
+    code, report = rig.evaluate([closing, *base_journal()], annotations=[explained(closing)])
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_POSITION_WITHOUT_STOP)["ids"] == [closing.journal_event_id]
+
+
+def test_a_close_that_kept_a_good_stop_is_not_a_position_without_a_stop(rig: Rig) -> None:
+    closing = make_event(
+        EVENT_CLOSE_REQUIRED,
+        day(3),
+        payload={
+            "accepted_knowingly": "STOP_KEPT_ENTRY_CANCEL_SLOW",
+            "branch": BRANCH_B1_ENTRY_NOT_TERMINAL,
+        },
+    )
+
+    code, report = rig.evaluate([closing, *base_journal()])
+
+    assert code == 0
+    assert criterion(report, soak.CRIT_POSITION_WITHOUT_STOP)["status"] == "PASS"
+
+
+def test_a_transition_into_close_required_for_an_unconfirmed_stop_fails(rig: Rig) -> None:
+    moved = transition(
+        day(3),
+        "plan-1",
+        to=ProtectionState.CLOSE_REQUIRED,
+        reason=BRANCH_B5_STOP_REJECTED,
+        previous="UNPROTECTED",
+    )
+
+    code, report = rig.evaluate([moved, *base_journal()], annotations=[explained(moved)])
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_POSITION_WITHOUT_STOP)["ids"] == [moved.journal_event_id]
+
+
+def test_a_lost_stop_after_protection_fails_but_a_first_fill_unprotected_step_does_not(
+    rig: Rig,
+) -> None:
+    first_fill = transition(
+        day(3),
+        "plan-1",
+        to=ProtectionState.UNPROTECTED,
+        reason=REASON_FIRST_FILL_STREAM,
+        previous="AWAITING_FILL",
+    )
+    lost = transition(
+        day(4),
+        "plan-1",
+        to=ProtectionState.UNPROTECTED,
+        reason=REASON_STOP_LOST_AFTER_PROTECTED,
+        previous="PROTECTED",
+    )
+
+    code, report = rig.evaluate([first_fill, *base_journal()])
+    assert code == 0
+
+    rig.out.unlink()
+    code, report = rig.evaluate([first_fill, lost, *base_journal()])
+    assert code == 1
+    assert criterion(report, soak.CRIT_POSITION_WITHOUT_STOP)["ids"] == [lost.journal_event_id]
+
+
+# ---- duplicate entries ----
+
+
+@pytest.mark.parametrize(
+    "kind", [DIVERGENCE_KIND_DOUBLED_POSITION, DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID]
+)
+def test_a_doubled_position_or_duplicate_exchange_id_fails_even_when_annotated(
+    rig: Rig, kind: str
+) -> None:
+    doubled = tick(day(3), {kind: 1})
+
+    code, report = rig.evaluate([doubled, *base_journal()], annotations=[explained(doubled)])
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_DUPLICATE_ENTRY)["ids"] == [doubled.journal_event_id]
+
+
+def test_an_explained_annotation_never_excuses_a_duplicate_outcome(rig: Rig) -> None:
+    first = outcome(day(1), "plan-1")
+    second = outcome(day(1.5), "plan-1")
+
+    code, report = rig.evaluate(
+        [first, second, *base_journal()], annotations=[explained(first), explained(second)]
+    )
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_DUPLICATE_ENTRY)["status"] == "FAIL"
+
+
+# ---- alerts and health ----
+
+
+def test_every_operational_alert_needs_an_owner_annotation(rig: Rig) -> None:
+    noisy = alert(day(2))
+    events = [noisy, *base_journal()]
+
+    code, report = rig.evaluate(events)
+    assert code == 1
+    assert criterion(report, soak.CRIT_ALERTS_EXPLAINED)["ids"] == [noisy.journal_event_id]
+
+    rig.out.unlink()
+    code, report = rig.evaluate(events, annotations=[explained(noisy)])
+    assert code == 0
+    assert criterion(report, soak.CRIT_ALERTS_EXPLAINED)["status"] == "PASS"
+
+
+def test_an_unhealthy_verdict_needs_an_annotation_and_an_allowed_degraded_check_does_not(
+    rig: Rig,
+) -> None:
+    allowed = healthy(day(1), degraded=["candle_freshness"])
+    outside = healthy(day(2), degraded=["clock_drift"])
+    failing = healthy(day(3), failing=["exchange_rest"])
+    events = [allowed, outside, failing, *base_journal()]
+
+    code, report = rig.evaluate(events)
+    assert code == 1
+    found = criterion(report, soak.CRIT_HEALTH_EXPLAINED)
+    assert set(found["ids"]) == {outside.journal_event_id, failing.journal_event_id}
+
+    rig.out.unlink()
+    code, _ = rig.evaluate(events, annotations=[explained(outside), explained(failing)])
+    assert code == 0
+
+
+def test_a_health_verdict_without_its_lists_fails_closed(rig: Rig) -> None:
+    unreadable = make_event(VERDICT_EVENT_TYPE, day(2), payload={"is_no_trade": False})
+
+    code, report = rig.evaluate([unreadable, *base_journal()])
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_HEALTH_EXPLAINED)["ids"] == [unreadable.journal_event_id]
+
+
+# ---- the window and the restart rule ----
+
+
+def test_the_effective_window_must_last_the_registered_days(rig: Rig) -> None:
+    code, report = rig.evaluate(base_journal(days=20))
+    assert code == 1
+    found = criterion(report, soak.CRIT_DURATION)
+    assert found["status"] == "FAIL"
+    assert report["window"]["effective_days"].startswith("20")
+
+    rig.out.unlink()
+    code, report = rig.evaluate(base_journal(days=21))
+    assert code == 0
+    assert criterion(report, soak.CRIT_DURATION)["status"] == "PASS"
+
+
+def test_a_defect_annotation_restarts_the_window_at_the_fix_time(rig: Rig) -> None:
+    broken = alert(day(5))
+    fixed_at = day(10)
+
+    code, report = rig.evaluate(
+        [broken, healthy(T0), healthy(day(25))], annotations=[defect(broken, fixed_at)]
+    )
+    assert code == 1
+    assert criterion(report, soak.CRIT_DURATION)["status"] == "FAIL"
+    assert report["window"]["window_start_utc"] == fixed_at.isoformat()
+    assert report["window"]["effective_days"].startswith("15")
+    assert criterion(report, soak.CRIT_ALERTS_EXPLAINED)["status"] == "PASS"
+
+    rig.out.unlink()
+    code, report = rig.evaluate(
+        [broken, healthy(T0), healthy(day(31))], annotations=[defect(broken, fixed_at)]
+    )
+    assert code == 0
+    assert criterion(report, soak.CRIT_DURATION)["status"] == "PASS"
+
+
+def test_an_explained_annotation_does_not_restart_the_window(rig: Rig) -> None:
+    noisy = alert(day(5))
+
+    code, report = rig.evaluate([noisy, *base_journal(days=22)], annotations=[explained(noisy)])
+
+    assert code == 0
+    assert report["window"]["window_start_utc"] == T0.isoformat()
+
+
+def test_the_latest_defect_fix_decides_the_window_start(rig: Rig) -> None:
+    first = alert(day(2), reason="A")
+    second = alert(day(6), reason="B")
+
+    code, report = rig.evaluate(
+        [first, second, *base_journal(days=40)],
+        annotations=[defect(first, day(3)), defect(second, day(8))],
+    )
+
+    assert code == 0
+    assert report["window"]["window_start_utc"] == day(8).isoformat()
+    assert report["window"]["defect_count"] == 2
+
+
+def test_a_defect_annotation_removes_the_row_it_names_from_the_stop_and_duplicate_criteria(
+    rig: Rig,
+) -> None:
+    exposed = tick(day(3), {DIVERGENCE_KIND_POSITION_WITHOUT_STOP: 1})
+    first = outcome(day(1), "plan-1")
+    second = outcome(day(1.5), "plan-1")
+
+    code, report = rig.evaluate(
+        [exposed, first, second, *base_journal(days=40)],
+        annotations=[defect(exposed, day(9)), defect(second, day(9))],
+    )
+
+    assert code == 0
+    assert criterion(report, soak.CRIT_POSITION_WITHOUT_STOP)["status"] == "PASS"
+    assert criterion(report, soak.CRIT_DUPLICATE_ENTRY)["status"] == "PASS"
+
+
+def test_a_defect_does_not_hide_an_unannotated_row_of_another_cause(rig: Rig) -> None:
+    broken = alert(day(5), reason="A")
+    other = tick(day(4), {"FOREIGN_ORDER": 1})
+
+    code, report = rig.evaluate(
+        [broken, other, *base_journal(days=40)], annotations=[defect(broken, day(6))]
+    )
+
+    assert code == 1
+    assert criterion(report, soak.CRIT_DIVERGENCE)["ids"] == [other.journal_event_id]
+
+
+# ---- owner round trips ----
+
+
+def round_trip(plan: str, filled: datetime, closed: datetime) -> list[JournalEvent]:
+    return [
+        transition(
+            filled,
+            plan,
+            to=ProtectionState.UNPROTECTED,
+            reason=REASON_FIRST_FILL_REST,
+            previous="AWAITING_FILL",
+        ),
+        transition(
+            closed,
+            plan,
+            to=ProtectionState.FLAT,
+            reason="POSITION_CLOSED",
+            previous="PROTECTED",
+        ),
+    ]
+
+
+def test_a_null_round_trip_number_skips_the_criterion_with_a_note(rig: Rig) -> None:
+    code, report = rig.evaluate(base_journal())
+
+    assert code == 0
+    found = criterion(report, soak.CRIT_ROUND_TRIPS)
+    assert found["status"] == "SKIPPED"
+    assert "null" in found["note"]
+
+
+def test_the_registered_round_trips_per_full_week_are_required(rig: Rig) -> None:
+    rig.use_registration(registration(trade_generation={"owner_round_trips_per_week": 2}))
+    events = [
+        *round_trip("p1", day(0.5), day(1)),
+        *round_trip("p2", day(1.5), day(2)),
+        *round_trip("p3", day(7.5), day(8)),
+        *round_trip("p4", day(8.5), day(9)),
+        *round_trip("p5", day(14.5), day(15)),
+        *round_trip("p6", day(15.5), day(16)),
+        *base_journal(days=22),
+    ]
+
+    code, report = rig.evaluate(events)
+
+    assert code == 0
+    assert criterion(report, soak.CRIT_ROUND_TRIPS)["status"] == "PASS"
+
+
+def test_a_week_with_fewer_round_trips_than_registered_fails(rig: Rig) -> None:
+    rig.use_registration(registration(trade_generation={"owner_round_trips_per_week": 2}))
+    events = [
+        *round_trip("p1", day(0.5), day(1)),
+        *round_trip("p2", day(1.5), day(2)),
+        *round_trip("p3", day(7.5), day(8)),
+        *round_trip("p5", day(14.5), day(15)),
+        *round_trip("p6", day(15.5), day(16)),
+        *base_journal(days=22),
+    ]
+
+    code, report = rig.evaluate(events)
+
+    assert code == 1
+    found = criterion(report, soak.CRIT_ROUND_TRIPS)
+    assert found["status"] == "FAIL"
+    assert found["count"] == 1
+    assert "week 2" in found["note"]
+
+
+def test_a_fill_without_an_exit_is_not_a_completed_round_trip(rig: Rig) -> None:
+    rig.use_registration(registration(trade_generation={"owner_round_trips_per_week": 1}))
+    events = [
+        *round_trip("p1", day(0.5), day(1)),
+        *round_trip("p2", day(7.5), day(8)),
+        transition(
+            day(14.5),
+            "p3",
+            to=ProtectionState.UNPROTECTED,
+            reason=REASON_FIRST_FILL_REST,
+            previous="AWAITING_FILL",
+        ),
+        *base_journal(days=22),
+    ]
+
+    code, report = rig.evaluate(events)
+
+    assert code == 1
+    assert "week 3" in criterion(report, soak.CRIT_ROUND_TRIPS)["note"]
+
+
+# ---- the event names come from the producers ----
+
+
+def test_the_safe_mode_entry_event_name_matches_what_the_controller_journals() -> None:
+    from src.reconcile.safe_mode import SafeModeController
+
+    from tests.support.reconcile_doubles import RecordingJournal
+
+    journal = RecordingJournal()
+    controller = SafeModeController(adapter=object(), journal=journal)  # type: ignore[arg-type]
+
+    controller.enter_safe_mode(reason="FOREIGN_ORDER", now_utc=T0)
+
+    assert [e.event_type for e in journal.events] == [soak.EVENT_SAFE_MODE_ENTER]
+
+
+def test_the_health_verdict_payload_keys_match_what_the_producer_writes() -> None:
+    from src.live.health import _verdict_event
+
+    verdict = SimpleNamespace(
+        is_no_trade=False,
+        reason_code="OK",
+        mode=None,
+        demo_degraded_allowed=True,
+        degraded_names=("candle_freshness",),
+        results=[],
+    )
+
+    event = _verdict_event(verdict, T0, {})  # type: ignore[arg-type]
+    payload = json.loads(event.payload_json)
+
+    assert event.event_type == VERDICT_EVENT_TYPE
+    assert payload[soak.KEY_HEALTH_DEGRADED] == ["candle_freshness"]
+    assert payload[soak.KEY_HEALTH_FAILING] == []
+
+
+def test_the_script_imports_its_event_names_and_never_retypes_them() -> None:
+    import ast
+
+    path = Path(soak.__file__)
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    producer_names = {
+        EVENT_PLACEMENT_OUTCOME,
+        EVENT_OPERATIONAL_ALERT,
+        EVENT_CLOSE_REQUIRED,
+        EVENT_PROTECTION_TRANSITION,
+        RECONCILE_TICK,
+        VERDICT_EVENT_TYPE,
+    }
+    docstring = ast.get_docstring(tree, clean=False)
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value != docstring
+    }
+
+    assert literals.isdisjoint(producer_names)
+    assert "from src." in text and "EVENT_OPERATIONAL_ALERT" in text and "RECONCILE_TICK" in text
