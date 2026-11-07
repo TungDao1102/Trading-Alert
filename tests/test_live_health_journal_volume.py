@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from src.adapters.binance_public import MarkPriceReading
 from src.domain.journal import JournalEvent
 from src.live.health import (
@@ -21,7 +22,12 @@ from src.live.health import (
     LiveHealthThresholds,
     health_tick_once,
 )
-from src.ops.health import ALL_CHECK_NAMES, CHECK_DB_WRITES, HealthVerdict
+from src.ops.health import (
+    ALL_CHECK_NAMES,
+    CHECK_DB_WRITES,
+    CHECK_TELEGRAM_DELIVERY,
+    HealthVerdict,
+)
 
 from tests.test_live_health import DIAGNOSTICS, NOW, SYMBOLS, Parts
 
@@ -102,3 +108,74 @@ async def test_ten_idle_ticks_journal_ten_verdicts_and_the_ten_check_rows_once()
     assert [row.entity_id for row in checks] == list(ALL_CHECK_NAMES)
     assert {row.occurred_at_utc for row in checks} == {NOW}  # all on the first tick
     assert status_of(verdict, CHECK_DB_WRITES) == "PASS"
+
+
+async def test_a_status_flip_journals_one_extra_row_for_that_check_only() -> None:
+    rig = Rig()
+    per_tick: list[list[str]] = []
+    for number in range(1, 9):
+        if number == 4:
+            rig.parts.telegram.note(ok=False)
+        if number == 6:
+            rig.parts.telegram.note(ok=True)
+        before = len(rig.of_type("HEALTH_CHECK"))
+        await rig.tick()
+        per_tick.append([row.entity_id for row in rig.of_type("HEALTH_CHECK")[before:]])
+    assert per_tick[0] == list(ALL_CHECK_NAMES)
+    assert per_tick[3] == [CHECK_TELEGRAM_DELIVERY]  # PASS -> FAIL
+    assert per_tick[5] == [CHECK_TELEGRAM_DELIVERY]  # FAIL -> PASS
+    assert [rows for index, rows in enumerate(per_tick) if index not in (0, 3, 5)] == [[]] * 5
+    assert len(rig.of_type("HEALTH_VERDICT")) == 8
+
+
+async def test_a_failed_check_row_write_keeps_the_verdict_and_is_written_again_next_tick() -> None:
+    rig = Rig()
+    rig.fail_check_name = ALL_CHECK_NAMES[0]
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        await rig.tick()
+    assert rig.producer.latest_verdict is not None  # stored before any write
+    assert rig.rows == []
+    await rig.tick()
+    checks = rig.of_type("HEALTH_CHECK")
+    # the failed write did not count as journaled: the first check is written again, in order
+    assert [row.entity_id for row in checks][:1] == [ALL_CHECK_NAMES[0]]
+    assert {row.entity_id for row in checks} == set(ALL_CHECK_NAMES)
+    assert len(checks) == len(ALL_CHECK_NAMES)
+    # the failed write cleared the tracker stamp, so db_writes read FAIL on tick 2 and PASS on
+    # tick 3: that one flip is the only row tick 3 writes
+    before = len(checks)
+    await rig.tick()
+    assert [row.entity_id for row in rig.of_type("HEALTH_CHECK")[before:]] == [CHECK_DB_WRITES]
+
+
+async def test_a_journal_that_fails_for_over_a_minute_turns_db_writes_red() -> None:
+    rig = Rig()
+    rig.write_fails = True
+    for _ in range(6):  # 75 virtual seconds, longer than DB_WRITE_MAX_AGE
+        with pytest.raises(RuntimeError, match="journal unavailable"):
+            await rig.tick()
+    verdict = rig.producer.latest_verdict
+    assert verdict is not None
+    assert status_of(verdict, CHECK_DB_WRITES) == "FAIL"
+    assert verdict.is_no_trade is True
+    assert rig.parts.db.last_ok_utc is None  # failed writes never refresh the tracker
+    assert rig.rows == []
+
+
+async def test_a_stamp_older_than_the_limit_reads_stale_then_recovers_on_the_next_write() -> None:
+    rig = Rig()
+    await rig.tick()
+    rig.clock += DB_WRITE_MAX_AGE + timedelta(seconds=1)  # nothing wrote for over a minute
+    stale = await rig.tick()
+    assert status_of(stale, CHECK_DB_WRITES) == "FAIL"
+    fresh = await rig.tick()  # the previous tick's verdict row refreshed the stamp
+    assert status_of(fresh, CHECK_DB_WRITES) == "PASS"
+
+
+async def test_the_start_sequence_and_the_scheduled_call_share_the_producer() -> None:
+    rig = Rig()
+    await rig.tick(advance=False)  # the start-sequence health verdict
+    assert len(rig.of_type("HEALTH_CHECK")) == len(ALL_CHECK_NAMES)
+    await rig.tick()  # the first scheduled tick, nothing changed
+    assert len(rig.of_type("HEALTH_CHECK")) == len(ALL_CHECK_NAMES)
+    assert len(rig.of_type("HEALTH_VERDICT")) == 2
