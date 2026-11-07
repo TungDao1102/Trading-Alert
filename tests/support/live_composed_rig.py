@@ -364,14 +364,20 @@ def make_composed_rig(
     day_reader = ScriptedDayRiskReader()
     rest = CompositeRest(clock=None)
     store_set, memory = stores if stores is not None else build_memory_stores()
+    if store_faults is not None:
+        store_set = store_faults.wrap(store_set)
     holder: dict[str, ComposedExchangeEdge] = {}
 
-    def sdk_factory(**kwargs: Any) -> Any:
+    def plain_sdk_factory(**kwargs: Any) -> Any:
         return SimpleNamespace(
             environment=kwargs["environment"],
             surfaces=kwargs["surfaces"],
             client=SimpleNamespace(rest_api=rest),
         )
+
+    sdk_factory = (
+        sdk_faults.wrap_factory(plain_sdk_factory) if sdk_faults is not None else plain_sdk_factory
+    )
 
     def edge(bundle: ExchangeBundle) -> ExchangeBundle:
         composed = ComposedExchangeEdge(real=bundle.adapter, fake=fake, day_reader=day_reader)

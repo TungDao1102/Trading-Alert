@@ -34,6 +34,9 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
+from binance_common.errors import RateLimitBanError, TooManyRequestsError
+from src.persistence.errors import StoreUnavailable
+
 MODE_RAISE_BEFORE_SEND = "raise_before_send"
 MODE_MUTATE_PAYLOAD = "mutate_payload"
 MODE_DROP_RESPONSE = "drop_response_after_send"
@@ -70,9 +73,12 @@ class _Ledger:
         self.calls: list[dict[str, Any]] = []
         self.injections: list[Injection] = []
 
-    def start(self, method: str, kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    def start(
+        self, method: str, kwargs: Mapping[str, Any], args: tuple[Any, ...] = ()
+    ) -> dict[str, Any]:
         record: dict[str, Any] = {
             "method": method,
+            "args": tuple(args),
             "kwargs": dict(kwargs),
             "injected": False,
             "mode": None,
@@ -335,6 +341,223 @@ class FaultPublic:
         return getattr(self._inner, name)
 
 
+# --------------------------------------------------------------------------- #
+# SDK level: the real adapter and the real REST gate see the error.
+# --------------------------------------------------------------------------- #
+
+_CODE_TOO_MANY_REQUESTS = -1003  # the Binance body code of a 418 and a 429
+_BAN_UNTIL_DIGITS = 13
+
+
+def rate_limit_ban_error(
+    *, retry_after: int | None = None, ban_until_epoch_ms: int | None = None
+) -> RateLimitBanError:
+    """An SDK HTTP 418 as the adapter's `error_facts_from_exception` reads it (code -1003).
+
+    `ban_until_epoch_ms` (13 digits) is put in the message text in the exact form D083 reads. The
+    error is only ever RAISED by `SdkFaults`; a real 418 is never provoked (owner, 2026-10-22).
+    """
+    message = "TEST_ONLY injected 418"
+    if ban_until_epoch_ms is not None:
+        if len(str(ban_until_epoch_ms)) != _BAN_UNTIL_DIGITS:
+            raise ValueError("ban_until_epoch_ms must be a 13-digit epoch in milliseconds")
+        message = f"{message}: IP banned until {ban_until_epoch_ms}"
+    return RateLimitBanError(message, _CODE_TOO_MANY_REQUESTS, retry_after)
+
+
+def too_many_requests_error(*, retry_after: int | None = None) -> TooManyRequestsError:
+    """An SDK HTTP 429 as the adapter reads it (code -1003); raised only by `SdkFaults`."""
+    return TooManyRequestsError("TEST_ONLY injected 429", _CODE_TOO_MANY_REQUESTS, retry_after)
+
+
+class _SdkRest:
+    """A proxy over the SDK client's `rest_api`: a named method raises before it is delegated."""
+
+    def __init__(self, owner: SdkFaults, inner: Any) -> None:
+        self._owner = owner
+        self._inner = inner
+        self._cache: dict[str, Callable[..., Any]] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        value = getattr(self._inner, name)
+        if not callable(value):
+            return value
+        cached = self._cache.get(name)
+        if cached is None:
+            cached = self._cache[name] = self._wrap(name)
+        return cached
+
+    def _wrap(self, name: str) -> Callable[..., Any]:
+        owner = self._owner
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            record = owner._ledger.start(name, kwargs, args)
+            fault = _take(owner._faults, name)
+            if fault is not None:
+                owner._ledger.mark(record, MODE_SDK_ERROR)
+                assert fault.exc is not None
+                raise fault.exc
+            return getattr(self._inner, name)(*args, **kwargs)
+
+        return call
+
+
+class SdkFaults:
+    """SDK errors seen by the REAL adapter (`_sdk_call` classifies) and the REAL REST gate.
+
+    `wrap_factory(factory)` is the `build_wiring(sdk_factory=...)` seam: the built SDK stand-in's
+    `client.rest_api` becomes a proxy that raises the armed error BEFORE delegating, so nothing is
+    sent and the adapter's own error path (classify, `gate.record` for 418/429, the -1021 hook)
+    runs unchanged. The proxy is for the rig's stand-in clients (it sets `client.rest_api`); it
+    never builds a network client.
+    """
+
+    def __init__(self) -> None:
+        self._ledger = _Ledger()
+        self._faults: dict[str, deque[_Fault]] = {}
+
+    def fail_sdk(self, sdk_method: str, exc: BaseException, times: int | None = 1) -> None:
+        """The next `times` calls of the SDK method raise `exc` (None: until `clear`)."""
+        self._faults.setdefault(sdk_method, deque()).append(_Fault(MODE_SDK_ERROR, times, exc=exc))
+
+    def clear(self, sdk_method: str | None = None) -> None:
+        if sdk_method is None:
+            self._faults.clear()
+        else:
+            self._faults.pop(sdk_method, None)
+
+    def wrap_factory(self, factory: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapped(**kwargs: Any) -> Any:
+            sdk = factory(**kwargs)
+            client = sdk.client
+            if not isinstance(client.rest_api, _SdkRest):
+                client.rest_api = _SdkRest(self, client.rest_api)
+            return sdk
+
+        return wrapped
+
+    @property
+    def injections(self) -> list[Injection]:
+        return self._ledger.injections
+
+    def calls_to(self, sdk_method: str) -> list[dict[str, Any]]:
+        """Every call of the SDK method that reached the proxy (past the REST gate)."""
+        return self._ledger.calls_to(sdk_method)
+
+
+# --------------------------------------------------------------------------- #
+# Store level: StoreUnavailable on a chosen store method.
+# --------------------------------------------------------------------------- #
+
+
+class _StoreProxy:
+    """A proxy over one store of the `LiveStoreSet`; one stable wrapper per method name."""
+
+    def __init__(self, owner: StoreFaults, attr: str, inner: Any) -> None:
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_attr", attr)
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_cache", {})
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") or name in ("_owner", "_attr", "_inner", "_cache"):
+            raise AttributeError(name)
+        value = getattr(self._inner, name)
+        if not callable(value) or isinstance(value, type):
+            return value
+        cached = self._cache.get(name)
+        if cached is None:
+            cached = self._cache[name] = self._wrap(name, value)
+        return cached
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._inner, name, value)
+
+    def _wrap(self, name: str, value: Callable[..., Any]) -> Callable[..., Any]:
+        owner, key = self._owner, f"{self._attr}.{name}"
+
+        def check(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+            record = owner._ledger.start(key, kwargs, args)
+            fault = _take(owner._faults, key)
+            if fault is not None:
+                owner._ledger.mark(record, MODE_STORE_UNAVAILABLE)
+                assert fault.exc is not None
+                raise fault.exc
+
+        if inspect.iscoroutinefunction(value):
+
+            @functools.wraps(value)
+            async def acall(*args: Any, **kwargs: Any) -> Any:
+                check(args, kwargs)
+                return await getattr(self._inner, name)(*args, **kwargs)
+
+            return acall
+
+        @functools.wraps(value)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            check(args, kwargs)
+            return getattr(self._inner, name)(*args, **kwargs)
+
+        return call
+
+
+class StoreFaults:
+    """`StoreUnavailable` on chosen store methods of a `LiveStoreSet` (the `stores=` seam).
+
+    `wrap(store_set)` returns a `LiveStoreSet` whose every store is a proxy; the in-memory handles
+    the rig keeps (`rig.memory`) stay the real objects. Wrapping an already wrapped set returns it
+    unchanged, so a restart that reuses `previous.stores` keeps one set of pending faults.
+    """
+
+    def __init__(self) -> None:
+        self._ledger = _Ledger()
+        self._faults: dict[str, deque[_Fault]] = {}
+        self._known: set[str] = set()
+
+    def wrap(self, store_set: Any) -> Any:
+        names = [f.name for f in dataclasses.fields(store_set)]
+        proxies = [getattr(store_set, n) for n in names]
+        if all(isinstance(p, _StoreProxy) for p in proxies):
+            if any(p._owner is not self for p in proxies):
+                raise ValueError("the store set is already wrapped by another StoreFaults")
+            return store_set
+        self._known.update(names)
+        return dataclasses.replace(
+            store_set,
+            **{n: _StoreProxy(self, n, getattr(store_set, n)) for n in names},
+        )
+
+    def fail_store(
+        self, attr: str, method: str, times: int | None = 1, exc: BaseException | None = None
+    ) -> None:
+        """The next `times` calls of `store_set.<attr>.<method>` raise `StoreUnavailable`."""
+        if self._known and attr not in self._known:
+            raise ValueError(f"unknown store {attr!r}; the set has {sorted(self._known)}")
+        error = exc if exc is not None else StoreUnavailable("TEST_ONLY injected store outage")
+        self._faults.setdefault(f"{attr}.{method}", deque()).append(
+            _Fault(MODE_STORE_UNAVAILABLE, times, exc=error)
+        )
+
+    def clear(self, attr: str | None = None, method: str | None = None) -> None:
+        if attr is None:
+            self._faults.clear()
+        elif method is None:
+            for key in [k for k in self._faults if k.startswith(f"{attr}.")]:
+                del self._faults[key]
+        else:
+            self._faults.pop(f"{attr}.{method}", None)
+
+    @property
+    def injections(self) -> list[Injection]:
+        return self._ledger.injections
+
+    def calls_to(self, key: str) -> list[dict[str, Any]]:
+        """Every call of `"<attr>.<method>"` (for example `"journal.record"`)."""
+        return self._ledger.calls_to(key)
+
+
 __all__ = [
     "MODE_DROP_RESPONSE",
     "MODE_HOLD",
@@ -348,4 +571,8 @@ __all__ = [
     "FaultEdge",
     "FaultPublic",
     "Injection",
+    "SdkFaults",
+    "StoreFaults",
+    "rate_limit_ban_error",
+    "too_many_requests_error",
 ]

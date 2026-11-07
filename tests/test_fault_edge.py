@@ -421,6 +421,7 @@ async def test_an_injected_418_under_the_real_adapter_records_a_ban_and_nothing_
     gate = wiring.exchange.gate
     adapter = wiring.exchange.adapter
     assert gate.restriction() is None
+    seen = len(sdk_faults.calls_to("account_information_v3"))  # prepare() may have read it
     sdk_faults.fail_sdk("account_information_v3", rate_limit_ban_error(retry_after=30))
 
     with pytest.raises(RateLimitBanError):
@@ -431,7 +432,7 @@ async def test_an_injected_418_under_the_real_adapter_records_a_ban_and_nothing_
     # The next signed call is refused by the gate before any SDK call: no second attempt exists.
     with pytest.raises(RateLimitBanActive):
         await adapter.account_information_snapshot()
-    assert len(sdk_faults.calls_to("account_information_v3")) == 1
+    assert len(sdk_faults.calls_to("account_information_v3")) == seen + 1
     assert len(sdk_faults.injections) == 1
     assert rig.fake.calls_to("place_entry") == []
 
@@ -440,6 +441,7 @@ async def test_an_injected_429_pauses_the_shared_gate(tmp_path: Path) -> None:
     sdk_faults = SdkFaults()
     rig = make_composed_rig(tmp_path, sdk_faults=sdk_faults)
     wiring = await rig.prepare()
+    seen = len(sdk_faults.calls_to("account_information_v3"))
     sdk_faults.fail_sdk("account_information_v3", too_many_requests_error(retry_after=5))
     with pytest.raises(TooManyRequestsError):
         await wiring.exchange.adapter.account_information_snapshot()
@@ -447,7 +449,7 @@ async def test_an_injected_429_pauses_the_shared_gate(tmp_path: Path) -> None:
     assert restriction is not None and restriction.reason == "RATE_LIMIT_PAUSE_429"
     with pytest.raises(RateLimitPauseActive):
         await wiring.exchange.adapter.account_information_snapshot()
-    assert len(sdk_faults.calls_to("account_information_v3")) == 1
+    assert len(sdk_faults.calls_to("account_information_v3")) == seen + 1
 
 
 def _event(event_id: str = "e-1") -> JournalEvent:
