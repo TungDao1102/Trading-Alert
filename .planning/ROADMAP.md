@@ -1424,18 +1424,18 @@ Plans:
 - [R-25 / 24-REVIEW IN-02] The health tick writes 11 journal rows every 15 s (about 63,000 a day): reduce the cadence or write on change only before the multi-week soak (source: 24-REVIEW.md IN-02, 24-DEFERRED.md R-25; decision: none required)
 - [R-28 / 24-REVIEW IN-01, IN-03, IN-04, IN-05] Info-level review items: `xc-` close-order updates journaled as stream failures, liveness and heartbeat ignore per-task PASS/FAIL, `CommissionCache` without `record`, `heartbeat.sh --install-timer` path validation and global `LC_ALL=C` (source: 24-REVIEW.md, 24-DEFERRED.md R-28; decision: none required)
 
-**Plans:** 0/25 plans executed
+**Plans:** 7/25 plans executed
 
 Plans:
 
 **Wave 1**
-- [ ] 25-01-PLAN.md - Demo suite gating: `demo` marker, skip-by-default collection hook, env guard, marker guard, S00 preflight, docs (D-03, OPS-02)
-- [ ] 25-02-PLAN.md - Test-only fault seams: FaultEdge (exchange_edge), SdkFaults (418/429 under the real adapter), StoreFaults (D-02, D-05, D-08)
-- [ ] 25-03-PLAN.md - R-24 test-first: pool-exhaustion TimeoutError becomes StoreUnavailable (D-13)
-- [ ] 25-04-PLAN.md - R-25 test-first: one HEALTH_VERDICT per tick, HEALTH_CHECK rows on change only (D-11, D-13)
-- [ ] 25-05-PLAN.md - D-08 same-code-path AST guard: pinned src/live allow-list, none in execution or risk
-- [ ] 25-06-PLAN.md - DEMO_VS_MAINNET.md with sourced labels and the G2-030 Demo cross-checks (D-07, D-12)
-- [ ] 25-07-PLAN.md - Journal-based soak evaluator: registration hash, criteria, restart rule, export (D-09, D-10 as corrected)
+- [x] 25-01-PLAN.md - Demo suite gating: `demo` marker, skip-by-default collection hook, env guard, marker guard, S00 preflight, docs (D-03, OPS-02)
+- [x] 25-02-PLAN.md - Test-only fault seams: FaultEdge (exchange_edge), SdkFaults (418/429 under the real adapter), StoreFaults (D-02, D-05, D-08)
+- [x] 25-03-PLAN.md - R-24 test-first: pool-exhaustion TimeoutError becomes StoreUnavailable (D-13)
+- [x] 25-04-PLAN.md - R-25 test-first: one HEALTH_VERDICT per tick, HEALTH_CHECK rows on change only (D-11, D-13)
+- [x] 25-05-PLAN.md - D-08 same-code-path AST guard: pinned src/live allow-list, none in execution or risk
+- [x] 25-06-PLAN.md - DEMO_VS_MAINNET.md with sourced labels and the G2-030 Demo cross-checks (D-07, D-12)
+- [x] 25-07-PLAN.md - Journal-based soak evaluator: registration hash, criteria, restart rule, export (D-09, D-10 as corrected)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 25-08-PLAN.md - Scenario framework and S01 tracer: catalog S01-S20, harness, labels, evidence index (D-04, D-05)
@@ -1567,7 +1567,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
 | 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
-| 25. Binance Demo Integration Test Campaign | 0/25 | Planned     | - |
+| 25. Binance Demo Integration Test Campaign | 7/25 | In Progress | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
 
