@@ -63,8 +63,8 @@ def _status(recorder: ScenarioRecorder) -> dict[str, str]:
 
 
 def _plan_hash(env: Any) -> str:
-    (placement,) = env.fake.calls_to("place_entry")
-    return str(placement["kwargs"]["new_client_order_id"]).removeprefix("x-")
+    (protection,) = env.wiring.coordinator.protections()
+    return str(protection.plan_hash)
 
 
 def test_the_catalog_pins_s04_to_this_plan() -> None:
@@ -111,8 +111,10 @@ async def test_the_stop_is_called_once_and_never_reaches_the_exchange(tmp_path: 
     assert stops[0]["kwargs"]["client_algo_id"] == stop_id
     assert stops[0]["injected"] is True and stops[0]["mode"] == "raise_before_send"
     assert env.fake.calls_to("place_algo_protective") == [], "the rejection came from the edge"
+    # The only trigger is the stop rejection; the close is delayed (held) for one look on the twin.
     assert [(i.method, i.mode) for i in env.faults.injections] == [
-        ("place_algo_protective", "raise_before_send")
+        ("place_algo_protective", "raise_before_send"),
+        ("place_market_close", "hold"),
     ]
     assert len(env.fake.calls_to("place_entry")) == 1, "a placement is never re-sent"
 
@@ -152,7 +154,7 @@ async def test_the_journal_holds_the_b5_transition_and_the_critical_alerts(tmp_p
     assert ("CLOSE_REQUIRED", "B5_STOP_REJECTED") in alerts
     assert ("PROTECTIVE_REJECTED", "B5_STOP_REJECTED") in alerts
     stop_id = derive_algo_client_id(plan_hash=plan_hash, role=OrderRole.STOP_LOSS.value)
-    intent = env.rig.memory.execution_state.intent_for_client_id(stop_id)
+    intent = env.wiring.stores.execution_state.intent_for_client_id(stop_id)
     assert intent is not None and intent.intent_status.value == "REJECTED"
 
 
