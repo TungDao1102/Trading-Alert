@@ -1424,7 +1424,7 @@ Plans:
 - [R-25 / 24-REVIEW IN-02] The health tick writes 11 journal rows every 15 s (about 63,000 a day): reduce the cadence or write on change only before the multi-week soak (source: 24-REVIEW.md IN-02, 24-DEFERRED.md R-25; decision: none required)
 - [R-28 / 24-REVIEW IN-01, IN-03, IN-04, IN-05] Info-level review items: `xc-` close-order updates journaled as stream failures, liveness and heartbeat ignore per-task PASS/FAIL, `CommissionCache` without `record`, `heartbeat.sh --install-timer` path validation and global `LC_ALL=C` (source: 24-REVIEW.md, 24-DEFERRED.md R-28; decision: none required)
 
-**Plans:** 7/25 plans executed
+**Plans:** 16/25 plans executed
 
 Plans:
 
@@ -1438,19 +1438,19 @@ Plans:
 - [x] 25-07-PLAN.md - Journal-based soak evaluator: registration hash, criteria, restart rule, export (D-09, D-10 as corrected)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 25-08-PLAN.md - Scenario framework and S01 tracer: catalog S01-S20, harness, labels, evidence index (D-04, D-05)
+- [x] 25-08-PLAN.md - Scenario framework and S01 tracer: catalog S01-S20, harness, labels, evidence index (D-04, D-05)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 25-09-PLAN.md - Demo env factory over the production assembly, programmatic owner, demo fixtures, S01 demo test (D-04, D-08)
+- [x] 25-09-PLAN.md - Demo env factory over the production assembly, programmatic owner, demo fixtures, S01 demo test (D-04, D-08)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 25-10-PLAN.md - Scenarios S06 replayed/concurrent presses, S02 partial fill, S05 cancel racing a fill
-- [ ] 25-11-PLAN.md - Scenarios S04 stop rejected after fill, S03 crossed stop (-2021), S18 unprotected drill
-- [ ] 25-12-PLAN.md - Scenario S07 restart at three cut points (D080 probe, never re-sent)
-- [ ] 25-13-PLAN.md - Scenarios S08 stream loss and listenKey expiry, S17 stale feed, S09 clock skew
-- [ ] 25-14-PLAN.md - Scenarios S10 injected 429/418, S19 rest_gate_cli status/clear, S11 DB outage during a close
-- [ ] 25-15-PLAN.md - Scenarios S14 SAFE_MODE entry and operator exit, S12 DAILY_STOP, S13 margin and liquidation guards
-- [ ] 25-16-PLAN.md - Scenarios S15 foreign order and doubled position, S16 manual close outside the system
+- [x] 25-10-PLAN.md - Scenarios S06 replayed/concurrent presses, S02 partial fill, S05 cancel racing a fill
+- [x] 25-11-PLAN.md - Scenarios S04 stop rejected after fill, S03 crossed stop (-2021), S18 unprotected drill
+- [x] 25-12-PLAN.md - Scenario S07 restart at three cut points (D080 probe, never re-sent)
+- [x] 25-13-PLAN.md - Scenarios S08 stream loss and listenKey expiry, S17 stale feed, S09 clock skew
+- [x] 25-14-PLAN.md - Scenarios S10 injected 429/418, S19 rest_gate_cli status/clear, S11 DB outage during a close
+- [x] 25-15-PLAN.md - Scenarios S14 SAFE_MODE entry and operator exit, S12 DAILY_STOP, S13 margin and liquidation guards
+- [x] 25-16-PLAN.md - Scenarios S15 foreign order and doubled position, S16 manual close outside the system
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 25-17-PLAN.md - Phase 25 gate, scenario inventory, inherited-item register (D-14)
@@ -1567,7 +1567,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
 | 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
-| 25. Binance Demo Integration Test Campaign | 7/25 | In Progress | - |
+| 25. Binance Demo Integration Test Campaign | 16/25 | In Progress | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
 
