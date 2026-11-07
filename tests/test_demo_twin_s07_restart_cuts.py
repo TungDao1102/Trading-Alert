@@ -1,0 +1,191 @@
+"""S07 (restart mid-flow, three cuts) on the CI twin: the fake composed process (plan 25-12).
+
+TEST_ONLY, EXEC-01, EXEC-03, D079, D080. The process is crashed (`abandon`, no drain) and a second
+process is built over the same stores and the same exchange at three points: after the fill and the
+confirmed stop (c), before the entry answer is known (a) and between the fill and the stop (b). The
+same `s07_restart_cuts.run(env, recorder, cut=...)` is what the owner's Demo test calls (D-04,
+D-05).
+
+On the twin every step is SYNTHETIC. On Demo an injected trigger (the lost entry answer, the held
+stop placement) is DEMO_FAULT_INJECTED and only what the second process does is DEMO_OBSERVED.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+from scripts import demo_rehearsal as dr
+from src.execution.protection import ProtectionState
+
+from tests.support.demo_scenarios import s07_restart_cuts
+from tests.support.demo_scenarios.catalog import by_id
+from tests.support.demo_scenarios.harness import (
+    SYNTHETIC,
+    EnvOptions,
+    ScenarioPrecondition,
+    ScenarioRecorder,
+    build_fake_scenario_env,
+)
+from tests.support.live_rig import forbid_real_sleep
+
+FAKE_NOW = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+
+# The existing tests this twin builds on (the coverage inventory of plan 25-17 reads this tuple).
+REUSES = (
+    "tests/test_live_restart_rehydrate.py::test_a_protected_plan_comes_back_protected_and_its_stop_is_not_placed_again",
+    "tests/test_live_restart_rehydrate.py::test_an_entry_sent_with_an_unknown_result_stays_unknown_with_safe_mode",
+    "tests/test_intent_recovery_unknown_entry.py::test_a_found_order_becomes_acked_with_journaled_evidence",
+)
+
+
+@pytest.fixture(autouse=True)
+def real_sleep_calls(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    return forbid_real_sleep(monkeypatch)
+
+
+def _recorder() -> ScenarioRecorder:
+    return ScenarioRecorder("S07", mode=dr.RunMode.DRY_RUN, environ={}, clock=lambda: FAKE_NOW)
+
+
+def _status(recorder: ScenarioRecorder) -> dict[str, str]:
+    return {step["name"]: step["status"] for step in recorder.steps}
+
+
+def test_the_catalog_pins_s07_to_this_plan() -> None:
+    s07 = by_id("S07")
+    assert (s07.plan, s07.module) == ("25-12", "tests/support/demo_scenarios/s07_restart_cuts.py")
+    assert s07.twin_test == "tests/test_demo_twin_s07_restart_cuts.py"
+    assert s07.demo_test == "tests/demo/test_demo_s07_restart_cuts.py"
+    assert set(s07.requirements) == {"EXEC-01", "EXEC-03"}
+
+
+async def test_an_unknown_cut_is_refused_before_anything_runs(tmp_path: Path) -> None:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    with pytest.raises(ValueError, match="cut"):
+        await s07_restart_cuts.run(env, recorder, cut="z")
+    assert recorder.steps == [], "nothing was recorded, nothing was read"
+    assert env.fake.calls_to("place_entry") == []
+
+
+# --------------------------------------------------------------------------------------------- #
+# Cut (c): restart after the fill and the confirmed stop.
+# --------------------------------------------------------------------------------------------- #
+
+_CUT_C_STEPS = (
+    "precondition_clean",
+    "start",
+    "signal",
+    "card",
+    "approve",
+    "confirm_entry",
+    "stop_confirmed",
+    "restart",
+    s07_restart_cuts.STEP_C_REHYDRATED,
+    s07_restart_cuts.STEP_C_NOTHING_SENT,
+    s07_restart_cuts.STEP_C_RECONCILE_CLEAN,
+    "close_cleanup",
+    "account_clean",
+)
+
+
+async def test_cut_c_runs_end_to_end_and_every_step_is_synthetic(tmp_path: Path) -> None:
+    recorder = _recorder()
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    outcome = await s07_restart_cuts.run(env, recorder, cut="c")
+    assert outcome == dr.OUTCOME_COMPLETE and recorder.outcome == outcome
+    assert {step["label"] for step in recorder.steps} == {SYNTHETIC}
+    statuses = _status(recorder)
+    for name in _CUT_C_STEPS:
+        assert statuses.get(name) == dr.STEP_PASSED, (name, recorder.steps)
+    assert recorder.details["cut"] == "c"
+
+
+async def test_cut_c_the_second_process_restored_one_plan_and_it_is_protected(
+    tmp_path: Path,
+) -> None:
+    recorder = _recorder()
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    await s07_restart_cuts.run(env, recorder, cut="c")
+    starts = recorder.details["start_sequences"]
+    assert [s["label"] for s in starts] == ["start", "restart"]
+    assert starts[0]["plans_restored"] == 0 and starts[1]["plans_restored"] == 1
+    assert starts[1]["admitted"] is True and starts[1]["safe_mode_reasons"] == []
+    facts = recorder.details["cut_c"]
+    assert facts["state_before_crash"] == facts["state_after_restart"]
+    assert facts["state_after_restart"] in {
+        ProtectionState.PROTECTED.value,
+        ProtectionState.COMPLETE.value,
+        ProtectionState.TP_UNAVAILABLE.value,
+    }
+    assert facts["stop_confirmed_after_restart"] is True
+
+
+async def test_cut_c_the_second_process_sends_nothing_to_the_exchange(tmp_path: Path) -> None:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    await s07_restart_cuts.run(env, recorder, cut="c")
+    facts = recorder.details["cut_c"]
+    assert facts["mutating_calls_after_restart"] == facts["mutating_calls_before_crash"]
+    # The exchange's own view: one entry, and every protective id placed exactly once.
+    assert len(env.fake.calls_to("place_entry")) == 1
+    ids = [c["kwargs"]["client_algo_id"] for c in env.fake.calls_to("place_algo_protective")]
+    assert len(ids) == len(set(ids)), "a protective id was placed twice"
+    assert ids.count(facts["stop_client_algo_id"]) == 1, "the stop was placed once, by process 1"
+
+
+async def test_cut_c_a_new_exchange_call_after_the_restart_fails_the_step(tmp_path: Path) -> None:
+    """Negative control: if the second process placed anything the scenario must stop."""
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    original = s07_restart_cuts.mutating_counts
+    calls = {"n": 0}
+
+    def growing(env_: Any) -> dict[str, int]:
+        counts = original(env_)
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the read after the restart
+            counts["place_algo_protective"] += 1
+        return counts
+
+    s07_restart_cuts.mutating_counts = growing  # type: ignore[assignment]
+    try:
+        with pytest.raises(dr.SmokeHalt):
+            await s07_restart_cuts.run(env, recorder, cut="c")
+    finally:
+        s07_restart_cuts.mutating_counts = original  # type: ignore[assignment]
+    assert _status(recorder)[s07_restart_cuts.STEP_C_NOTHING_SENT] == dr.STEP_FAILED
+
+
+async def test_cut_c_a_dirty_account_stops_before_anything_is_placed(tmp_path: Path) -> None:
+    from decimal import Decimal
+
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    env.fake.positions["BTCUSDT"] = Decimal("0.01")
+    with pytest.raises(ScenarioPrecondition):
+        await s07_restart_cuts.run(env, _recorder(), cut="c")
+    assert env.fake.calls_to("place_entry") == []
+
+
+async def test_the_evidence_file_has_the_scenario_schema_and_one_kind(tmp_path: Path) -> None:
+    recorder = _recorder()
+    await s07_restart_cuts.run(build_fake_scenario_env(tmp_path, EnvOptions()), recorder, cut="c")
+    path = recorder.write(tmp_path / "evidence")
+    assert path.name.startswith("25-DEMO-SCENARIO-DRYRUN-S07-20261107T120000Z")
+    document: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    assert document["schema"] == "demo-scenario-evidence/schema-1"
+    assert document["scenario_id"] == "S07"
+    assert document["evidence_kinds"] == ["SYNTHETIC"]
+    assert document["outcome"] == dr.OUTCOME_COMPLETE
+    assert document["details"]["cut"] == "c"
+
+
+def test_the_twin_names_the_existing_tests_it_reuses() -> None:
+    assert len(REUSES) >= 1
+    for reference in REUSES:
+        path, _, name = reference.partition("::")
+        assert name in Path(path).read_text(encoding="utf-8")
