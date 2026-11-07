@@ -1424,10 +1424,50 @@ Plans:
 - [R-25 / 24-REVIEW IN-02] The health tick writes 11 journal rows every 15 s (about 63,000 a day): reduce the cadence or write on change only before the multi-week soak (source: 24-REVIEW.md IN-02, 24-DEFERRED.md R-25; decision: none required)
 - [R-28 / 24-REVIEW IN-01, IN-03, IN-04, IN-05] Info-level review items: `xc-` close-order updates journaled as stream failures, liveness and heartbeat ignore per-task PASS/FAIL, `CommissionCache` without `record`, `heartbeat.sh --install-timer` path validation and global `LC_ALL=C` (source: 24-REVIEW.md, 24-DEFERRED.md R-28; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 0/25 plans executed
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 25 to break down)
+
+**Wave 1**
+- [ ] 25-01-PLAN.md - Demo suite gating: `demo` marker, skip-by-default collection hook, env guard, marker guard, S00 preflight, docs (D-03, OPS-02)
+- [ ] 25-02-PLAN.md - Test-only fault seams: FaultEdge (exchange_edge), SdkFaults (418/429 under the real adapter), StoreFaults (D-02, D-05, D-08)
+- [ ] 25-03-PLAN.md - R-24 test-first: pool-exhaustion TimeoutError becomes StoreUnavailable (D-13)
+- [ ] 25-04-PLAN.md - R-25 test-first: one HEALTH_VERDICT per tick, HEALTH_CHECK rows on change only (D-11, D-13)
+- [ ] 25-05-PLAN.md - D-08 same-code-path AST guard: pinned src/live allow-list, none in execution or risk
+- [ ] 25-06-PLAN.md - DEMO_VS_MAINNET.md with sourced labels and the G2-030 Demo cross-checks (D-07, D-12)
+- [ ] 25-07-PLAN.md - Journal-based soak evaluator: registration hash, criteria, restart rule, export (D-09, D-10 as corrected)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 25-08-PLAN.md - Scenario framework and S01 tracer: catalog S01-S20, harness, labels, evidence index (D-04, D-05)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 25-09-PLAN.md - Demo env factory over the production assembly, programmatic owner, demo fixtures, S01 demo test (D-04, D-08)
+- [ ] 25-10-PLAN.md - Scenarios S06 replayed/concurrent presses, S02 partial fill, S05 cancel racing a fill
+- [ ] 25-11-PLAN.md - Scenarios S04 stop rejected after fill, S03 crossed stop (-2021), S18 unprotected drill
+- [ ] 25-12-PLAN.md - Scenario S07 restart at three cut points (D080 probe, never re-sent)
+- [ ] 25-13-PLAN.md - Scenarios S08 stream loss and listenKey expiry, S17 stale feed, S09 clock skew
+- [ ] 25-14-PLAN.md - Scenarios S10 injected 429/418, S19 rest_gate_cli status/clear, S11 DB outage during a close
+- [ ] 25-15-PLAN.md - Scenarios S14 SAFE_MODE entry and operator exit, S12 DAILY_STOP, S13 margin and liquidation guards
+- [ ] 25-16-PLAN.md - Scenarios S15 foreign order and doubled position, S16 manual close outside the system
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 25-17-PLAN.md - Phase 25 gate, scenario inventory, inherited-item register (D-14)
+- [ ] 25-18-PLAN.md - Owner campaign runbook and owner decision packet Q-AB to Q-G (D-01)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 25-19-PLAN.md - Owner decisions Q-AB soak shape and Q-C healthy reading *(checkpoint: owner decision)*
+- [ ] 25-20-PLAN.md - Owner Demo campaign sessions and results, defects to gap closure *(checkpoint: owner run)*
+- [ ] 25-21-PLAN.md - Owner decision Q-F on R-21 stamping and its DECISIONS row *(checkpoint: owner decision)*
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 25-22-PLAN.md - Owner decisions Q-D account and Q-E soak host and restart policy *(checkpoint: owner decision)*
+- [ ] 25-23-PLAN.md - R-21 reservation stamping as the owner decided (skipped if deferred)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 25-24-PLAN.md - Soak pre-registration, owner approval, committed SHA-256 (D-09) *(checkpoint: owner decision)*
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 25-25-PLAN.md - Owner-run Demo soak of at least 21 days and its recorded verdict *(checkpoint: owner run)*
 
 ### Phase 26: Go-Live Readiness Gate
 
@@ -1525,7 +1565,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
 | 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
-| 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
+| 25. Binance Demo Integration Test Campaign | 0/25 | Planned     | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
 
