@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import dataclasses
+import json
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -572,3 +573,136 @@ def test_a_callable_clock_default_reads_utc(stubs: _Stubs) -> None:
     )
     clock: Callable[[], datetime] = env.clock
     assert clock().tzinfo is not None
+
+
+# --------------------------------------------------------------------------- #
+# Task 2: the session evidence, the demo fixtures and the S01 demo test.
+# --------------------------------------------------------------------------- #
+
+DEMO_DIR = Path(__file__).resolve().parent / "demo"
+
+
+def _session(tmp_path: Path, **environ: str) -> demo_env.SessionEvidence:
+    return demo_env.SessionEvidence(tmp_path / "evidence", environ=environ, clock=lambda: NOW)
+
+
+def test_a_session_recorder_is_execute_mode_and_writes_into_the_phase_directory(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    recorder = session.recorder("S01")
+    assert isinstance(recorder, ScenarioRecorder)
+    assert recorder.mode is dr.RunMode.EXECUTE
+    assert recorder.default_label == dr.EVIDENCE_KIND_DEMO
+    recorder.add_step("probe", dr.STEP_PASSED, "ok")
+    path = recorder.write()
+    assert path.parent == tmp_path / "evidence"
+    assert path.name.startswith("25-DEMO-SCENARIO-EVIDENCE-S01-")
+    assert session.files == [path]
+
+
+def test_the_session_ends_with_one_index_over_every_file_and_scrubs_secrets(
+    tmp_path: Path,
+) -> None:
+    secret = "FAKE-DEMO-SECRET-SENTINEL-0910"
+    session = _session(tmp_path, BINANCE_DEMO_API_SECRET=secret)
+    first, second = session.recorder("S01"), session.recorder("S02")
+    first.add_step("a", dr.STEP_PASSED, f"detail {secret}")
+    second.add_step("b", dr.STEP_PASSED, "ok")
+    first.write()
+    second.write()
+    index = session.finish()
+    assert index is not None and index.parent == tmp_path / "evidence"
+    assert len(list((tmp_path / "evidence").glob("25-DEMO-SESSION-INDEX-*.json"))) == 1
+    for path in (tmp_path / "evidence").iterdir():
+        assert secret not in path.read_text(encoding="utf-8")
+    rows = json.loads(index.read_text(encoding="utf-8"))["rows"]
+    assert [row["scenario_id"] for row in rows] == ["S01", "S02"]
+
+
+def test_a_recorder_the_test_never_wrote_is_kept_as_failed_evidence(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    abandoned = session.recorder("S03")
+    abandoned.add_step("started", dr.STEP_PASSED, "ok")
+    empty = session.recorder("S04")  # a recorder with no step has nothing to keep
+    del empty
+    index = session.finish()
+    assert index is not None
+    (written,) = (tmp_path / "evidence").glob("25-DEMO-SCENARIO-EVIDENCE-S03-*.json")
+    assert '"outcome": "FAILED"' in written.read_text(encoding="utf-8")
+    assert not list((tmp_path / "evidence").glob("*S04*"))
+
+
+def test_a_session_that_wrote_nothing_writes_no_index(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.recorder("S01")
+    assert session.finish() is None
+    assert not (tmp_path / "evidence").exists()
+
+
+def test_an_unknown_scenario_id_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(KeyError):
+        _session(tmp_path).recorder("S99")
+
+
+def _functions(path: Path) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def _names_used(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def test_the_demo_conftest_defines_both_fixtures_of_the_contract() -> None:
+    from tests.support.demo_scenarios.harness import (
+        FIXTURE_MAKE_DEMO_ENV,
+        FIXTURE_SCENARIO_RECORDER,
+    )
+
+    functions = _functions(DEMO_DIR / "conftest.py")
+    assert FIXTURE_SCENARIO_RECORDER in functions and FIXTURE_MAKE_DEMO_ENV in functions
+    assert "build_demo_scenario_env" in _names_used(functions[FIXTURE_MAKE_DEMO_ENV])
+    assert "os" in _names_used(functions[FIXTURE_MAKE_DEMO_ENV]), "the env is os.environ"
+    assert isinstance(functions[FIXTURE_MAKE_DEMO_ENV], ast.AsyncFunctionDef) or any(
+        isinstance(n, ast.AsyncFunctionDef) for n in ast.walk(functions[FIXTURE_MAKE_DEMO_ENV])
+    ), "make_demo_env hands out an async factory"
+    assert "SessionEvidence" in _names_used(
+        ast.parse((DEMO_DIR / "conftest.py").read_text("utf-8"))
+    )
+
+
+def test_the_demo_conftest_keeps_the_guard_and_ends_the_session_with_the_index() -> None:
+    tree = ast.parse((DEMO_DIR / "conftest.py").read_text(encoding="utf-8"))
+    names = _names_used(tree)
+    assert "assert_demo_run_environment" in names and "DemoRunRefused" in names
+    finishers = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "finish"
+    ]
+    assert finishers, "a session finalizer calls SessionEvidence.finish"
+
+
+def test_the_s01_demo_test_imports_the_shared_scenario_and_requests_both_fixtures() -> None:
+    path = DEMO_DIR / "test_demo_s01_happy.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom | ast.Import)
+        for alias in node.names
+    }
+    assert "s01_happy" in imported, "the same run(env, recorder) the CI twin calls"
+    tests = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef) and n.name.startswith("test_")
+    ]
+    assert tests
+    for test in tests:
+        arguments = {a.arg for a in test.args.args}
+        assert {"scenario_recorder", "make_demo_env"} <= arguments
+    assert "pytestmark" in path.read_text(encoding="utf-8")
