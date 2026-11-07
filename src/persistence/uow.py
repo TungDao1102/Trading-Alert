@@ -12,6 +12,7 @@ from contextlib import contextmanager
 
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
 from src.persistence.errors import StoreFailure, StoreUnavailable
@@ -34,13 +35,19 @@ class OperationalDatabase:
         out-of-range value) becomes `StoreFailure`, so callers that fail closed on
         `PersistenceError` never see a raw driver exception (17-REVIEW WR-01). Both typed
         messages name exception types only and drop the cause (`from None`): the
-        SQLAlchemy message carries the SQL text and its parameters.
+        SQLAlchemy message carries the SQL text and its parameters. A pool exhaustion
+        (`sqlalchemy.exc.TimeoutError`, not a `DBAPIError`) also becomes `StoreUnavailable`, so it
+        can no longer escape the manager as a raw exception (R-24, D-13).
         """
         try:
             with Session(self._engine, expire_on_commit=False) as session, session.begin():
                 yield session
         except IntegrityError:
             raise
+        except SQLAlchemyTimeoutError as exc:
+            raise StoreUnavailable(
+                f"PostgreSQL pool exhausted during transaction ({type(exc).__name__})"
+            ) from None
         except (OperationalError, InterfaceError) as exc:
             raise StoreUnavailable(
                 f"PostgreSQL unavailable during transaction ({type(exc).__name__})"
