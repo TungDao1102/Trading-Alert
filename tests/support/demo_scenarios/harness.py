@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from scripts import demo_rehearsal as dr
+from src.domain.enums import TradePlanStatus
 
 from tests.support.demo_scenarios.catalog import by_id
 from tests.support.fault_edge import FaultEdge, SdkFaults, StoreFaults
@@ -215,6 +216,137 @@ def build_fake_scenario_env(tmp_path: Path, options: EnvOptions) -> FakeScenario
     return _adopt(smoke)
 
 
+# --------------------------------------------------------------------------- #
+# Clean start and cleanup (Pitfall 8, T-25-20).
+# --------------------------------------------------------------------------- #
+
+CLEAR_INSTRUCTION = (
+    "close every Demo position and order in the Binance Demo UI, then run "
+    "scripts/demo_clear.py (it expires the plans behind open approvals)"
+)
+STEP_PRECONDITION_CLEAN = "precondition_clean"
+STEP_ACCOUNT_CLEAN = "account_clean"
+
+
+class ScenarioPrecondition(Exception):  # noqa: N818 - a precondition stop, not an error class
+    """The account or the stores were not clean when the scenario started."""
+
+
+@dataclass(frozen=True)
+class AccountCounts:
+    """What the symbol still holds: counts only, never an id (T-25-18)."""
+
+    normal_orders: int
+    algo_orders: int
+    positions: int
+    open_approvals: int
+
+    @property
+    def clean(self) -> bool:
+        return not (self.normal_orders or self.algo_orders or self.positions or self.open_approvals)
+
+    def text(self) -> str:
+        return (
+            f"normal_orders={self.normal_orders}, algo_orders={self.algo_orders}, "
+            f"positions={self.positions}, open_approvals={self.open_approvals}"
+        )
+
+
+# A plan in one of these states can no longer be confirmed: its approval holds nothing (the same
+# rule as the live sender's open-approvals reader, `src/live/approval_sender.py`).
+_CLOSED_PLAN_STATUSES = frozenset(
+    {TradePlanStatus.EXPIRED, TradePlanStatus.INVALIDATED, TradePlanStatus.SUPERSEDED}
+)
+
+
+def _open_approvals(shadow: Any, now: datetime) -> list[str]:
+    """Trade plan ids of PENDING and APPROVED approvals of the symbol whose plan is still open.
+
+    A plan is open until its status is closed or its expiry time has passed (a refused or
+    unconfirmed plan stays APPROVED past its expiry and then holds nothing).
+
+    Stricter than the live reader on purpose: a PENDING approval is counted without the DEMO
+    journal marker (the store is DEMO-scoped on Demo, and the in-memory store of the twin writes
+    no marker). A row whose plan or signal cannot be found is counted (fail closed).
+    """
+    found: dict[str, None] = {}
+    for approval in [*shadow.list_pending_approvals(), *shadow.list_approved_approvals()]:
+        plan = shadow.get_trade_plan(approval.trade_plan_id)
+        signal = shadow.get_signal(approval.signal_id)
+        if plan is not None and (plan.status in _CLOSED_PLAN_STATUSES or plan.expiry_utc <= now):
+            continue
+        if signal is not None and signal.symbol != dr.SYMBOL:
+            continue
+        found[approval.trade_plan_id] = None
+    return list(found)
+
+
+async def read_account_counts(env: Any) -> AccountCounts:
+    """Open normal and algo orders, non-zero positions and open (PENDING or APPROVED) approvals.
+
+    The exchange is read through `env.assembly.exchange.adapter` and the approvals through the
+    stores with `env.assembly.executor.read`, so it works before the process is started. Call it
+    before arming a fault: a fault armed on a snapshot method would be consumed by this read.
+    """
+    adapter = env.assembly.exchange.adapter
+    orders = await adapter.snapshot_open_normal_orders(symbol=dr.SYMBOL)
+    algos = await adapter.snapshot_open_algo_orders(symbol=dr.SYMBOL)
+    positions = [
+        row for row in await adapter.snapshot_positions(symbol=dr.SYMBOL) if row.position_amt != 0
+    ]
+    approvals = await env.assembly.executor.read(
+        _open_approvals, env.assembly.stores.shadow, env.clock()
+    )
+    return AccountCounts(len(orders), len(algos), len(positions), len(approvals))
+
+
+def _record(env: Any, recorder: ScenarioRecorder, name: str, status: str, text: str) -> None:
+    prefix = "SYNTHETIC: " if env.synthetic else ""
+    recorder.add_labeled_step(name, status, prefix + text, label=label_for(env, injected=False))
+
+
+async def ensure_clean_start(env: Any, recorder: ScenarioRecorder) -> None:
+    """Record `precondition_clean` PASSED, or FAILED and raise `ScenarioPrecondition`.
+
+    The message names `scripts/demo_clear.py` and lists counts only.
+    """
+    counts = await read_account_counts(env)
+    if counts.clean:
+        _record(
+            env,
+            recorder,
+            STEP_PRECONDITION_CLEAN,
+            dr.STEP_PASSED,
+            "no open order, algo order, position or approval",
+        )
+        return
+    message = f"the account is not clean ({counts.text()}): {CLEAR_INSTRUCTION}"
+    _record(env, recorder, STEP_PRECONDITION_CLEAN, dr.STEP_FAILED, message)
+    raise ScenarioPrecondition(message)
+
+
+async def account_clean(env: Any, recorder: ScenarioRecorder) -> bool:
+    """Record `account_clean` PASSED or FAILED with the same counts; returns whether it is clean."""
+    counts = await read_account_counts(env)
+    if counts.clean:
+        _record(
+            env,
+            recorder,
+            STEP_ACCOUNT_CLEAN,
+            dr.STEP_PASSED,
+            "no order, algo order, position or approval",
+        )
+        return True
+    _record(
+        env,
+        recorder,
+        STEP_ACCOUNT_CLEAN,
+        dr.STEP_FAILED,
+        f"left behind ({counts.text()}): {CLEAR_INSTRUCTION}",
+    )
+    return False
+
+
 __all__ = [
     "DEMO_FAULT_INJECTED",
     "DEMO_OBSERVED",
@@ -224,10 +356,15 @@ __all__ = [
     "NOT_OBSERVED",
     "SCENARIO_EVIDENCE_SCHEMA",
     "SYNTHETIC",
+    "AccountCounts",
     "EnvOptions",
     "FakeScenarioEnv",
     "ScenarioEnv",
+    "ScenarioPrecondition",
     "ScenarioRecorder",
+    "account_clean",
     "build_fake_scenario_env",
+    "ensure_clean_start",
     "label_for",
+    "read_account_counts",
 ]

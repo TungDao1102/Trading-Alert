@@ -16,12 +16,13 @@ from typing import Any
 
 from scripts import demo_rehearsal as dr
 
-from tests.support.demo_scenarios.harness import ScenarioRecorder
+from tests.support.demo_scenarios.harness import ScenarioRecorder, ensure_clean_start
 
 
 async def run(env: Any, recorder: ScenarioRecorder) -> str:
     """Run the happy path on `env`; returns the smoke outcome (an `OUTCOME_*` constant)."""
     recorder.default_label = env.label
+    await ensure_clean_start(env, recorder)
     outcome = await dr.run_composed_smoke(env, recorder)
     recorder.record_health(_latest_health(env))
     recorder.attestation_map = dr.build_smoke_attestation(recorder)

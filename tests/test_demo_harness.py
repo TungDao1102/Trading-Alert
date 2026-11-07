@@ -18,9 +18,8 @@ from typing import Any
 
 import pytest
 from scripts import demo_rehearsal as dr
-from src.live.approval_sender import OpenApproval
+from src.domain.enums import TradePlanStatus
 
-from tests.support.demo_scenarios import harness
 from tests.support.demo_scenarios.catalog import SCENARIOS, Scenario, by_id
 from tests.support.demo_scenarios.harness import (
     DEMO_FAULT_INJECTED,
@@ -252,19 +251,6 @@ async def test_a_leftover_position_stops_the_start(tmp_path: Path) -> None:
         await ensure_clean_start(env, _recorder())
 
 
-async def test_an_open_approval_of_the_symbol_stops_the_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    other = OpenApproval(approval_id="a-2", symbol="ETHUSDT", expiry_utc=NOW)
-    mine = OpenApproval(approval_id="a-1", symbol=dr.SYMBOL, expiry_utc=NOW)
-    monkeypatch.setattr(
-        harness, "make_open_demo_approvals_reader", lambda _stores: lambda: [mine, other]
-    )
-    env = build_fake_scenario_env(tmp_path, EnvOptions())
-    with pytest.raises(ScenarioPrecondition, match=r"open_approvals=1"):
-        await ensure_clean_start(env, _recorder())
-
-
 async def test_a_pending_card_of_a_real_process_counts_as_an_open_approval(
     tmp_path: Path,
 ) -> None:
@@ -282,6 +268,14 @@ async def test_a_pending_card_of_a_real_process_counts_as_an_open_approval(
         await env.tick()
     with pytest.raises(ScenarioPrecondition, match=r"open_approvals=1"):
         await ensure_clean_start(env, _recorder())
+    # Closed the official way (DOMN-04, the transition scripts/demo_clear.py makes): clean again.
+    await env.assembly.executor.write(
+        env.wiring.stores.entities.transition_trade_plan,
+        ids.trade_plan_id,
+        TradePlanStatus.EXPIRED,
+        now_utc=env.clock(),
+    )
+    await ensure_clean_start(env, _recorder())
 
 
 async def test_account_clean_records_passed_then_failed_with_the_same_counts(
