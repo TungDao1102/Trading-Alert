@@ -14,7 +14,9 @@ Mode scope (Phase 24, plan 24-08; research C-7, OQ-6; owner answer 24-01 Q8): SH
 share one PostgreSQL database, and the confirm sweeps judge every APPROVED approval their store
 lists. `PgShadowStores(db, confirm_mode=...)` therefore writes a durable mode marker (the journal
 event `APPROVAL_MODE_RECORDED`, correlation `approval-mode:<approval_id>`) in the SAME transaction
-as the PENDING approval row, and `list_approved_approvals` returns only the approvals of its mode:
+as the PENDING approval row, and `list_approved_approvals` and `list_pending_approvals` return only
+the approvals of its mode (the PENDING reader feeds the SHADOW restart sweep, which must never
+expire a DEMO approval; 24-REVIEW WR-02):
 
 - a SHADOW-scoped store also returns an approval that has no marker (every row written before
   this plan is a SHADOW row);
@@ -185,10 +187,14 @@ class PgShadowStores:
         return self._approvals.get(approval_id)
 
     def list_pending_approvals(self) -> list[Approval]:
-        return self._by_status(ApprovalResult.PENDING)
+        """PENDING approvals (any action) of this store's mode (see the module docstring)."""
+        return self._list_in_mode(ApprovalResult.PENDING, approve_only=False)
 
     def list_approved_approvals(self) -> list[Approval]:
         """APPROVE-action APPROVED approvals of this store's mode (see the module docstring)."""
+        return self._list_in_mode(ApprovalResult.APPROVED, approve_only=True)
+
+    def _list_in_mode(self, status: ApprovalResult, *, approve_only: bool) -> list[Approval]:
         with self._db.transaction() as session:
             rows = session.execute(
                 select(ApprovalRow, JournalEventRow.payload_json)
@@ -199,7 +205,7 @@ class PgShadowStores:
                         JournalEventRow.event_type == EVENT_APPROVAL_MODE_RECORDED,
                     ),
                 )
-                .where(ApprovalRow.status == ApprovalResult.APPROVED.value)
+                .where(ApprovalRow.status == status.value)
             ).all()
             approvals: list[Approval] = []
             for row, marker_payload in rows:
@@ -211,19 +217,12 @@ class PgShadowStores:
                 if not mode_includes(self._confirm_mode, recorded):
                     continue
                 approval = approval_from_row(row)
-                if approval.action is ApprovalAction.APPROVE:
+                if not approve_only or approval.action is ApprovalAction.APPROVE:
                     approvals.append(approval)
             return approvals
 
     def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]:
         return self._journal.list_by_correlation(correlation_id)
-
-    def _by_status(self, status: ApprovalResult) -> list[Approval]:
-        with self._db.transaction() as session:
-            rows = session.execute(
-                select(ApprovalRow).where(ApprovalRow.status == status.value)
-            ).scalars()
-            return [approval_from_row(row) for row in rows]
 
 
 __all__ = [

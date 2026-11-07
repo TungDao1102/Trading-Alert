@@ -108,6 +108,56 @@ def test_a_shadow_and_a_demo_approval_on_one_database_are_invisible_to_each_othe
         assert ids(stores[None].list_approved_approvals()) == ["apr-1", "apr-2"]
 
 
+def pend(stores: PgShadowStores, n: int) -> Approval:
+    """Insert plan n's rows and leave a PENDING approval through `stores`."""
+    signal = make_shadow_signal(n)
+    plan = make_shadow_plan(signal, plan_hash=f"{n:x}".rjust(64, "d"))
+    stores.insert_signal(signal)
+    stores.insert_trade_plan(plan)
+    pending = Approval(
+        approval_id=f"apr-{n}",
+        trade_plan_id=plan.trade_plan_id,
+        signal_id=signal.signal_id,
+        action=ApprovalAction.APPROVE,
+        approval_token_hash=hashlib.sha256(f"approval-token-{n}".encode()).hexdigest(),
+        requested_at_utc=T0,
+        request_hash=plan.plan_hash,
+        result=ApprovalResult.PENDING,
+        status=ApprovalResult.PENDING,
+        actor_id="",
+    )
+    stores.insert_pending(pending)
+    return pending
+
+
+def test_pending_approvals_are_scoped_like_approved_ones(pg_db: str) -> None:
+    """24-REVIEW WR-02: a SHADOW restart sweep reads no DEMO PENDING approval."""
+    with two_processes(pg_db) as (_engine, stores):
+        pend(stores["SHADOW"], 1)
+        pend(stores["DEMO"], 2)
+        pend(stores[None], 3)  # no marker: a Phase 16 SHADOW row
+
+        assert ids(stores["SHADOW"].list_pending_approvals()) == ["apr-1", "apr-3"]
+        assert ids(stores["DEMO"].list_pending_approvals()) == ["apr-2"]
+        assert ids(stores["LIVE"].list_pending_approvals()) == []
+        assert ids(stores[None].list_pending_approvals()) == ["apr-1", "apr-2", "apr-3"]
+
+
+def test_the_shadow_restart_sweep_leaves_a_demo_pending_approval_untouched(pg_db: str) -> None:
+    from src.paper.shadow import invalidate_pending_on_restart
+
+    with two_processes(pg_db) as (_engine, stores):
+        pend(stores["SHADOW"], 1)
+        pend(stores["DEMO"], 2)
+
+        report = invalidate_pending_on_restart(stores["SHADOW"], T0)  # type: ignore[arg-type]
+
+        assert ids(report.expired) == ["apr-1"]
+        demo = stores["DEMO"].get_approval("apr-2")
+        assert demo is not None and demo.status is ApprovalResult.PENDING
+        assert ids(stores["DEMO"].list_pending_approvals()) == ["apr-2"]
+
+
 def test_the_marker_is_one_journal_event_with_the_mode_in_its_payload(pg_db: str) -> None:
     with two_processes(pg_db) as (engine, stores):
         approve(stores["DEMO"], 1)

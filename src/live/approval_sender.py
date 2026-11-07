@@ -518,11 +518,11 @@ class ApprovalLookupStores(Protocol):
 def make_open_demo_approvals_reader(stores: ApprovalLookupStores) -> ApprovalsReader:
     """The PENDING and APPROVED DEMO approvals with their symbol and plan expiry.
 
-    `list_pending_approvals` is not mode-scoped (SHADOW and DEMO share one database), so a
-    PENDING approval counts only when it carries the DEMO marker of plan 24-08
-    (`APPROVAL_MODE_RECORDED`); `list_approved_approvals` is scoped by the store itself, so the
-    store MUST be `confirm_mode="DEMO"`. A plan or signal row that cannot be found raises: the
-    sender then refuses (fail closed).
+    SHADOW and DEMO share one database. `list_pending_approvals` and `list_approved_approvals`
+    are both scoped by the store itself (24-REVIEW WR-02), so the store MUST be
+    `confirm_mode="DEMO"`; a PENDING approval is still checked for the DEMO marker of plan 24-08
+    (`APPROVAL_MODE_RECORDED`) as a second guard. A plan or signal row that cannot be found
+    raises: the sender then refuses (fail closed).
     """
     if stores.confirm_mode != _DEMO_MODE:
         raise ValueError('the open-approvals reader needs stores with confirm_mode="DEMO"')

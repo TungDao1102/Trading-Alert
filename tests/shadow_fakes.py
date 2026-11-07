@@ -269,7 +269,13 @@ class InMemoryShadowStores:
         return None if mapping is None else (mapping.signal_id, mapping.trade_plan_id)
 
     def list_pending_approvals(self) -> list[Approval]:
-        return [a for a in self.approvals.values() if a.status == ApprovalResult.PENDING]
+        """PENDING approvals of this view's mode (the scope `PgShadowStores` applies, WR-02)."""
+        return [
+            a
+            for a in self.approvals.values()
+            if a.status == ApprovalResult.PENDING
+            and mode_includes(self.confirm_mode, self.approval_modes.get(a.approval_id))
+        ]
 
     def list_approved_approvals(self) -> list[Approval]:
         """APPROVE-action approvals that reached APPROVED, of this view's mode (sweep input)."""
