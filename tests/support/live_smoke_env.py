@@ -57,6 +57,10 @@ class FakeSmokeEnv(SmokeEnv):
 
     fake: Any = None
     rig: ComposedRig | None = None
+    # Plan 25-02: the test-only fault objects the rig was built with (None: no fault injection).
+    faults: Any = None
+    sdk_faults: Any = None
+    store_faults: Any = None
 
 
 class FakeOwner:
@@ -150,9 +154,19 @@ def _env_ports(rig: ComposedRig) -> Any:
 
 
 def build_fake_smoke_env(
-    tmp_path: Path, *, scripted_trade: bool = True, drop_snapshots_before_restart: bool = False
+    tmp_path: Path,
+    *,
+    scripted_trade: bool = True,
+    drop_snapshots_before_restart: bool = False,
+    faults: Any = None,
+    sdk_faults: Any = None,
+    store_faults: Any = None,
 ) -> Any:
     """A `SmokeEnv` over the composed rig; `restart` builds a second wiring over the same stores.
+
+    Plan 25-02 (test-only, D-08): `faults`, `sdk_faults` and `store_faults` are installed in the
+    first rig and in the restart rig; the restart reuses the first rig's (already wrapped) stores,
+    so a store fault armed before the restart still applies after it.
 
     Since plan 24-37 (F3, D095) the placement itself records the verified plan constraint snapshot,
     so a restart needs no help from this env (the TEST_ONLY gap fill of plan 24-29 is gone).
@@ -161,7 +175,9 @@ def build_fake_smoke_env(
     lost the row would.
     """
     holder: list[ComposedRig] = []
-    first = make_composed_rig(tmp_path)
+    first = make_composed_rig(
+        tmp_path, faults=faults, sdk_faults=sdk_faults, store_faults=store_faults
+    )
     holder.append(first)
     owner = FakeOwner(holder)
 
@@ -226,6 +242,9 @@ def build_fake_smoke_env(
             clock=previous.clock,
             fake=previous.fake,
             session_id="composed-rig-2",
+            faults=faults,
+            sdk_faults=sdk_faults,
+            store_faults=store_faults,  # `wrap` is idempotent over the already wrapped stores
         )
         holder.append(second)
         return make_env(second, initialize=False, restartable=False)
@@ -234,6 +253,9 @@ def build_fake_smoke_env(
         return FakeSmokeEnv(
             fake=rig.fake,
             rig=rig,
+            faults=faults,
+            sdk_faults=sdk_faults,
+            store_faults=store_faults,
             assembly=rig.assembly,
             clock=rig.clock.now,
             tick=tick,

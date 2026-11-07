@@ -68,6 +68,7 @@ from tests.shadow_fakes import (
 from tests.support.day_risk_fakes import ScriptedDayRiskReader
 from tests.support.execution_limits import test_only_execution_limits
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
+from tests.support.fault_edge import FaultEdge
 from tests.support.limits import test_only_binance_limits
 from tests.support.live_risk_rig import btc_filters
 from tests.support.live_store_set import MemoryStoreHandles, build_memory_stores
@@ -225,6 +226,10 @@ class ComposedRig:
     wiring: CompleteLiveWiring | None = None
     enablement: LiveEnablementController | None = None
     safe_mode: SafeModeController | None = None
+    # Plan 25-02: the test-only fault objects installed at the three production seams (or None).
+    faults: FaultEdge | None = None
+    sdk_faults: Any = None
+    store_faults: Any = None
 
     # ---- bring-up -------------------------------------------------------------------------- #
 
@@ -341,8 +346,17 @@ def make_composed_rig(
     clock: VirtualTime | None = None,
     fake: BinanceSemanticsFakeAdapter | None = None,
     session_id: str = "composed-rig",
+    faults: FaultEdge | None = None,
+    sdk_faults: Any = None,
+    store_faults: Any = None,
 ) -> ComposedRig:
-    """One composed process; a restart passes the SAME `stores`, `clock` and `fake` (plan 24-29)."""
+    """One composed process; a restart passes the SAME `stores`, `clock` and `fake` (plan 24-29).
+
+    Plan 25-02 (test-only, D-08): `faults` is installed inside `edge()` around the composed edge and
+    FakePublic (the `exchange_edge` seam), `sdk_faults` wraps the rig's own `sdk_factory` (the
+    `sdk_factory` seam) and `store_faults` wraps the store set before `build_wiring(stores=...)`
+    (the `stores` seam). Every default keeps the existing callers unchanged.
+    """
     clock = clock if clock is not None else VirtualTime(T0)
     if fake is None:
         fake = BinanceSemanticsFakeAdapter(now_utc=clock.now(), enforce_flat_stop_rejection=True)
@@ -362,11 +376,14 @@ def make_composed_rig(
     def edge(bundle: ExchangeBundle) -> ExchangeBundle:
         composed = ComposedExchangeEdge(real=bundle.adapter, fake=fake, day_reader=day_reader)
         holder["edge"] = composed
-        return dataclasses.replace(
+        composed_bundle = dataclasses.replace(
             bundle,
             adapter=composed,  # type: ignore[arg-type]
             public=FakePublic(fake, bundle.gate),  # type: ignore[arg-type]
         )
+        if faults is not None:
+            return cast(ExchangeBundle, faults.install(composed_bundle))
+        return composed_bundle
 
     config = make_config(tmp_path, mode=Environment.DEMO)
     # The loss bound is raised for the rig only: the rig's presses take 30 virtual seconds.
@@ -411,6 +428,9 @@ def make_composed_rig(
         edge=holder["edge"],
         day_reader=day_reader,
         source=source,
+        faults=faults,
+        sdk_faults=sdk_faults,
+        store_faults=store_faults,
     )
 
 
