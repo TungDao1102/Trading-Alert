@@ -181,6 +181,8 @@ Phase 23 (plan 23-04, D-03, D-13) added the `money_json` column and fixed the `a
 
 Phase 23 (plan 23-08, D-16, DECISIONS D088, the owner's answer O-2 (a) of 2026-10-26) changed the one-decided-per-plan rule (G4-042). Alembic revision `0014_decided_excl_expired` (down revision `0013_approval_money`) recreates `uq_approvals_one_decided_per_plan` with the predicate `status NOT IN ('PENDING','EXPIRED')`: at most one APPROVED or SKIPPED approval per trade plan, any number of EXPIRED approvals. Both PENDING siblings (APPROVE and SKIP_USER) of an undecided plan can therefore be expired at restart. An EXPIRED decision on a plan that already has an APPROVED or SKIPPED approval is refused by the store (`ApprovalAlreadyDecided`) before the reservation hook runs, so a decided plan's sibling is never expired and its risk reservation is never released by it. The downgrade raises when any plan has more than one non-PENDING approval. The predicate `status <> 'PENDING'` quoted in the Phase 17 paragraph above is the one before revision 0014.
 
+Phase 24 (plan 24-08, DECISIONS D105, the owner's answer to 24-01 Q8) records the MODE an approval was issued under without a new column: when a PENDING row is newly inserted by a mode-scoped store (`PgShadowStores(db, confirm_mode=SHADOW|DEMO|LIVE)`), the same transaction writes one `journal_events` row `APPROVAL_MODE_RECORDED` (entity type `ApprovalMode`, correlation id `approval-mode:<approval_id>`, payload the canonical JSON `{"mode":"<MODE>"}`, `occurred_at_utc` = the approval's `requested_at_utc`). A replay of the same PENDING insert writes no marker. `list_approved_approvals` of a scoped store returns only the APPROVED approvals whose marker payload equals its own mode; a marker payload the code did not write is listed by no scoped store (fail closed), and an approval with no marker (written before Phase 24) is a legacy SHADOW row that no DEMO or LIVE store lists. `confirm_mode=None` is the unscoped store and lists every APPROVED approval.
+
 ### 2.6 `trades`
 
 **V1 status: not built (D045).** User-executed attribution derives from approvals, orders, fills, positions and journal events; the field list below is a design record.
@@ -236,11 +238,14 @@ local_status
 submitted_at_utc
 updated_at_utc
 canceled_at_utc        NULL
+exchange_event_time_utc NULL
 ```
 
 `client_order_id`, `exchange_order_id`, and conditional/algo identifiers must be independently stored because Binance may use different identifiers for normal and algo orders.
 
 Phase 17 (D051): `client_order_id` and `algo_client_id` are each unique where not NULL (partial unique indexes `uq_orders_client_order_id` and `uq_orders_algo_client_id`). `quantity` is `>= 0` (a `closePosition` stop-loss leg has no quantity and is stored as 0), `price` and `stop_price` are NULL or `> 0`, and `local_status` is limited to the `OrderStatus` values by a named CHECK. `order_role` is a free string and has no CHECK.
+
+Phase 24 (plan 24-07, D-10, DECISIONS D100, the owner's answer to 24-01 Q3) added the nullable column `exchange_event_time_utc` (TIMESTAMPTZ, the Binance event time `E` of the last applied update) in Alembic revision `0015_order_event_time` (down revision `0014_decided_excl_expired`); no new table, no backfill, outside the domain entity and the content-hash identity. The store applies `update_order_exchange_state(..., exchange_event_time_utc=)` only when the event time is not older than the stored one: an older time is reported as stale (`StateUpdate.stale`) and changes nothing, an equal time applies (Binance can send several updates with the same `E`), identical state at an equal time is an idempotent no-op that does not rewrite `updated_at_utc`, and a call without an event time never clears a stored one. The rule is enforced under the row lock (`FOR UPDATE`) and again in the WHERE of the conditional UPDATE. The downgrade refuses once any event time is stored.
 
 ### 2.8 `fills`
 
@@ -287,11 +292,14 @@ opened_at_utc
 updated_at_utc
 closed_at_utc NULL
 status
+snapshot_event_time_utc NULL
 ```
 
 The exchange remains authoritative for the live position state.
 
 `positions.quantity` is a signed amount (negative for a short in one-way mode, as `positionAmt` is on Binance), so it has NO sign CHECK; a `>= 0` CHECK would reject a legal short (Phase 17, D051).
+
+Phase 24 (plan 24-07, DECISIONS D100) added the nullable column `snapshot_event_time_utc` (TIMESTAMPTZ) in the same revision `0015_order_event_time`, and the store method `update_position_snapshot` (G4-043), which writes a position snapshot from the user-data stream under the same monotonic rule as orders (an older snapshot is stale and changes nothing) and always returns `StateUpdate[Position]`.
 
 ### 2.10 `journal_events`
 
@@ -620,6 +628,8 @@ SignalStatus       ≠ OrderStatus ≠ PositionStatus ≠ ApprovalAction
 ```
 
 A signal reaching `APPROVED` must never imply that an order was accepted by Binance. Signal-level approval and plan-level approval are separate: `SignalStatus.APPROVED` records user approval observed on the signal instance, `TradePlanStatus.APPROVED` authorizes execution handoff, and order placement reads the plan status. (D028)
+
+Phase 24 applies these transitions on the DEMO approval path (`apply_d028_chain`, `src/live/approval_sender.py`, DECISIONS D101 and D105), inside the approval decision transaction, after the risk-reservation hook: APPROVED moves the Signal to `APPROVED` and then the TradePlan to `APPROVED`; SKIPPED moves the Signal to `SKIPPED_USER` (`SKIPPED_BUSY` for a `SKIP_BUSY` action) and leaves the TradePlan as it is, because GLOSSARY section 11.2 names no plan state for a skip; EXPIRED moves the Signal and the TradePlan to `EXPIRED`. An illegal move raises `IllegalTransition` and rolls the whole approval transaction back. A smoke Signal is persisted `DETECTED` and moves to `NOTIFIED` only after a successful send, because `DETECTED -> APPROVED` is illegal (GLOSSARY 11.1). The owner script `scripts/demo_clear.py` closes a stale DEMO plan through the same table (`APPROVED -> EXPIRED`, one journal row `DEMO_STALE_PLAN_CLEARED`), never by editing a row.
 
 ## 4. Relationships
 

@@ -90,6 +90,7 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
 | `src/backtest/` | project-owned closed-candle simulator — the canonical execution semantics |
 | `src/paper/` | paper runtime, freeze, shadow mode, liveness |
 | `src/execution/` | human-approved placement; since Phase 19 the fill-driven protection model (below) |
+| `src/live/` | the live process (Phase 24): composition, start sequence, operator commands, Demo smoke |
 | `src/approval/`, `src/reconcile/` | approval tokens + replay; exchange reconciliation, SAFE_MODE |
 | `src/adapters/` | Binance + Telegram behind project-owned interfaces (SDK types never leave) |
 | `src/persistence/`, `src/db/` | SQLAlchemy stores, Alembic migrations |
@@ -101,6 +102,8 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
 
 Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
 (`--healthcheck` / `--pin-epoch` / `--hold-on-refusal` / `--liveness`),
+`python -m src.live.runtime` (`--healthcheck` / `--liveness` / `--hold-on-refusal` /
+`--initialize-gate-state`; owner-run Demo rehearsal: `scripts/demo_rehearsal.py --execute`),
 `python -m src.ops.backup scheduled`, `python -m src.research.run`, `src/analytics/cli.py`.
 
 ## Execution model since Phase 19 (D-10; DECISIONS D079, D080)
@@ -112,7 +115,11 @@ Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
 - **A placement is never re-sent** (owner, 2026-10-20): one `place_entry` POST per approval; an
   ambiguous result is probed once by client order id; not found or probe error ⇒ UNKNOWN + SAFE_MODE.
 - Plan binding: symbol and side come from the hashed plan; quantity may be ≤ approved, never larger.
-- Still open (owner): the `NOT_CONFIGURED` limit keys in `config/execution/execution-limits-v1.toml`;
+- The composition exists since Phase 24 (`src/live/`, DECISIONS D098–D107, `docs/operations/RUNBOOK.md`
+  section 22): one process, one loop; the Demo smoke passed 21/21 steps on 2026-11-06. Placement stays
+  disabled (`LIVE_ORDERS_DISABLED`); nothing was observed on a host.
+- Still open (owner): the optional `NOT_CONFIGURED` key `rest_gate.ban_end_clock_margin_ms` in
+  `config/execution/execution-limits-v1.toml`;
   what Demo cannot show (P3, P7, A2) waits for Phases 25/26. Register:
   `.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`.
 

@@ -426,6 +426,16 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "D095",
         "D096",
         "D097",
+        "D098",
+        "D099",
+        "D100",
+        "D101",
+        "D102",
+        "D103",
+        "D104",
+        "D105",
+        "D106",
+        "D107",
     ], (
         f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
         "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
@@ -440,7 +450,9 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
         "tick, plan 24-37) and D095 (the snapshot recorder in the write-ahead path and the "
         "reservation release, plan 24-37); the owner choice of 2026-11-01 wrote D096 (the "
         "last-price age bound 30000 ms); the assistant proposed D097 (the reconcile skips "
-        "a placement in flight)"
+        "a placement in flight), which the owner accepted on 2026-11-07; plan 24-31 wrote D098 to "
+        "D106 (the owner answers of 2026-10-31 to 24-01 Q1 to Q8, Q11 to Q13 and Q15) and D107 "
+        "(Provisional: the env split and the open-algo cancel confirmation)"
     )
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:
