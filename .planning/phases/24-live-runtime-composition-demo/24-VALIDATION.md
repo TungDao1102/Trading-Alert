@@ -1,7 +1,7 @@
 ---
 phase: "24"
 slug: "live-runtime-composition-demo"
-status: partial
+status: validated
 nyquist_compliant: false
 wave_0_complete: false
 created: "2026-10-30"
@@ -125,12 +125,12 @@ Filled by the planner on 2026-10-31 from the 36 PLAN.md files (first `<automated
 | 24-32-T2 | 24-32 | 9 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03,OPS-04 | unit/integration | `uv run pytest -m "not docker" tests/test_phase24_gate.py -x` | ✅ | ✅ green 2026-11-07 |
 | 24-32-T3 | 24-32 | 9 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03,OPS-04 | doc/static | `uv run pytest -m "not docker" tests/test_phase24_gate.py tests/test_phase18_gate.py tests/test_phase23_gate.py ...` | ✅ | ✅ green 2026-11-07 |
 | 24-33-T1 | 24-33 | 10 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03 | doc/static | inline `uv run python -c` check that 24-OWNER-RUNBOOK.md has every owner step | n/a | ✅ green 2026-11-07 |
-| 24-33-T2 | 24-33 | 10 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03 | checkpoint:human-action (owner) | n/a (owner run; evidence paths recorded in 24-OWNER-RUNBOOK.md) | n/a | ⬜ pending (owner run, plan 24-33) |
-| 24-33-T3 | 24-33 | 10 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03 | doc/static | `uv run pytest -m "not docker" tests/test_phase24_gate.py -x` | ✅ | ⬜ pending (the command passes today; the task records the owner's results) |
+| 24-33-T2 | 24-33 | 10 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03 | checkpoint:human-action (owner) | n/a (owner run; evidence paths recorded in 24-OWNER-RUNBOOK.md) | n/a | ⬜ manual-only (owner run, plan 24-33) |
+| 24-33-T3 | 24-33 | 10 | APRV-01,EXEC-01,EXEC-02,EXEC-03,OPS-02,OPS-03 | doc/static | `uv run pytest -m "not docker" tests/test_phase24_gate.py -x` | ✅ | ⬜ manual-only (the command passes today; the task records the owner's results) |
 | 24-34-T1 | 24-34 | 5 | EXEC-02,EXEC-03 | tracer | `uv run pytest -m "not docker" tests/test_live_unknown_entry_notify.py tests/test_intent_recovery.py tests/test_intent_recovery_unknown_entry.py ...` | ✅ | ✅ green 2026-11-07 |
 | 24-34-T2 | 24-34 | 5 | EXEC-02,EXEC-03 | unit/integration | `uv run pytest -m "not docker" tests/test_protection_cancel_lag.py tests/test_protection_sweep_spill.py tests/test_protection_router_rig.py -x` | ✅ | ✅ green 2026-11-07 |
 | 24-34-T3 | 24-34 | 5 | EXEC-02,EXEC-03 | unit/integration | `uv run pytest -m "not docker" tests/test_live_reconcile_divergences.py tests/test_reconcile_compare_v2.py -x` | ✅ | ✅ green 2026-11-07 |
-| 24-35-T1 | 24-35 | 7 | OPS-02,OPS-03 | tracer | `uv run pytest -m docker tests/test_live_compose_service.py -x` | ✅ | ⬜ not re-run 2026-11-07 (docker-marked; see 24-35-SUMMARY) |
+| 24-35-T1 | 24-35 | 7 | OPS-02,OPS-03 | tracer | `uv run pytest -m docker tests/test_live_compose_service.py -x` | ✅ | ✅ green 2026-11-07 (docker-marked, run by validate-phase: 1 passed) |
 | 24-35-T2 | 24-35 | 7 | OPS-02,OPS-03 | unit/integration | `uv run pytest -m "not docker" tests/test_deploy_compose.py tests/test_live_compose_env_split.py -x` | ✅ | ✅ green 2026-11-07 |
 | 24-36-T1 | 24-36 | 6 | OPS-02 | tracer | `uv run pytest -m "not docker" tests/test_live_compose_env_split.py tests/test_soak_compose.py -x` | ✅ | ✅ green 2026-11-07 |
 | 24-36-T2 | 24-36 | 6 | OPS-02 | unit/integration | `uv run pytest -m "not docker" tests/test_deploy_backup_scripts.py tests/test_live_compose_env_split.py -x` | ✅ | ✅ green 2026-11-07 |
@@ -144,8 +144,8 @@ heartbeat file-mode cases, which cannot run on Windows). `verify_decision_alignm
 the final commands, and some test files were renamed since (for example `test_live_tracer.py` became
 `test_live_composed_tracer.py`). This is a per-file run, not the recorded sequential gate and not the full suite.
 
-Not green: 24-35-T1 (docker-marked, not re-run here), 24-33-T2 (owner run) and 24-33-T3 (records the owner's
-results). `nyquist_compliant` and `wave_0_complete` stay false until every row is green, as plan 24-32 requires.
+Not green: 24-33-T2 (owner run) and 24-33-T3 (records the owner's results). 24-35-T1 was re-run on
+2026-11-07 by validate-phase and passed. `nyquist_compliant` and `wave_0_complete` stay false until every row is green, as plan 24-32 requires.
 
 ## Wave 0 Requirements
 
@@ -168,4 +168,12 @@ See `24-RESEARCH.md` "Wave 0 Gaps": `tests/support/live_rig.py`, fake-exchange e
 - [x] No watch-mode flags
 - [ ] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** partial; only the owner-run rows 24-33-T2/T3 remain
+
+## Validation Audit 2026-11-07
+
+| Metric | Count |
+|---|---|
+| Gaps found | 3 |
+| Resolved | 1 |
+| Escalated | 2 |
