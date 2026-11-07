@@ -18,8 +18,13 @@ any more) followed by `env.restart()`: a second process over the SAME stores and
   `place_entry` exists. `probe_error=True` (twin only) makes that recovery probe fail too: the
   entry stays UNKNOWN with SAFE_MODE, still nothing is re-sent.
 
-Cut "b" (between the fill and the stop) is added in a later task of the plan; `run` refuses any
-other name before it touches anything.
+* cut "b" (between the fill and the stop, D079, D-13): the first stop placement is held at the
+  adapter edge (`hold`), the process crashes with the position open and no stop, and the second
+  process rebuilds the plan UNPROTECTED (entries blocked), places the stop under the same
+  deterministic algo client id and REST-confirms it. `late_restart=True` (twin only) restarts after
+  `max_unprotected_ms`: the position is closed instead.
+
+`run` refuses any other cut name before it touches anything.
 
 Labels: the lost answer and the failed probe are injected triggers (DEMO_FAULT_INJECTED on Demo,
 `label_for(env, injected=True)`); what the processes then do is the real reaction and carries the
@@ -28,6 +33,9 @@ env label (SYNTHETIC on the fake, DEMO_OBSERVED on Demo). Cut "c" injects nothin
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -41,13 +49,18 @@ from tests.support.demo_scenarios.harness import (
     ScenarioRecorder,
     account_clean,
     ensure_clean_start,
+    label_for,
 )
 from tests.support.demo_scenarios.s04_stop_rejected import (
     SCENARIO_FILL,
     STEP_SAFE_MODE_LEFT,
+    close_placements,
     drive_fill,
+    observe_close_window,
     record_injection_step,
     record_step,
+    stop_placements,
+    wait_flat,
 )
 from tests.support.demo_scenarios.s06_replay import (
     SCENARIO_FAR,
@@ -58,6 +71,8 @@ from tests.support.demo_scenarios.s06_replay import (
     shutdown,
     start_evidence,
 )
+from tests.support.fault_edge import MODE_HOLD
+from tests.support.virtual_time import yield_to_loop
 
 # Every adapter method that sends something to the exchange; the read-only ones are not listed.
 MUTATING_METHODS: tuple[str, ...] = (
@@ -76,6 +91,17 @@ STEP_A_LOST_ANSWER = "cut_a_lost_answer"
 STEP_A_ENTRY_UNKNOWN = "cut_a_entry_unknown"
 STEP_A_RECOVERY = "cut_a_recovery_probe"
 STEP_A_ONE_ENTRY = "cut_a_one_place_entry"
+
+STEP_B_HELD = "cut_b_stop_held"
+STEP_B_RESTORED = "cut_b_restored_unprotected"
+STEP_B_STOP_PLACED = "cut_b_stop_placed_by_second"
+STEP_B_CLOSED = "cut_b_closed_at_deadline"
+STEP_B_ONE_ENTRY = "cut_b_one_place_entry"
+
+STOP_METHOD = "place_algo_protective"
+# Twin only: longer than the twin's max_unprotected_ms (a test value), so the restart is late.
+LATE_RESTART_SECONDS = 60
+_HOLD_POLL_ROUNDS = 5000
 
 # "Send status unknown": the exchange may have taken the order (taxonomy STATUS_UNKNOWN).
 LOST_ANSWER_CODE = -1007
@@ -135,10 +161,17 @@ def protection_of(env: Any, plan_hash: str) -> Any:
 
 # ---- the dispatcher ---------------------------------------------------------------------------- #
 
-CutRunner = Callable[[Any, ScenarioRecorder, _Processes, bool], Awaitable[str]]
+CutRunner = Callable[[Any, ScenarioRecorder, _Processes, bool, bool], Awaitable[str]]
 
 
-async def run(env: Any, recorder: ScenarioRecorder, *, cut: str, probe_error: bool = False) -> str:
+async def run(
+    env: Any,
+    recorder: ScenarioRecorder,
+    *,
+    cut: str,
+    probe_error: bool = False,
+    late_restart: bool = False,
+) -> str:
     """Run S07 at `cut` on `env`; returns the outcome. A failed step raises `dr.SmokeHalt`.
 
     An unknown cut name raises `ValueError` before anything is read or recorded. `probe_error`
@@ -149,12 +182,14 @@ async def run(env: Any, recorder: ScenarioRecorder, *, cut: str, probe_error: bo
         raise ValueError(f"unknown restart cut {cut!r}; expected one of {sorted(_CUT_RUNNERS)}")
     if probe_error and (cut != "a" or not env.synthetic):
         raise ValueError("probe_error is a twin-only option of cut 'a' (the recovery probe fails)")
+    if late_restart and (cut != "b" or not env.synthetic):
+        raise ValueError("late_restart is a twin-only option of cut 'b' (the restart is late)")
     recorder.default_label = env.label
     recorder.details["cut"] = cut
     await ensure_clean_start(env, recorder)
     processes = _Processes(env)
     try:
-        return await runner(env, recorder, processes, probe_error)
+        return await runner(env, recorder, processes, probe_error, late_restart)
     finally:
         await processes.shutdown()
 
@@ -163,7 +198,11 @@ async def run(env: Any, recorder: ScenarioRecorder, *, cut: str, probe_error: bo
 
 
 async def _cut_c(
-    env: Any, recorder: ScenarioRecorder, processes: _Processes, probe_error: bool
+    env: Any,
+    recorder: ScenarioRecorder,
+    processes: _Processes,
+    probe_error: bool,
+    late_restart: bool,
 ) -> str:
     start_evidence(env, recorder)
     await dr._bring_up(env, recorder, "start")
@@ -377,7 +416,11 @@ async def _first_process_to_unknown(env: Any, recorder: ScenarioRecorder) -> Any
 
 
 async def _cut_a(
-    env: Any, recorder: ScenarioRecorder, processes: _Processes, probe_error: bool
+    env: Any,
+    recorder: ScenarioRecorder,
+    processes: _Processes,
+    probe_error: bool,
+    late_restart: bool,
 ) -> str:
     start_evidence(env, recorder)
     await dr._bring_up(env, recorder, "start")
@@ -567,4 +610,345 @@ async def _cut_a(
     return dr.OUTCOME_COMPLETE
 
 
-_CUT_RUNNERS: dict[str, CutRunner] = {"a": _cut_a, "c": _cut_c}
+# ---- cut (b): crash between the fill and the stop (D079, D-13) --------------------------------- #
+
+
+def record_held_stop(env: Any, recorder: ScenarioRecorder, detail: str) -> None:
+    """The held stop placement is an injected trigger (T-25-25)."""
+    record_injection_step(env, recorder, detail, name=STEP_B_HELD)
+
+
+def record_restored(env: Any, recorder: ScenarioRecorder, detail: str) -> None:
+    """What the second process found and rebuilt: the real reaction, the env label."""
+    record_step(env, recorder, STEP_B_RESTORED, detail)
+
+
+async def _drive_until_stop_held(env: Any, recorder: ScenarioRecorder) -> Any:
+    """Run the process until its stop placement is held; returns the task to cancel (fake) or None.
+
+    On the fake the tick that reaches the held placement is a task of this scenario, so the crash
+    is cancelling it. On Demo the process's own scheduler runs the placement and `abandon` cancels
+    it; the scenario only polls.
+    """
+    for _ in range(env.wait_ticks):
+        if env.faults.held(STOP_METHOD):
+            return None
+        if not env.synthetic:
+            await env.tick()
+            continue
+        ticking = asyncio.ensure_future(env.tick())
+        for _ in range(_HOLD_POLL_ROUNDS):
+            if env.faults.held(STOP_METHOD) or ticking.done():
+                break
+            await yield_to_loop()
+        if env.faults.held(STOP_METHOD):
+            return ticking
+        await ticking
+    if env.faults.held(STOP_METHOD):
+        return None
+    raise dr._smoke_fail(env, recorder, STEP_B_HELD, "the stop placement was never held")
+
+
+async def _cut_b(
+    env: Any,
+    recorder: ScenarioRecorder,
+    processes: _Processes,
+    probe_error: bool,
+    late_restart: bool,
+) -> str:
+    start_evidence(env, recorder)
+    await dr._bring_up(env, recorder, "start")
+    facts: dict[str, Any] = {"branch": "late_restart" if late_restart else "stop_placed"}
+    recorder.details["cut_b"] = facts
+
+    # The first stop placement is held at the exchange edge: nothing is sent for it while held.
+    env.faults.hold(STOP_METHOD)
+    first = await place_approved_entry(env, recorder, SCENARIO_FILL)
+    plan_hash = first.plan_hash
+    stop_id = derive_algo_client_id(plan_hash=plan_hash, role=OrderRole.STOP_LOSS.value)
+    await drive_fill(env, first)
+    ticking = await _drive_until_stop_held(env, recorder)
+
+    view = protection_of(env, plan_hash)
+    held = stop_placements(env, plan_hash)
+    if (
+        view is None
+        or view.state is not ProtectionState.UNPROTECTED
+        or view.stop_confirmed_at_utc is not None
+        or len(held) != 1
+        or held[0]["mode"] != MODE_HOLD
+    ):
+        state = None if view is None else view.state.value
+        raise dr._smoke_fail(
+            env,
+            recorder,
+            STEP_B_HELD,
+            f"state {state}, {len(held)} stop call(s) at the edge; expected UNPROTECTED and "
+            "one held stop call",
+        )
+    record_held_stop(
+        env,
+        recorder,
+        "the first stop placement is held at the adapter edge after the fill; nothing was sent "
+        "for it and the position has no stop",
+    )
+    facts.update(
+        {
+            "state_before_crash": view.state.value,
+            "stop_client_algo_id": stop_id,
+            "stop_calls_at_exchange_before_restart": 0 if env.synthetic else None,
+        }
+    )
+    counts_before = mutating_counts(env)
+
+    # ---- the crash: the held call is cut where it stands ---------------------------------- #
+    if ticking is not None:
+        ticking.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await ticking
+    await processes.crash()
+    if env.faults.held(STOP_METHOD):
+        raise dr._smoke_fail(
+            env, recorder, STEP_B_HELD, "the held stop placement survived the crash"
+        )
+    if env.synthetic:
+        on_exchange = [
+            c for c in env.fake.calls_to(STOP_METHOD) if c["kwargs"]["client_algo_id"] == stop_id
+        ]
+        facts["stop_calls_at_exchange_before_restart"] = len(on_exchange)
+        if on_exchange:
+            raise dr._smoke_fail(
+                env, recorder, STEP_B_HELD, "the held stop reached the exchange before the crash"
+            )
+    if late_restart:
+        facts["late_restart_seconds"] = LATE_RESTART_SECONDS
+        await env.pause(LATE_RESTART_SECONDS)
+
+    # ---- the second process: UNPROTECTED, entries blocked ---------------------------------- #
+    second = await processes.restart()
+    outcome = await start_tolerant(second, recorder, "restart")
+    wiring = second.wiring
+    restored = protection_of(second, plan_hash)
+    blocked = bool(wiring.coordinator.blocks_new_entries())
+    report = outcome.recovery.intents
+    facts.update(
+        {
+            "restart_in_safe_mode": bool(outcome.in_safe_mode),
+            "restart_entries_enabled": bool(outcome.enabled),
+            "recovery_unresolved": [[role, st.value] for _, role, st in report.unresolved],
+            "state_after_restart": None if restored is None else restored.state.value,
+            "blocks_new_entries_after_restart": blocked,
+            "safe_mode_reason_after_restart": getattr(wiring.safe_mode, "entered_reason", None),
+        }
+    )
+    if (
+        restored is None
+        or restored.state is not ProtectionState.UNPROTECTED
+        or not blocked
+        or not outcome.in_safe_mode
+        or outcome.enabled
+    ):
+        state = None if restored is None else restored.state.value
+        raise dr._smoke_fail(
+            second,
+            recorder,
+            STEP_B_RESTORED,
+            f"state {state}, blocks entries {blocked}, in SAFE_MODE {outcome.in_safe_mode}, "
+            f"enabled {outcome.enabled}; expected UNPROTECTED and entries blocked",
+        )
+    record_restored(
+        second,
+        recorder,
+        "the second process rebuilt the plan UNPROTECTED from the stores and the exchange; new "
+        "entries are blocked by the coordinator and by SAFE_MODE",
+    )
+
+    if late_restart:
+        await _late_restart_closes(second, recorder, first, facts)
+    else:
+        await _second_process_places_the_stop(second, recorder, first, facts)
+
+    # ---- one entry across both processes --------------------------------------------------- #
+    placed = place_entry_calls(second)
+    on_exchange_entries = None if second.placements is None else second.placements()
+    if placed != 1 or on_exchange_entries not in (None, 1):
+        raise dr._smoke_fail(
+            second,
+            recorder,
+            STEP_B_ONE_ENTRY,
+            f"{placed} place_entry call(s) at the edge, {on_exchange_entries} at the exchange; "
+            "expected one",
+        )
+    record_step(
+        second,
+        recorder,
+        STEP_B_ONE_ENTRY,
+        "exactly one place_entry across both processes; no new entry opened",
+    )
+    facts["mutating_calls_before_crash"] = counts_before
+    facts["mutating_calls_at_end"] = mutating_counts(second)
+
+    if late_restart:
+        outcome_name = await _late_restart_tail(second, recorder, first, facts)
+    else:
+        await close_and_clean(second, recorder, first)
+        await _leave_safe_mode(second, recorder)
+        facts["safe_mode_after_exit"] = bool(wiring.safe_mode.in_safe_mode)
+        outcome_name = dr.OUTCOME_COMPLETE
+    recorder.outcome = outcome_name
+    return outcome_name
+
+
+async def _late_restart_tail(
+    second: Any, recorder: ScenarioRecorder, first: Any, facts: dict[str, Any]
+) -> str:
+    """Expire the plan, try the operator SAFE_MODE exit, report what it answered (twin only).
+
+    After the deadline close the plan's STOP_LOSS intent (SENT before the crash, UNKNOWN after the
+    recovery) is still UNKNOWN, and `/safemode_exit` refuses it (UNKNOWN_INTENT_PRESENT). That is
+    what the code does (finding F1 of plan 25-12); the step is NOT_REHEARSED with the refusals and
+    the outcome COMPLETE_WITH_GAPS, never a pass.
+    """
+    wiring = second.wiring
+    await second.assembly.executor.write(
+        wiring.stores.entities.transition_trade_plan,
+        first.trade_plan_id,
+        TradePlanStatus.EXPIRED,
+        now_utc=second.clock(),
+    )
+    for _ in range(dr.SMOKE_REPLAY_SETTLE_TICKS):
+        await second.tick()
+    stop_status = await _intent_status_value(
+        second, derive_algo_client_id(plan_hash=first.plan_hash, role=OrderRole.STOP_LOSS.value)
+    )
+    facts["stop_intent_after_close"] = stop_status
+    if wiring.safe_mode.in_safe_mode:
+        await second.owner.act("safemode_exit")
+        for _ in range(dr.SMOKE_REPLAY_SETTLE_TICKS):
+            await second.tick()
+    left = not wiring.safe_mode.in_safe_mode
+    facts["safe_mode_after_exit"] = not left
+    refusals: list[str] = []
+    for row in second.rig.stores.journal.by_type("SAFE_MODE_EXIT_REFUSED"):
+        refusals = list(json.loads(row.payload_json).get("refusals", []))
+    facts["safe_mode_exit_refusals"] = refusals
+    if left:
+        record_step(
+            second, recorder, STEP_SAFE_MODE_LEFT, "SAFE_MODE is off (left through /safemode_exit)"
+        )
+    else:
+        recorder.add_labeled_step(
+            STEP_SAFE_MODE_LEFT,
+            dr.STEP_NOT_REHEARSED,
+            f"SYNTHETIC: /safemode_exit refused ({', '.join(refusals)}); the stop intent is "
+            f"{stop_status}",
+            label=label_for(second, injected=False),
+        )
+    if not await account_clean(second, recorder):
+        raise dr.SmokeHalt("account_clean")
+    return dr.OUTCOME_COMPLETE if left else dr.OUTCOME_COMPLETE_WITH_GAPS
+
+
+async def _second_process_places_the_stop(
+    second: Any, recorder: ScenarioRecorder, first: Any, facts: dict[str, Any]
+) -> None:
+    """The coordinator re-places the stop under the SAME deterministic id and REST-confirms it."""
+    plan_hash = first.plan_hash
+
+    async def confirmed() -> bool:
+        view = protection_of(second, plan_hash)
+        return view is not None and view.stop_confirmed_at_utc is not None
+
+    if not await dr._wait_until(second, confirmed):
+        raise dr._smoke_fail(
+            second, recorder, STEP_B_STOP_PLACED, "the second process did not confirm a stop"
+        )
+    stop_id = facts["stop_client_algo_id"]
+    calls = stop_placements(second, plan_hash)
+    if (
+        len(calls) != 2
+        or calls[0]["mode"] != MODE_HOLD
+        or calls[1]["injected"] is not False
+        or calls[1]["kwargs"].get("client_algo_id") != stop_id
+    ):
+        raise dr._smoke_fail(
+            second,
+            recorder,
+            STEP_B_STOP_PLACED,
+            f"{len(calls)} stop call(s) at the edge; expected the held one and one real one "
+            "under the same id",
+        )
+    view = protection_of(second, plan_hash)
+    assert view is not None
+    facts["stop_confirmed_after_restart"] = view.stop_confirmed_at_utc is not None
+    facts["state_after_stop"] = view.state.value
+    recorder.record_ids(
+        STEP_B_STOP_PLACED, order_ids=[], client_order_ids=[], algo_client_ids=[stop_id]
+    )
+    record_step(
+        second,
+        recorder,
+        STEP_B_STOP_PLACED,
+        "the second process placed the stop under the same deterministic id and the REST read "
+        "confirmed it; the held first call never reached the exchange",
+    )
+
+    async def complete() -> bool:
+        view = protection_of(second, plan_hash)
+        return view is not None and view.state in (
+            ProtectionState.COMPLETE,
+            ProtectionState.TP_UNAVAILABLE,
+        )
+
+    await dr._wait_until(second, complete)  # best effort: the take-profit legs follow the stop
+    view = protection_of(second, plan_hash)
+    assert view is not None
+    facts["state_after_stop"] = view.state.value
+
+
+async def _late_restart_closes(
+    second: Any, recorder: ScenarioRecorder, first: Any, facts: dict[str, Any]
+) -> None:
+    """Twin only: the restart came after `max_unprotected_ms`, so the position is closed (D-13)."""
+    plan_hash = first.plan_hash
+    state = await observe_close_window(second, recorder, first, step=STEP_B_CLOSED)
+    assert state is not None
+    facts["first_closing_state"] = state.value
+    await wait_flat(second, recorder, first, STEP_B_CLOSED)
+    closes = close_placements(second)
+    if len(closes) != 1:
+        raise dr._smoke_fail(
+            second, recorder, STEP_B_CLOSED, f"{len(closes)} close call(s), expected one"
+        )
+    record_step(
+        second,
+        recorder,
+        STEP_B_CLOSED,
+        "the restart came after the unprotected deadline: CLOSE_REQUIRED, one reduce-only close, "
+        f"the plan ends FLAT ({plan_hash[:8]})",
+    )
+
+
+async def _leave_safe_mode(env: Any, recorder: ScenarioRecorder) -> None:
+    """Leave SAFE_MODE through the operator commands (RUNBOOK 21.1a), as the owner would."""
+    wiring = env.wiring
+    if wiring.safe_mode.in_safe_mode:
+        await env.owner.act("safemode_exit")
+
+        async def left() -> bool:
+            return not wiring.safe_mode.in_safe_mode
+
+        if not await dr._wait_until(env, left):
+            raise dr._smoke_fail(
+                env,
+                recorder,
+                STEP_SAFE_MODE_LEFT,
+                "SAFE_MODE was not left by /safemode_exit; read its refusal rows, then leave it "
+                "by hand (RUNBOOK 21.1a) and run scripts/demo_clear.py if anything is left",
+            )
+    record_step(
+        env, recorder, STEP_SAFE_MODE_LEFT, "SAFE_MODE is off (left through /safemode_exit)"
+    )
+
+
+_CUT_RUNNERS: dict[str, CutRunner] = {"a": _cut_a, "b": _cut_b, "c": _cut_c}

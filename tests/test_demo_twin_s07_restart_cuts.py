@@ -417,7 +417,10 @@ async def test_cut_b_the_protected_plan_is_closed_the_owner_leaves_safe_mode(
 async def test_cut_b_a_late_restart_closes_at_the_deadline_instead_of_protecting(
     tmp_path: Path,
 ) -> None:
-    env, recorder = await _run_b(tmp_path, late_restart=True)
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    outcome = await s07_restart_cuts.run(env, recorder, cut="b", late_restart=True)
+    assert outcome == dr.OUTCOME_COMPLETE_WITH_GAPS, "SAFE_MODE could not be left (finding F1)"
     facts = recorder.details["cut_b"]
     assert facts["branch"] == "late_restart"
     assert (
@@ -430,6 +433,27 @@ async def test_cut_b_a_late_restart_closes_at_the_deadline_instead_of_protecting
     assert len(env.fake.calls_to("place_market_close")) == 1
     assert len(env.fake.calls_to("place_entry")) == 1
     assert env.fake.positions.get("BTCUSDT", 0) == 0
+    assert statuses_of(recorder)["account_clean"] == dr.STEP_PASSED
+    # What the code does after the deadline close (finding F1 of plan 25-12): the plan's stop
+    # intent stays UNKNOWN and the operator exit refuses it. The step is a gap, not a pass.
+    assert facts["stop_intent_after_close"] == "UNKNOWN"
+    assert "UNKNOWN_INTENT_PRESENT" in facts["safe_mode_exit_refusals"]
+    assert statuses_of(recorder)["safe_mode_left"] == dr.STEP_NOT_REHEARSED
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="finding F1 (plan 25-12): after a restart past max_unprotected_ms and the deadline "
+    "close, the plan's STOP_LOSS intent stays UNKNOWN and /safemode_exit refuses "
+    "UNKNOWN_INTENT_PRESENT; the owner decides whether src should resolve it",
+)
+async def test_cut_b_a_late_restart_close_lets_the_operator_leave_safe_mode(
+    tmp_path: Path,
+) -> None:
+    env = build_fake_scenario_env(tmp_path, EnvOptions())
+    recorder = _recorder()
+    outcome = await s07_restart_cuts.run(env, recorder, cut="b", late_restart=True)
+    assert outcome == dr.OUTCOME_COMPLETE
 
 
 def statuses_of(recorder: ScenarioRecorder) -> dict[str, str]:
