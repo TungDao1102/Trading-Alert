@@ -20,6 +20,49 @@ file bytes is committed (`--hash-file`: the 64 hex characters first on the first
 `sha256sum` line is fine) BEFORE the first soak order; `--registration-committed-at` is the commit
 time of that hash (`git log -1 --format=%cI -- <hash file>`).
 
+Annotations (`--annotations`, optional): a markdown file with exactly ONE fenced json block holding
+a list of {"journal_event_id", "kind": "explained" | "defect", "note" (non-empty), "fixed_at_utc"
+(defect only: timezone aware, not before the annotated row)}. An unknown id, a repeated id, another
+kind, a missing or extra key is refused (exit 2).
+
+Window and restart rule: window_start is the first journal row, moved to the latest `fixed_at_utc`
+of a defect annotation; window_end is the last journal row; the effective window must last at least
+duration_days. A defect annotation names the row that showed the defect: that row leaves the
+divergence, stop, duplicate, alert and health criteria (it is the cause of the restart). An
+`explained` annotation clears only a divergence, alert or health row; it never excuses a position
+without a stop or a duplicate entry. A row of any other cause stays unexplained wherever it lies.
+
+Rows each criterion reads (names are imported from the producing module, never re-typed; payload
+keys are the producer's own):
+
+  order_after_registration  LIVE_PLACEMENT_OUTCOME   src.live.execution_service
+                            the first outcome row must be later than the registration commit
+  duplicate_entry           LIVE_PLACEMENT_OUTCOME   payload is_no_trade (False = placed; an
+                            unreadable payload counts as placed); the plan is the trade_plan_id
+                            column. More than one placed outcome per plan fails.
+                            RECONCILE_TICK           src.reconcile.loop; payload counts[kind] with
+                            kind DOUBLED_POSITION or DUPLICATE_EXCHANGE_ID fails.
+  reconcile_divergence      RECONCILE_TICK           payload divergence_count (a count that cannot
+                            be read counts as a divergence); SAFE_MODE_ENTER (src.reconcile.
+                            safe_mode journals the literal; a test pins it) fails unannotated.
+  position_without_stop     RECONCILE_TICK           payload counts[kind] with kind
+                            POSITION_WITHOUT_STOP, ENTRY_WITHOUT_PROTECTIVE or TP_ONLY_POSITION;
+                            PROTECTION_CLOSE_REQUIRED (src.execution.protection) payload branch
+                            in the stop branches B2, B3, B4_FILL_AFTER_STOP, B5,
+                            NO_POSITION_ON_STOP_BUT_EXPOSED, B4_STOP_LOST_UNRESOLVED;
+                            PROTECTION_TRANSITION payload to/reason: into CLOSE_REQUIRED with one
+                            of those branches, or into UNPROTECTED with reason STOP_LOST or
+                            STOP_LOST_AFTER_PROTECTED. A close that kept a good stop (B1) and the
+                            normal first-fill step into UNPROTECTED are not counted.
+  alerts_explained          OPERATIONAL_ALERT        src.ops.alerts; every row needs an annotation.
+  health_explained          HEALTH_VERDICT           src.live.health; payload failing (non-empty) or
+                            degraded naming a check outside healthy.allowed_degraded_checks needs
+                            an annotation; a verdict without the two lists counts as unhealthy.
+  round_trips               PROTECTION_TRANSITION    payload reason FIRST_FILL_STREAM/REST (the
+                            entry fill) then a later transition to FLAT, per payload
+                            trade_plan_id. Each FULL week of the effective window must hold at least
+                            owner_round_trips_per_week completed round trips; null skips it.
+
 Exit codes: 0 PASS; 1 at least one criterion FAILS (`verify-registration`: the file is not a valid
 registration or does not match its hash); 2 the input is unusable (a file that is missing or
 malformed, an output path that exists). Messages name the file, line or key, never a value that
@@ -33,9 +76,10 @@ import hashlib
 import json
 import re
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +88,32 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.domain.journal import JournalEvent  # noqa: E402
+from src.execution.protection import (  # noqa: E402
+    BRANCH_B2_STOP_UNCONFIRMED,
+    BRANCH_B3_BOTH_AMBIGUOUS,
+    BRANCH_B4_FILL_AFTER_STOP,
+    BRANCH_B4_STOP_LOST_UNRESOLVED,
+    BRANCH_B5_STOP_REJECTED,
+    BRANCH_NO_POSITION_BUT_EXPOSED,
+    DIVERGENCE_KIND_DOUBLED_POSITION,
+    DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
+    DIVERGENCE_KIND_POSITION_WITHOUT_STOP,
+    DIVERGENCE_KIND_TP_ONLY_POSITION,
+    EVENT_CLOSE_REQUIRED,
+    EVENT_PROTECTION_TRANSITION,
+    REASON_FIRST_FILL_REST,
+    REASON_FIRST_FILL_STREAM,
+    ProtectionState,
+)
+from src.execution.protection_replay import (  # noqa: E402
+    REASON_STOP_LOST,
+    REASON_STOP_LOST_AFTER_PROTECTED,
+)
 from src.live.execution_service import EVENT_PLACEMENT_OUTCOME  # noqa: E402
+from src.live.health import VERDICT_EVENT_TYPE  # noqa: E402
+from src.ops.alerts import EVENT_OPERATIONAL_ALERT  # noqa: E402
+from src.reconcile.compare import DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID  # noqa: E402
+from src.reconcile.loop import RECONCILE_TICK  # noqa: E402
 
 EXIT_PASS = 0
 EXIT_FAIL = 1
@@ -54,12 +123,68 @@ REGISTRATION_SCHEMA = "demo-soak-registration/1"
 REPORT_SCHEMA = "demo-soak-evaluation/1"
 MIN_DURATION_DAYS = 21
 
+#: The one event whose producer journals a literal, not a constant (`SafeModeController.
+#: enter_safe_mode`); `tests/test_evaluate_demo_soak.py` pins it against the real controller.
+EVENT_SAFE_MODE_ENTER = "SAFE_MODE_ENTER"
+
+# Payload keys, as the producers write them.
+KEY_IS_NO_TRADE = "is_no_trade"
+KEY_DIVERGENCE_COUNT = "divergence_count"
+KEY_COUNTS = "counts"
+KEY_BRANCH = "branch"
+KEY_REASON = "reason"
+KEY_TO = "to"
+KEY_TRADE_PLAN_ID = "trade_plan_id"
+KEY_HEALTH_DEGRADED = "degraded"
+KEY_HEALTH_FAILING = "failing"
+
+#: Reconcile divergence kinds that mean a position (or an entry) has no confirmed exchange stop.
+#: TP_ONLY_POSITION (a take-profit with no stop) is added to the two the plan named.
+STOP_DIVERGENCE_KINDS = frozenset(
+    {
+        DIVERGENCE_KIND_POSITION_WITHOUT_STOP,
+        DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
+        DIVERGENCE_KIND_TP_ONLY_POSITION,
+    }
+)
+DUPLICATE_DIVERGENCE_KINDS = frozenset(
+    {DIVERGENCE_KIND_DOUBLED_POSITION, DIVERGENCE_KIND_DUPLICATE_EXCHANGE_ID}
+)
+#: The close branches that are about a stop that was rejected, unconfirmed, lost or never there.
+#: B1 (a good stop kept, the entry cancel was slow), the operator close and B6 (liquidation price)
+#: are not about a missing stop and are not listed.
+STOP_BRANCHES = frozenset(
+    {
+        BRANCH_B2_STOP_UNCONFIRMED,
+        BRANCH_B3_BOTH_AMBIGUOUS,
+        BRANCH_B4_FILL_AFTER_STOP,
+        BRANCH_B5_STOP_REJECTED,
+        BRANCH_NO_POSITION_BUT_EXPOSED,
+        BRANCH_B4_STOP_LOST_UNRESOLVED,
+    }
+)
+STOP_LOST_REASONS = frozenset({REASON_STOP_LOST, REASON_STOP_LOST_AFTER_PROTECTED})
+FIRST_FILL_REASONS = frozenset({REASON_FIRST_FILL_STREAM, REASON_FIRST_FILL_REST})
+
+KIND_EXPLAINED = "explained"
+KIND_DEFECT = "defect"
+
 CRIT_REGISTRATION_HASH = "registration_hash"
 CRIT_ORDER_AFTER_REGISTRATION = "order_after_registration"
+CRIT_DURATION = "duration"
+CRIT_DIVERGENCE = "reconcile_divergence"
+CRIT_POSITION_WITHOUT_STOP = "position_without_stop"
 CRIT_DUPLICATE_ENTRY = "duplicate_entry"
+CRIT_ALERTS_EXPLAINED = "alerts_explained"
+CRIT_HEALTH_EXPLAINED = "health_explained"
+CRIT_ROUND_TRIPS = "round_trips"
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
+STATUS_SKIPPED = "SKIPPED"
+
+_WEEK = timedelta(days=7)
+_SECONDS_PER_DAY = Decimal(86400)
 
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -359,26 +484,120 @@ def _verdict(offending: Sequence[str], count: int, note: str, name: str) -> Crit
     )
 
 
+# ---- annotations ---------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Annotation:
+    """One owner annotation of a journal row: explained, or a defect fixed at `fixed_at`."""
+
+    journal_event_id: str
+    kind: str
+    note: str
+    fixed_at: datetime | None
+
+
+_ANNOTATION_KEYS = frozenset({"journal_event_id", "kind", "note", "fixed_at_utc"})
+
+
+def parse_annotations(raw: bytes, events: Sequence[JournalEvent]) -> dict[str, Annotation]:
+    """Validate the annotations file against the journal; every refusal names the entry."""
+    blocks = _json_blocks(raw, "annotations")
+    if len(blocks) != 1:
+        raise InputError(f"annotations must hold exactly one json block, found {len(blocks)}")
+    try:
+        document = json.loads(blocks[0])
+    except ValueError:
+        raise InputError("annotations json block is not valid JSON") from None
+    if not isinstance(document, list):
+        raise InputError("annotations json block must be a list")
+    occurred = {e.journal_event_id: e.occurred_at_utc for e in events}
+    found: dict[str, Annotation] = {}
+    for number, item in enumerate(document, start=1):
+        where = f"annotation {number}"
+        if not isinstance(item, dict) or set(item) - _ANNOTATION_KEYS:
+            raise InputError(f"{where} must be an object with the documented keys only")
+        event_id = item.get("journal_event_id")
+        if not isinstance(event_id, str) or event_id not in occurred:
+            raise InputError(f"{where} names a journal_event_id that is not in the journal")
+        if event_id in found:
+            raise InputError(f"{where} repeats a journal_event_id")
+        kind = item.get("kind")
+        if kind not in (KIND_EXPLAINED, KIND_DEFECT):
+            raise InputError(f"{where} kind must be {KIND_EXPLAINED} or {KIND_DEFECT}")
+        note = item.get("note")
+        if not isinstance(note, str) or not note.strip():
+            raise InputError(f"{where} needs a non-empty note")
+        fixed_at: datetime | None = None
+        if kind == KIND_EXPLAINED:
+            if "fixed_at_utc" in item:
+                raise InputError(f"{where} is explained and must not carry fixed_at_utc")
+        else:
+            if "fixed_at_utc" not in item:
+                raise InputError(f"{where} is a defect and needs fixed_at_utc")
+            fixed_at = parse_utc(item["fixed_at_utc"], f"{where} fixed_at_utc")
+            if fixed_at < occurred[event_id]:
+                raise InputError(f"{where} fixed_at_utc is before the annotated row")
+        found[event_id] = Annotation(event_id, kind, note, fixed_at)
+    return found
+
+
+def _is_defect_cause(event: JournalEvent, annotations: Mapping[str, Annotation]) -> bool:
+    found = annotations.get(event.journal_event_id)
+    return found is not None and found.kind == KIND_DEFECT
+
+
+# ---- payload readers ------------------------------------------------------ #
+
+
+def _text(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _tick_divergence_count(event: JournalEvent) -> int | None:
+    """The divergence count of a reconcile tick row; None when it cannot be read."""
+    count = payload_of(event).get(KEY_DIVERGENCE_COUNT)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return None
+    return count
+
+
+def _tick_kind_count(event: JournalEvent, kinds: frozenset[str]) -> int:
+    counts = payload_of(event).get(KEY_COUNTS)
+    if not isinstance(counts, dict):
+        return 0
+    total = 0
+    for kind in kinds:
+        value = counts.get(kind)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            total += value
+    return total
+
+
 def is_order_event(event: JournalEvent) -> bool:
     return event.event_type == EVENT_PLACEMENT_OUTCOME
 
 
 def is_placed_outcome(event: JournalEvent) -> bool:
     """A placement outcome that was not a refusal; an unreadable payload counts as placed."""
-    return (
-        event.event_type == EVENT_PLACEMENT_OUTCOME
-        and payload_of(event).get("is_no_trade") is not True
-    )
+    return is_order_event(event) and payload_of(event).get(KEY_IS_NO_TRADE) is not True
+
+
+def _plan_of(event: JournalEvent) -> str:
+    return _text(payload_of(event), KEY_TRADE_PLAN_ID) or event.trade_plan_id or event.entity_id
+
+
+# ---- the criteria --------------------------------------------------------- #
 
 
 def check_registration_hash(*, matches: bool) -> Criterion:
-    ok = matches
     return Criterion(
         name=CRIT_REGISTRATION_HASH,
-        status=STATUS_PASS if ok else STATUS_FAIL,
-        count=0 if ok else 1,
+        status=STATUS_PASS if matches else STATUS_FAIL,
+        count=0 if matches else 1,
         note="registration SHA-256 equals the committed hash"
-        if ok
+        if matches
         else "registration SHA-256 differs from the committed hash",
     )
 
@@ -411,19 +630,220 @@ def check_order_after_registration(
     )
 
 
-def check_duplicate_entry(events: Sequence[JournalEvent]) -> Criterion:
+@dataclass(frozen=True)
+class Window:
+    """The effective soak window after the restart rule."""
+
+    start: datetime
+    end: datetime
+    effective_days: Decimal
+    defect_count: int
+
+
+def compute_window(events: Sequence[JournalEvent], annotations: Mapping[str, Annotation]) -> Window:
+    """First row (moved to the latest defect fix) to the last row; `events` are sorted."""
+    start = events[0].occurred_at_utc
+    fixes = [a.fixed_at for a in annotations.values() if a.fixed_at is not None]
+    if fixes:
+        start = max(start, max(fixes))
+    end = events[-1].occurred_at_utc
+    delta = max(end - start, timedelta(0))
+    seconds = (
+        Decimal(delta.days) * _SECONDS_PER_DAY
+        + Decimal(delta.seconds)
+        + Decimal(delta.microseconds) / Decimal(1_000_000)
+    )
+    return Window(start, end, seconds / _SECONDS_PER_DAY, len(fixes))
+
+
+def check_duration(window: Window, registration: Registration) -> Criterion:
+    ok = window.effective_days >= Decimal(registration.duration_days)
+    return Criterion(
+        name=CRIT_DURATION,
+        status=STATUS_PASS if ok else STATUS_FAIL,
+        count=0 if ok else 1,
+        note=(
+            f"effective window {window.effective_days:.4f} days of "
+            f"{registration.duration_days} registered"
+        ),
+    )
+
+
+def check_divergence(
+    events: Sequence[JournalEvent], annotations: Mapping[str, Annotation]
+) -> Criterion:
+    offending: list[str] = []
+    for event in events:
+        if event.event_type == RECONCILE_TICK:
+            count = _tick_divergence_count(event)
+            needs = count is None or count > 0
+        else:
+            needs = event.event_type == EVENT_SAFE_MODE_ENTER
+        if needs and event.journal_event_id not in annotations:
+            offending.append(event.journal_event_id)
+    return _verdict(
+        offending,
+        len(offending),
+        "reconcile ticks with a divergence and SAFE_MODE entries need an owner annotation",
+        CRIT_DIVERGENCE,
+    )
+
+
+def _is_stop_row(event: JournalEvent) -> bool:
+    payload = payload_of(event)
+    if event.event_type == RECONCILE_TICK:
+        return _tick_kind_count(event, STOP_DIVERGENCE_KINDS) > 0
+    if event.event_type == EVENT_CLOSE_REQUIRED:
+        return _text(payload, KEY_BRANCH) in STOP_BRANCHES
+    if event.event_type == EVENT_PROTECTION_TRANSITION:
+        target = _text(payload, KEY_TO)
+        reason = _text(payload, KEY_REASON)
+        if target == ProtectionState.CLOSE_REQUIRED.value:
+            return reason in STOP_BRANCHES
+        if target == ProtectionState.UNPROTECTED.value:
+            return reason in STOP_LOST_REASONS
+    return False
+
+
+def check_position_without_stop(
+    events: Sequence[JournalEvent], annotations: Mapping[str, Annotation]
+) -> Criterion:
+    """An `explained` annotation never excuses these rows; only a defect annotation removes one."""
+    offending = [
+        e.journal_event_id
+        for e in events
+        if _is_stop_row(e) and not _is_defect_cause(e, annotations)
+    ]
+    return _verdict(
+        offending,
+        len(offending),
+        "rows showing a position or entry without a confirmed exchange-side stop",
+        CRIT_POSITION_WITHOUT_STOP,
+    )
+
+
+def check_duplicate_entry(
+    events: Sequence[JournalEvent], annotations: Mapping[str, Annotation]
+) -> Criterion:
+    """An `explained` annotation never excuses a duplicate; a defect annotation removes its row."""
     by_plan: dict[str, list[JournalEvent]] = {}
     for event in events:
         if is_placed_outcome(event):
             key = event.trade_plan_id or event.approval_id or event.entity_id
             by_plan.setdefault(key, []).append(event)
-    offending = {key: rows for key, rows in by_plan.items() if len(rows) > 1}
-    ids = sorted({row.journal_event_id for rows in offending.values() for row in rows})
+    ids: set[str] = set()
+    count = 0
+    for rows in by_plan.values():
+        if len(rows) > 1 and not any(_is_defect_cause(row, annotations) for row in rows):
+            count += 1
+            ids.update(row.journal_event_id for row in rows)
+    for event in events:
+        if (
+            event.event_type == RECONCILE_TICK
+            and _tick_kind_count(event, DUPLICATE_DIVERGENCE_KINDS) > 0
+            and not _is_defect_cause(event, annotations)
+        ):
+            count += 1
+            ids.add(event.journal_event_id)
     return _verdict(
-        ids,
-        len(offending),
-        "plans with more than one non-refused placement outcome",
+        sorted(ids),
+        count,
+        "plans with more than one non-refused placement outcome, doubled positions and "
+        "duplicate exchange ids",
         CRIT_DUPLICATE_ENTRY,
+    )
+
+
+def check_alerts_explained(
+    events: Sequence[JournalEvent], annotations: Mapping[str, Annotation]
+) -> Criterion:
+    offending = [
+        e.journal_event_id
+        for e in events
+        if e.event_type == EVENT_OPERATIONAL_ALERT and e.journal_event_id not in annotations
+    ]
+    return _verdict(
+        offending,
+        len(offending),
+        "every OPERATIONAL_ALERT row needs an owner annotation",
+        CRIT_ALERTS_EXPLAINED,
+    )
+
+
+def _verdict_is_unhealthy(event: JournalEvent, allowed: frozenset[str]) -> bool:
+    payload = payload_of(event)
+    degraded = payload.get(KEY_HEALTH_DEGRADED)
+    failing = payload.get(KEY_HEALTH_FAILING)
+    if not isinstance(degraded, list) or not isinstance(failing, list):
+        return True
+    if failing:
+        return True
+    return any(not isinstance(name, str) or name not in allowed for name in degraded)
+
+
+def check_health_explained(
+    events: Sequence[JournalEvent],
+    annotations: Mapping[str, Annotation],
+    registration: Registration,
+) -> Criterion:
+    offending = [
+        e.journal_event_id
+        for e in events
+        if e.event_type == VERDICT_EVENT_TYPE
+        and _verdict_is_unhealthy(e, registration.allowed_degraded_checks)
+        and e.journal_event_id not in annotations
+    ]
+    return _verdict(
+        offending,
+        len(offending),
+        "unhealthy HEALTH_VERDICT rows need an owner annotation",
+        CRIT_HEALTH_EXPLAINED,
+    )
+
+
+def check_round_trips(
+    events: Sequence[JournalEvent], window: Window, registration: Registration
+) -> Criterion:
+    required = registration.owner_round_trips_per_week
+    if required is None:
+        return Criterion(
+            name=CRIT_ROUND_TRIPS,
+            status=STATUS_SKIPPED,
+            count=0,
+            note="owner_round_trips_per_week is null in the registration: criterion skipped",
+        )
+    filled: set[str] = set()
+    completed_at: dict[str, datetime] = {}
+    for event in events:
+        if event.event_type != EVENT_PROTECTION_TRANSITION:
+            continue
+        payload = payload_of(event)
+        plan = _plan_of(event)
+        if _text(payload, KEY_REASON) in FIRST_FILL_REASONS:
+            filled.add(plan)
+        elif (
+            _text(payload, KEY_TO) == ProtectionState.FLAT.value
+            and plan in filled
+            and plan not in completed_at
+        ):
+            completed_at[plan] = event.occurred_at_utc
+    full_weeks = int(window.effective_days // 7)
+    per_week = [0] * full_weeks
+    for moment in completed_at.values():
+        index = (moment - window.start) // _WEEK
+        if 0 <= index < full_weeks:
+            per_week[index] += 1
+    short = [(i + 1, got) for i, got in enumerate(per_week) if got < required]
+    detail = "; ".join(f"week {number}: {got} of {required}" for number, got in short)
+    return Criterion(
+        name=CRIT_ROUND_TRIPS,
+        status=STATUS_FAIL if short else STATUS_PASS,
+        count=len(short),
+        note=(
+            f"weeks short of the registered round trips: {detail}"
+            if short
+            else f"{full_weeks} full weeks, at least {required} completed round trips each"
+        ),
     )
 
 
@@ -448,18 +868,32 @@ def evaluate_journal(
     registration: Registration,
     hash_matches: bool,
     committed_at: datetime,
+    annotations: Mapping[str, Annotation] | None = None,
 ) -> Evaluation:
+    """Every criterion over the sorted events; overall PASS only when none FAILS."""
+    notes: Mapping[str, Annotation] = annotations or {}
+    window = compute_window(events, notes)
     criteria = (
         check_registration_hash(matches=hash_matches),
         check_order_after_registration(events, committed_at),
-        check_duplicate_entry(events),
+        check_duration(window, registration),
+        check_divergence(events, notes),
+        check_position_without_stop(events, notes),
+        check_duplicate_entry(events, notes),
+        check_alerts_explained(events, notes),
+        check_health_explained(events, notes, registration),
+        check_round_trips(events, window, registration),
     )
-    window = {
+    report_window = {
         "first_event_utc": events[0].occurred_at_utc.isoformat(),
         "last_event_utc": events[-1].occurred_at_utc.isoformat(),
+        "window_start_utc": window.start.isoformat(),
+        "window_end_utc": window.end.isoformat(),
+        "effective_days": f"{window.effective_days:.4f}",
         "registered_duration_days": registration.duration_days,
+        "defect_count": window.defect_count,
     }
-    return Evaluation(criteria=criteria, window=window)
+    return Evaluation(criteria=criteria, window=report_window)
 
 
 def _manifest_entry(path: Path, raw: bytes) -> dict[str, Any]:
@@ -516,6 +950,7 @@ def _parser() -> argparse.ArgumentParser:
         help="commit time of the hash file (ISO 8601, timezone aware)",
     )
     run.add_argument("--journal", required=True, type=Path, help="JSONL journal export")
+    run.add_argument("--annotations", type=Path, default=None, help="owner annotations (markdown)")
     run.add_argument("--out", required=True, type=Path, help="report file (create-only)")
     return parser
 
@@ -548,14 +983,23 @@ def _cmd_evaluate(args: argparse.Namespace, clock: Callable[[], datetime]) -> in
     committed_at = parse_utc(args.registration_committed_at, "--registration-committed-at")
     raw_journal = _read_bytes(args.journal, "journal")
     events = parse_journal(raw_journal)
-    evaluation = evaluate_journal(
-        events, registration=registration, hash_matches=matches, committed_at=committed_at
-    )
-    manifest = {
+    manifest: dict[str, Any] = {
         "registration": _manifest_entry(args.registration, raw_reg),
         "hash_file": _manifest_entry(args.hash_file, raw_hash),
         "journal": _manifest_entry(args.journal, raw_journal),
     }
+    annotations: dict[str, Annotation] = {}
+    if args.annotations is not None:
+        raw_notes = _read_bytes(args.annotations, "annotations")
+        annotations = parse_annotations(raw_notes, events)
+        manifest["annotations"] = _manifest_entry(args.annotations, raw_notes)
+    evaluation = evaluate_journal(
+        events,
+        registration=registration,
+        hash_matches=matches,
+        committed_at=committed_at,
+        annotations=annotations,
+    )
     text = render_report(evaluation, manifest=manifest, now=clock(), committed_at=committed_at)
     write_create_only(args.out, text)
     print(f"verdict {STATUS_PASS if evaluation.passed else STATUS_FAIL}")
