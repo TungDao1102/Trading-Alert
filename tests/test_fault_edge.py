@@ -16,15 +16,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from binance_common.errors import BadRequestError
+from binance_common.errors import BadRequestError, RateLimitBanError, TooManyRequestsError
+from src.adapters.binance_errors import error_facts_from_exception
 from src.adapters.binance_public import MarkPriceReading
+from src.adapters.binance_ratelimit_gate import RateLimitBanActive, RateLimitPauseActive
 from src.domain.enums import OrderRole
+from src.domain.exchange_errors import HttpClass
+from src.domain.journal import JournalEvent
 from src.execution.order_ids import derive_algo_client_id
 from src.execution.protection import ProtectionState
-from src.live.wiring import TASK_SIGNAL_PUMP, check_wiring
+from src.live.wiring import TASK_SIGNAL_PUMP, LiveStoreSet, check_wiring
+from src.persistence.errors import StoreUnavailable
 
 from tests.support.ast_guards import float_constructor_calls, wall_clock_calls
 from tests.support.fault_edge import (
@@ -34,11 +40,19 @@ from tests.support.fault_edge import (
     MODE_MUTATE_PAYLOAD,
     MODE_OVERRIDE,
     MODE_RAISE_BEFORE_SEND,
+    MODE_SDK_ERROR,
     MODE_STALE_MARK,
+    MODE_STORE_UNAVAILABLE,
     FaultEdge,
+    SdkFaults,
+    StoreFaults,
+    rate_limit_ban_error,
+    too_many_requests_error,
 )
 from tests.support.live_composed_rig import ComposedRig, make_composed_rig
 from tests.support.live_rig import forbid_real_sleep
+from tests.support.live_smoke_env import build_fake_smoke_env
+from tests.support.live_store_set import build_memory_stores
 
 
 @pytest.fixture(autouse=True)
@@ -333,3 +347,185 @@ def test_the_module_reads_no_clock_no_float_and_awaits_no_sleep() -> None:
         if isinstance(node, ast.Await) and isinstance(node.value, ast.Call)
     }
     assert "asyncio.sleep" not in awaited
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 - SDK-level faults (real adapter, real REST gate) and store faults.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_sdk_error_builders_build_the_classes_the_adapter_recognises() -> None:
+    ban = rate_limit_ban_error(retry_after=7)
+    assert isinstance(ban, RateLimitBanError)
+    facts = error_facts_from_exception(ban)
+    assert (facts.http_class, facts.code, facts.retry_after_seconds) == (
+        HttpClass.BANNED_418,
+        -1003,
+        7,
+    )
+    assert facts.ban_until_epoch_ms is None
+    dated = error_facts_from_exception(rate_limit_ban_error(ban_until_epoch_ms=1_793_000_000_000))
+    assert dated.ban_until_epoch_ms == 1_793_000_000_000
+    pause = too_many_requests_error(retry_after=3)
+    assert isinstance(pause, TooManyRequestsError)
+    facts = error_facts_from_exception(pause)
+    assert (facts.http_class, facts.code, facts.retry_after_seconds) == (
+        HttpClass.TOO_MANY_429,
+        -1003,
+        3,
+    )
+    with pytest.raises(ValueError, match="13"):
+        rate_limit_ban_error(ban_until_epoch_ms=12345)
+
+
+def test_wrap_factory_puts_the_proxy_on_the_client_and_raises_before_delegating() -> None:
+    sdk_faults = SdkFaults()
+    delegated: list[str] = []
+
+    class Rest:
+        marker = "kept"
+
+        def account_information_v3(self, **kwargs: Any) -> str:
+            delegated.append("account_information_v3")
+            return "ANSWER"
+
+    def factory(**kwargs: Any) -> Any:
+        return SimpleNamespace(
+            environment=kwargs["environment"], client=SimpleNamespace(rest_api=Rest())
+        )
+
+    wrapped = sdk_faults.wrap_factory(factory)
+    sdk = wrapped(environment="DEMO")
+    assert sdk.environment == "DEMO"
+    assert sdk.client.rest_api.marker == "kept"
+    sdk_faults.fail_sdk("account_information_v3", too_many_requests_error(retry_after=2))
+    with pytest.raises(TooManyRequestsError):
+        sdk.client.rest_api.account_information_v3(recv_window=5000)
+    assert delegated == [], "the SDK method was never reached: nothing is sent"
+    assert sdk.client.rest_api.account_information_v3(recv_window=5000) == "ANSWER"
+    assert delegated == ["account_information_v3"]
+    records = sdk_faults.calls_to("account_information_v3")
+    assert [r["injected"] for r in records] == [True, False]
+    assert [(i.method, i.mode) for i in sdk_faults.injections] == [
+        ("account_information_v3", MODE_SDK_ERROR)
+    ]
+
+
+async def test_an_injected_418_under_the_real_adapter_records_a_ban_and_nothing_is_resent(
+    tmp_path: Path,
+) -> None:
+    sdk_faults = SdkFaults()
+    rig = make_composed_rig(tmp_path, sdk_faults=sdk_faults)
+    wiring = await rig.prepare()
+    assert check_wiring(wiring) == []
+    gate = wiring.exchange.gate
+    adapter = wiring.exchange.adapter
+    assert gate.restriction() is None
+    sdk_faults.fail_sdk("account_information_v3", rate_limit_ban_error(retry_after=30))
+
+    with pytest.raises(RateLimitBanError):
+        await adapter.account_information_snapshot()
+    restriction = gate.restriction()
+    assert restriction is not None and restriction.reason == "IP_BAN_418"
+
+    # The next signed call is refused by the gate before any SDK call: no second attempt exists.
+    with pytest.raises(RateLimitBanActive):
+        await adapter.account_information_snapshot()
+    assert len(sdk_faults.calls_to("account_information_v3")) == 1
+    assert len(sdk_faults.injections) == 1
+    assert rig.fake.calls_to("place_entry") == []
+
+
+async def test_an_injected_429_pauses_the_shared_gate(tmp_path: Path) -> None:
+    sdk_faults = SdkFaults()
+    rig = make_composed_rig(tmp_path, sdk_faults=sdk_faults)
+    wiring = await rig.prepare()
+    sdk_faults.fail_sdk("account_information_v3", too_many_requests_error(retry_after=5))
+    with pytest.raises(TooManyRequestsError):
+        await wiring.exchange.adapter.account_information_snapshot()
+    restriction = wiring.exchange.gate.restriction()
+    assert restriction is not None and restriction.reason == "RATE_LIMIT_PAUSE_429"
+    with pytest.raises(RateLimitPauseActive):
+        await wiring.exchange.adapter.account_information_snapshot()
+    assert len(sdk_faults.calls_to("account_information_v3")) == 1
+
+
+def _event(event_id: str = "e-1") -> JournalEvent:
+    return JournalEvent(
+        journal_event_id=event_id,
+        occurred_at_utc=T_MARK,
+        event_type="TEST_ONLY",
+        entity_type="Test",
+        entity_id="x",
+        correlation_id="c",
+        payload_json="{}",
+    )
+
+
+def test_store_faults_raise_store_unavailable_on_the_chosen_method_only() -> None:
+    store_set, _ = build_memory_stores()
+    store_faults = StoreFaults()
+    wrapped = store_faults.wrap(store_set)
+    assert isinstance(wrapped, LiveStoreSet)
+    assert store_faults.wrap(wrapped) is wrapped, "wrapping twice is a no-op (a restart reuses it)"
+    store_faults.fail_store("journal", "record")
+
+    with pytest.raises(StoreUnavailable):
+        wrapped.journal.record(_event())
+    assert wrapped.journal.get("e-1") is None, "the failed write left nothing behind"
+    wrapped.journal.record(_event())  # consumed: times=1
+    assert wrapped.journal.get("e-1") == _event()
+    assert wrapped.journal.by_type("TEST_ONLY") == [_event()]
+    # other stores and methods are untouched, and the proxy hands out one stable callable
+    assert wrapped.system_state is not None and wrapped.day_risk is not wrapped.journal
+    assert wrapped.snapshots.record is wrapped.snapshots.record
+    assert [r["injected"] for r in store_faults.calls_to("journal.record")] == [True, False]
+    assert [(i.method, i.mode) for i in store_faults.injections] == [
+        ("journal.record", MODE_STORE_UNAVAILABLE)
+    ]
+    with pytest.raises(ValueError, match="unknown store"):
+        store_faults.fail_store("no_such_store", "record")
+
+
+async def test_store_faults_on_the_composed_rig_keep_the_wiring_whole_and_apply_to_it(
+    tmp_path: Path,
+) -> None:
+    store_faults = StoreFaults()
+    rig = make_composed_rig(tmp_path, store_faults=store_faults)
+    wiring = await rig.prepare()
+    assert check_wiring(wiring) == []
+    assert rig.store_faults is store_faults
+    assert wiring.stores is rig.stores
+    store_faults.fail_store("journal", "record")
+    with pytest.raises(StoreUnavailable):
+        wiring.stores.journal.record(_event())
+    assert rig.memory.journal.get("e-1") is None
+
+
+async def test_the_fake_smoke_env_passes_the_faults_to_the_first_rig_and_the_restart(
+    tmp_path: Path,
+) -> None:
+    faults, sdk_faults, store_faults = FaultEdge(), SdkFaults(), StoreFaults()
+    env = build_fake_smoke_env(
+        tmp_path, faults=faults, sdk_faults=sdk_faults, store_faults=store_faults
+    )
+    assert (env.faults, env.sdk_faults, env.store_faults) == (faults, sdk_faults, store_faults)
+    first = env.rig
+    assert first.faults is faults and first.sdk_faults is sdk_faults
+    assert first.assembly.exchange.adapter is faults
+    store_faults.fail_store("journal", "record")
+
+    second_env = await env.restart()
+    second = second_env.rig
+    assert second is not first
+    assert second.stores is first.stores, "the restart reuses the same wrapped stores"
+    assert second.assembly.exchange.adapter is faults
+    assert (second_env.faults, second_env.sdk_faults) == (faults, sdk_faults)
+    with pytest.raises(StoreUnavailable):  # armed before the restart, still pending after it
+        second.stores.journal.record(_event())
+
+
+async def test_the_plain_smoke_env_has_no_faults(tmp_path: Path) -> None:
+    env = build_fake_smoke_env(tmp_path)
+    assert (env.faults, env.sdk_faults, env.store_faults) == (None, None, None)
+    assert env.rig.assembly.exchange.adapter is env.rig.edge
