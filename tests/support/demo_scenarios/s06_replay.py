@@ -34,6 +34,7 @@ STEP_CONCURRENT_CONFIRM = "concurrent_confirm"
 STEP_REPLAYS = "replays_place_nothing"
 STEP_ONE_OUTCOME = "one_placement_outcome"
 STEP_CANCEL_ENTRY = "cancel_resting_entry"
+STEP_CLOSE = "close_cleanup"
 _JOURNAL_CORRELATION_PREFIX = "live-placement"
 
 
@@ -260,3 +261,39 @@ async def cancel_resting_entry(env: Any, recorder: ScenarioRecorder, first: Any)
         dr.STEP_PASSED,
         "the resting entry was cancelled by its client id and the plan expired",
     )
+
+
+async def close_and_clean(env: Any, recorder: ScenarioRecorder, first: Any) -> None:
+    """Close the plan's position with the production operator close, expire the plan, check clean.
+
+    `operator_close_position` sends the reduce-only MARKET close and the coordinator sweeps the
+    plan's legs by their deterministic ids (never a blanket cancel); the APPROVED plan then moves
+    to EXPIRED (DOMN-04) so its approval no longer holds the symbol; `account_clean` PASSED or
+    `dr.SmokeHalt`.
+    """
+    from src.execution.manager import operator_close_position
+
+    wiring = env.wiring
+    closed = await operator_close_position(
+        coordinator=wiring.coordinator, plan_hash=first.plan_hash, operator_id=dr.OPERATOR_ID
+    )
+    if not closed.accepted:
+        raise dr._smoke_fail(env, recorder, STEP_CLOSE, f"close refused: {closed.code}")
+
+    async def flat() -> bool:
+        view = wiring.coordinator.protection_of(first.plan_hash)
+        return view is not None and view.state is ProtectionState.FLAT
+
+    if not await dr._wait_until(env, flat):
+        raise dr._smoke_fail(env, recorder, STEP_CLOSE, "the plan did not end FLAT")
+    dr._smoke_record(env, recorder, STEP_CLOSE, dr.STEP_PASSED, "closed by the operator close")
+    await env.assembly.executor.write(
+        wiring.stores.entities.transition_trade_plan,
+        first.trade_plan_id,
+        TradePlanStatus.EXPIRED,
+        now_utc=env.clock(),
+    )
+    for _ in range(dr.SMOKE_REPLAY_SETTLE_TICKS):
+        await env.tick()
+    if not await account_clean(env, recorder):
+        raise dr.SmokeHalt("account_clean")

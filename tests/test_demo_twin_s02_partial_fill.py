@@ -22,7 +22,7 @@ from src.adapters.binance_usdm import UserTradeRow
 from src.domain.enums import OrderRole
 from src.execution.order_ids import derive_algo_client_id
 
-from tests.support.demo_scenarios import s02_partial_fill
+from tests.support.demo_scenarios import s02_partial_fill, s06_replay
 from tests.support.demo_scenarios.catalog import by_id
 from tests.support.demo_scenarios.harness import (
     DEMO_OBSERVED,
@@ -130,7 +130,7 @@ async def test_a_partial_fill_is_protected_after_the_first_fill_and_ends_clean(
         s02_partial_fill.STEP_STOP_AFTER_FIRST_FILL,
         s02_partial_fill.STEP_REMAINDER_CANCELLED,
         s02_partial_fill.STEP_TP_SIZING,
-        s02_partial_fill.STEP_CLOSE,
+        s06_replay.STEP_CLOSE,
         "account_clean",
     ):
         assert statuses.get(name) == dr.STEP_PASSED, (name, recorder.steps)
@@ -216,7 +216,7 @@ async def test_a_full_fill_without_the_hook_marks_the_partial_step_as_not_rehear
     for name in (
         s02_partial_fill.STEP_STOP_AFTER_FIRST_FILL,
         s02_partial_fill.STEP_REMAINDER_CANCELLED,
-        s02_partial_fill.STEP_CLOSE,
+        s06_replay.STEP_CLOSE,
         "account_clean",
     ):
         assert statuses[name] == dr.STEP_PASSED, (name, recorder.steps)

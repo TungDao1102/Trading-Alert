@@ -27,7 +27,7 @@ from decimal import Decimal
 from typing import Any
 
 from scripts import demo_rehearsal as dr
-from src.domain.enums import OrderRole, TradePlanStatus
+from src.domain.enums import OrderRole
 from src.execution.order_ids import derive_algo_client_id
 from src.execution.protection import ProtectionState
 from src.live.wiring import TASK_PROTECTION
@@ -35,11 +35,11 @@ from src.live.wiring import TASK_PROTECTION
 from tests.support.demo_scenarios.harness import (
     NOT_OBSERVED,
     ScenarioRecorder,
-    account_clean,
     ensure_clean_start,
     label_for,
 )
 from tests.support.demo_scenarios.s06_replay import (
+    close_and_clean,
     place_approved_entry,
     shutdown,
     start_evidence,
@@ -52,7 +52,6 @@ STEP_STOP_AFTER_FIRST_FILL = "stop_after_first_fill"
 STEP_BLOCKS_WHILE_UNPROTECTED = "blocks_new_entries_while_unprotected"
 STEP_REMAINDER_CANCELLED = "remainder_cancelled"
 STEP_TP_SIZING = "tp_sized_from_position"
-STEP_CLOSE = "close_cleanup"
 
 # A twin hook: scripts ONE partial fill of the request on the exchange and on the user-data stream,
 # and returns the filled quantity. Demo passes none (the exchange fills when it fills).
@@ -222,32 +221,7 @@ async def _sequence(env: Any, recorder: ScenarioRecorder, partial_fill: PartialF
     if not partial_seen or partial_fill is None:
         gaps += 1
 
-    # ---- close, expire the plan, the account is clean ------------------------------------- #
-    from src.execution.manager import operator_close_position
-
-    closed = await operator_close_position(
-        coordinator=wiring.coordinator, plan_hash=first.plan_hash, operator_id=dr.OPERATOR_ID
-    )
-    if not closed.accepted:
-        raise dr._smoke_fail(env, recorder, STEP_CLOSE, f"close refused: {closed.code}")
-
-    async def flat() -> bool:
-        view = _protection(env, first)
-        return view is not None and view.state is ProtectionState.FLAT
-
-    if not await dr._wait_until(env, flat):
-        raise dr._smoke_fail(env, recorder, STEP_CLOSE, "the plan did not end FLAT")
-    dr._smoke_record(env, recorder, STEP_CLOSE, dr.STEP_PASSED, "closed by the operator close")
-    await env.assembly.executor.write(
-        wiring.stores.entities.transition_trade_plan,
-        first.trade_plan_id,
-        TradePlanStatus.EXPIRED,
-        now_utc=env.clock(),
-    )
-    for _ in range(dr.SMOKE_REPLAY_SETTLE_TICKS):
-        await env.tick()
-    if not await account_clean(env, recorder):
-        raise dr.SmokeHalt("account_clean")
+    await close_and_clean(env, recorder, first)
     outcome = dr.OUTCOME_COMPLETE_WITH_GAPS if gaps else dr.OUTCOME_COMPLETE
     recorder.outcome = outcome
     return outcome
