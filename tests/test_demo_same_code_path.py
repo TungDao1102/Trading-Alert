@@ -29,10 +29,18 @@ import ast
 from collections.abc import Iterable
 from pathlib import Path
 
+import pytest
+
+from tests.support.ast_guards import forbidden_imports
+
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTION_DIR = ROOT / "src" / "execution"
 RISK_DIR = ROOT / "src" / "risk"
 LIVE_DIR = ROOT / "src" / "live"
+
+MANAGER = ROOT / "src" / "execution" / "manager.py"
+ADAPTER = ROOT / "src" / "adapters" / "binance_usdm.py"
+RUNTIME = ROOT / "src" / "live" / "runtime.py"
 
 # Each entry is a reviewed, deliberate Demo-aware module of the live process (D-08), keyed by exact
 # repo-relative path. A new module that references `Environment.DEMO` must be added here with a
@@ -63,6 +71,12 @@ DEMO_BRANCH_ALLOW_LIST: dict[str, str] = {
         "evaluated state in every other mode"
     ),
 }
+
+# Argument names that would make the placement chain mode-dependent.
+MODE_ARGUMENT_NAMES = frozenset({"mode", "environment", "env"})
+# The keyword that installs a test fault edge into the exchange adapter (24-xx test seam).
+TEST_EDGE_KEYWORD = "exchange_edge"
+SPLAT = "**"
 
 
 def source_files(directory: Path) -> list[Path]:
@@ -95,6 +109,70 @@ def demo_references(
 
 def referencing_files(references: Iterable[str]) -> set[str]:
     return {reference.rsplit(":", 1)[0] for reference in references}
+
+
+def _find_function(
+    tree: ast.Module, name: str, class_name: str | None = None
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    scope: ast.AST = tree
+    if class_name is not None:
+        classes = [
+            n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == class_name
+        ]
+        if not classes:
+            return None
+        scope = classes[0]
+    for node in ast.walk(scope):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def argument_names(source: str, name: str, class_name: str | None = None) -> list[str]:
+    """Every parameter name of the first function `name` (in `class_name` when given).
+
+    Raises:
+        LookupError: no such function, so a rename cannot turn the check vacuous.
+    """
+    function = _find_function(ast.parse(source), name, class_name)
+    if function is None:
+        raise LookupError(f"{class_name + '.' if class_name else ''}{name} not found")
+    args = function.args
+    names = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    if args.vararg is not None:
+        names.append(args.vararg.arg)
+    if args.kwarg is not None:
+        names.append(args.kwarg.arg)
+    return names
+
+
+def mode_arguments(source: str, name: str, class_name: str | None = None) -> list[str]:
+    return [n for n in argument_names(source, name, class_name) if n in MODE_ARGUMENT_NAMES]
+
+
+def build_wiring_keywords(source: str, function: str = "default_assemble") -> list[str]:
+    """Keyword names of every `build_wiring(...)` call inside `function`; `**` for an expansion.
+
+    Raises:
+        LookupError: `function` or its `build_wiring` call is missing (the check would be vacuous).
+    """
+    found = _find_function(ast.parse(source), function)
+    if found is None:
+        raise LookupError(f"{function} not found")
+    keywords: list[str] = []
+    calls = 0
+    for node in ast.walk(found):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        callee = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if callee != "build_wiring":
+            continue
+        calls += 1
+        keywords.extend(k.arg if k.arg is not None else SPLAT for k in node.keywords)
+    if calls == 0:
+        raise LookupError(f"{function} has no build_wiring call")
+    return keywords
 
 
 def test_src_execution_and_src_risk_reference_no_environment_demo() -> None:
@@ -180,3 +258,87 @@ def test_negative_control_a_non_attribute_demo_text_is_not_a_reference(tmp_path:
         encoding="utf-8",
     )
     assert demo_references([seeded], root=tmp_path) == []
+
+
+# ---- the placement chain takes no mode ---------------------------------------------------------
+
+
+def test_execute_approved_plan_has_no_mode_argument() -> None:
+    names = argument_names(MANAGER.read_text(encoding="utf-8"), "execute_approved_plan")
+    assert "callback" in names and "adapter" in names  # the right function was found
+    assert mode_arguments(MANAGER.read_text(encoding="utf-8"), "execute_approved_plan") == []
+
+
+def test_adapter_place_entry_has_no_mode_argument() -> None:
+    source = ADAPTER.read_text(encoding="utf-8")
+    names = argument_names(source, "place_entry", class_name="BinanceUsdmAdapter")
+    assert "symbol" in names and "quantity" in names  # the right method was found
+    assert mode_arguments(source, "place_entry", class_name="BinanceUsdmAdapter") == []
+
+
+@pytest.mark.parametrize("argument", sorted(MODE_ARGUMENT_NAMES))
+def test_negative_control_a_mode_argument_is_found(argument: str) -> None:
+    free = f"async def execute_approved_plan(*, callback, {argument}, adapter): ...\n"
+    assert mode_arguments(free, "execute_approved_plan") == [argument]
+    positional = f"class C:\n    def place_entry(self, symbol, {argument}=None, **kw): ...\n"
+    assert mode_arguments(positional, "place_entry", class_name="C") == [argument]
+    extra = f"def place_entry(self, *{argument}): ...\n"
+    assert mode_arguments(extra, "place_entry") == [argument]
+
+
+def test_a_missing_function_is_an_error_not_an_empty_pass() -> None:
+    with pytest.raises(LookupError):
+        argument_names("def other(): ...\n", "execute_approved_plan")
+    with pytest.raises(LookupError):
+        argument_names("class A:\n    def place_entry(self): ...\n", "place_entry", "B")
+
+
+# ---- production assembly installs no test edge -------------------------------------------------
+
+
+def test_default_assemble_passes_no_exchange_edge_to_build_wiring() -> None:
+    keywords = build_wiring_keywords(RUNTIME.read_text(encoding="utf-8"))
+    assert "config" in keywords and "sdk_factory" in keywords  # the real call was found
+    assert TEST_EDGE_KEYWORD not in keywords
+    assert SPLAT not in keywords
+
+
+def test_negative_control_a_seeded_exchange_edge_keyword_is_found() -> None:
+    seeded = (
+        "def default_assemble(context):\n"
+        "    from x import build_wiring\n"
+        "    return build_wiring(config=1, exchange_edge=edge, sleep=2)\n"
+    )
+    assert build_wiring_keywords(seeded) == ["config", "exchange_edge", "sleep"]
+    assert TEST_EDGE_KEYWORD in build_wiring_keywords(seeded)
+
+
+def test_negative_control_a_keyword_expansion_is_found() -> None:
+    seeded = "def default_assemble(context):\n    return wiring.build_wiring(config=1, **extra)\n"
+    assert build_wiring_keywords(seeded) == ["config", SPLAT]
+
+
+def test_negative_control_a_clean_call_and_a_vacuous_scan() -> None:
+    clean = "def default_assemble(c):\n    return build_wiring(config=1)\n"
+    assert TEST_EDGE_KEYWORD not in build_wiring_keywords(clean)
+    # A call moved out of default_assemble, or a renamed function, cannot make the check vacuous.
+    with pytest.raises(LookupError):
+        build_wiring_keywords("def default_assemble(c):\n    return other(config=1)\n")
+    with pytest.raises(LookupError):
+        build_wiring_keywords("def assemble(c):\n    return build_wiring(config=1)\n")
+
+
+@pytest.mark.parametrize(
+    "path", source_files(EXECUTION_DIR) + source_files(RISK_DIR), ids=lambda p: relative(p)
+)
+def test_src_execution_and_src_risk_import_neither_tests_nor_scripts(path: Path) -> None:
+    assert forbidden_imports(path, ("tests", "scripts")) == []
+
+
+def test_negative_control_a_tests_or_scripts_import_is_found(tmp_path: Path) -> None:
+    seeded = tmp_path / "seeded.py"
+    seeded.write_text(
+        "import tests.support.fakes\nfrom scripts import demo_rehearsal\nimport src.risk\n",
+        encoding="utf-8",
+    )
+    assert forbidden_imports(seeded, ("tests", "scripts")) == ["tests.support.fakes", "scripts"]
