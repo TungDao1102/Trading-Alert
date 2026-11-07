@@ -1363,7 +1363,9 @@ async def test_refusal_before_send_is_journaled_with_its_class_and_fixed_message
     rows = [e for e in journal.events if e.event_type == "ENTRY_REFUSED_BEFORE_SEND"]
     assert len(rows) == 1, label
     payload = json.loads(rows[0].payload_json)
-    assert payload["refusal"] == f"{type(refusal).__name__}: {refusal}", label
+    reason = getattr(refusal, "reason", None)
+    name = type(refusal).__name__
+    assert payload["refusal"] == (name if reason is None else f"{name}: {reason}"), label
 
 
 @pytest.mark.parametrize("code", [-1106, -4016, -4024])

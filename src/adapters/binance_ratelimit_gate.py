@@ -103,6 +103,8 @@ class RestGateRefusal(PreSendRefusal):  # noqa: N818 - a refusal, not an error o
     two only: never a URL, a key or SDK text.
     """
 
+    reason: str
+
     def __init__(self, reason: str, retry_after_seconds: int) -> None:
         self.reason = reason
         self.retry_after_seconds = retry_after_seconds

@@ -375,8 +375,10 @@ async def _place_entry_no_blind_retry(
     try:
         response = await adapter.place_entry(**entry_kwargs)
     except PreSendRefusal as exc:
+        label = type(exc).__name__
         return _EntryPlacement(
-            state=_ENTRY_STATE_REFUSED, refusal=f"{type(exc).__name__}: {str(exc)[:200]}"
+            state=_ENTRY_STATE_REFUSED,
+            refusal=label if exc.reason is None else f"{label}: {exc.reason}",
         )
     except Exception as exc:  # noqa: BLE001 — classified by facts; ambiguous ones are probed
         category = _placement_failure_category(adapter, exc)

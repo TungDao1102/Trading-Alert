@@ -107,7 +107,12 @@ class PreSendRefusal(Exception):  # noqa: N818 - a refusal, not an error of the 
     entry block, a missing signed-call policy). It is never an ambiguous send, so the
     execution core can retry or fall back without treating it as a possible placement. An
     exception that is not a `PreSendRefusal` carries no such guarantee.
+
+    `reason` is a fixed project code that says why (a subclass sets it); the execution core
+    journals it instead of the message text, which no decision may read.
     """
+
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
