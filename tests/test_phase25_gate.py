@@ -455,3 +455,549 @@ def test_negative_control_a_418_row_that_claims_an_observation_fails(tmp_path: P
     assert problems == [
         "S20: the DVM row for a real 418 ban beyond 259200 s is not labelled NOT_OBSERVED"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Requirement -> named tests (resolved with ast, never imported).
+# --------------------------------------------------------------------------- #
+
+REQUIREMENT_TESTS: dict[str, tuple[tuple[str, str], ...]] = {
+    "EXEC-01": (
+        (
+            "tests/test_demo_twin_s01_happy.py",
+            "test_s01_runs_end_to_end_and_every_step_is_synthetic",
+        ),
+        (
+            "tests/test_demo_twin_s02_partial_fill.py",
+            "test_a_partial_fill_is_protected_after_the_first_fill_and_ends_clean",
+        ),
+        (
+            "tests/test_demo_twin_s04_stop_rejected.py",
+            "test_a_rejected_stop_after_a_fill_ends_in_one_close_and_a_clean_account",
+        ),
+        ("tests/test_demo_same_code_path.py", "test_execute_approved_plan_has_no_mode_argument"),
+    ),
+    "EXEC-02": (
+        (
+            "tests/test_demo_twin_s15_foreign_order.py",
+            "test_a_foreign_resting_order_is_reported_enters_safe_mode_and_is_never_touched",
+        ),
+        (
+            "tests/test_demo_twin_s16_manual_close.py",
+            "test_a_manual_close_leaves_a_flat_clean_orphan_free_account",
+        ),
+        (
+            "tests/test_demo_twin_s08_stream_loss.py",
+            "test_the_rest_reconcile_finds_the_order_change_the_stream_never_delivered",
+        ),
+    ),
+    "EXEC-03": (
+        ("tests/test_demo_twin_s06_replay.py", "test_the_exchange_saw_exactly_one_place_entry"),
+        (
+            "tests/test_demo_twin_s07_restart_cuts.py",
+            "test_cut_a_one_place_entry_across_both_processes",
+        ),
+        (
+            "tests/test_evaluate_demo_soak.py",
+            "test_two_non_refused_outcomes_for_one_plan_fail_and_name_both_journal_ids",
+        ),
+    ),
+    "APRV-01": (
+        (
+            "tests/test_demo_twin_s01_happy.py",
+            "test_every_card_the_run_sent_passes_the_live_text_check",
+        ),
+        (
+            "tests/test_demo_env_factory.py",
+            "test_an_approve_press_goes_through_the_runner_handler_with_the_authorized_ids",
+        ),
+        (
+            "tests/test_demo_twin_s06_replay.py",
+            "test_the_press_ids_were_distinct_and_both_reached_the_handler",
+        ),
+    ),
+    "APRV-02": (
+        (
+            "tests/test_demo_twin_s06_replay.py",
+            "test_the_journal_holds_one_non_refused_placement_outcome",
+        ),
+        (
+            "tests/test_demo_env_factory.py",
+            "test_a_replayed_approve_and_the_confirm_variants_press_the_right_prefix",
+        ),
+        (
+            "tests/test_demo_twin_s06_replay.py",
+            "test_a_second_place_entry_fails_the_concurrent_step",
+        ),
+    ),
+    "OPS-01": (
+        (
+            "tests/test_demo_twin_s14_safe_mode.py",
+            "test_an_unresolved_entry_enters_safe_mode_and_the_operator_exit_restores_entries",
+        ),
+        (
+            "tests/test_demo_twin_s10_rate_limit.py",
+            "test_an_injected_429_restricts_the_gate_refuses_the_entry_and_opens_again",
+        ),
+        (
+            "tests/test_persistence_pool_timeout.py",
+            "test_an_exhausted_pool_is_store_unavailable_with_the_type_name_only",
+        ),
+        (
+            "tests/test_live_health_journal_volume.py",
+            "test_ten_idle_ticks_journal_ten_verdicts_and_the_ten_check_rows_once",
+        ),
+    ),
+    "OPS-02": (
+        (
+            "tests/test_demo_env_guard.py",
+            "test_any_binance_live_name_is_refused_by_name_and_not_by_value",
+        ),
+        (
+            "tests/test_demo_evidence_index.py",
+            "test_a_secret_in_an_evidence_file_is_scrubbed_in_the_index",
+        ),
+        (
+            "tests/test_demo_twin_s01_happy.py",
+            "test_no_sentinel_secret_reaches_the_evidence_file",
+        ),
+    ),
+}
+
+
+def missing_pairs(root: Path, pairs: tuple[tuple[str, str], ...], label: str) -> list[str]:
+    problems: list[str] = []
+    for relative, name in pairs:
+        reason = _resolve_reference(root, f"{relative}::{name}")
+        if reason is not None:
+            problems.append(f"{label}: {reason}")
+    return problems
+
+
+def test_each_phase25_requirement_has_at_least_two_named_tests() -> None:
+    assert set(REQUIREMENT_TESTS) == {
+        "EXEC-01",
+        "EXEC-02",
+        "EXEC-03",
+        "APRV-01",
+        "APRV-02",
+        "OPS-01",
+        "OPS-02",
+    }
+    problems: list[str] = []
+    for requirement, pairs in REQUIREMENT_TESTS.items():
+        assert len(set(pairs)) >= 2, f"{requirement} names fewer than two distinct tests"
+        problems.extend(missing_pairs(ROOT, pairs, requirement))
+    assert problems == [], f"requirement-to-test pairs missing: {problems}"
+
+
+def test_every_requirement_name_is_a_known_requirement() -> None:
+    planning = ROOT / ".planning" / "REQUIREMENTS.md"
+    if not planning.is_file():
+        pytest.skip("REQUIREMENTS.md is not in this checkout (filtered)")
+    text = planning.read_text(encoding="utf-8")
+    for requirement in REQUIREMENT_TESTS:
+        assert f"**{requirement}**" in text, requirement
+
+
+def test_every_requirement_a_catalog_scenario_names_has_named_tests() -> None:
+    named = {requirement for scenario in SCENARIOS for requirement in scenario.requirements}
+    assert named <= set(REQUIREMENT_TESTS), sorted(named - set(REQUIREMENT_TESTS))
+
+
+def test_negative_control_a_requirement_pair_naming_a_missing_test_is_reported(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "tests/test_a.py", "def test_here():\n    pass\n")
+    problems = missing_pairs(
+        tmp_path, (("tests/test_a.py", "test_here"), ("tests/test_a.py", "test_gone")), "EXEC-01"
+    )
+    assert len(problems) == 1 and "EXEC-01" in problems[0] and "test_gone" in problems[0]
+    assert missing_pairs(tmp_path, (("tests/none.py", "test_x"),), "OPS-02") == [
+        "OPS-02: tests/none.py does not exist"
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# The decision table: every CONTEXT decision D-01..D-14 to its plan and its evidence.
+# An evidence item is ("test", path, function) or ("doc", path, anchor text).
+# --------------------------------------------------------------------------- #
+
+Evidence = tuple[str, str, str]
+
+
+def _t(path: str, name: str) -> Evidence:
+    return ("test", path, name)
+
+
+def _d(path: str, anchor: str) -> Evidence:
+    return ("doc", path, anchor)
+
+
+_PLANNING = ".planning/phases/25-demo-integration-test-campaign"
+_FACTS = ".planning/phases/09-live-execution-rollout/09-EXCHANGE-FACTS.md"
+
+DECISION_EVIDENCE: dict[str, tuple[str, tuple[Evidence, ...]]] = {
+    "D-01": (
+        "25-01, 25-09",
+        (
+            _t(
+                "tests/test_demo_marker_guard.py",
+                "test_the_ci_expression_skips_a_demo_item_even_with_the_run_variable",
+            ),
+            _d("AGENTS.md", "run by the owner only"),
+        ),
+    ),
+    "D-02": (
+        "25-02",
+        (
+            _t("tests/test_fault_edge.py", "test_a_fault_edge_keeps_the_composed_wiring_whole"),
+            _t(
+                "tests/test_demo_twin_s01_happy.py",
+                "test_s01_runs_end_to_end_and_every_step_is_synthetic",
+            ),
+        ),
+    ),
+    "D-03": (
+        "25-01",
+        (
+            _t(
+                "tests/test_demo_marker_guard.py",
+                "test_every_test_function_under_tests_demo_carries_the_demo_mark",
+            ),
+            _t(
+                "tests/test_demo_env_guard.py",
+                "test_any_binance_live_name_is_refused_by_name_and_not_by_value",
+            ),
+        ),
+    ),
+    "D-04": (
+        "25-08, 25-09",
+        (
+            _t(
+                "tests/test_demo_harness.py",
+                "test_the_document_has_the_scenario_schema_and_the_file_stem_follows_the_mode",
+            ),
+            _t(
+                "tests/test_demo_twin_s01_happy.py",
+                "test_the_evidence_file_has_the_scenario_schema_name_and_one_kind",
+            ),
+        ),
+    ),
+    "D-05": (
+        "25-08, 25-10, 25-11, 25-12, 25-13, 25-14, 25-15, 25-16",
+        (
+            _t("tests/test_demo_harness.py", "test_every_entry_follows_the_naming_rule"),
+            _t(
+                "tests/test_phase25_gate.py",
+                "test_every_catalog_scenario_has_its_module_twin_reuses_and_marked_demo_test",
+            ),
+        ),
+    ),
+    "D-06": (
+        "25-11, 25-13, 25-14, 25-16",
+        (
+            _t(
+                "tests/test_demo_twin_s16_manual_close.py",
+                "test_a_manual_close_leaves_a_flat_clean_orphan_free_account",
+            ),
+            _t(
+                "tests/test_demo_twin_s17_stale_feed.py",
+                "test_a_stale_mark_fails_the_feed_check_refuses_the_entry_and_enters_safe_mode",
+            ),
+            _t(
+                "tests/test_demo_twin_s18_unprotected.py",
+                "test_a_rejected_stop_and_a_failing_close_end_close_failed_then_flat",
+            ),
+            _t(
+                "tests/test_demo_twin_s19_rest_gate_cli.py",
+                "test_a_false_418_is_cleared_by_stop_status_clear_and_restart",
+            ),
+        ),
+    ),
+    "D-07": (
+        "25-06",
+        (
+            _d("docs/operations/DEMO_VS_MAINNET.md", "| DVM-22 |"),
+            _d("docs/operations/DEMO_VS_MAINNET.md", "| DVM-28 |"),
+            _t("tests/test_phase25_gate.py", "test_s20_is_covered_by_the_demo_vs_mainnet_rows"),
+        ),
+    ),
+    "D-08": (
+        "25-05",
+        (
+            _t(
+                "tests/test_demo_same_code_path.py",
+                "test_src_execution_and_src_risk_reference_no_environment_demo",
+            ),
+            _t(
+                "tests/test_demo_same_code_path.py",
+                "test_src_live_demo_references_equal_the_pinned_allow_list",
+            ),
+        ),
+    ),
+    "D-09": (
+        "25-07 (the registration itself: plan 25-24)",
+        (
+            _t(
+                "tests/test_evaluate_demo_soak.py",
+                "test_verify_registration_refuses_a_file_edited_after_its_hash_was_recorded",
+            ),
+            _t(
+                "tests/test_evaluate_demo_soak.py",
+                "test_an_order_before_the_registration_commit_fails",
+            ),
+        ),
+    ),
+    "D-10": (
+        "25-07",
+        (
+            _t(
+                "tests/test_evaluate_demo_soak.py",
+                "test_the_report_is_create_only_sorted_lf_and_carries_the_input_hashes",
+            ),
+            _t(
+                "tests/test_evaluate_demo_soak.py",
+                "test_the_script_imports_its_event_names_and_never_retypes_them",
+            ),
+        ),
+    ),
+    "D-11": (
+        "25-04",
+        (
+            _t(
+                "tests/test_live_health_journal_volume.py",
+                "test_ten_idle_ticks_journal_ten_verdicts_and_the_ten_check_rows_once",
+            ),
+        ),
+    ),
+    "D-12": (
+        "25-06",
+        (
+            _d("docs/operations/DEMO_VS_MAINNET.md", "| DVM-01 |"),
+            _d(_FACTS, "Demo cross-check"),
+        ),
+    ),
+    "D-13": (
+        "25-03, 25-04",
+        (
+            _t(
+                "tests/test_persistence_pool_timeout.py",
+                "test_an_exhausted_pool_is_store_unavailable_with_the_type_name_only",
+            ),
+            _t(
+                "tests/test_live_health_journal_volume.py",
+                "test_a_status_flip_journals_one_extra_row_for_that_check_only",
+            ),
+        ),
+    ),
+    "D-14": (
+        "25-17",
+        (_d(f"{_PLANNING}/25-CONTEXT.md", "**D-14 [auto]:**"),),
+    ),
+}
+
+
+def decision_problems(root: Path, table: dict[str, tuple[str, tuple[Evidence, ...]]]) -> list[str]:
+    problems: list[str] = []
+    for decision, (plans, items) in sorted(table.items()):
+        if not plans.strip() or not items:
+            problems.append(f"{decision}: no plan or no evidence")
+            continue
+        for plan in re.findall(r"25-\d\d", plans):
+            if not (root / _PLANNING / f"{plan}-PLAN.md").is_file():
+                problems.append(f"{decision}: plan {plan} has no PLAN.md")
+        for kind, relative, needle in items:
+            path = root / relative
+            if not path.is_file():
+                problems.append(f"{decision}: {relative} does not exist")
+            elif kind == "test":
+                if needle not in _function_names(_tree(path)):
+                    problems.append(f"{decision}: {relative} defines no test {needle!r}")
+            elif needle not in path.read_text(encoding="utf-8"):
+                problems.append(f"{decision}: {relative} does not contain {needle!r}")
+    return problems
+
+
+def test_the_decision_table_names_every_context_decision() -> None:
+    expected = {f"D-{number:02d}" for number in range(1, 15)}
+    assert set(DECISION_EVIDENCE) == expected, (
+        f"decision table ids differ: {sorted(expected ^ set(DECISION_EVIDENCE))}"
+    )
+    context = (PHASE_DIR / "25-CONTEXT.md").read_text(encoding="utf-8")
+    for decision in sorted(expected):
+        assert re.search(rf"\*\*{decision}\b", context), f"{decision} is not a CONTEXT decision"
+
+
+def test_every_decision_has_a_plan_and_existing_evidence() -> None:
+    assert decision_problems(ROOT, DECISION_EVIDENCE) == []
+
+
+def test_negative_control_a_decision_without_evidence_or_with_a_missing_anchor_fails(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "tests/test_a.py", "def test_here():\n    pass\n")
+    _write(tmp_path, "docs/a.md", "an anchor\n")
+    _write(tmp_path, f"{_PLANNING}/25-01-PLAN.md", "plan\n")
+    table: dict[str, tuple[str, tuple[Evidence, ...]]] = {
+        "D-01": ("25-01", (_t("tests/test_a.py", "test_here"), _d("docs/a.md", "an anchor"))),
+        "D-02": ("25-01", ()),
+        "D-03": ("25-02", (_t("tests/test_a.py", "test_here"),)),
+        "D-04": ("25-01", (_t("tests/test_a.py", "test_gone"), _d("docs/a.md", "nothing"))),
+    }
+    problems = decision_problems(tmp_path, table)
+    assert [problem.split(":")[0] for problem in problems] == ["D-02", "D-03", "D-04", "D-04"]
+
+
+# --------------------------------------------------------------------------- #
+# The consolidated scenario inventory: the Wave 0 coverage inventory of 25-RESEARCH.
+# --------------------------------------------------------------------------- #
+
+INVENTORY_RELATIVE = f"{_PLANNING}/25-SCENARIO-INVENTORY.md"
+INVENTORY_COLUMNS: tuple[str, ...] = (
+    "id",
+    "title",
+    "twin test",
+    "demo test",
+    "REUSES",
+    "expected Demo labels",
+    "leaves_state",
+)
+#: The evidence labels an inventory row may name (harness.LABELS, checked by a test below).
+LABEL_WORDS: frozenset[str] = frozenset(
+    {"SYNTHETIC", "DEMO_OBSERVED", "DEMO_FAULT_INJECTED", "NOT_OBSERVED"}
+)
+
+
+def _strip(cell: str) -> str:
+    return cell.replace("`", "").strip()
+
+
+def inventory_cells(root: Path) -> dict[str, list[str]]:
+    path = root / INVENTORY_RELATIVE
+    if not path.is_file():
+        return {}
+    rows: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if re.match(r"^\| S\d\d ", line):
+            cells = [_strip(cell) for cell in line.strip().strip("|").split("|")]
+            rows[cells[0]] = cells
+    return rows
+
+
+def inventory_header(root: Path) -> list[str]:
+    path = root / INVENTORY_RELATIVE
+    if not path.is_file():
+        return []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("| id "):
+            return [_strip(cell) for cell in line.strip().strip("|").split("|")]
+    return []
+
+
+def inventory_problems(root: Path, scenarios: tuple[Scenario, ...]) -> list[str]:
+    """Rows missing, unknown or drifted from the catalog and from the REUSES tuples."""
+    if not (root / INVENTORY_RELATIVE).is_file():
+        return [f"{INVENTORY_RELATIVE} does not exist"]
+    problems: list[str] = []
+    if inventory_header(root) != list(INVENTORY_COLUMNS):
+        problems.append(f"inventory header is not {list(INVENTORY_COLUMNS)}")
+    rows = inventory_cells(root)
+    for sid in sorted(set(rows) - {scenario.id for scenario in scenarios}):
+        problems.append(f"{sid}: the inventory has a row the catalog does not list")
+    for scenario in scenarios:
+        sid = scenario.id
+        cells = rows.get(sid)
+        if cells is None:
+            problems.append(f"{sid}: no inventory row")
+            continue
+        if len(cells) != len(INVENTORY_COLUMNS):
+            problems.append(
+                f"{sid}: the row has {len(cells)} columns, not {len(INVENTORY_COLUMNS)}"
+            )
+            continue
+        _, title, twin, demo, reuses, labels, leaves = cells
+        if title != scenario.title:
+            problems.append(f"{sid}: title {title!r} differs from the catalog {scenario.title!r}")
+        if leaves != ("yes" if scenario.leaves_state else "no"):
+            problems.append(f"{sid}: leaves_state {leaves!r} differs from the catalog")
+        if scenario.observation_only:
+            if "DVM" not in labels:
+                problems.append(f"{sid}: an observation-only row must name its DVM rows")
+            continue
+        if twin != scenario.twin_test or demo != scenario.demo_test:
+            problems.append(f"{sid}: twin or demo path differs from the catalog")
+        words = set(re.findall(r"[A-Z]+(?:_[A-Z]+)+", labels))
+        if not words or not words <= LABEL_WORDS:
+            problems.append(f"{sid}: expected Demo labels {labels!r} are not harness labels")
+        twin_path = root / (scenario.twin_test or "")
+        tuple_entries = (
+            _module_string_tuple(_tree(twin_path), "REUSES") if twin_path.is_file() else None
+        )
+        listed = [entry.strip() for entry in reuses.split(";") if entry.strip()]
+        if tuple_entries is None or listed != tuple_entries:
+            problems.append(f"{sid}: inventory REUSES differ from the REUSES tuple of {twin}")
+    return problems
+
+
+def test_the_inventory_has_one_row_per_scenario_agreeing_with_catalog_and_reuses() -> None:
+    assert inventory_problems(ROOT, SCENARIOS) == []
+
+
+def test_the_inventory_labels_are_the_harness_labels() -> None:
+    from tests.support.demo_scenarios.harness import LABELS
+
+    assert set(LABEL_WORDS) == set(LABELS)
+
+
+def _inventory_text(rows: list[str]) -> str:
+    header = "| " + " | ".join(INVENTORY_COLUMNS) + " |\n|" + "---|" * len(INVENTORY_COLUMNS) + "\n"
+    return header + "".join(rows)
+
+
+def _fake_row(**override: str) -> str:
+    cells = {
+        "id": "S99",
+        "title": "Fake",
+        "twin": "`tests/test_demo_twin_s99_fake.py`",
+        "demo": "`tests/demo/test_demo_s99_fake.py`",
+        "reuses": "`tests/test_existing.py::test_exists`",
+        "labels": "DEMO_OBSERVED",
+        "leaves": "no",
+    }
+    cells.update(override)
+    return "| " + " | ".join(cells.values()) + " |\n"
+
+
+def test_negative_control_an_inventory_matching_the_tree_has_no_problem(tmp_path: Path) -> None:
+    _fake_tree(tmp_path)
+    _write(tmp_path, INVENTORY_RELATIVE, _inventory_text([_fake_row()]))
+    assert inventory_problems(tmp_path, (_FAKE,)) == []
+
+
+def test_negative_control_an_inventory_that_drifted_fails_naming_the_scenario(
+    tmp_path: Path,
+) -> None:
+    _fake_tree(tmp_path)
+    drifts = {
+        "reuses": "`tests/test_existing.py::test_other`",
+        "labels": "DEMO_MAYBE",
+        "leaves": "yes",
+        "title": "Another",
+        "twin": "`tests/test_demo_twin_s98_x.py`",
+    }
+    for column, value in drifts.items():
+        _write(tmp_path, INVENTORY_RELATIVE, _inventory_text([_fake_row(**{column: value})]))
+        problems = inventory_problems(tmp_path, (_FAKE,))
+        assert len(problems) == 1 and problems[0].startswith("S99:"), (column, problems)
+
+
+def test_negative_control_a_missing_row_an_extra_row_and_a_missing_file_fail(
+    tmp_path: Path,
+) -> None:
+    _fake_tree(tmp_path)
+    assert inventory_problems(tmp_path, (_FAKE,)) == [f"{INVENTORY_RELATIVE} does not exist"]
+    _write(tmp_path, INVENTORY_RELATIVE, _inventory_text([_fake_row(id="S98")]))
+    problems = inventory_problems(tmp_path, (_FAKE,))
+    assert "S98: the inventory has a row the catalog does not list" in problems
+    assert "S99: no inventory row" in problems
