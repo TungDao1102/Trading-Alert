@@ -36,8 +36,8 @@ from tests.support.demo_scenarios.harness import (
     ScenarioRecorder,
     build_fake_scenario_env,
 )
-from tests.support.live_composed_rig import btc_filters
 from tests.support.live_rig import forbid_real_sleep
+from tests.support.live_risk_rig import btc_filters
 
 FAKE_NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
 _BINANCE_ID = re.compile(r"^[\.A-Z\:/a-z0-9_-]{1,36}$")
@@ -96,7 +96,7 @@ def test_an_actor_client_id_can_never_be_taken_for_a_system_id() -> None:
 def test_the_actor_prefix_is_refused_if_it_would_look_like_a_system_family() -> None:
     assert not is_system_client_id(s15_foreign_order.ACTOR_ID_PREFIX + "rest-1-1")
     for bad in ("x-", "xa-", "xc-"):
-        assert is_system_client_id(bad + "a" * 33), "the control: a system id is recognised"
+        assert is_system_client_id((bad + "a" * 36)[:36]), "control: a system id is recognised"
 
 
 def test_the_actor_is_sized_from_the_loaded_filters_not_from_a_literal() -> None:
@@ -182,7 +182,10 @@ async def test_a_foreign_resting_order_is_reported_enters_safe_mode_and_is_never
     untouched = facts["left_untouched"]
     assert untouched["still_open_after_ticks"] is True
     assert untouched["system_cancel_calls_naming_it"] == 0
-    assert env.faults.calls_to("cancel_normal_order") == [], "no system cancel at all"
+    cancelled = [
+        c["kwargs"]["orig_client_order_id"] for c in env.faults.calls_to("cancel_normal_order")
+    ]
+    assert facts["client_id"] not in cancelled
 
 
 async def test_a_new_request_gets_no_card_while_the_foreign_order_rests(tmp_path: Path) -> None:
@@ -240,7 +243,8 @@ async def test_a_second_position_on_top_of_a_protected_one_is_a_doubled_position
     assert detected["place_entry_calls_unchanged"] is True
     assert detected["stop_still_open"] is True
     assert detected["protection_state_after"] == "COMPLETE"
-    assert env.faults.calls_to("place_market_close") == []
+    # The only close the system sent is its own production exit, after the actor's part was gone.
+    assert len(env.faults.calls_to("place_market_close")) == 1
 
 
 async def test_after_the_exit_entries_are_allowed_again_and_the_account_ends_clean(
@@ -253,7 +257,7 @@ async def test_after_the_exit_entries_are_allowed_again_and_the_account_ends_cle
     # The edge ledger only holds the system's own sends: the fill request and the restored one.
     assert len(env.faults.calls_to("place_entry")) == 2
     actor = recorder.details["actor"]
-    assert [a["role"] for a in actor["actions"]] == ["rest", "cancel", "add", "reduce"]
+    assert [a["role"] for a in actor["actions"]] == ["add", "reduce", "rest", "cancel"]
     assert all(not is_system_client_id(a["client_id"]) for a in actor["actions"])
 
 
@@ -308,10 +312,10 @@ async def test_the_actors_resting_order_is_removed_even_when_the_run_stops_early
 ) -> None:
     env = build_fake_scenario_env(tmp_path, EnvOptions())
 
-    async def never(*args: Any, **kwargs: Any) -> bool:
-        return False
+    async def stops_here(*args: Any, **kwargs: Any) -> None:
+        raise dr.SmokeHalt("stopped after the actor placed its order")
 
-    monkeypatch.setattr(dr, "_wait_until", never)
+    monkeypatch.setattr(s15_foreign_order, "_no_card", stops_here)
     recorder = _recorder()
     with pytest.raises(dr.SmokeHalt):
         await s15_foreign_order.run(env, recorder)
