@@ -1001,3 +1001,300 @@ def test_negative_control_a_missing_row_an_extra_row_and_a_missing_file_fail(
     problems = inventory_problems(tmp_path, (_FAKE,))
     assert "S98: the inventory has a row the catalog does not list" in problems
     assert "S99: no inventory row" in problems
+
+
+# --------------------------------------------------------------------------- #
+# The register of inherited items and findings: a status for every one (D-13, D-14).
+# --------------------------------------------------------------------------- #
+
+REGISTER_RELATIVE = f"{_PLANNING}/25-DEFERRED.md"
+REGISTER_STATUS_WORDS: tuple[str, ...] = ("covered", "owner-open", "deferred", "superseded")
+
+#: The inherited ids of the ROADMAP Phase 25 entry (owner registration 2026-10-07).
+INHERITED_IDS: tuple[str, ...] = (
+    "G2-016",
+    "D055",
+    "D056",
+    "G2-030",
+    "P20-DEMO",
+    "P20-ERR1003",
+    "R-21",
+    "R-22",
+    "R-23",
+    "R-24",
+    "R-25",
+    "R-28",
+)
+
+#: Statuses the plan and the CONTEXT fix for good; the owner-open rows are NOT pinned here, because
+#: the owner's later answers (plans 25-19 to 25-23) move them on purpose.
+PINNED_STATUS: dict[str, str] = {
+    "P20-ERR1003": "superseded",
+    "R-23": "deferred",
+    "R-24": "covered",
+    "R-25": "covered",
+    "R-28": "deferred",
+}
+
+FORBIDDEN_CLAIMS: tuple[str, ...] = ("mainnet-observed", "live-observed", "host-observed")
+
+
+def roadmap_inherited_ids(root: Path) -> list[str]:
+    text = (root / ".planning" / "ROADMAP.md").read_text(encoding="utf-8")
+    start = text.index("### Phase 25: Binance Demo Integration Test Campaign")
+    section = text[start:]
+    section = section[: section.index("**Plans:**")]
+    section = section[section.index("**Inherited items**") :]
+    return re.findall(r"^- \[([A-Za-z0-9-]+)[\] /]", section, re.MULTILINE)
+
+
+def register_rows(root: Path) -> dict[str, list[str]]:
+    path = root / REGISTER_RELATIVE
+    if not path.is_file():
+        return {}
+    rows: dict[str, list[str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        first = cells[0].strip("`")
+        if len(cells) >= 4 and first and first != "id" and not set(first) <= {"-", ":", " "}:
+            rows[first] = cells
+    return rows
+
+
+def status_problem(row_id: str, cells: list[str]) -> str | None:
+    words = cells[2].replace("`", "").split()
+    status = words[0].strip("*:;,.") if words else ""
+    if status not in REGISTER_STATUS_WORDS:
+        return f"{row_id}: status {cells[2][:30]!r} is none of {REGISTER_STATUS_WORDS}"
+    if not cells[3]:
+        return f"{row_id}: no evidence or reason in the where column"
+    if status == "covered" and not re.search(r"25-\d\d|\bS\d\d\b", cells[3]):
+        return f"{row_id}: a covered row must name the plan or scenario that covers it"
+    return None
+
+
+def register_problems(root: Path, inherited: tuple[str, ...] | list[str]) -> list[str]:
+    path = root / REGISTER_RELATIVE
+    if not path.is_file():
+        return [f"{REGISTER_RELATIVE} does not exist"]
+    rows = register_rows(root)
+    problems: list[str] = []
+    for item in inherited:
+        if item not in rows:
+            problems.append(f"{item}: no row in 25-DEFERRED.md")
+    for row_id, cells in rows.items():
+        problem = status_problem(row_id, cells)
+        if problem:
+            problems.append(problem)
+    for row_id, wanted in PINNED_STATUS.items():
+        if row_id in rows and not rows[row_id][2].replace("`", "").startswith(wanted):
+            problems.append(f"{row_id}: the status must be {wanted!r}")
+    return problems
+
+
+def evidence_claim_problems(text: str) -> list[str]:
+    """A forbidden claim anywhere, or a DEMO_OBSERVED line with no evidence path or DVM row."""
+    problems = [f"the register claims {claim}" for claim in FORBIDDEN_CLAIMS if claim in text]
+    evidence = re.compile(r"[A-Za-z0-9_./-]+\.(?:json|md|py|txt)\b|DVM-\d+")
+    for number, line in enumerate(text.splitlines(), start=1):
+        if "DEMO_OBSERVED" in line and not evidence.search(line):
+            problems.append(f"line {number} claims DEMO_OBSERVED with no evidence path")
+    return problems
+
+
+def named_test_files(text: str) -> list[str]:
+    return sorted(set(re.findall(r"tests/[A-Za-z0-9_/]+\.py", text)))
+
+
+def test_the_roadmap_phase25_entry_lists_the_expected_inherited_ids() -> None:
+    ids = roadmap_inherited_ids(ROOT)
+    assert ids == list(INHERITED_IDS), f"the ROADMAP inherited ids changed: {ids}"
+
+
+def test_every_inherited_item_has_a_status_in_the_register() -> None:
+    assert register_problems(ROOT, roadmap_inherited_ids(ROOT)) == []
+
+
+def test_the_register_names_only_existing_test_files() -> None:
+    text = (ROOT / REGISTER_RELATIVE).read_text(encoding="utf-8")
+    named = named_test_files(text)
+    assert named, "the register names no test file"
+    missing = [relative for relative in named if not (ROOT / relative).is_file()]
+    assert missing == [], f"the register names test files that do not exist: {missing}"
+
+
+def test_nothing_in_the_register_claims_a_mainnet_host_or_unevidenced_demo_result() -> None:
+    text = (ROOT / REGISTER_RELATIVE).read_text(encoding="utf-8")
+    assert "NOT_OBSERVED" in text, "the register must keep NOT_OBSERVED for owner-only items"
+    assert evidence_claim_problems(text) == []
+
+
+def test_decision_d14_points_at_the_register_rows_of_r23_and_r28() -> None:
+    rows = register_rows(ROOT)
+    for row_id in ("R-23", "R-28"):
+        assert row_id in rows, f"{row_id} has no register row"
+        assert "D-14" in " ".join(rows[row_id]), f"{row_id} does not cite D-14"
+
+
+def test_the_owner_questions_are_recorded_open_and_never_decided_here() -> None:
+    rows = register_rows(ROOT)
+    for row_id in ("R-21", "R-22", "ERR1003-KEY", "OWNER-4"):
+        assert row_id in rows, f"{row_id} has no register row"
+    for row_id in ("R-21", "R-22"):
+        status = rows[row_id][2].replace("`", "")
+        assert status.startswith(("owner-open", "covered")), (row_id, status)
+    if rows["R-22"][2].startswith("owner-open"):
+        assert "22.5" in " ".join(rows["R-22"]), "R-22 must cite the interim stop procedure"
+
+
+# --- every finding of the plan summaries ------------------------------------ #
+
+
+def summary_finding_ids(root: Path) -> list[str]:
+    """`25-NN-Fk` for every `**Fk (` finding label in a plan SUMMARY of the phase."""
+    found: list[str] = []
+    for path in sorted((root / _PLANNING).glob("25-[0-9][0-9]-SUMMARY.md")):
+        plan = path.name[:5]
+        for label in re.findall(r"^\*\*F(\d+) \(", path.read_text(encoding="utf-8"), re.MULTILINE):
+            found.append(f"{plan}-F{label}")
+    return found
+
+
+def finding_problems(root: Path) -> list[str]:
+    rows = register_rows(root)
+    labelled = summary_finding_ids(root)
+    problems = [
+        f"{item}: a SUMMARY finding with no register row" for item in labelled if item not in rows
+    ]
+    for row_id, cells in rows.items():
+        if re.fullmatch(r"25-\d\d-F\d+", row_id):
+            if row_id not in labelled:
+                problems.append(f"{row_id}: a register finding row that no SUMMARY labels")
+            if not cells[2].replace("`", "").startswith("owner-open"):
+                problems.append(f"{row_id}: a finding is owner-open until the owner decides")
+    return problems
+
+
+def test_the_summaries_label_the_expected_findings() -> None:
+    labelled = summary_finding_ids(ROOT)
+    assert len(labelled) == len(set(labelled)), "a finding label is used twice in one SUMMARY"
+    assert len(labelled) >= 20, f"only {len(labelled)} findings were parsed from the SUMMARYs"
+
+
+def test_every_summary_finding_is_captured_in_the_register_as_owner_open() -> None:
+    assert finding_problems(ROOT) == []
+
+
+# --- every strict xfail twin ------------------------------------------------- #
+
+
+def xfail_twin_tests(root: Path) -> list[str]:
+    names: list[str] = []
+    for path in sorted(root.glob("tests/test_demo_twin_s*.py")):
+        for node in ast.walk(_tree(path)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and any(
+                "xfail" in ast.dump(decorator) for decorator in node.decorator_list
+            ):
+                names.append(f"{path.name}::{node.name}")
+    return names
+
+
+def xfail_problems(root: Path) -> list[str]:
+    path = root / REGISTER_RELATIVE
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    return [
+        f"{entry}: a strict xfail twin test the register does not name"
+        for entry in xfail_twin_tests(root)
+        if entry.split("::")[1] not in text
+    ]
+
+
+def test_every_xfail_twin_test_is_named_in_the_register() -> None:
+    assert len(xfail_twin_tests(ROOT)) >= 3, (
+        "the strict xfail twins of 25-12, 25-14, 25-15 vanished"
+    )
+    assert xfail_problems(ROOT) == []
+
+
+# --- negative controls -------------------------------------------------------- #
+
+_REGISTER_HEAD = "| id | item | status | where |\n|---|---|---|---|\n"
+
+
+def _register_text(rows: list[str]) -> str:
+    return _REGISTER_HEAD + "".join(f"{row}\n" for row in rows)
+
+
+def test_negative_control_an_inherited_id_without_a_row_or_a_status_fails(tmp_path: Path) -> None:
+    rows = [
+        "| G2-016 | drills | covered | S16, plan 25-16 |",
+        "| D055 | model | maybe | somewhere |",
+        "| D056 | health | owner-open |  |",
+        "| R-24 | pool | covered | nothing named |",
+        "| R-23 | async | covered | D-14, 25-17 |",
+    ]
+    _write(tmp_path, REGISTER_RELATIVE, _register_text(rows))
+    problems = register_problems(tmp_path, ["G2-016", "D055", "D056", "R-24", "R-23", "R-99"])
+    joined = " | ".join(problems)
+    assert "R-99: no row" in joined
+    assert "D055: status" in joined
+    assert "D056: no evidence" in joined
+    assert "R-24: a covered row must name" in joined
+    assert "R-23: the status must be 'deferred'" in joined
+    assert not any(problem.startswith("G2-016") for problem in problems)
+
+
+def test_negative_control_a_missing_register_file_fails(tmp_path: Path) -> None:
+    assert register_problems(tmp_path, ["R-21"]) == [f"{REGISTER_RELATIVE} does not exist"]
+
+
+def test_negative_control_a_mainnet_claim_or_an_unevidenced_demo_claim_fails() -> None:
+    assert evidence_claim_problems("A row that says mainnet-observed.") == [
+        "the register claims mainnet-observed"
+    ]
+    assert evidence_claim_problems("| X | item | covered | DEMO_OBSERVED, trust me |") == [
+        "line 1 claims DEMO_OBSERVED with no evidence path"
+    ]
+    assert evidence_claim_problems("| X | item | covered | DEMO_OBSERVED, DVM-21 |") == []
+    assert (
+        evidence_claim_problems("DEMO_OBSERVED in evidence/09-DEMO-REHEARSAL-EVIDENCE-x.json") == []
+    )
+
+
+def test_negative_control_a_finding_without_a_row_and_a_row_without_a_finding_fail(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        f"{_PLANNING}/25-11-SUMMARY.md",
+        "## Findings\n\n**F1 (design observation): something.**\n\n**F2 (observation): more.**\n",
+    )
+    rows = ["| 25-11-F1 | x | owner-open | y |", "| 25-12-F1 | x | owner-open | y |"]
+    _write(tmp_path, REGISTER_RELATIVE, _register_text(rows))
+    problems = finding_problems(tmp_path)
+    assert "25-11-F2: a SUMMARY finding with no register row" in problems
+    assert "25-12-F1: a register finding row that no SUMMARY labels" in problems
+    rows = ["| 25-11-F1 | x | deferred | y |", "| 25-11-F2 | x | owner-open | y |"]
+    _write(tmp_path, REGISTER_RELATIVE, _register_text(rows))
+    assert finding_problems(tmp_path) == [
+        "25-11-F1: a finding is owner-open until the owner decides"
+    ]
+
+
+def test_negative_control_a_strict_xfail_twin_the_register_does_not_name_fails(
+    tmp_path: Path,
+) -> None:
+    twin = (
+        "import pytest\n\n\n@pytest.mark.xfail(strict=True, reason='gap')\n"
+        "async def test_a_gap_is_closed():\n    pass\n\n\ndef test_plain():\n    pass\n"
+    )
+    _write(tmp_path, "tests/test_demo_twin_s98_gap.py", twin)
+    assert xfail_twin_tests(tmp_path) == ["test_demo_twin_s98_gap.py::test_a_gap_is_closed"]
+    assert xfail_problems(tmp_path) == [
+        "test_demo_twin_s98_gap.py::test_a_gap_is_closed: a strict xfail twin test "
+        "the register does not name"
+    ]
+    _write(tmp_path, REGISTER_RELATIVE, "| 25-98-F1 | test_a_gap_is_closed | owner-open | y |\n")
+    assert xfail_problems(tmp_path) == []
