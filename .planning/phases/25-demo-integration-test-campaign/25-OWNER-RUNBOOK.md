@@ -162,7 +162,379 @@ Reply with (no secrets):
 The assistant copies your reply verbatim into "Results (owner run)" below and sets a status only from your reply
 and the evidence files; a step with no evidence stays NOT_OBSERVED.
 
-<!-- gsd:write-continue -->
+## 8. Campaign steps S02 to S19 (the safe order)
+
+Run these after session 1 passed, in this order, on session dates you choose (decision Q-G; no plan sets a
+date). You may stop after any step and continue in a later session from the next row. Only the last row,
+S12, has a hard rule: it is the last step of its UTC day.
+
+### 8.1 Clean-up (used by every step that says "clean-up")
+
+Run it after any step that leaves state (catalog `leaves_state` = yes: S12, S15, S16, S18) and after any
+failed or interrupted step, once the Demo UI shows no open position, order or algo order:
+
+```powershell
+$env:PYTHONPATH = "."; uv run python scripts/demo_clear.py
+```
+
+It needs `LIVE_RUNTIME_MODE=DEMO` and a database URL, asks for the phrase `DEMO IS FLAT`, refuses while an
+execution intent is unresolved, closes the plan behind every open Demo approval (APPROVED to EXPIRED, one
+journal row each, about 26 minutes saved) and leaves a persisted SAFE_MODE with the operator id
+`owner-demo-clear`. The reservation of a closed plan is released by the live process's own sweep at its next
+start, not by the script. If SAFE_MODE is still on afterwards, leave it with `/safemode_exit` and `/confirm`
+on the live bot (RUNBOOK 21.1a) before the next step.
+
+### 8.2 Step index
+
+| Step | Id | Test file | Leaves state | Real orders on Demo |
+|---|---|---|---|---|
+| 1 | S06 | `tests/demo/test_demo_s06_replay.py` | no | one far resting entry, cancelled |
+| 2 | S04 | `tests/demo/test_demo_s04_stop_rejected.py` | no | entry fill, one reduce-only close |
+| 3 | S03 | `tests/demo/test_demo_s03_crossed_stop.py` | no | variant (ii): entry fill, one reduce-only close |
+| 4 | S07 a, b, c | `tests/demo/test_demo_s07_restart_cuts.py` | no | entry, fill, stop, close; cut b leaves a real position without a stop for the restart time |
+| 5 | S05 | `tests/demo/test_demo_s05_cancel_race.py` | no | one entry and its cancel |
+| 6 | S02 | `tests/demo/test_demo_s02_partial_fill.py` | no | entry fill, stop, legs, close |
+| 7 | S09 | `tests/demo/test_demo_s09_clock_skew.py` | no | none (nothing may be placed) |
+| 8 | S17 | `tests/demo/test_demo_s17_stale_feed.py` | no | one resting entry |
+| 9 | S08 | `tests/demo/test_demo_s08_stream_loss.py` | no | per the scenario; real stream reconnection |
+| 10 | S10 | `tests/demo/test_demo_s10_rate_limit.py` | no | none or one far entry (see the step) |
+| 11 | S19 | `tests/demo/test_demo_s19_rest_gate_cli.py` | no | one entry placed and cancelled |
+| 12 | S11 | `tests/demo/test_demo_s11_db_outage.py` | no | entry fill, one reduce-only close |
+| 13 | S13 | `tests/demo/test_demo_s13_margin_liquidation.py` | no | one far entry placed and cancelled |
+| 14 | S14 | `tests/demo/test_demo_s14_safe_mode.py` | no | one far GTD LIMIT entry whose answer is dropped |
+| 15 | S15 | `tests/demo/test_demo_s15_foreign_order.py` | yes | actor orders `t25a-`, a system entry |
+| 16 | S16 | `tests/demo/test_demo_s16_manual_close.py` | yes | system entry, an actor reduce-only close |
+| 17 | S18 | `tests/demo/test_demo_s18_unprotected.py` | yes | entry fill, reduce-only close after faults |
+| 18 | S12 | `tests/demo/test_demo_s12_daily_stop.py` | yes | a resting entry, then DAILY_STOP |
+
+The rows marked as blocked by an open strict-xfail twin in precondition P6 (S07 cut b, S11, S12) stay in their
+place; run them after the gap is closed, or record your waiver.
+
+### S06 Duplicate or replayed APPROVE and CONFIRM
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s06_replay.py`
+- Expected result: `1 passed`. One approved far request, two concurrent CONFIRM presses through the runner's
+  handler, then a replayed APPROVE and CONFIRM. Exactly one `place_entry` POST leaves the process (counted at
+  the fault edge) and the journal holds one non-refused placement outcome. The resting entry is cancelled by
+  its client id at the end.
+- Labels: DEMO_OBSERVED (nothing is injected). Evidence: `25-DEMO-SCENARIO-EVIDENCE-S06-*.json`.
+- Clean-up: none expected; after a failure see 8.1.
+- Status: NOT_OBSERVED
+
+### S04 Stop rejected after a fill, reduce-only close
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s04_stop_rejected.py`
+- Expected result: `1 passed`. The stop rejection (code -2021) is injected at the adapter edge before
+  anything is sent. The coordinator reacts for real: one reduce-only MARKET close under an `xc-` client id (a
+  real Demo order), the plan ends FLAT, the critical alerts are journaled, SAFE_MODE is left through
+  `/safemode_exit` and `/confirm`, and the account ends clean.
+- Labels: DEMO_FAULT_INJECTED for the stop rejection, DEMO_OBSERVED for the close and the final state.
+  Evidence: `25-DEMO-SCENARIO-EVIDENCE-S04-*.json`.
+- Clean-up: after a failure close any BTCUSDT position in the Demo UI, then 8.1.
+- Status: NOT_OBSERVED
+
+### S03 Price crossed the stop before placement (-2021)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s03_crossed_stop.py`
+- Expected result: `1 passed`. Variant (i): the mark the pre-placement check reads is moved past the stop at
+  CONFIRM; the real check refuses and nothing is sent. Variant (ii): after a fill the stop payload is mutated to
+  the wrong side of the mark and sent to Demo. The exchange's own answer (research assumption A2: -2021) is
+  recorded by code and class name; it is DEMO_OBSERVED only if Binance really answered -2021, otherwise
+  NOT_OBSERVED with the code recorded (outcome COMPLETE_WITH_GAPS). The coordinator then reacts as in S04
+  (one reduce-only close).
+- Labels: DEMO_FAULT_INJECTED for the injections, DEMO_OBSERVED for the exchange answer when it comes, else
+  NOT_OBSERVED. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S03-*.json`.
+- Clean-up: after a failure close any BTCUSDT position in the Demo UI, then 8.1.
+- Status: NOT_OBSERVED
+
+### S07 Restart mid-flow, the three cuts (a, then b, then c)
+
+Each cut builds the real process, crashes it at one point (no drain, the listenKey kept) and starts a second
+process over the same database and the same exchange. Three commands, one per cut:
+
+- Cut a, before the entry answer is known:
+  `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s07_restart_cuts.py -k cut_a`
+  Expected: the lost answer and the failed in-process probe are injected; the second process probes once by
+  client id, finds the entry and tracks it; one `place_entry` across both processes (never re-sent, D080).
+  A restart that inherits SAFE_MODE ends admitted but with entries disabled (finding 25-12-F2): the scenario
+  leaves SAFE_MODE with `/safemode_exit`. Labels: DEMO_FAULT_INJECTED.
+- Cut b, between the fill and the stop:
+  `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s07_restart_cuts.py -k cut_b`
+  Expected: the stop placement is held and the process crashes; the second process protects or closes the
+  position. This leaves a REAL Demo position without a stop for the restart time: do not leave the machine
+  until it ends. Labels: DEMO_FAULT_INJECTED. A late restart (after `max_unprotected_ms`) is finding 25-12-F1
+  (strict-xfail twin; decision question in `25-OWNER-DECISIONS.md`).
+- Cut c, after the fill and the confirmed stop:
+  `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s07_restart_cuts.py -k cut_c`
+  Expected: the second process rehydrates the plan protected, sends nothing, and its first reconcile is clean.
+  Labels: DEMO_OBSERVED.
+- Every cut ends flat with a clean account. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S07-*.json` (one file per cut).
+- Clean-up: after a failure close the position in the Demo UI, then 8.1.
+- Status: cut a NOT_OBSERVED, cut b NOT_OBSERVED, cut c NOT_OBSERVED
+
+### S05 Cancel racing a fill
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s05_cancel_race.py`
+- Expected result: `1 passed`. The "fill" request is marketable; right after the entry is acknowledged the
+  scenario sends the entry cancel of the expiry path once. The race step is DEMO_OBSERVED only if the entry
+  rested (NEW) before the cancel and the exchange then showed it filled; otherwise NOT_OBSERVED with the
+  observed order of events and the outcome COMPLETE_WITH_GAPS (the twin is the deterministic proof). Either
+  way the fill is protected or the entry is cancelled, no second entry is placed and the account ends clean.
+- Labels: DEMO_OBSERVED or NOT_OBSERVED. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S05-*.json`.
+- Clean-up: after a failure close any position in the Demo UI, then 8.1.
+- Status: NOT_OBSERVED
+
+### S02 Partial fill
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s02_partial_fill.py`
+- Expected result: `1 passed`, outcome COMPLETE_WITH_GAPS. Nothing is scripted: the entry fills when Binance
+  fills it. Demo cannot force a partial fill, so the `partial_fill` step is expected NOT_OBSERVED with its
+  reason; the protection assertions (stop after the first fill, REST-confirmed, remainder cancelled, legs sized
+  from the position, flat at the end) are checked on the real fill either way. The twin is the proof of the
+  partial branch (DVM-03).
+- Labels: NOT_OBSERVED for the partial fill (DEMO_OBSERVED only if it really was partial), DEMO_OBSERVED for
+  the protection steps. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S02-*.json`. The best-effort exchange probe is in
+  section 9.
+- Clean-up: after a failure close any position in the Demo UI, then 8.1.
+- Status: NOT_OBSERVED
+
+### S09 Clock skew
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s09_clock_skew.py`
+- Precondition: P4 (a synchronised clock; the skew is added on top of the real offset).
+- Expected result: `1 passed`. The skew (twice the larger ratified drift limit) is injected into the process
+  clock only. The real drift guard measures it against Binance's server time and blocks new entries
+  (`OUT_OF_LIMITS`), so a request that is approved and confirmed places nothing. Research assumption A3: the
+  SDK stamps requests from the system clock, so the signed calls themselves should succeed; if Binance answers
+  -1021 the scenario records that and still asserts nothing was placed. The exchange-side -1021 is the probe
+  case in section 9.
+- Labels: DEMO_FAULT_INJECTED for the skew, DEMO_OBSERVED for the guard's reaction. Evidence:
+  `25-DEMO-SCENARIO-EVIDENCE-S09-*.json`.
+- Clean-up: after a failure see 8.1 (an approved plan may stay APPROVED).
+- Status: NOT_OBSERVED
+
+### S17 Stale feed drill (G2-016)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s17_stale_feed.py`
+- Expected result: `1 passed`. A mark reading older than twice the configured mark-price age is injected (nothing
+  is sent for it). The process fails the market-feed health check, refuses the CONFIRM at the pre-placement
+  mark gate and, with a resting entry, enters SAFE_MODE `STALE_FEED` with a STALE_DATA alert. The fault is
+  cleared, the operator leaves SAFE_MODE through `/safemode_exit`, the account ends clean.
+- Labels: DEMO_FAULT_INJECTED. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S17-*.json`.
+- Clean-up: after a failure cancel the BTCUSDT order in the Demo UI, leave SAFE_MODE (RUNBOOK 21.1a), then 8.1.
+- Status: NOT_OBSERVED
+
+### S08 WS disconnect and listenKey expiry
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s08_stream_loss.py`
+  Optional real listenKey expiry (wall-clock slow, more than the 60 minute key life; keep the machine awake):
+  `$env:TRADING_DEMO_RUN="1"; $env:TRADING_DEMO_SLOW="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s08_stream_loss.py`
+  (`TRADING_DEMO_SLOW` is the S08-only switch of section 5.)
+- Expected result: `1 passed`. A "close" event of the current connection is posted into the supervisor's own
+  listener, so the supervisor runs its own rebuild (a real keepalive, a new websocket connection, a REST
+  snapshot). The states it passes through (UNKNOWN, SYNCING, LIVE) are recorded for the SAFE_MODE exit row 7.
+  Without `TRADING_DEMO_SLOW=1` the real-expiry step is NOT_OBSERVED with its reason and the outcome is
+  COMPLETE_WITH_GAPS. Expect the observation of finding 25-13-F1: after a recovery that halts (reconnect
+  exhausted, a ban, a hard listenKey failure) nothing in `src` requests a resync, so only a process restart
+  (RUNBOOK 22.5) recovers the stream.
+- Labels: DEMO_FAULT_INJECTED for the forced drop and for the keepalive failures, NOT_OBSERVED for a real
+  expiry unless the slow switch ran. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S08-*.json`.
+- Clean-up: after a failure see 8.1.
+- Status: NOT_OBSERVED (the slow variant: NOT_TESTED until run)
+
+### S10 Rate limit (an injected 429 only)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s10_rate_limit.py`
+- A real 429 or 418 is never provoked: the answer is raised under the real adapter before the SDK sends
+  anything, with a short Retry-After derived from the loaded limits.
+- Expected result: `1 passed`. The real gate records and persists the pause, the CONFIRM is refused with no
+  order sent, and entries work again after the pause. The 418 variant is twin-only here; S19 runs the Demo 418
+  variant and clears it at once.
+- Labels: DEMO_FAULT_INJECTED (never an observed 429 or 418). Evidence: `25-DEMO-SCENARIO-EVIDENCE-S10-*.json`.
+- Clean-up: after a failure see 8.1.
+- Status: NOT_OBSERVED
+
+### S19 REST gate operator commands after a false 418 (P20-DEMO)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s19_rest_gate_cli.py`
+- Expected result: `1 passed`. A false 418 is injected under the real adapter (never provoked) and persisted
+  by the real gate; the process is stopped in order (RUNBOOK 22.5 shape); `rest_gate_cli status` shows the
+  ban; `clear` refuses the future deadline; `clear --force` writes a fresh record and its audit lines (a
+  `.clear-audit.jsonl` file beside the state file); the restarted process restores a clear gate; a request is
+  placed and cancelled. The commands run in process and the state file is never edited by hand.
+- IF THE RUN STOPS AFTER THE INJECTION AND BEFORE THE CLEAR, the gate state file still holds a ban that lasts
+  days (the real 259200 s fallback wait). Before any other scenario: stop the process, then run
+  `uv run python -m src.ops.rest_gate_cli status --path <state dir>/<gate state file>` and
+  `uv run python -m src.ops.rest_gate_cli clear --path <state dir>/<gate state file> --force --operator-id <id> --reason "Phase 25 S19 false restriction"`
+  (RUNBOOK 21.3). Do not edit the file by hand.
+- Labels: DEMO_FAULT_INJECTED. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S19-*.json` and the clear-audit file name.
+  Note finding 25-14-F2: `rest_gate_cli` has no running-process check; stop the trading process first.
+- Clean-up: after a failure the gate clear above, then 8.1.
+- Status: NOT_OBSERVED
+
+### S11 DB outage during a risk-reducing close
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s11_db_outage.py`
+- Expected result: `1 passed`. The first stop placement after the fill is rejected at the adapter edge (-2021)
+  and, at the same instant, the journal store raises `StoreUnavailable` (a test proxy over the real PostgreSQL
+  store; the database itself stays up). The real process still sends ONE reduce-only MARKET close (a real Demo
+  order), ends flat, writes the audit rows the journal refused to the local spill and enters SAFE_MODE
+  `DB_FAILURE`. The fault is cleared, the operator leaves SAFE_MODE through `/safemode_exit`, entries work
+  again and the next start replays the spill into the journal. Expect finding 25-14-F1 until it is decided:
+  the coordinator's protection-transition rows are not spilled, so the closed plan's reservation stays counted
+  and the next request can be refused `CLUSTER_CAP_REJECT`.
+- Labels: DEMO_FAULT_INJECTED for the rejection and the journal fault, DEMO_OBSERVED for the close. Evidence:
+  `25-DEMO-SCENARIO-EVIDENCE-S11-*.json`.
+- Clean-up: after a failure close any BTCUSDT position in the Demo UI, then 8.1.
+- Status: NOT_OBSERVED
+
+### S13 Liquidation-guard and available-margin rejections
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s13_margin_liquidation.py`
+- Expected result: `1 passed`. Two readings are injected at the adapter edge: an available balance below the
+  margin the plan needs, and a leverage-bracket table whose liquidation price lies between the entry and the
+  stop. The real guards refuse the CONFIRM before any entry or symbol-configuration POST. A normal request is
+  then placed and cancelled. The bad-bracket case runs last and waits the `margin.max_bracket_age_ms` bound
+  once, in real time (see `config/execution/execution-limits-v1.toml`; 60000 ms when this was written), so the
+  run has one silent minute. The exchange-side -2019 is not part of this test: it is the probe case
+  `insufficient_margin_order` (Demo-observed 2026-10-24).
+- Labels: DEMO_FAULT_INJECTED for the two readings, DEMO_OBSERVED for the normal request. Evidence:
+  `25-DEMO-SCENARIO-EVIDENCE-S13-*.json`.
+- Clean-up: after a failure cancel any BTCUSDT order in the Demo UI, then 8.1.
+- Status: NOT_OBSERVED
+
+### S14 SAFE_MODE entry and operator exit
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s14_safe_mode.py`
+- Expected result: `1 passed`. The answer of the entry POST is dropped after it was sent (the order is really
+  on Demo, a GTD LIMIT far from the market) and the probe by client id fails. The real process leaves the entry
+  UNKNOWN, enters SAFE_MODE `ENTRY_STATE_UNKNOWN`, keeps its reconcile and health ticks running, refuses the
+  operator exit, resolves the entry through its own reconcile probe once the fault is cleared, refuses a CONFIRM
+  while SAFE_MODE stands and accepts `/safemode_exit` plus `/confirm <token>` (the token lives 60 s). SAFE_MODE
+  is durable on Demo, so the exit is part of the run. Note finding 25-15-F4: after the reconcile resolves the
+  entry the standing reason reads `UNRESOLVED_EXECUTION_INTENT`; the journal keeps the original row.
+- Labels: DEMO_FAULT_INJECTED for the dropped answer, DEMO_OBSERVED for the reaction. Evidence:
+  `25-DEMO-SCENARIO-EVIDENCE-S14-*.json`.
+- Clean-up: after a failure leave SAFE_MODE by hand (RUNBOOK 21.1a), cancel any BTCUSDT order in the Demo UI,
+  then 8.1.
+- Status: NOT_OBSERVED
+
+### S15 Foreign order and doubled position (leaves state)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s15_foreign_order.py`
+- Expected result: `1 passed`. A test actor makes REAL Demo orders on BTCUSDT outside the system: one far
+  resting BUY LIMIT, then, on top of a protected system position, one marketable BUY LIMIT of the smallest valid
+  size and a reduce-only MARKET close of the same quantity. The actor's client ids start with `t25a-`. Reconcile
+  reports the foreign order and the doubled position, alerts and enters SAFE_MODE (it acts on nothing: findings
+  25-16-F2 and 25-16-F3); the run leaves SAFE_MODE through the operator exit.
+- Labels: DEMO_OBSERVED (the actor steps carry the detail "test actor"). Evidence:
+  `25-DEMO-SCENARIO-EVIDENCE-S15-*.json`.
+- Clean-up: ALWAYS 8.1 after this step. If the run stopped early: the actor's resting order is cancelled by its
+  own id, but an actor position is NOT closed automatically: close any BTCUSDT order and position in the Demo
+  UI, leave SAFE_MODE with `/safemode_exit` and `/confirm`, then 8.1.
+- Status: NOT_OBSERVED
+
+### S16 Manual close outside the system (G2-016; leaves state)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s16_manual_close.py`
+- Expected result: `1 passed`. A system plan is filled and protected; then the test actor closes the whole
+  position with a REAL reduce-only MARKET order made outside the system (client id `t25a-close-...`), exactly
+  what you closing in the Binance UI does. The scenario reads the final status of the stop and both
+  take-profit legs from the exchange and records each verbatim (the 2026-10-22 record says the closePosition
+  legs ended EXPIRED, none orphaned; the status of the explicit-quantity TP1 is unrecorded). The plan ends FLAT
+  with no close of the system's own, reconcile reports no divergence, no leg stays open, and a new request is
+  placed once the first plan is expired (the scenario applies the same APPROVED to EXPIRED step as
+  `scripts/demo_clear.py`; finding 25-16-F1: without it the symbol is blocked about 26 minutes).
+- Labels: DEMO_OBSERVED. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S16-*.json`.
+- Clean-up: ALWAYS 8.1 after this step; after a failure close the position and the algo orders in the Demo UI
+  first.
+- Status: NOT_OBSERVED
+
+### S18 Unprotected-position drill (G2-016; leaves state)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s18_unprotected.py`
+- Expected result: `1 passed`. The stop rejection (-2021) and the rejection of every reduce-only close (-2022)
+  are injected at the adapter edge (nothing is sent for them). With the position open and unprotected the real
+  coordinator holds CLOSE_FAILED, blocks entries, retries the close at every step and journals the critical
+  alerts. `/close` then `/confirm` are sent through the real handler and the code answers
+  CLOSE_ALREADY_REQUIRED (finding 25-11-F1). Then the close fault is lifted and the coordinator's own retry
+  sends a real reduce-only MARKET close; the plan ends FLAT, SAFE_MODE is left through `/safemode_exit`, the
+  account ends clean.
+- If it fails, a real Demo position without a stop may stay open with SAFE_MODE on: the recorded failure step
+  names the recovery. Close the position and orders in the Binance Demo UI, then 8.1.
+- Labels: DEMO_FAULT_INJECTED for the rejections, DEMO_OBSERVED for the final close. Evidence:
+  `25-DEMO-SCENARIO-EVIDENCE-S18-*.json`.
+- Clean-up: ALWAYS 8.1 after this step.
+- Status: NOT_OBSERVED
+
+### S12 DAILY_STOP (run it LAST; leaves state until 00:00 UTC)
+
+- Command: `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s tests/demo/test_demo_s12_daily_stop.py`
+- Run this step last in its session and last of the UTC day: DAILY_STOP holds for the UTC day. Once the day
+  state is latched, every later CONFIRM on this Demo account is refused `DAILY_STOP_BLOCK` until 00:00 UTC, so
+  no other scenario can run again that day. The scenario refuses to start when the day is already latched.
+- Expected result: `1 passed`. The loss rows are injected at the adapter edge, sized from the loaded daily stop
+  rate and the day base the process persisted; no real loss is made. A resting entry placed before the stop is
+  expected to be cancelled with the stops kept and an alert, but the code does not do that in a live process
+  today (finding 25-15-F1, strict-xfail twin; the run records what it sees). A new request still gets a card
+  and its APPROVE succeeds; only the CONFIRM is refused (finding 25-15-F2).
+- Labels: DEMO_FAULT_INJECTED. Evidence: `25-DEMO-SCENARIO-EVIDENCE-S12-*.json`.
+- Clean-up: 8.1 after this step; if the run stopped early close any open BTCUSDT order in the Demo UI first.
+  The day latch itself ends at 00:00 UTC; nothing clears it earlier.
+- Status: NOT_OBSERVED
+
+## 9. S20 observation-only items (probe cases, owner opt-in)
+
+S20 has no test and no twin. These are exchange questions only Demo can answer. Each is an opt-in case of
+`scripts/demo_probe.py`, enabled by its own key in your probe limits file (DEMO-EVIDENCE-PLAN, Step 0). They
+send real Demo orders and are run by you only. Command, one case at a time (the typed phrase is
+`DEMO PROBE BTCUSDT`, the symbol of your file; the run needs an interactive terminal):
+
+```powershell
+uv run python -m scripts.demo_probe --environment DEMO --probe-limits-file <owner probe limits file> --evidence-dir .planning/phases/25-demo-integration-test-campaign/evidence --only <case id> --execute
+```
+
+The probe cleans up after every case (cancel-all, one reduce-only close, verify flat) and ends `CLEANUP_FAILED`
+if it cannot: then clean the account by hand and run `scripts/demo_clear.py`. An `--only` run reports
+`acceptance.overall` FAIL by design; read the per-case verdicts. Run the cases in the order below, not during
+a pytest session (one process per Demo account).
+
+| Case id (key in your file) | Question | Expected | Status |
+|---|---|---|---|
+| `partial_fill_attempt` (`partial_fill_attempt`) | P3: can Demo produce a real partial fill (best effort) | NOT_OBSERVED is a valid result; it can stay so for ever on Demo (DVM-03) | NOT_OBSERVED |
+| `entry_cancel_fill_race` (`cancel_fill_race`, needs `race_repeats`) | P7: a cancel racing a fill (best effort) | OBSERVED only if a race really happens | NOT_OBSERVED |
+| `timestamp_outside_recv_window` (`recv_window_error`) | the exchange side of S09: one read-only signed GET with a stale timestamp answers -1021 | OBSERVED with the code | NOT_OBSERVED |
+| `gtd_entry_expiry_status` (`gtd_expiry`, needs `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds`) | A2: the terminal status of a GTD entry after its goodTillDate (DVM-22 saw NEW 840 s after expiry and no terminal status) | OBSERVED with the terminal status, or NOT_OBSERVED again; waits more than 10 minutes, so run it last of the probe cases | NOT_OBSERVED |
+
+Items that are already recorded or permanent, with no step to run:
+
+- A3 (closePosition legs after the position closes), B2/B3 (same-id stop re-place, -4116 and the -2013 timing)
+  and the stream states of the SAFE_MODE exit row 7 are in `docs/operations/DEMO_VS_MAINNET.md` (rows DVM-19 to
+  DVM-21 and DVM-25) with their evidence. S08 and S16 add system-level runs.
+- A real HTTP 418 that outlasts 259200 s (DVM-28) and the 429/418 queue order against the real exchange
+  (DVM-29) are permanent NOT_OBSERVED rows: the rule "a real 418 or 429 is never provoked" is the owner decision
+  of 2026-10-22. They are never a step in this runbook. The injected runs of S10 and S19 are fault-injected, not
+  exchange behaviour. The real -1003 text (DVM-30) can be recorded only if a ban ever happens by accident.
+
+## 10. Optional variants (not part of any status until you run them)
+
+All are NOT_TESTED until run. None blocks the campaign.
+
+- Telegram transport on the VPS: re-run `uv run python -m scripts.demo_rehearsal --execute` (typed phrase
+  `DEMO SMOKE BTCUSDT`) from the machine that will host the process, with the live service stopped and the
+  account flat. Only on a machine that is not the Phase 16 soak host, or after you confirmed the soak finished.
+- Real taps instead of the programmatic owner: add `$env:TRADING_DEMO_OWNER="console"` to any step above.
+- A real PostgreSQL stop for S11 (`docker compose stop postgres` on your own machine while the close runs): the
+  S11 test keeps the database up and injects the journal fault instead; this variant checks the same reaction
+  against a real outage. Follow RUNBOOK 22.5 before and after, and do it only on a machine you own.
+
+## 11. Restarts of a live process (R-22 interim)
+
+R-22 (cancel-on-stop for the live process) is an owner decision and is open. Until it is decided, any stop or
+restart of a live process during the campaign (a `live` compose service, not the pytest harness) follows
+`docs/operations/RUNBOOK.md` 22.5: `/disable_entries`, then `/status` until `protections: 0 open of N tracked`,
+then stop it. `deploy/update.sh` refuses while the live service runs. After the restart read `/status` before
+sending any new signal. A restart you did not plan is a defect: record it in the Defects section.
 
 ## Evidence template
 
