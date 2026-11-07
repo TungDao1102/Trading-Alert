@@ -793,7 +793,11 @@ DECISION_EVIDENCE: dict[str, tuple[str, tuple[Evidence, ...]]] = {
     ),
     "D-14": (
         "25-17",
-        (_d(f"{_PLANNING}/25-CONTEXT.md", "**D-14 [auto]:**"),),
+        (
+            _d(f"{_PLANNING}/25-CONTEXT.md", "**D-14 [auto]:**"),
+            _d(f"{_PLANNING}/25-DEFERRED.md", "| R-23 |"),
+            _d(f"{_PLANNING}/25-DEFERRED.md", "| R-28 |"),
+        ),
     ),
 }
 
