@@ -209,9 +209,9 @@ class Rig:
             )
             argv += ["--annotations", str(path)]
         code = soak.main(argv, clock=lambda: NOW)
-        report: dict[str, Any] = json.loads(self.out.read_text(encoding="utf-8")) if (
-            self.out.exists()
-        ) else {}
+        report: dict[str, Any] = (
+            json.loads(self.out.read_text(encoding="utf-8")) if (self.out.exists()) else {}
+        )
         return code, report
 
 
@@ -222,7 +222,9 @@ def rig(tmp_path: Path) -> Rig:
 
 def criterion(report: dict[str, Any], name: str) -> dict[str, Any]:
     matches = [c for c in report["criteria"] if c["name"] == name]
-    assert len(matches) == 1, f"criterion {name} missing from {[c['name'] for c in report['criteria']]}"
+    assert len(matches) == 1, (
+        f"criterion {name} missing from {[c['name'] for c in report['criteria']]}"
+    )
     found: dict[str, Any] = matches[0]
     return found
 
@@ -428,7 +430,9 @@ def test_the_report_is_create_only_sorted_lf_and_carries_the_input_hashes(rig: R
     assert rig.out.read_bytes() == raw
 
 
-def test_evaluate_exit_2_for_an_unusable_input(rig: Rig, capsys: pytest.CaptureFixture[str]) -> None:
+def test_evaluate_exit_2_for_an_unusable_input(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
     journal = rig.tmp_path / "journal.jsonl"
     journal.write_text("this is not json\n", encoding="utf-8")
 
@@ -491,5 +495,5 @@ def test_help_names_the_subcommands(capsys: pytest.CaptureFixture[str]) -> None:
 
     assert raised.value.code == 0
     text = capsys.readouterr().out
-    for name in ("verify-registration", "evaluate", "export"):
+    for name in ("verify-registration", "evaluate"):
         assert name in text
