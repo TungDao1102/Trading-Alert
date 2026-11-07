@@ -373,7 +373,7 @@ def recovery_window_seconds(env: Any) -> int:
     return 2 * int(env.assembly.binance_limits.stream.reconnect_max_delay_seconds)
 
 
-async def _card_and_approve(env: Any, recorder: ScenarioRecorder) -> Any:
+async def card_and_approve(env: Any, recorder: ScenarioRecorder) -> Any:
     """Inject a `far` request, wait for the card and APPROVE it (no CONFIRM)."""
     first = await dr._inject(env, recorder, SCENARIO_FAR, "signal")
     wiring = env.wiring
@@ -428,7 +428,7 @@ def placement_decisions(journal: Any, shadow: Any, trade_plan_id: str) -> list[d
     return rows
 
 
-async def _placement_decision(env: Any, first: Any) -> list[dict[str, Any]]:
+async def placement_decision(env: Any, first: Any) -> list[dict[str, Any]]:
     wiring = env.wiring
     rows: list[dict[str, Any]] = await env.assembly.executor.read(
         placement_decisions, wiring.stores.journal, wiring.stores.shadow, first.trade_plan_id
@@ -436,7 +436,7 @@ async def _placement_decision(env: Any, first: Any) -> list[dict[str, Any]]:
     return rows
 
 
-async def _expire_plan(env: Any, first: Any) -> None:
+async def expire_plan(env: Any, first: Any) -> None:
     """APPROVED -> EXPIRED (DOMN-04), so the approval no longer holds the symbol."""
     await env.assembly.executor.write(
         env.wiring.stores.entities.transition_trade_plan,
@@ -446,7 +446,7 @@ async def _expire_plan(env: Any, first: Any) -> None:
     )
 
 
-async def _ticks(env: Any, count: int = dr.SMOKE_REPLAY_SETTLE_TICKS) -> None:
+async def ticks(env: Any, count: int = dr.SMOKE_REPLAY_SETTLE_TICKS) -> None:
     for _ in range(count):
         await env.tick()
 
@@ -469,7 +469,7 @@ def _exit_refusals(env: Any) -> list[str]:
     return refusals
 
 
-async def _leave_safe_mode(env: Any, recorder: ScenarioRecorder, name: str) -> None:
+async def leave_safe_mode(env: Any, recorder: ScenarioRecorder, name: str) -> None:
     """The operator exit (RUNBOOK 21.1a) once the stream is LIVE; SAFE_MODE must be off after."""
     wiring = env.wiring
     if wiring.safe_mode.in_safe_mode:
@@ -519,7 +519,7 @@ def _snapshot_calls(env: Any) -> int:
     return len(env.faults.calls_to("snapshot_positions"))
 
 
-def _protection_state(env: Any, plan_hash: str) -> str | None:
+def protection_state(env: Any, plan_hash: str) -> str | None:
     view = env.wiring.coordinator.protection_of(plan_hash)
     return None if view is None else str(view.state.value)
 
@@ -646,11 +646,11 @@ async def _twin_sequence(
     )
 
     # ---- a CONFIRM during the gap places nothing; the silence enters SAFE_MODE ----------------- #
-    first = await _card_and_approve(env, recorder)
+    first = await card_and_approve(env, recorder)
     await env.owner.act("confirm", short_id=first.short_id, note="")
-    await _ticks(env)
+    await ticks(env)
     placed = place_entry_calls(env)
-    decisions = await _placement_decision(env, first)
+    decisions = await placement_decision(env, first)
     gap["place_entry_calls"] = placed
     gap["placement_refusal"] = decisions[-1]["reason"] if decisions else None
     if placed != 0 or not decisions or not decisions[-1]["refused"]:
@@ -687,7 +687,7 @@ async def _twin_sequence(
 
     # ---- the exit is refused while the stream is not LIVE (exit row 7) ------------------------ #
     await env.owner.act("safemode_exit")
-    await _ticks(env, 2)
+    await ticks(env, 2)
     refused = bool(wiring.safe_mode.in_safe_mode) and _stream_state(env) is not StreamState.LIVE
     gap["exit_refused_while_not_live"] = refused
     gap["exit_refusals"] = _exit_refusals(env)
@@ -706,7 +706,7 @@ async def _twin_sequence(
     mark = len(watcher.transitions)
     rebuilds_before = trigger.calls().get("rebuild", 0)
     await env.pause(recovery_window_seconds(env))
-    await _ticks(env, 2)
+    await ticks(env, 2)
     window = {
         "state": _stream_state(env).value,
         "new_transitions": len(watcher.transitions) - mark,
@@ -728,8 +728,8 @@ async def _twin_sequence(
 
     # ---- back to LIVE, the documented exit, then entries are allowed again -------------------- #
     await _restore_stream(env, recorder, trigger, watcher)
-    await _leave_safe_mode(env, recorder, STEP_SAFE_MODE_EXIT)
-    await _expire_plan(env, first)
+    await leave_safe_mode(env, recorder, STEP_SAFE_MODE_EXIT)
+    await expire_plan(env, first)
     second = await place_approved_entry(env, recorder, SCENARIO_FAR)
     if place_entry_calls(env) != 1:
         raise dr._smoke_fail(
@@ -744,8 +744,8 @@ async def _twin_sequence(
 
     # ---- an order change the stream never delivered is found by the REST reconcile ------------ #
     await _catch_up(env, recorder, trigger, watcher, second)
-    await _leave_safe_mode(env, recorder, STEP_SAFE_MODE_EXIT)
-    await _expire_plan(env, second)
+    await leave_safe_mode(env, recorder, STEP_SAFE_MODE_EXIT)
+    await expire_plan(env, second)
 
     # ---- listenKeyExpired restarts the stream and reconciles ----------------------------------- #
     return await _expiry(env, recorder, trigger, watcher)
@@ -761,13 +761,13 @@ async def _catch_up(
     snapshots_before = _snapshot_calls(env)
     await _drop(env, recorder, trigger, watcher)
     await trigger.change_order_during_gap(env, first)
-    await _ticks(env, 2 * dr.SMOKE_REPLAY_SETTLE_TICKS)
+    await ticks(env, 2 * dr.SMOKE_REPLAY_SETTLE_TICKS)
     facts: dict[str, Any] = recorder.details.setdefault("catch_up", {})
     facts["stream_items_queued"] = trigger.queued_items()
-    facts["protection_state_in_gap"] = _protection_state(env, first.plan_hash)
+    facts["protection_state_in_gap"] = protection_state(env, first.plan_hash)
     await _restore_stream(env, recorder, trigger, watcher)
-    await _ticks(env)
-    facts["protection_state"] = _protection_state(env, first.plan_hash)
+    await ticks(env)
+    facts["protection_state"] = protection_state(env, first.plan_hash)
     facts["snapshot_calls_before"] = snapshots_before
     facts["snapshot_calls_after"] = _snapshot_calls(env)
     caught = (
@@ -802,7 +802,7 @@ async def _expiry(
     await env.pause(0)
     if not await _wait_state(env, StreamState.LIVE):
         raise dr._smoke_fail(env, recorder, STEP_EXPIRY, "the stream did not return to LIVE")
-    await _ticks(env)
+    await ticks(env)
     seen = [[state, reason] for state, reason in watcher.since(mark)]
     facts: dict[str, Any] = recorder.details.setdefault("expiry", {})
     facts["transitions"] = seen
@@ -837,12 +837,12 @@ async def _early_sequence(
 ) -> str:
     """CONFIRM right after the drop, before any reconcile tick: SAFE_MODE is not on yet."""
     wiring = env.wiring
-    first = await _card_and_approve(env, recorder)
+    first = await card_and_approve(env, recorder)
     await _drop(env, recorder, trigger, watcher)
     verdict = await health_verdict(env, recorder)
     await env.owner.act("confirm", short_id=first.short_id, note="")
     placed = place_entry_calls(env)
-    decisions = await _placement_decision(env, first)
+    decisions = await placement_decision(env, first)
     facts: dict[str, Any] = recorder.details.setdefault("early_confirm", {})
     facts["health_no_trade_at_confirm"] = bool(verdict.is_no_trade)
     facts["place_entry_calls"] = placed
@@ -862,9 +862,9 @@ async def _early_sequence(
         f"the CONFIRM pressed right after the drop, before SAFE_MODE (on: "
         f"{facts['safe_mode_at_confirm']}), placed nothing (refused: {facts['placement_refusal']})",
     )
-    await _expire_plan(env, first)
+    await expire_plan(env, first)
     await _restore_stream(env, recorder, trigger, watcher)
-    await _leave_safe_mode(env, recorder, STEP_SAFE_MODE_EXIT)
+    await leave_safe_mode(env, recorder, STEP_SAFE_MODE_EXIT)
     return dr.OUTCOME_COMPLETE
 
 
@@ -895,9 +895,9 @@ async def _demo_sequence(
         )
     seen = [[state, reason] for state, reason in watcher.since(mark)]
     record_step(env, recorder, STEP_RESTORED, f"the supervisor rebuilt the stream: {seen}")
-    await _ticks(env)
+    await ticks(env)
     snapshots_after = _snapshot_calls(env)
-    state = _protection_state(env, first.plan_hash)
+    state = protection_state(env, first.plan_hash)
     recorder.details["catch_up"] = {
         "snapshot_calls_before": snapshots_before,
         "snapshot_calls_after": snapshots_after,

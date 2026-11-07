@@ -33,7 +33,7 @@ from tests.support.demo_scenarios.harness import (
     ScenarioRecorder,
     build_fake_scenario_env,
 )
-from tests.support.execution_limits import test_only_execution_limits
+from tests.support.execution_limits import test_only_execution_limits as make_test_limits
 from tests.support.live_rig import forbid_real_sleep
 
 FAKE_NOW = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
@@ -113,7 +113,7 @@ async def test_the_stale_age_is_twice_the_configured_bound_never_a_literal(
 
 
 def test_a_limit_that_is_not_configured_is_refused_never_defaulted() -> None:
-    limits = test_only_execution_limits()
+    limits = make_test_limits()
     unset = SimpleNamespace(
         stale_feed_max_mark_price_age_ms=None,
         max_mark_price_age_ms=limits.max_mark_price_age_ms,
@@ -128,10 +128,10 @@ async def test_the_confirm_on_a_stale_pre_placement_mark_is_refused_with_nothing
     env, recorder, _outcome = await _run(tmp_path)
     facts = recorder.details["stale"]
     assert facts["place_entry_calls_at_refusal"] == 0
-    assert facts["refusal_event"] in {"LIVE_PLACEMENT_REFUSED", "LIVE_PLACEMENT_OUTCOME"} or (
-        facts["refusal_event"] == "DEMO_CONFIRM_EXPIRED"
-    )
-    assert facts["refusal_reason"], "the refusal reason is journaled and recorded"
+    # The twin's observation: the CONFIRM recheck of the approval core reads a stale mark as
+    # unavailable and refuses before the placement service writes any row.
+    assert facts["refusal_event"] == "DEMO_CONFIRM_EXPIRED"
+    assert facts["refusal_reason"] == "MARK_PRICE_UNAVAILABLE"
     injected = [c for c in env.faults.calls_to("get_mark_price") if c.get("injected") is True]
     assert injected, "the pre-placement mark was served stale"
     assert len(env.fake.calls_to("place_entry")) == 1, "only the entry after the exit"
