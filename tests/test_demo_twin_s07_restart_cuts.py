@@ -33,6 +33,7 @@ from tests.support.demo_scenarios.harness import (
     ScenarioRecorder,
     build_fake_scenario_env,
 )
+from tests.support.fault_edge import MODE_DROP_RESPONSE
 from tests.support.live_rig import forbid_real_sleep
 
 FAKE_NOW = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
@@ -217,7 +218,7 @@ async def test_cut_a_one_place_entry_across_both_processes(tmp_path: Path) -> No
     assert len(env.fake.calls_to("place_entry")) == 1, "the exchange saw one entry POST"
     assert len(env.faults.calls_to("place_entry")) == 1, "the process sent one entry POST"
     (record,) = env.faults.calls_to("place_entry")
-    assert record["injected"] is True and record["mode"] == "drop_response"
+    assert record["injected"] is True and record["mode"] == MODE_DROP_RESPONSE
     assert env.fake.calls_to("place_algo_protective") == [], "nothing filled, no stop"
     assert env.fake.calls_to("place_market_close") == []
 
@@ -256,7 +257,7 @@ async def test_cut_a_the_second_process_starts_blocked_and_the_owner_leaves_safe
     assert starts[1]["admitted"] is True and starts[1]["plans_restored"] == 1
     facts = recorder.details["cut_a"]
     assert facts["restart_in_safe_mode"] is True and facts["restart_entries_enabled"] is False
-    assert env.rig.wiring.safe_mode.in_safe_mode is False, "left through /safemode_exit"
+    assert facts["safe_mode_after_exit"] is False, "left through /safemode_exit"
     assert env.rig.stores.journal.by_type("SAFE_MODE_EXIT")
 
 
@@ -279,7 +280,8 @@ async def test_cut_a_probe_error_branch_stays_unknown_with_safe_mode_and_never_r
     assert probes[0]["injected"] is True and probes[1]["injected"] is True
     assert len(env.fake.calls_to("place_entry")) == 1
     assert len(env.faults.calls_to("place_entry")) == 1
-    assert env.rig.wiring.safe_mode.in_safe_mode is False, "resolved the documented way"
+    assert facts["safe_mode_after_exit"] is False, "resolved the documented way"
+    assert env.rig.stores.journal.by_type("SAFE_MODE_EXIT")
 
 
 async def test_cut_a_a_second_place_entry_fails_the_step(tmp_path: Path) -> None:
