@@ -77,6 +77,7 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
 - Demo (`BINANCE_DEMO_*`) and live (`BINANCE_LIVE_*`) credential names are separate on purpose; the
   paper runtime refuses to start if any `BINANCE_*` variable is present.
 - No mainnet or LIVE use. Demo smoke/probe scripts (`--execute`) are run by the owner only.
+- `pytest -m demo` (`tests/demo/`, needs `TRADING_DEMO_RUN=1`) is owner-only like `--execute`; agents never run it.
 - Live placement is **disabled** (`src/execution/enablement.py`, `LIVE_ORDERS_DISABLED`).
 - Alembic reads `DATABASE_URL`; `alembic upgrade head` only, `create_all` is never used.
 
