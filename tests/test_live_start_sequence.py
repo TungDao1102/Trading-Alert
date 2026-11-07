@@ -620,6 +620,36 @@ async def test_the_first_install_initializes_the_gate_once_and_writes_the_sentin
     assert gate_row["code"] == "INITIALIZED"
 
 
+async def test_a_first_install_that_holds_before_the_sentinel_step_is_recoverable(
+    tmp_path: Path,
+) -> None:
+    """24-REVIEW WR-01: the gate state and the sentinel appear together, whatever holds next."""
+    harness = Harness(tmp=tmp_path, flag=True)
+    harness.overrides["alembic"] = lambda: AlembicRevisions(current="0014_x", head=HEAD)
+    first = await harness.run()
+
+    assert (first.held_step, first.held_code) == ("ALEMBIC", startup.CODE_ALEMBIC_MISMATCH)
+    assert harness.gate_path.exists()
+    assert startup.check_spill_sentinel(harness.spill_dir), "no gate state without a sentinel"
+
+    # The operator fixes the migration and starts again, without --initialize-gate-state.
+    del harness.overrides["alembic"]
+    harness.flag = False
+    second = await harness.run()
+    assert second.admitted and not second.in_safe_mode and second.enabled
+    assert "SPILL_SENTINEL" not in second.degraded_steps
+
+
+async def test_a_refused_bootstrap_without_an_operator_id_writes_no_sentinel(
+    tmp_path: Path,
+) -> None:
+    harness = Harness(tmp=tmp_path, flag=True, operator=None)
+    outcome = await harness.run()
+    assert outcome.held_code == startup.CODE_OPERATOR_ID_MISSING
+    assert not harness.gate_path.exists()
+    assert not startup.check_spill_sentinel(harness.spill_dir)
+
+
 async def test_a_later_start_with_the_gate_but_no_sentinel_enters_restore_inconsistent(
     tmp_path: Path,
 ) -> None:

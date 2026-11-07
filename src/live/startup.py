@@ -829,6 +829,13 @@ async def _drive(run: _Run) -> None:
                     CODE_OPERATOR_ID_MISSING,
                     "--initialize-gate-state needs --operator-id <id>",
                 )
+            # The sentinel is written BEFORE the gate state exists (atomic, idempotent): if this
+            # first start then holds in ALEMBIC, SAFE_MODE or ENABLEMENT, a later start finds the
+            # gate state and the sentinel together. The other order left a gate state without a
+            # sentinel, which neither `--initialize-gate-state` (GATE_STATE_EXISTS) nor a plain
+            # start (SPILL_SENTINEL_MISSING, SAFE_MODE on every start) could recover (24-REVIEW
+            # WR-01). The SPILL_SENTINEL step below stays the check (and re-writes idempotently).
+            write_spill_sentinel(ports.spill_directory, now_utc=run.now_utc)
             ports.gate_store.initialize(now_utc=run.now_utc, operator_id=operator)
             run.first_install = True
         elif not inspection.exists:
