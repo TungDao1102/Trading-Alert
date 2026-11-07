@@ -36,3 +36,13 @@ Source: `19-execution-plan-binding-price-check/` (19-11, 19-14, 19-15 and 19-16 
 ## 6. Live constraint inputs decide whether any TP is ever placed
 
 - `attach_protectives_to_fill` places TP1 and TP2 only if `snapshot_is_valid_for_live` holds. With real data margin type, leverage and equity have no source before Phases 21 and 22, so every TP placement is refused into `TP_UNAVAILABLE` (stop kept, SAFE_MODE, alert). The Demo rehearsal records this as a known gap (COMPLETE_WITH_GAPS, attestation item 1 NOT_OBSERVED). The live risk-input producer of criterion 1 (constraints, equity, daily loss, open algo count) is what removes it.
+
+## From the Demo rehearsal of 2026-11-06 (owner decision 2026-11-07: deferred)
+
+Source: the Phase 24 Demo rehearsal (evidence `09-DEMO-REHEARSAL-EVIDENCE-smoke-20261106T160307Z.json`, 21 of 21 steps PASSED). Not a decision record; no DECISIONS row is written until the owner takes it up.
+
+## 7. UNTRACKED_SYSTEM_ORDER and SAFE_MODE when the owner closes a position by hand while TP1 still rests
+
+- When the owner closes a position by hand (OPERATOR_CLOSE), the plan becomes CLOSE_REQUIRED. A TP1 order of that plan may still rest on the exchange. Reconcile sees an exchange order with a system client id and no open local intent, reports UNTRACKED_SYSTEM_ORDER and enters SAFE_MODE. The system fails closed; no money is at risk. The cost is a false alert and an owner `/safemode_exit`.
+- Candidate rule (not adopted): in CLOSE_REQUIRED and CLOSE_FAILED, TP legs of that same plan (matched by client id prefix) may rest and are not UNTRACKED. It changes Phase 20 semantics and the pinned cases in `tests/test_reconcile_classify.py`, so it needs a new DECISIONS row (next free id D098) and tests for both directions: that plan's TP allowed, another plan's TP still reported.
+- Owner decision 2026-11-07: leave the current behavior, record it here, decide after Phase 24. The normal path (SL or TP fills by themselves) is not affected.
