@@ -5,9 +5,9 @@ answer was lost, the probe by client id fails: all injected) puts the process in
 ENTRY_STATE_UNKNOWN (D080). While it stands the reconcile and health ticks keep running, no second
 request gets a card and a CONFIRM places nothing, and `/safemode_exit` plus `/confirm` is refused
 (`UNKNOWN_INTENT_PRESENT`). Once the probe works again the reconcile resolver finds the order and
-records it ACKED, which never exits SAFE_MODE (D-15). The operator then cancels the resting entry, a
-CONFIRM is still refused, `/safemode_exit` plus `/confirm <token>` leaves SAFE_MODE and a new request
-is placed. The same `s14_safe_mode.run(env, recorder)` is what the owner's Demo test calls.
+records it ACKED, which never exits SAFE_MODE (D-15). The operator then cancels the resting entry,
+a CONFIRM is still refused, `/safemode_exit` plus `/confirm <token>` leaves SAFE_MODE and a new
+request is placed. The same `s14_safe_mode.run(env, recorder)` is what the owner's Demo test calls.
 
 On the twin every step is SYNTHETIC. On Demo the injection step is DEMO_FAULT_INJECTED, the lost
 answer being the injected trigger; the reactions are the real process's.
@@ -121,7 +121,7 @@ async def test_the_reconcile_and_health_ticks_keep_running_in_safe_mode(tmp_path
     assert monitoring["in_safe_mode_throughout"] is True
     assert monitoring["reconcile_ticks_journaled"] >= 2
     assert monitoring["health_verdicts_journaled"] >= 2
-    assert monitoring["resolver_probes_failed"] >= 1, "the resolver probed and the probe failed"
+    assert monitoring["probes_failed_after_the_first"] >= 1, "the resolver probed and it failed"
 
 
 async def test_no_second_card_is_issued_while_the_entry_is_unresolved(tmp_path: Path) -> None:
