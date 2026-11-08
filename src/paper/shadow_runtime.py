@@ -238,20 +238,24 @@ class FillContext:
 class LedgerRiskInputs:
     """The `RiskInputsProvider` port (`market_inputs.py`) bound to a `ShadowLedger` (D-17).
 
-    Built by `bind_risk_inputs`; the two members are functions over the ledger rather than
+    Built by `bind_risk_inputs`; the three members are functions over the ledger rather than
     methods, so there is no class in `src` that implements the port with invented state
-    (`tests/test_paper_market_inputs.py` keeps asserting that).
+    (`tests/test_paper_market_inputs.py` keeps asserting that). `equity_and_thresholds` is the
+    equity to size with and the absolute portfolio thresholds, both as of the instant
+    (16-DEC-EQUITY-BASE).
     """
 
     open_positions: Callable[[datetime], Sequence[OpenPosition]]
     daily_loss_quote: Callable[[datetime], Decimal | None]
+    equity_and_thresholds: Callable[[datetime], tuple[Decimal, dict[str, Any]]]
 
 
 def bind_risk_inputs(ledger: ShadowLedger) -> LedgerRiskInputs:
-    """The open positions (fills and still-valid reservations) and the simulated daily loss."""
+    """Open positions (fills and still-valid reservations), daily loss, equity and thresholds."""
     return LedgerRiskInputs(
         open_positions=lambda at_utc: tuple(ledger.risk_inputs(at_utc)[0]),
         daily_loss_quote=lambda at_utc: ledger.risk_inputs(at_utc)[1],
+        equity_and_thresholds=lambda at_utc: ledger.equity_and_thresholds(at_utc),
     )
 
 

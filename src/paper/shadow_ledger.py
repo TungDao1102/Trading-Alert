@@ -421,6 +421,19 @@ class ShadowLedger:
             view = self._view_at(now_utc)
             return open_positions_for_risk(view), daily_loss_quote(view)
 
+    def equity_and_thresholds(self, now_utc: datetime) -> tuple[Decimal, dict[str, Any]]:
+        """`(equity, absolute thresholds)` the next risk verdict at `now_utc` sizes and gates with.
+
+        What the engine reads after `roll_to(close)`: the CURRENT ledger equity for sizing
+        (`ledger.equity`) and the absolute portfolio thresholds re-resolved against the UTC
+        day-start equity (`ledger.thresholds`; 16-DEC-EQUITY-BASE). Both come from one `_view_at`
+        under the ledger lock, so they are a consistent pair. The roll is made on a copy and
+        never stored: the stored ledger moves only through bookings.
+        """
+        with self._lock:
+            view = self._view_at(now_utc)
+            return view.equity, dict(view.thresholds)
+
 
 # --------------------------------------------------------------------------- #
 # Reservation lifecycle (Q-C reserve-at-confirm).
