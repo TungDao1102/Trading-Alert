@@ -76,6 +76,7 @@ from src.paper.vocabulary import RuntimeEventType, SourceTag, TaggedBar
 from src.persistence.engine import make_sync_engine
 from src.persistence.paper_runtime_state import PgRuntimeState
 from src.persistence.uow import OperationalDatabase
+from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import OpenPosition
 
 from tests.test_paper_decision_surface import (
@@ -109,10 +110,27 @@ class RiskDouble:
     """The in-test risk-inputs port: fixed positions and daily loss, never a default in src."""
 
     def __init__(
-        self, positions: Sequence[OpenPosition] = (), daily_loss: Decimal | None = Decimal("0")
+        self,
+        positions: Sequence[OpenPosition] = (),
+        daily_loss: Decimal | None = Decimal("0"),
+        *,
+        equity: Decimal | None = None,
+        threshold_equity: Decimal | None = None,
     ) -> None:
         self.positions = tuple(positions)
         self.daily_loss = daily_loss
+        self.equity = equity
+        self.threshold_equity = threshold_equity
+        # `World` attaches the parameter set and the fixture equity once it has loaded them.
+        self.params: Mapping[str, Any] | None = None
+        self.fixture_equity: Decimal | None = None
+
+    def equity_and_thresholds(self, at_utc: datetime) -> tuple[Decimal, dict[str, Any]]:
+        """The sizing equity and the absolute thresholds (the ledger's view at the close)."""
+        assert self.params is not None and self.fixture_equity is not None
+        equity = self.fixture_equity if self.equity is None else self.equity
+        base = equity if self.threshold_equity is None else self.threshold_equity
+        return equity, resolve_absolute_thresholds(parameter_set=self.params, equity=base)
 
     def open_positions(self, at_utc: datetime) -> Sequence[OpenPosition]:
         return self.positions
@@ -177,6 +195,8 @@ class World:
         self.case = self.fx.case
         self.parameter_set: ParameterSet = self.fx.parameter_set
         self.risk = risk or RiskDouble()
+        self.risk.params = self.parameter_set.params
+        self.risk.fixture_equity = Decimal(self.case["account_state"]["equity"])
         self.state = state or InMemoryRuntimeState()
         self.started_at = self.fx.now - timedelta(minutes=1)
         observed = self.fx.setup[0].open_time_utc

@@ -11,22 +11,29 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
 from collections.abc import Callable, Iterator, Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import src.domain.registry as domain_registry
 from src.adapters.binance_public import SymbolFilters
 from src.backtest.costs import cost_rates_from_model, guard_rates_from_params
-from src.core.types import Candle
+from src.backtest.ledger import roll_to
+from src.backtest.records import BOOKING_EXIT, Booking
+from src.core.types import AccountState, Candle
 from src.paper import market_inputs
 from src.paper.freeze import load_parameter_set_at_root
 from src.paper.runtime_config import AccountConfig, ExitCode
+from src.paper.shadow_ledger import ShadowLedger
+from src.paper.shadow_runtime import bind_risk_inputs
 from src.paper.vocabulary import RuntimeEventType
 from src.risk.gating import evaluate_risk
+from src.risk.portfolio import resolve_absolute_thresholds
+from src.risk.types import ConstraintSnapshot
 
 from tests.test_paper_runtime_admission import _Rig
 from tests.test_paper_runtime_loop import (
@@ -78,8 +85,23 @@ class ChangingPublic(FakePublic):
 class RecordingRisk:
     """Test-only RiskInputsProvider that remembers the instants it was asked about."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        params: dict[str, Any],
+        *,
+        equity: Decimal = ACCOUNT.initial_equity,
+        threshold_equity: Decimal | None = None,
+    ) -> None:
         self.asked: list[datetime] = []
+        self.params = params
+        self.equity = equity
+        self.threshold_equity = equity if threshold_equity is None else threshold_equity
+
+    def equity_and_thresholds(self, at_utc: datetime) -> tuple[Decimal, dict[str, Any]]:
+        self.asked.append(at_utc)
+        return self.equity, resolve_absolute_thresholds(
+            parameter_set=self.params, equity=self.threshold_equity
+        )
 
     def open_positions(self, at_utc: datetime) -> Sequence[Any]:
         self.asked.append(at_utc)
@@ -116,7 +138,7 @@ def build_context(parameter_set: Any, provider: Any, close: datetime, risk: Any 
     factory = market_inputs.make_context_factory(
         parameter_set=parameter_set,
         constraints=provider,
-        risk_inputs=risk if risk is not None else RecordingRisk(),
+        risk_inputs=risk if risk is not None else RecordingRisk(parameter_set.params),
         account=ACCOUNT,
         ttl_seconds=TTL_SECONDS,
     )
@@ -256,27 +278,187 @@ async def test_without_any_snapshot_the_provider_refuses_instead_of_inventing_on
 # ---------------------------------------------------------------------------------------------- #
 
 
-async def test_the_context_carries_config_account_values_and_the_port_inputs(
+async def test_the_context_takes_equity_and_thresholds_from_the_port_and_the_rate_from_config(
     parameter_set: Any,
 ) -> None:
     provider = market_inputs.ConstraintProvider(
         public=ChangingPublic(), symbols=("BTCUSDT",), clock=SteppingClock()
     )
     await provider.refresh()
-    risk = RecordingRisk()
+    risk = RecordingRisk(
+        parameter_set.params, equity=Decimal("987.65"), threshold_equity=Decimal("990")
+    )
+    close = NOW + timedelta(seconds=1)
 
-    context = build_context(parameter_set, provider, NOW + timedelta(seconds=1), risk)
+    context = build_context(parameter_set, provider, close, risk)
 
     assert context.symbol == "BTCUSDT"
     assert context.strategy_version == parameter_set.strategy_version
     assert context.parameter_set is parameter_set
-    assert context.account_state.equity == ACCOUNT.initial_equity
+    assert ACCOUNT.initial_equity == Decimal("1000"), "the configured start differs on purpose"
+    assert context.account_state.equity == Decimal("987.65"), "the port's equity, not the config's"
     assert context.account_state.risk_rate == ACCOUNT.risk_rate
     assert context.open_positions == ()
     assert context.daily_loss_quote == Decimal("0")
-    assert risk.asked == [NOW + timedelta(seconds=1)] * 2, "the port is asked at the bar close"
+    assert risk.asked == [close] * 3, "the port is asked three times, each at the bar close"
     assert context.absolute_thresholds["cluster_cap"] == (
-        Decimal(parameter_set.params["cluster_cap"]) * ACCOUNT.initial_equity
+        Decimal(parameter_set.params["cluster_cap"]) * Decimal("990")
+    )
+
+
+# ---------------------------------------------------------------------------------------------- #
+# The equity base (16-DEC-EQUITY-BASE, 16-43 cap reject): the bar pipeline and the ledger agree.
+# ---------------------------------------------------------------------------------------------- #
+
+LEDGER_START = datetime(2026, 11, 1, tzinfo=UTC)
+LEDGER_START_EQUITY = Decimal("600")
+INCIDENT_LOSSES = ("-1.835028", "-1.865155", "-1.843585", "-1.850293")  # the four 16-43 losses
+AFTER_LOSSES_EQUITY = Decimal("592.605939")  # 600 - 7.394061
+BAR_CLOSE = datetime(2026, 11, 3, 5, 59, 59, 999000, tzinfo=UTC)
+INTRADAY_LOSS = Decimal("-1.85")
+
+
+def incident_parameter_set() -> Any:
+    """The parameter set of the 16-43 trial (cluster cap 0.005 of the equity)."""
+    return domain_registry.load_parameter_set("trend-pullback", "research-run-1-a01")
+
+
+def exit_booking(at: datetime, amount: str, plan_id: str) -> Booking:
+    return Booking(
+        time_utc=at,
+        symbol="BTCUSDT",
+        trade_plan_id=plan_id,
+        amount=Decimal(amount),
+        kind=BOOKING_EXIT,
+    )
+
+
+def incident_ledger(params: dict[str, Any], *, intraday: bool = False) -> ShadowLedger:
+    """A SHADOW ledger started at 600 that booked the four losses of 2026-11-01."""
+    ledger = ShadowLedger(
+        initial_equity=LEDGER_START_EQUITY, parameter_set_params=params, started_at_utc=LEDGER_START
+    )
+    for index, amount in enumerate(INCIDENT_LOSSES):
+        ledger.apply(
+            exit_booking(LEDGER_START + timedelta(hours=10 + index), amount, f"loss-{index}")
+        )
+    if intraday:
+        ledger.apply(
+            exit_booking(datetime(2026, 11, 3, 2, tzinfo=UTC), str(INTRADAY_LOSS), "loss-today")
+        )
+    return ledger
+
+
+class FixedConstraints:
+    """Point-in-time constraints with a fine quantity step (the sized risk fills the budget)."""
+
+    def __init__(self, observed_at: datetime) -> None:
+        self.snapshot = ConstraintSnapshot(
+            symbol="BTCUSDT",
+            price_tick_size=Decimal("0.1"),
+            quantity_step_size=Decimal("0.000001"),
+            min_quantity=Decimal("0.000001"),
+            min_notional=Decimal("5"),
+            metadata_observed_at_utc=observed_at,
+        )
+
+    def snapshot_for(self, symbol: str, at_utc: datetime) -> ConstraintSnapshot:
+        return self.snapshot
+
+
+def ledger_context(ledger: ShadowLedger, parameter_set: Any) -> Any:
+    factory = market_inputs.make_context_factory(
+        parameter_set=parameter_set,
+        constraints=cast(Any, FixedConstraints(BAR_CLOSE - timedelta(minutes=1))),
+        risk_inputs=bind_risk_inputs(ledger),
+        account=AccountConfig(initial_equity=LEDGER_START_EQUITY, risk_rate=Decimal("0.005")),
+        ttl_seconds=3600,
+    )
+    return factory(candle("BTCUSDT", BAR_CLOSE))
+
+
+def test_a_standard_candidate_passes_the_pipeline_and_the_ledger_after_realized_losses() -> None:
+    parameter_set = incident_parameter_set()
+    ledger = incident_ledger(parameter_set.params)
+    assert ledger.equity == AFTER_LOSSES_EQUITY
+    admit_at = BAR_CLOSE + timedelta(seconds=40)
+
+    context = ledger_context(ledger, parameter_set)
+    verdict = verdict_of(context, BAR_CLOSE)
+
+    assert verdict.reason_code == "OK"
+    assert verdict.sized is not None and verdict.sized.quantity is not None
+    reason = ledger.admit(
+        symbol="BTCUSDT",
+        direction="LONG",
+        sized_realized_risk=verdict.sized.realized_risk,
+        planned_quantity=verdict.sized.quantity,
+        now_utc=admit_at,
+    )
+    assert reason is None, "the pipeline and the ledger judge the same equity"
+
+    # The old arithmetic (account state and thresholds on the 600 start) is what failed at 16-43.
+    stale = dataclasses.replace(
+        context,
+        account_state=AccountState(equity=LEDGER_START_EQUITY, risk_rate=Decimal("0.005")),
+        absolute_thresholds=resolve_absolute_thresholds(
+            parameter_set=parameter_set.params, equity=LEDGER_START_EQUITY
+        ),
+    )
+    stale_verdict = verdict_of(stale, BAR_CLOSE)
+    assert stale_verdict.reason_code == "OK", "sized on 600 the pipeline still lets it through"
+    assert stale_verdict.sized is not None and stale_verdict.sized.quantity is not None
+    assert (
+        ledger.admit(
+            symbol="BTCUSDT",
+            direction="LONG",
+            sized_realized_risk=stale_verdict.sized.realized_risk,
+            planned_quantity=stale_verdict.sized.quantity,
+            now_utc=admit_at,
+        )
+        == "CLUSTER_CAP_REJECT"
+    )
+
+
+def test_the_sizing_equity_and_the_thresholds_are_the_engine_view_at_the_close() -> None:
+    parameter_set = incident_parameter_set()
+    ledger = incident_ledger(parameter_set.params)
+
+    context = ledger_context(ledger, parameter_set)
+
+    reference = roll_to(ledger.ledger, BAR_CLOSE)
+    assert context.account_state.equity == ledger.equity == AFTER_LOSSES_EQUITY
+    assert context.account_state.risk_rate == Decimal("0.005")
+    assert context.absolute_thresholds == reference.thresholds
+    assert context.absolute_thresholds["cluster_cap"] == (
+        Decimal(str(parameter_set.params["cluster_cap"])) * AFTER_LOSSES_EQUITY
+    )
+
+    # Intraday: sizing follows the CURRENT equity, the thresholds stay on the day-start equity.
+    intraday = incident_ledger(parameter_set.params, intraday=True)
+    context = ledger_context(intraday, parameter_set)
+
+    expected = roll_to(intraday.ledger, BAR_CLOSE)
+    assert expected.equity == AFTER_LOSSES_EQUITY + INTRADAY_LOSS
+    assert context.account_state.equity == expected.equity
+    assert context.absolute_thresholds == expected.thresholds
+    assert expected.equity_at_day_start == AFTER_LOSSES_EQUITY
+    assert context.absolute_thresholds["cluster_cap"] == (
+        Decimal(str(parameter_set.params["cluster_cap"])) * AFTER_LOSSES_EQUITY
+    )
+    assert context.daily_loss_quote == -INTRADAY_LOSS
+    verdict = verdict_of(context, BAR_CLOSE)
+    assert verdict.reason_code == "OK"
+    assert verdict.sized is not None and verdict.sized.quantity is not None
+    assert (
+        intraday.admit(
+            symbol="BTCUSDT",
+            direction="LONG",
+            sized_realized_risk=verdict.sized.realized_risk,
+            planned_quantity=verdict.sized.quantity,
+            now_utc=BAR_CLOSE + timedelta(seconds=40),
+        )
+        is None
     )
 
 
