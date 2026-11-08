@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -21,6 +21,7 @@ from src.adapters.paper_ws import PaperWsAdapter, install_sdk_log_bridge
 from structlog.testing import capture_logs
 
 from tests.paper_ws_fakes import FakeSdkWsClient, fresh_sdk_stream_map, make_kline_model
+from tests.test_paper_supervisor_backfill import _make_rig
 
 if TYPE_CHECKING:
     from src.adapters.paper_ws import ConnectionDiagnostics
@@ -377,3 +378,162 @@ def test_the_bridge_never_extracts_a_name_that_is_not_an_allowed_kline_interval(
 
 def test_the_bridge_still_ignores_a_record_from_a_foreign_path() -> None:
     assert _bridge_events("Stream btcusdt@kline_1h not connected.", path="C:/x/other/lib.py") == []
+
+
+# --------------------------------------------------------------------------- #
+# One `paper_ws.diagnostics` snapshot per trigger: watchdog entry and a successful rebuild.
+# --------------------------------------------------------------------------- #
+
+
+def _snapshots(logs: list[Any]) -> list[Any]:
+    return [entry for entry in logs if entry["event"] == "paper_ws.diagnostics"]
+
+
+def test_the_two_snapshot_reasons_are_module_constants() -> None:
+    from src.adapters import paper_ws
+
+    assert paper_ws.WS_DIAGNOSTICS_SILENCE == "silence_recovery_entered"
+    assert paper_ws.WS_DIAGNOSTICS_REBUILT == "rebuilt"
+
+
+async def test_log_diagnostics_logs_one_event_with_one_row_per_connection() -> None:
+    adapter, fake, _clients, _btc, _eth = await _connected(_Clock(10.0))
+    fake.handles[0]._emit(make_kline_model())
+
+    with capture_logs() as logs:
+        adapter.log_diagnostics("silence_recovery_entered")
+
+    events = _snapshots(logs)
+    assert len(events) == 1
+    event = events[0]
+    assert event["reason"] == "silence_recovery_entered"
+    assert event["connection_count"] == 3
+    assert event["subscribed_streams"] == 2
+    assert type(event["subscribed_streams"]) is int
+    assert event["unattributed_frames"] == 0
+    expected = [
+        {**asdict(row), "streams_assigned": list(row.streams_assigned)}
+        for row in adapter.connection_diagnostics()
+    ]
+    assert event["connections"] == expected
+    assert [row["url_path"] for row in event["connections"]] == ["market", "public", "private"]
+    assert event["connections"][0]["frames_since_connect"] == 1
+    assert event["connections"][0]["streams_assigned"] == [_BTC, _ETH]
+
+
+async def test_log_diagnostics_rejects_an_unknown_reason() -> None:
+    adapter, _fake, _clients, _btc, _eth = await _connected()
+
+    with pytest.raises(ValueError, match="reason"):
+        adapter.log_diagnostics("every_ten_seconds")
+
+
+async def test_a_failure_while_building_the_snapshot_is_a_warning_never_an_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _fake, _clients, _btc, _eth = await _connected()
+
+    def boom() -> Any:
+        raise RuntimeError("snapshot broke")
+
+    monkeypatch.setattr(adapter, "connection_diagnostics", boom)
+
+    with capture_logs() as logs:
+        adapter.log_diagnostics("silence_recovery_entered")
+
+    assert _snapshots(logs) == []
+    failed = [e for e in logs if e["event"] == "paper_ws.diagnostics_failed"]
+    assert len(failed) == 1
+    assert failed[0]["log_level"] == "warning"
+    assert failed[0]["reason"] == "silence_recovery_entered"
+    assert failed[0]["error"] == "RuntimeError"
+
+
+async def test_a_successful_rebuild_logs_one_snapshot_after_the_rebuilt_line() -> None:
+    adapter, fake, _clients, _btc, _eth = await _connected(_Clock(1.0))
+    fake.simulate_unsolicited_close()
+
+    with capture_logs() as logs:
+        await adapter.rebuild()
+
+    names = [entry["event"] for entry in logs]
+    assert names.index("paper_ws.rebuilt") < names.index("paper_ws.diagnostics")
+    events = _snapshots(logs)
+    assert len(events) == 1
+    assert events[0]["reason"] == "rebuilt"
+    assert events[0]["connection_count"] == 3
+    assert all(row["frames_since_connect"] == 0 for row in events[0]["connections"])
+
+
+async def test_a_failed_rebuild_logs_no_snapshot() -> None:
+    first = FakeSdkWsClient()
+
+    def broken_factory(_configuration: Any) -> Any:
+        raise ConnectionError("ws dead")
+
+    adapter = PaperWsAdapter(ws_client=first, client_factory=broken_factory)  # type: ignore[arg-type]
+    await adapter.connect()
+    await adapter.subscribe(symbol="btcusdt", interval="1h", on_kline=lambda _k: None)
+    first.simulate_unsolicited_close()
+
+    with capture_logs() as logs, pytest.raises(ConnectionError):
+        await adapter.rebuild()
+
+    assert _snapshots(logs) == []
+
+
+async def test_subscribing_frames_and_answers_log_no_snapshot() -> None:
+    with capture_logs() as logs:
+        _adapter, fake, _clients, _btc, _eth = await _connected(_Clock(1.0))
+        for _ in range(10):
+            fake.handles[0]._emit(make_kline_model(is_closed=False))
+        fake.answer_subscribes()
+        await asyncio.sleep(0)
+
+    assert _snapshots(logs) == []
+
+
+async def test_the_supervisor_forwards_a_snapshot_request_to_the_adapter() -> None:
+    rig = _make_rig()
+    await rig.supervisor.start()
+
+    with capture_logs() as logs:
+        rig.supervisor.log_ws_diagnostics("silence_recovery_entered")
+
+    events = _snapshots(logs)
+    assert len(events) == 1
+    assert events[0]["reason"] == "silence_recovery_entered"
+    assert events[0]["subscribed_streams"] == 1
+    await rig.supervisor.stop()
+
+
+async def test_the_supervisor_ignores_an_adapter_without_a_snapshot_method() -> None:
+    class _PlainWs:
+        pass
+
+    rig = _make_rig()
+    rig.supervisor._ws = _PlainWs()  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        rig.supervisor.log_ws_diagnostics("silence_recovery_entered")
+
+    assert _snapshots(logs) == []
+    assert [e for e in logs if e["event"] == "paper.supervisor.ws_diagnostics_unavailable"]
+
+
+async def test_the_supervisor_never_raises_when_the_adapter_snapshot_fails() -> None:
+    class _BrokenWs:
+        def log_diagnostics(self, reason: str) -> None:
+            raise RuntimeError("adapter broke")
+
+    rig = _make_rig()
+    rig.supervisor._ws = _BrokenWs()  # type: ignore[assignment]
+
+    with capture_logs() as logs:
+        rig.supervisor.log_ws_diagnostics("silence_recovery_entered")
+
+    failed = [e for e in logs if e["event"] == "paper.supervisor.ws_diagnostics_failed"]
+    assert len(failed) == 1
+    assert failed[0]["log_level"] == "warning"
+    assert failed[0]["reason"] == "silence_recovery_entered"
+    assert failed[0]["error"] == "RuntimeError"

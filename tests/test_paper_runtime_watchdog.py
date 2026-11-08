@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import tomllib
 from datetime import timedelta
 from decimal import Decimal
@@ -241,6 +242,103 @@ def test_normal_feed_activity_on_any_stream_never_trips_the_watchdog(live: Live)
     assert live.records(RuntimeEventType.WS_DISCONNECT) == []
     assert len(live.clients) == 1, "no recovery"
     assert set(watch.requested) == {timedelta(seconds=HALF)}, "wakes at half the bound"
+
+
+def _ws_snapshots(output: str) -> list[dict[str, Any]]:
+    """The `paper_ws.diagnostics` events among the JSON log lines of one captured stream."""
+    found: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("event") == "paper_ws.diagnostics":
+            found.append(entry)
+    return found
+
+
+def _market_row(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return next(row for row in snapshot["connections"] if row["url_path"] == "market")
+
+
+def test_normal_feed_activity_logs_no_ws_snapshot(
+    live: Live, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch = Watch()
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+        for symbol, interval in [("BTCUSDT", "1h"), ("ETHUSDT", "4h"), ("BTCUSDT", "4h")] * 3:
+            _frame(h, symbol, interval)
+            await watch.tick()
+
+    assert live.start(script, **_watched(watch)) == 0
+
+    captured = capsys.readouterr()
+    assert _ws_snapshots(captured.out) == []
+    assert _ws_snapshots(captured.err) == []
+
+
+def test_the_silence_recovery_logs_one_ws_snapshot_on_entry_and_one_after_the_rebuild(
+    live: Live, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch = Watch()
+    pipeline = RecordingPipeline()
+    public = SilencePublic()
+    live.public = public
+    clock = FixedClock()
+
+    async def script(h: Live) -> None:
+        await wait_until(lambda: len(h.client.handles) == 4)
+        h.emit("BTCUSDT", "1h", open_time=PAST_OPEN)  # one frame, at Watch time 1000
+        await wait_until(lambda: len(pipeline.bars) == 1)
+        clock.advance(2 * HOUR)
+        public.armed = True
+        await watch.tick()
+        await watch.tick()
+        await watch.tick()  # silent for more than the bound: the recovery starts
+        await wait_until(lambda: bool(h.records(RuntimeEventType.WS_RECONNECT)))
+        await wait_until(lambda: len(pipeline.bars) == 2)
+        _frame(h, "ETHUSDT", "1h")
+        for _ in range(4):
+            await watch.tick()
+            _frame(h, "ETHUSDT", "1h")
+
+    code = live.start(script, clock=clock, pipeline=pipeline, **_watched(watch))
+
+    assert code == 0
+    captured = capsys.readouterr()
+    # Read from stdout: the structlog JSON lines (the entry line of the watchdog is there too).
+    assert "market stream silent, entering the bounded recovery" in captured.out
+    snapshots = _ws_snapshots(captured.out)
+    assert [s["reason"] for s in snapshots] == ["silence_recovery_entered", "rebuilt"]
+    names = [
+        "btcusdt@kline_1h",
+        "btcusdt@kline_4h",
+        "ethusdt@kline_1h",
+        "ethusdt@kline_4h",
+    ]
+    entered, rebuilt = snapshots
+    assert entered["connection_count"] == 3
+    assert entered["subscribed_streams"] == 4
+    market = _market_row(entered)
+    assert market["frames_since_connect"] == 1
+    assert market["seconds_since_last_frame"] == 3 * HALF
+    assert market["streams_assigned"] == names
+    others = [row for row in entered["connections"] if row["url_path"] != "market"]
+    assert len(others) == 2
+    assert all(row["frames_since_connect"] == 0 for row in others)
+    assert rebuilt["connection_count"] == 3
+    assert rebuilt["subscribed_streams"] == 4
+    assert all(row["frames_since_connect"] == 0 for row in rebuilt["connections"])
+    assert all(row["seconds_since_last_frame"] is None for row in rebuilt["connections"])
+    assert _market_row(rebuilt)["streams_assigned"] == names
+    # The recovery itself is unchanged by the observation.
+    assert len(live.records(RuntimeEventType.WS_DISCONNECT)) == 1
+    assert len(live.records(RuntimeEventType.WS_RECONNECT)) == 1
+    assert len(live.clients) == 2, "one bounded rebuild"
 
 
 def test_one_quiet_symbol_never_trips_the_connection_wide_clock(live: Live) -> None:
