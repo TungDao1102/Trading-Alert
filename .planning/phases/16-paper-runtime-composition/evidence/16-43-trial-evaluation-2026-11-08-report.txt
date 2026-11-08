@@ -1,0 +1,113 @@
+Trial evaluation of epoch ce6c0bbf27f080a6843c62dcedfd336e6d90b918ca08203912035235e9f83eda
+window: 2026-10-25T12:37:43.833841+00:00 to 2026-11-08T12:37:43.833841+00:00
+bundle source: pg
+proof class: REAL_SOAK
+
+== trial definition ==
+PASS  trial window
+    required: 14 calendar days from the epoch pin (DECISION D061 item D, 2026-10-07)
+    window 2026-10-25T12:37:43.833841+00:00 to 2026-11-08T12:37:43.833841+00:00 = 14 days, 0:00:00
+    epoch pinned at 2026-10-25T12:37:43.833841+00:00
+
+== freeze integrity ==
+FAIL  freeze continuity
+    expected scheduled slots 336, satisfied 327, EVIDENCE_GAP 9, non-CLEAN lines after the pin 0
+    Freeze integrity evidence only (registry immutability from the epoch pin); runtime health is a separate report. 9 EVIDENCE_GAP slot(s), first at 2026-10-25T13:34:00+00:00: a missing, late, failed, manual or mismatched tick is never CLEAN and is never interpolated or filled from neighbouring ticks. The qualifying trial restarts with a new epoch pin (D065 item 4). Note: earlier epoch evidence is auxiliary and cannot complete the freeze criterion of the new trial (0 line(s) and 660 run(s) at or before the pin, kept untouched).
+    9 EVIDENCE_GAP record(s) in the bundle fall inside the window: the qualifying trial restarts with a new epoch pin (D065 item 4).
+    EVIDENCE_GAP slot 2026-10-25T13:34:00+00:00 reason RUN_WITHOUT_LINE run 40198757199
+    EVIDENCE_GAP slot 2026-10-25T14:34:00+00:00 reason RUN_WITHOUT_LINE run 40203425195
+    EVIDENCE_GAP slot 2026-10-26T00:34:00+00:00 reason RUN_LATE_BEYOND_GRACE run 40253067739
+    EVIDENCE_GAP slot 2026-10-26T06:34:00+00:00 reason RUN_LATE_BEYOND_GRACE run 40284265924
+    EVIDENCE_GAP slot 2026-10-26T12:34:00+00:00 reason NO_RUN_FOUND
+    EVIDENCE_GAP slot 2026-10-26T13:34:00+00:00 reason RUN_LATE_BEYOND_GRACE run 40338369708
+    EVIDENCE_GAP slot 2026-10-26T14:34:00+00:00 reason RUN_LATE_BEYOND_GRACE run 40348190367
+    EVIDENCE_GAP slot 2026-10-27T00:34:00+00:00 reason RUN_LATE_BEYOND_GRACE run 40431115678
+    EVIDENCE_GAP slot 2026-11-01T08:34:00+00:00 reason NO_RUN_FOUND
+PASS  single epoch
+    epoch_id ce6c0bbf27f080a6843c62dcedfd336e6d90b918ca08203912035235e9f83eda; 333 freeze line(s) after the pin read
+PASS  pinned hash unchanged
+    pinned parameter_set_hash 6f42f70e7e7a107b1be02fc4079fbb70f1408b4307099aa253bd93ebdbce6d87; 333 CLEAN line(s) read
+
+== runtime health ==
+PASS  runtime coverage
+    window 336.000 h; covered 334.779 h (fraction 0.9964); criterion: at least 0.95 of the whole window with a HEALTHY feed (DECISION D061 item D, 2026-10-07)
+    minimum covered time 319.200 h - DERIVED (window hours x 0.95, REV-17); a derived value, not a threshold: the criterion is coverage >= 0.95 of the window
+    uncovered 2026-10-25T12:37:43.833841+00:00 to 2026-10-25T12:38:06.669323+00:00 reason PROCESS_DOWN
+    uncovered 2026-10-25T12:38:06.669323+00:00 to 2026-10-25T13:00:00.246577+00:00 reason WS_RECONNECT_WINDOW
+    uncovered 2026-10-27T00:06:25.165193+00:00 to 2026-10-27T00:06:30.829250+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:09:25.170025+00:00 to 2026-10-27T00:09:30.834248+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:09:30.834248+00:00 to 2026-10-27T00:11:31.743198+00:00 reason CRASH
+    uncovered 2026-10-27T00:11:31.743198+00:00 to 2026-10-27T00:13:43.545508+00:00 reason WS_RECONNECT_WINDOW
+    uncovered 2026-10-27T00:13:43.545508+00:00 to 2026-10-27T00:13:49.214611+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:13:49.214611+00:00 to 2026-10-27T00:15:53.002991+00:00 reason CRASH
+    uncovered 2026-10-27T00:15:53.002991+00:00 to 2026-10-27T00:18:04.266342+00:00 reason WS_RECONNECT_WINDOW
+    uncovered 2026-10-27T00:18:04.266342+00:00 to 2026-10-27T00:18:09.924911+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:18:09.924911+00:00 to 2026-10-27T00:20:13.410687+00:00 reason CRASH
+    uncovered 2026-10-27T00:20:13.410687+00:00 to 2026-10-27T00:22:24.700556+00:00 reason WS_RECONNECT_WINDOW
+    uncovered 2026-10-27T00:22:24.700556+00:00 to 2026-10-27T00:22:30.362732+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:22:30.362732+00:00 to 2026-10-27T00:24:33.880345+00:00 reason CRASH
+    uncovered 2026-10-27T00:24:33.880345+00:00 to 2026-10-27T00:26:44.973915+00:00 reason WS_RECONNECT_WINDOW
+    uncovered 2026-10-27T00:26:44.973915+00:00 to 2026-10-27T00:26:50.656697+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:26:50.656697+00:00 to 2026-10-27T00:28:54.169004+00:00 reason CRASH
+    uncovered 2026-10-27T00:28:54.169004+00:00 to 2026-10-27T00:31:05.301716+00:00 reason WS_RECONNECT_WINDOW
+    uncovered 2026-10-27T00:31:05.301716+00:00 to 2026-10-27T00:31:10.965296+00:00 reason WS_DISCONNECTED
+    uncovered 2026-10-27T00:31:10.965296+00:00 to 2026-10-27T00:33:14.505396+00:00 reason CRASH
+    ... and 7 more uncovered interval(s)
+FAIL  continuous uncovered time
+    longest continuous uncovered block 3034.953874 s from 2026-10-27T00:09:25.170025+00:00 to 2026-10-27T01:00:00.123899+00:00 (WS_DISCONNECTED, CRASH, WS_RECONNECT_WINDOW)
+    ceiling 900 s (the user's number, O-07, from the ratified configuration)
+PASS  gaps explained, no fabricated bar
+    2115 processed bar record(s) by source: LIVE_WS=2115; 0 PAPER_GAP record(s) by reason: none
+    Q-D rule in force: history-only
+PASS  restart warm-up before the first evaluated bar
+    8 run(s) from RUNTIME_START and RUNTIME_STOP records; 1695 evaluated bar(s) checked against the start of their run
+PASS  no duplicate signal
+    2115 PAPER_BAR_PROCESSED record(s) read; 380 distinct signal id(s)
+PASS  no missing journal row
+    2100 expected closed bar(s) (BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT x 1h, 4h) from the pin to the window end; 0 without a record
+PASS  no test signal inside the soak window
+    6974 runtime record(s) of the judged epoch read
+PASS  runtime records of one epoch
+    judged epoch ce6c0bbf27f080a6843c62dcedfd336e6d90b918ca08203912035235e9f83eda; runtime records of earlier epochs before the pin are auxiliary and are not read here
+PASS  parity (tolerance zero)
+    2115 recorded surface record(s) compared with the replay of 54115 logged bar(s) in 8 run(s) and 2115 recorded bar(s); tolerance 0, 0 difference(s)
+    recorded stages: context=420, planner=113, risk=132, risk_passed=135, strategy=1315; pipeline-only gate records not compared: 0
+
+REPORTED  time of day: reported, not a pass condition (D061 item D)
+    00:00 UTC  covered 13.155 h  uncovered 0.845 h
+    01:00 UTC  covered 14.000 h  uncovered 0.000 h
+    02:00 UTC  covered 13.998 h  uncovered 0.002 h
+    03:00 UTC  covered 14.000 h  uncovered 0.000 h
+    04:00 UTC  covered 14.000 h  uncovered 0.000 h
+    05:00 UTC  covered 14.000 h  uncovered 0.000 h
+    06:00 UTC  covered 13.998 h  uncovered 0.002 h
+    07:00 UTC  covered 14.000 h  uncovered 0.000 h
+    08:00 UTC  covered 14.000 h  uncovered 0.000 h
+    09:00 UTC  covered 14.000 h  uncovered 0.000 h
+    10:00 UTC  covered 14.000 h  uncovered 0.000 h
+    11:00 UTC  covered 14.000 h  uncovered 0.000 h
+    12:00 UTC  covered 13.629 h  uncovered 0.371 h
+    13:00 UTC  covered 14.000 h  uncovered 0.000 h
+    14:00 UTC  covered 14.000 h  uncovered 0.000 h
+    15:00 UTC  covered 14.000 h  uncovered 0.000 h
+    16:00 UTC  covered 14.000 h  uncovered 0.000 h
+    17:00 UTC  covered 14.000 h  uncovered 0.000 h
+    18:00 UTC  covered 14.000 h  uncovered 0.000 h
+    19:00 UTC  covered 14.000 h  uncovered 0.000 h
+    20:00 UTC  covered 14.000 h  uncovered 0.000 h
+    21:00 UTC  covered 14.000 h  uncovered 0.000 h
+    22:00 UTC  covered 13.998 h  uncovered 0.002 h
+    23:00 UTC  covered 14.000 h  uncovered 0.000 h
+
+observations (not criteria):
+    report-only: no observation turns a criterion into PASS or FAIL.
+    tick timing: 964 tick(s); duration ms min 47 median 185 max 1864; queue depth max 10
+    dropped events: 0
+
+auxiliary evidence (not qualifying):
+    freeze lines at or before the pin: 0; runs: 660; span 2026-09-27T11:06:32+00:00 to 2026-10-25T11:40:51+00:00
+    runtime records of other epochs: 0
+    EVIDENCE_GAP records of earlier epochs: 0
+    all of the above is retained untouched and cannot satisfy a slot or an interval of the judged epoch: earlier-epoch evidence cannot complete the freeze criterion of the new trial (REV-18).
+
+RESULT: FAIL
