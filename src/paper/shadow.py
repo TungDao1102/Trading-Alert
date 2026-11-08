@@ -186,17 +186,21 @@ class ConfirmCardFields:
     """The values of the SHADOW confirmation card (D041), already computed by the caller.
 
     `entry_ref` is the adverse edge of the entry zone (the sizing basis of RISK_MANAGEMENT:
-    LONG entry_max, SHORT entry_min), so `notional` and `estimated_loss` are the conservative
-    figures. `mark_price` is None when the injected provider had none; the card then says so.
+    LONG entry_max, SHORT entry_min). `quantity`, `notional` and `estimated_loss` are the
+    risk-stage figures (`verdict.sized`: what the SHADOW ledger reserves and the simulated fill
+    reads, 16-DEC-EQUITY-BASE), not the planner quantity: the loss includes the modeled costs and
+    the notional is that quantity times the adverse-edge entry. They are None when no sizing basis
+    exists (the reservation then refuses the CONFIRM); the card says `unavailable`.
+    `mark_price` is None when the injected provider had none; the card then says so.
     """
 
     symbol: str
     side: str
-    quantity: Decimal
+    quantity: Decimal | None
     entry_ref: Decimal
     stop_loss: Decimal
-    notional: Decimal
-    estimated_loss: Decimal
+    notional: Decimal | None
+    estimated_loss: Decimal | None
     mark_price: Decimal | None
     plan_expiry_utc: datetime
     plan_remaining_seconds: int
@@ -210,6 +214,11 @@ def _plain(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+def _plain_or_unavailable(value: Decimal | None, *, suffix: str = "") -> str:
+    """The plain text of a card figure, or `unavailable` when it has no sizing basis."""
+    return "unavailable" if value is None else _plain(value) + suffix
 
 
 def format_time_pair(instant_utc: datetime) -> str:
@@ -279,11 +288,12 @@ def render_shadow_message(
                 "Confirm this SHADOW plan? No real order will be placed.",
                 f"Symbol: {card.symbol}",
                 f"Side: {card.side}",
-                f"Quantity: {_plain(card.quantity)}",
+                f"Quantity: {_plain_or_unavailable(card.quantity)}",
                 f"Entry (adverse edge): {_plain(card.entry_ref)}",
                 f"Stop loss: {_plain(card.stop_loss)}",
-                f"Notional: {_plain(card.notional)} quote",
-                f"Estimated loss at SL: {_plain(card.estimated_loss)} quote",
+                f"Notional: {_plain_or_unavailable(card.notional, suffix=' quote')}",
+                "Estimated loss at SL (incl. costs): "
+                f"{_plain_or_unavailable(card.estimated_loss, suffix=' quote')}",
                 f"Mark price: {mark}",
                 f"Plan expiry: {format_time_pair(card.plan_expiry_utc)} "
                 f"(remaining {card.plan_remaining_seconds} s)",

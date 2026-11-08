@@ -104,6 +104,7 @@ from src.paper.shadow import (
     render_shadow_message,
     require_shadow,
 )
+from src.paper.shadow_ledger import BasisFn, ReservationBasis
 
 log = structlog.get_logger()
 
@@ -148,13 +149,19 @@ def render_confirm_card(
     mark_price: Decimal | None,
     now_utc: datetime,
     ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT,
+    sized: ReservationBasis | None,
 ) -> str:
     """The SHADOW confirmation card, built by the one composer (`render_shadow_message`).
 
     Shows mode SHADOW, symbol, side, quantity, notional, estimated loss at SL, the current mark
     price against entry and SL, and the remaining validity (the plan expiry as a UTC and an
     Asia/Ho_Chi_Minh time next to the remaining seconds, plus the confirm window).
-    Notional and loss use the adverse edge of the entry zone (LONG entry_max, SHORT entry_min).
+
+    The quantity and the loss are the risk-stage figures in `sized` (the basis the SHADOW ledger
+    reserves, 16-DEC-EQUITY-BASE): the loss includes the modeled costs, and the notional is that
+    quantity times the adverse edge of the entry zone (LONG entry_max, SHORT entry_min). `sized`
+    has no default, so no caller can fall back to the planner figure; with `sized` None all three
+    figures read `unavailable`.
     """
     require_shadow(mode)
     if signal.direction == "LONG":
@@ -163,7 +170,7 @@ def render_confirm_card(
         entry_ref = plan.entry_min_price
     else:
         raise ValueError(f"unknown signal direction {signal.direction!r}")
-    quantity = plan.quantity_after_rounding
+    quantity = None if sized is None else sized.planned_quantity
     remaining = max(0, int((plan.expiry_utc - now_utc).total_seconds()))
     card = ConfirmCardFields(
         symbol=signal.symbol,
@@ -171,8 +178,8 @@ def render_confirm_card(
         quantity=quantity,
         entry_ref=entry_ref,
         stop_loss=plan.stop_loss_price,
-        notional=quantity * entry_ref,
-        estimated_loss=quantity * abs(entry_ref - plan.stop_loss_price),
+        notional=None if quantity is None else quantity * entry_ref,
+        estimated_loss=None if sized is None else sized.sized_realized_risk,
         mark_price=mark_price,
         plan_expiry_utc=plan.expiry_utc,
         plan_remaining_seconds=remaining,
@@ -212,6 +219,7 @@ class ConfirmBook(CoreConfirmBook):
         recheck: RecheckFn | None = None,
         on_confirmed: OnConfirmedFn | None = None,
         reservations: ReservationPort | None = None,
+        sizing: BasisFn | None = None,
     ) -> None:
         super().__init__(
             stores,
@@ -226,6 +234,8 @@ class ConfirmBook(CoreConfirmBook):
         )
         require_shadow(mode)
         self._mode = mode
+        # The risk-stage basis the card shows (the one `ShadowReservations` reserves with).
+        self._sizing = sizing
 
     def entry_for_approval(self, approval_id: str) -> ConfirmEntry | None:
         """The entry of one approval, or None (a swept orphan has no entry in memory)."""
@@ -244,8 +254,28 @@ class ConfirmBook(CoreConfirmBook):
         ttl_seconds: int,
     ) -> str:
         return render_confirm_card(
-            signal, plan, mode=self._mode, mark_price=mark, now_utc=now_utc, ttl_seconds=ttl_seconds
+            signal,
+            plan,
+            mode=self._mode,
+            mark_price=mark,
+            now_utc=now_utc,
+            ttl_seconds=ttl_seconds,
+            sized=self._sized_for(signal, plan),
         )
+
+    def _sized_for(self, signal: Signal, plan: TradePlan) -> ReservationBasis | None:
+        """The risk-stage basis of a plan, or None (the card then says `unavailable`).
+
+        Like the mark price, a failing port never blocks a card: the reservation at CONFIRM
+        refuses a plan without a basis, so nothing is simulated on a missing figure.
+        """
+        if self._sizing is None:
+            return None
+        try:
+            return self._sizing(signal, plan)
+        except Exception as exc:  # noqa: BLE001 - a missing basis is shown, not fatal
+            log.warning("paper.shadow_confirm.sizing_failed", error_class=type(exc).__name__)
+            return None
 
     def _new_entry(
         self, fields: Mapping[str, Any], *, mark: Decimal | None, now_utc: datetime
@@ -261,6 +291,7 @@ class ConfirmBook(CoreConfirmBook):
                 mark_price=mark,
                 now_utc=now_utc,
                 ttl_seconds=self._ttl,
+                sized=self._sized_for(fields["signal"], fields["plan"]),
             ),
         )
 

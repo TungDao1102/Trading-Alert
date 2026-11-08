@@ -437,6 +437,7 @@ class ShadowCoordinator:
             on_confirmed=self._on_confirmed,
             recheck=self._open_check,
             reservations=self._reservations,
+            sizing=self._basis_for,
         )
         self._callbacks = make_confirm_callbacks(
             approvals=self._book,
