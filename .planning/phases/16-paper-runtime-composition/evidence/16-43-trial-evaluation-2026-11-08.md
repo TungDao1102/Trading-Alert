@@ -81,12 +81,13 @@ about 3.4 times larger.
   landed. The decision file is not edited here; this note records the change of state.
 - The first export used `--window-start 2026-10-25T12:37:43Z`, which is 0.83 s before the pin, and the
   evaluator marked the trial window FAIL. The bundle was exported again with the exact pin instant
-  and that line passed. Both reports show the same other results (the second has 5 more processed
-  bars and 19 more runtime records because the first bundle ended earlier).
-- A mid-trial reading of this window in the session assumed the evaluator would refuse an
-  as-of before the window end plus the grace; the exporter accepts an explicit `--as-of` only in
-  whole seconds, so the final bundle of a window whose pin has a fractional second is made without
-  `--as-of` (the default is the window end plus the grace).
+  and that line passed. Every other result is the same in both reports. The counts differ slightly
+  (first bundle: 2110 processed bars and 6955 runtime records; second: 2115 and 6974). The window
+  differs by 0.83 s only, so that cannot explain it; the second export was made later and may have
+  read records written in between. Not investigated; no criterion changed.
+- The exporter accepts an explicit `--as-of` only in whole seconds, while the final as-of of this
+  window (end plus grace) has a fractional second. The final bundle was therefore made without
+  `--as-of`, which defaults to the window end plus the grace.
 
 ## Owner decisions and work before a new trial
 
