@@ -1424,7 +1424,7 @@ Plans:
 - [R-25 / 24-REVIEW IN-02] The health tick writes 11 journal rows every 15 s (about 63,000 a day): reduce the cadence or write on change only before the multi-week soak (source: 24-REVIEW.md IN-02, 24-DEFERRED.md R-25; decision: none required)
 - [R-28 / 24-REVIEW IN-01, IN-03, IN-04, IN-05] Info-level review items: `xc-` close-order updates journaled as stream failures, liveness and heartbeat ignore per-task PASS/FAIL, `CommissionCache` without `record`, `heartbeat.sh --install-timer` path validation and global `LC_ALL=C` (source: 24-REVIEW.md, 24-DEFERRED.md R-28; decision: none required)
 
-**Plans:** 18/25 plans executed
+**Plans:** 18/33 plans executed
 
 Plans:
 
@@ -1458,17 +1458,41 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 25-19-PLAN.md - Owner decisions Q-AB soak shape and Q-C healthy reading *(checkpoint: owner decision)*
-- [ ] 25-20-PLAN.md - Owner Demo campaign sessions and results, defects to gap closure *(checkpoint: owner run)*
 - [ ] 25-21-PLAN.md - Owner decision Q-F on R-21 stamping and its DECISIONS row *(checkpoint: owner decision)*
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 25-22-PLAN.md - Owner decisions Q-D account and Q-E soak host and restart policy *(checkpoint: owner decision)*
 - [ ] 25-23-PLAN.md - R-21 reservation stamping as the owner decided (skipped if deferred)
+- [ ] 25-26-PLAN.md - Gap Q-H: the STOP_LOSS intent of a FLAT plan is resolved by query; S07 late restart leaves SAFE_MODE by command; gate rules for owner-closed findings (25-12-F1)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 25-24-PLAN.md - Soak pre-registration, owner approval, committed SHA-256 (D-09) *(checkpoint: owner decision)*
+- [ ] 25-27-PLAN.md - Gap Q-I: coordinator rows spilled while the journal is down and replayed in process; restart sees the closed plan (25-14-F1, after R-21)
 
 **Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 25-28-PLAN.md - Gap Q-J: the live day-risk task enforces DAILY_STOP through enforce_daily_state (25-15-F1, after R-21)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 25-29-PLAN.md - Gap Q-K part 1: operator command /resync_stream after a halted user-data stream (25-13-F1)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [ ] 25-30-PLAN.md - Gap Q-K part 2: owner bounds of the automatic resync in a new versioned limits file, loader, guard, DECISIONS row *(checkpoint: owner decision)*
+
+**Wave 12** *(blocked on Wave 11 completion)*
+- [ ] 25-31-PLAN.md - Gap Q-K part 3: bounded automatic resync for non-ban halts in the live composition (never after a ban or a gate restriction)
+
+**Wave 13** *(blocked on Wave 12 completion)*
+- [ ] 25-32-PLAN.md - Gap Q-L: /close on CLOSE_REQUIRED or CLOSE_FAILED is an out-of-cadence retry through the emergency closer (25-11-F1)
+
+**Wave 14** *(blocked on Wave 13 completion)*
+- [ ] 25-33-PLAN.md - Gap Q-L: a plan's approval expires when its plan closes (25-16-F1); D102 DEGRADED wording docs check (25-13-F2)
+
+**Wave 15** *(blocked on Wave 14 completion)*
+- [ ] 25-20-PLAN.md - Owner Demo campaign sessions and results, defects to gap closure *(checkpoint: owner run; waits for the gap plans 25-26 to 25-33, P6)*
+
+**Wave 16** *(blocked on Wave 15 completion)*
+- [ ] 25-24-PLAN.md - Soak pre-registration, owner approval, committed SHA-256 (D-09) *(checkpoint: owner decision)*
+
+**Wave 17** *(blocked on Wave 16 completion)*
 - [ ] 25-25-PLAN.md - Owner-run Demo soak of at least 21 days and its recorded verdict *(checkpoint: owner run)*
 
 ### Phase 26: Go-Live Readiness Gate
@@ -1567,7 +1591,7 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
 | 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
 | 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
-| 25. Binance Demo Integration Test Campaign | 18/25 | In Progress | - |
+| 25. Binance Demo Integration Test Campaign | 18/33 | In Progress | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
 
