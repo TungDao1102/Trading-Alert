@@ -1,6 +1,6 @@
 # Phase 25 owner decisions (plan 25-18)
 
-Written 2026-11-08 by the assistant (Claude Sonnet 5.5). Status of this packet: OPEN, no question is answered.
+Written 2026-11-08 by the assistant (Claude Sonnet 5.5). Status of this packet: ANSWERED by the owner on 2026-11-08 (see each last line).
 This file decides nothing. Every question below gives the facts, the options, one assistant recommendation
 labelled as such, and what the answer gates. The answers are yours. Plans 25-19, 25-21 and 25-22 copy your
 words verbatim into the last line of each question; no agent chooses an option, auto-selects one or writes an
@@ -79,7 +79,7 @@ shape the current code supports and it keeps R-21 off the critical path.
 Gates: plan 25-24 (the registration: duration, symbols, round trips per week, pass criteria) and plan 25-25
 (the soak). An answer that needs new scope blocks plan 25-24 until you approve a new plan or phase.
 
-Owner answer: pending
+Owner answer: btc-owner-trips, N = 3 owner round trips per week (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa"; N is the assistant's recommendation, accepted)
 
 ## Q-C Healthy reading for D056 2(d) (research Open Question 3)
 
@@ -108,7 +108,7 @@ Assistant recommendation (not a decision): `all-pass-except-candle`, written int
 
 Gates: plan 25-24 (the registration and the healthy judgement applied to the campaign evidence).
 
-Owner answer: pending
+Owner answer: all-pass-except-candle (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa")
 
 ## Q-D Account: campaign and soak on one Demo account (Pitfall 6, assumption A7)
 
@@ -133,7 +133,7 @@ Assistant recommendation (not a decision): `sequence-same-account`.
 
 Gates: plan 25-22 records it; plans 25-24 and 25-25 schedule the soak after it.
 
-Owner answer: pending
+Owner answer: sequence-same-account (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa")
 
 ## Q-E Soak host and restart policy (Open Question 7, Pitfall 10)
 
@@ -166,7 +166,7 @@ procedure and the unplanned-restart-is-a-defect rule, on the host only after the
 Gates: plan 25-22 records it; plan 25-24 writes the "Soak (owner)" section of the runbook; the soak start in
 plan 25-25 needs the 24-33 steps B to E.
 
-Owner answer: pending
+Owner answer: vps-unless-stopped, after one clean run, on the host only after the Phase 16 soak finished; the owner expects it to finish on 2026-11-08 and has not yet confirmed it (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa")
 
 ## Q-F R-21: when margin reservations advance (CONTEXT OWNER-1, WR-03)
 
@@ -195,7 +195,7 @@ Assistant recommendation (not a decision): `ack-then-first-fill`.
 Gates: plan 25-21 (the DECISIONS row and DOC_STATUS line, unless deferred), plan 25-23 (implementation), any
 second symbol (Q-AB `live5-owner-trips`).
 
-Owner answer: pending
+Owner answer: ack-then-first-fill (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa")
 
 ## Q-G Dates (OWNER-4)
 
@@ -212,7 +212,7 @@ soak finished for any session that uses the EC2 host.
 
 Gates: plans 25-20 and 25-25 (their owner checkpoints).
 
-Owner answer: pending
+Owner answer: later: no session or soak date until P6 holds and the owner confirms the Phase 16 soak finished (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa")
 
 ## Q-H Finding 25-12-F1: SAFE_MODE CLOSE_REQUIRED cannot be left after a late restart (strict-xfail twin)
 
@@ -241,7 +241,7 @@ the exit gate is the last operator safeguard and should not be loosened.
 
 Gates: the gap-closure plan; P6 (no strict-xfail twin) for session steps S07 cut b.
 
-Owner answer: pending
+Owner answer: resolve-stop-intent, as a gap plan before the campaign (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa"; standing preference, owner 2026-11-08: "xử lý sao cho ít phải vào sửa database hoặc thao tác trên server nhất có thể, trừ những tình huống quan trọng, còn không thì UI command telegram hoặc hệ thống tự xử lý được")
 
 ## Q-I Finding 25-14-F1: coordinator transition rows are not spilled while the journal is down (strict-xfail twin)
 
@@ -270,7 +270,7 @@ Assistant recommendation (not a decision): `spill-coordinator-rows`, as a gap pl
 
 Gates: the gap-closure plan; P6 for session step S11.
 
-Owner answer: pending
+Owner answer: spill-coordinator-rows, as a gap plan before the campaign (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa"; standing preference, owner 2026-11-08: "xử lý sao cho ít phải vào sửa database hoặc thao tác trên server nhất có thể, trừ những tình huống quan trọng, còn không thì UI command telegram hoặc hệ thống tự xử lý được")
 
 ## Q-J Finding 25-15-F1: `enforce_daily_state` is not wired into the live process (strict-xfail twin)
 
@@ -300,7 +300,7 @@ reservation rows), before the campaign step S12.
 
 Gates: the gap-closure plan; P6 for session step S12.
 
-Owner answer: pending
+Owner answer: wire-daily-stop, as a gap plan after Q-F, before S12 (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa"; standing preference, owner 2026-11-08: "xử lý sao cho ít phải vào sửa database hoặc thao tác trên server nhất có thể, trừ những tình huống quan trọng, còn không thì UI command telegram hoặc hệ thống tự xử lý được")
 
 ## Q-K Finding 25-13-F1: nothing requests a user-data stream resync
 
@@ -328,7 +328,7 @@ Assistant recommendation (not a decision): `operator-resync`.
 
 Gates: the gap plan if any; S08 expectations; the soak restart rule.
 
-Owner answer: pending
+Owner answer: operator-resync as the assistant recommended (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa"); the assistant proposes applying the standing preference by adding a bounded loop-resync for non-ban halts only, never automatic after a ban or a 418 (to confirm in the gap plan; standing preference, owner 2026-11-08: "xử lý sao cho ít phải vào sửa database hoặc thao tác trên server nhất có thể, trừ những tình huống quan trọng, còn không thì UI command telegram hoặc hệ thống tự xử lý được")
 
 ## Q-L Observations to confirm as intended or to change
 
@@ -362,4 +362,4 @@ order path); reword the reason name of 25-16-F1 (a text change only).
 
 Gates: gap plans if you choose change; none block the campaign unless you say so.
 
-Owner answer: pending
+Owner answer: accept 25-13-F2 (with a docs check of the D102 wording before Phase 26), 25-14-F3, 25-15-F2, 25-16-F2; change 25-11-F1 and 25-16-F1 as gap items under the standing preference: `/close` on a CLOSE_REQUIRED or CLOSE_FAILED plan becomes an out-of-cadence retry that acts, and the approval of a plan expires when its plan closes, so no manual script or database edit is needed (owner 2026-11-08: "theo bạn recommend cho tất cả đi, recommend cho tôi luôn cả N nữa"; standing preference, owner 2026-11-08: "xử lý sao cho ít phải vào sửa database hoặc thao tác trên server nhất có thể, trừ những tình huống quan trọng, còn không thì UI command telegram hoặc hệ thống tự xử lý được"). The assistant's own recommendation was the smaller reword for both; this answer picks the behaviour change because of the standing preference and the owner may overrule it
