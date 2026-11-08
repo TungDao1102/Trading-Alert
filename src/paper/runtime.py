@@ -155,7 +155,7 @@ from src.paper.shadow_runtime import (
     ShadowWiring,
     build_coordinator,
 )
-from src.paper.supervisor import PaperSupervisor
+from src.paper.supervisor import WS_DIAGNOSTICS_SILENCE, PaperSupervisor
 from src.paper.vocabulary import (
     GapReason,
     GapRecord,
@@ -909,7 +909,8 @@ class _LiveLoop:
         probe never reports a process live before its feed spoke. A silence longer than the bound
         starts the supervisor's bounded drop recovery once per episode; a frame arriving after
         the silence began ends the episode; when the bound expires again with no frame since the
-        silence began, the process fails closed.
+        silence began, the process fails closed. On entry into the recovery one adapter snapshot
+        of the silent connections is logged, before the rebuild replaces them.
         """
         bound = self._context.config.health.feed_silence_timeout_seconds
         wake = timedelta(seconds=bound) / 2
@@ -932,6 +933,7 @@ class _LiveLoop:
                         "paper runtime: market stream silent, entering the bounded recovery",
                         silent_seconds=int(now - reference),
                     )
+                    self._supervisor.log_ws_diagnostics(WS_DIAGNOSTICS_SILENCE)
                     self._start_silence_recovery()
             elif last is not None and last > silent_since:
                 log.info("paper runtime: market stream resumed after the recovery")
@@ -1284,7 +1286,11 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
         )
 
     def build_supervisor(owner: _LiveLoop) -> PaperSupervisor:
-        adapter = PaperWsAdapter(ws_client=live.ws_client, client_factory=live.ws_client_factory)
+        adapter = PaperWsAdapter(
+            ws_client=live.ws_client,
+            client_factory=live.ws_client_factory,
+            feed_clock=owner.feed_clock,
+        )
         sinks = owner.sinks()
         return PaperSupervisor(
             ws_adapter=adapter,

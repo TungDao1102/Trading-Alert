@@ -18,6 +18,11 @@ awaited, the interval is a plain string, the default configuration carries the S
 stream URL, and the stream handle is used only through `on` / `unsubscribe`. The adapter is
 constructible with an injected SDK-shaped fake (`tests/paper_ws_fakes.py`, bound to the
 installed SDK by `tests/test_paper_ws_contract.py`) so unit tests never touch the network.
+
+Quick 261109-01d (16-43 investigation, next steps 2): the adapter counts frames per SDK
+connection, records and logs the answer to every SUBSCRIBE request, and logs one
+`paper_ws.diagnostics` snapshot at the watchdog's entry into the recovery and after each rebuild.
+In-memory counters and structlog events only; no per-message log line, nothing is persisted.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -197,6 +202,11 @@ def _sdk_stream_map() -> dict[Any, Any]:
 
 # Connection lifecycle events the runtime may observe (ping/pong are not lifecycle events).
 LIFECYCLE_EVENTS: tuple[str, ...] = ("open", "reconnect", "close", "error")
+
+# The only two triggers of the `paper_ws.diagnostics` snapshot (never per message, never periodic).
+WS_DIAGNOSTICS_SILENCE = "silence_recovery_entered"
+WS_DIAGNOSTICS_REBUILT = "rebuilt"
+_WS_DIAGNOSTICS_REASONS = frozenset({WS_DIAGNOSTICS_SILENCE, WS_DIAGNOSTICS_REBUILT})
 
 ClientFactory = Callable[
     [ConfigurationWebSocketStreams], DerivativesTradingUsdsFuturesWebSocketStreams
@@ -640,6 +650,35 @@ class PaperWsAdapter:
             )
         return tuple(rows)
 
+    def log_diagnostics(self, reason: str) -> None:
+        """Log ONE `paper_ws.diagnostics` snapshot: the counters of every SDK connection.
+
+        `reason` is `WS_DIAGNOSTICS_SILENCE` (the watchdog entered the bounded recovery) or
+        `WS_DIAGNOSTICS_REBUILT` (a rebuild succeeded); anything else is a programming error
+        (ValueError). Building or logging the snapshot never raises: a failure is one
+        `paper_ws.diagnostics_failed` warning. Fields: counts, stream names, connection ids,
+        `url_path` labels and seconds only, never a URL or a payload.
+        """
+        if reason not in _WS_DIAGNOSTICS_REASONS:
+            raise ValueError(
+                f"unsupported diagnostics reason {reason!r}; "
+                f"supported: {sorted(_WS_DIAGNOSTICS_REASONS)}"
+            )
+        try:
+            rows = self.connection_diagnostics()
+            log.info(
+                "paper_ws.diagnostics",
+                reason=reason,
+                connection_count=len(rows),
+                subscribed_streams=len(self._subscriptions),
+                unattributed_frames=self._unattributed_frames,
+                connections=[
+                    {**asdict(row), "streams_assigned": list(row.streams_assigned)} for row in rows
+                ],
+            )
+        except Exception as exc:
+            log.warning("paper_ws.diagnostics_failed", reason=reason, error=type(exc).__name__)
+
     # -- recovery and diagnostics -------------------------------------------- #
 
     def _own_stream_names(self) -> tuple[str, ...]:
@@ -699,6 +738,7 @@ class PaperWsAdapter:
             connections_before=connections_before,
             connections_after=self.last_rebuild.connections_after,
         )
+        self.log_diagnostics(WS_DIAGNOSTICS_REBUILT)
 
     def sdk_connections(self) -> tuple[Any, ...]:
         """Read-only snapshot of the SDK connection objects of the current client.
@@ -792,6 +832,8 @@ def _extract_kline_payload(message: Any) -> dict[str, Any] | None:
 __all__ = [
     "ALLOWED_INTERVALS",
     "LIFECYCLE_EVENTS",
+    "WS_DIAGNOSTICS_REBUILT",
+    "WS_DIAGNOSTICS_SILENCE",
     "ConnectionDiagnostics",
     "Kline",
     "PaperWsAdapter",
