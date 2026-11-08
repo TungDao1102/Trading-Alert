@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -210,13 +210,18 @@ class WsDiagnostics:
 
 @dataclass
 class _Subscription:
-    """One recorded kline subscription, kept so `rebuild` can replay it."""
+    """One recorded kline subscription, kept so `rebuild` can replay it.
+
+    `retired_handles` holds the SDK handles that `rebuild` replaced, so that a handle the caller
+    received before a rebuild still names this subscription (16-43 investigation, Finding 2).
+    """
 
     symbol: str
     interval: str
     on_kline: Callable[[Kline], None]
     stream_id: str | None
     handle: Any = None
+    retired_handles: list[Any] = field(default_factory=list)
 
     @property
     def stream_name(self) -> str:
@@ -339,7 +344,9 @@ class PaperWsAdapter:
         stays in the supervisor).
         `stream_id` is an optional unique request ID.
 
-        Returns the underlying SDK stream handle; pass it to `unsubscribe`.
+        Returns the underlying SDK stream handle; pass it to `unsubscribe`. The handle stays
+        valid across `rebuild`: `unsubscribe` resolves it to the subscription's current SDK
+        handle (16-43 investigation, Finding 2).
         """
         if interval not in ALLOWED_INTERVALS:
             raise ValueError(
@@ -352,10 +359,28 @@ class PaperWsAdapter:
         self._subscriptions.append(sub)
         return sub.handle
 
+    def _subscription_of(self, handle: Any) -> _Subscription | None:
+        """The subscription whose current or retired SDK handle is this object (identity)."""
+        for sub in self._subscriptions:
+            if sub.handle is handle or any(old is handle for old in sub.retired_handles):
+                return sub
+        return None
+
     async def unsubscribe(self, handle: Any) -> None:
-        """Unsubscribe one stream (awaits the SDK handle) and stop replaying it on rebuild."""
-        await handle.unsubscribe()
-        self._subscriptions = [sub for sub in self._subscriptions if sub.handle is not handle]
+        """Unsubscribe one stream (awaits the SDK handle) and stop replaying it on rebuild.
+
+        `handle` is what `subscribe` returned. After a `rebuild` that handle belongs to the
+        closed client, so it is resolved to the subscription's CURRENT SDK handle and that one
+        is unsubscribed (16-43 investigation, Finding 2). A handle the adapter never returned is
+        awaited as given and no subscription is dropped. If the SDK call raises, the
+        subscription stays, so a later rebuild still replays it.
+        """
+        sub = self._subscription_of(handle)
+        if sub is None:
+            await handle.unsubscribe()
+            return
+        await sub.handle.unsubscribe()
+        self._subscriptions = [other for other in self._subscriptions if other is not sub]
 
     async def _open_stream(self, sub: _Subscription) -> None:
         symbol = sub.symbol
@@ -400,6 +425,8 @@ class PaperWsAdapter:
             on_kline(kline)
 
         handle.on("message", _on_message)
+        if sub.handle is not None:
+            sub.retired_handles.append(sub.handle)
         sub.handle = handle
 
     # -- recovery and diagnostics -------------------------------------------- #
