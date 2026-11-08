@@ -268,8 +268,10 @@ def make_outcome(
     stage: str = "risk_passed",
     symbol: str = SYMBOL,
     realized_risk: str = "48",
+    quantity: str = "0.08",
 ) -> BarOutcome:
-    """A bar outcome: the SHADOW fixture signal and plan of `n`, sized 0.08 for a risk of 48."""
+    """A bar outcome: the SHADOW fixture signal and plan of `n`; the risk stage sized `quantity`
+    (default 0.08, the planner quantity of the fixture plan) for a risk of `realized_risk`."""
     signal = make_shadow_signal(n, symbol=symbol, source_candle_close_utc=SIGNAL_CLOSE)
     plan = make_shadow_plan(signal, plan_hash=str(n) * 64)
     candle = Candle(
@@ -292,9 +294,9 @@ def make_outcome(
         )
     sized = SizedResult(
         is_no_trade=False,
-        quantity=Decimal("0.08"),
-        quantity_before_rounding=Decimal("0.08"),
-        quantity_after_rounding=Decimal("0.08"),
+        quantity=Decimal(quantity),
+        quantity_before_rounding=Decimal(quantity),
+        quantity_after_rounding=Decimal(quantity),
         quantization_decision="ACCEPTED",
         realized_risk=Decimal(realized_risk),
     )
@@ -488,6 +490,30 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     assert payload(opened)["fill_quantity"] == "0.080"
     assert rig.coordinator.open_positions()[0].filled is True
     assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))], "one exposure, never counted twice"
+
+
+async def test_the_confirm_card_shows_what_the_ledger_reserves() -> None:
+    """16-DEC-EQUITY-BASE: the card shows the risk-stage figures, not the planner quantity."""
+    rig = Rig()
+    await rig.alert(make_outcome(quantity="0.05", realized_risk="31.25"))
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
+    card = rig.bot.edited[0].text
+    assert "Quantity: 0.05" in card
+    assert "Notional: 2505 quote" in card  # 0.05 x 50100, the adverse edge of the entry zone
+    assert "Estimated loss at SL (incl. costs): 31.25 quote" in card
+    assert "Quantity: 0.08" not in card
+
+    await rig.tap(f"CNF:{short}", "q-cnf", at=T_CONFIRM)
+    (confirmed,) = rig.journal(EVENT_SHADOW_CONFIRMED)
+    reservation = payload(confirmed)["reservation"]
+    assert reservation["planned_quantity"] == "0.05"
+    assert reservation["sized_realized_risk"] == "31.25"
+    assert exposures(rig) == [(SYMBOL, "LONG", Decimal("31.25"))]
+    # The approval rows keep the planner quantity (owner choice, 16-DEC-EQUITY-BASE).
+    approved = [a for a in rig.stores.approvals.values() if a.status == ApprovalResult.APPROVED]
+    assert [a.approved_quantity for a in approved] == [Decimal("0.08")]
 
 
 # --------------------------------------------------------------------------- #
