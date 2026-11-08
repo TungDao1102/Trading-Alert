@@ -22,7 +22,10 @@ installed SDK by `tests/test_paper_ws_contract.py`) so unit tests never touch th
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -121,6 +124,13 @@ def _normalize_kline_payload(
 
 _SDK_PATH_MARKERS: tuple[str, ...] = ("/binance_common/", "/binance_sdk_")
 
+# A kline stream name as the SDK writes it: `<lowercase symbol>@kline_<allowed interval>`. The
+# literal `@kline_` plus an allowed interval must follow the word, so URL userinfo or a credential
+# can never be extracted by it.
+_KLINE_STREAM_NAME = re.compile(
+    r"\b[a-z0-9]+@kline_(?:" + "|".join(sorted(ALLOWED_INTERVALS)) + r")\b"
+)
+
 
 class _SdkLogBridge(logging.Handler):
     """Forward WARNING+ records raised inside the Binance SDK packages to structlog.
@@ -128,6 +138,10 @@ class _SdkLogBridge(logging.Handler):
     `WebSocketCommon.connect` swallows every exception and reports it with the root
     `logging.error(...)` function (research D4), so without a handler a failed connect
     is invisible in the structured output. Records from other libraries are ignored.
+
+    `message` is forwarded verbatim. When it names kline streams (`btcusdt@kline_1h`), the record
+    also carries `streams` (sorted, unique) so a warning can be tied to a stream; a message that
+    contains a URL never gets the field, and no other field is added.
     """
 
     def __init__(self) -> None:
@@ -139,7 +153,13 @@ class _SdkLogBridge(logging.Handler):
             if not any(marker in path for marker in _SDK_PATH_MARKERS):
                 return
             emit = log.error if record.levelno >= logging.ERROR else log.warning
-            emit("paper_ws.sdk_log", sdk_level=record.levelname, message=record.getMessage())
+            message = record.getMessage()
+            fields: dict[str, Any] = {}
+            if "://" not in message:
+                names = sorted(set(_KLINE_STREAM_NAME.findall(message)))
+                if names:
+                    fields["streams"] = names
+            emit("paper_ws.sdk_log", sdk_level=record.levelname, message=message, **fields)
         except Exception:
             self.handleError(record)
 
@@ -208,6 +228,44 @@ class WsDiagnostics:
     stale_stream_names: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ConnectionDiagnostics:
+    """Per-SDK-connection counters for one market-stream silence investigation (plain types).
+
+    `frames_since_connect` counts every message the SDK delivered to a stream callback of this
+    connection since the client was built; `seconds_since_last_frame` is None until the first
+    one. `streams_assigned` lists the adapter's own streams the SDK mapped to this connection.
+    The `subscribe_*` counts are the outcomes of the SUBSCRIBE requests sent on it.
+    """
+
+    connection_id: str
+    url_path: str | None
+    frames_since_connect: int
+    seconds_since_last_frame: float | None
+    streams_assigned: tuple[str, ...]
+    subscribe_accepted: int
+    subscribe_refused: int
+    subscribe_unanswered: int
+
+
+@dataclass
+class _FrameCounter:
+    """Frames delivered on one SDK connection (the counter keeps the object alive)."""
+
+    connection: Any
+    frames: int = 0
+    last_frame: float | None = None
+
+
+@dataclass
+class _SubscribeRequest:
+    """One SUBSCRIBE request the SDK sent, and how the server answered it."""
+
+    connection: Any
+    streams: tuple[str, ...]
+    outcome: str = "unanswered"
+
+
 @dataclass
 class _Subscription:
     """One recorded kline subscription, kept so `rebuild` can replay it.
@@ -249,6 +307,9 @@ class PaperWsAdapter:
 
     The adapter normalizes SDK response models to frozen `Kline` instances; SDK types never
     leave this module. It never touches an order or account endpoint.
+
+    `feed_clock` is the monotonic clock the supervisor's watchdog uses (the runtime injects the
+    same one); it stamps the last frame of each SDK connection. Default: `time.monotonic`.
     """
 
     def __init__(
@@ -256,6 +317,7 @@ class PaperWsAdapter:
         ws_client: DerivativesTradingUsdsFuturesWebSocketStreams | None = None,
         configuration: ConfigurationWebSocketStreams | None = None,
         client_factory: ClientFactory | None = None,
+        feed_clock: Callable[[], float] | None = None,
     ) -> None:
         self._configuration: ConfigurationWebSocketStreams = (
             configuration
@@ -276,6 +338,15 @@ class PaperWsAdapter:
         self._subscriptions: list[_Subscription] = []
         self._connection_callbacks: list[tuple[str, Callable[..., None]]] = []
         self.last_rebuild: RebuildReport | None = None
+        self._feed_clock: Callable[[], float] = (
+            feed_clock if feed_clock is not None else time.monotonic
+        )
+        # Observability (16-43 next steps 2): in-memory only, reset when `rebuild` replaces the
+        # client. Frame counters are keyed by the identity of the SDK connection object.
+        self._frame_counters: dict[int, _FrameCounter] = {}
+        self._unattributed_frames = 0
+        self._subscribe_requests: list[_SubscribeRequest] = []
+        self._observed_client: Any = None
 
     @property
     def configuration(self) -> ConfigurationWebSocketStreams:
@@ -292,6 +363,7 @@ class PaperWsAdapter:
         instead, and `ConnectionError` is raised so a dead stream is never silent.
         """
         install_sdk_log_bridge()
+        self._observe_subscribe_answers()
         await self._ws.create_connection()  # type: ignore[no-untyped-call]  # SDK is untyped
         if not self._ws.connections:
             log.error(
@@ -386,6 +458,7 @@ class PaperWsAdapter:
         symbol = sub.symbol
         interval = sub.interval
         on_kline = sub.on_kline
+        stream_name = sub.stream_name
         # The SDK types `interval` as its Enum but builds the stream name with str(); the
         # plain string is what produces `btcusdt@kline_1h` (research (b)).
         handle = await self._ws.kline_candlestick_streams(
@@ -399,6 +472,7 @@ class PaperWsAdapter:
             # never propagate into the SDK dispatch thread and kill
             # the stream, and unknown envelopes must be logged, never
             # silently dropped.
+            self._count_frame(stream_name)
             try:
                 payload = _extract_kline_payload(message)
             except Exception as exc:
@@ -428,6 +502,143 @@ class PaperWsAdapter:
         if sub.handle is not None:
             sub.retired_handles.append(sub.handle)
         sub.handle = handle
+
+    # -- observability (16-43 investigation, next steps 2) ------------------- #
+
+    def _count_frame(self, stream_name: str) -> None:
+        """Count one message delivered to a stream callback, per SDK connection.
+
+        The connection is the one the SDK's global stream map assigns the stream to. Never logs
+        and never raises: a stream that is not mapped, or any failure here, counts as
+        unattributed instead, so the SDK dispatch is never disturbed.
+        """
+        try:
+            now = self._feed_clock()
+            connection = _sdk_stream_map().get(stream_name)
+            if connection is None:
+                self._unattributed_frames += 1
+                return
+            counter = self._frame_counters.get(id(connection))
+            if counter is None:
+                counter = _FrameCounter(connection=connection)
+                self._frame_counters[id(connection)] = counter
+            counter.frames += 1
+            counter.last_frame = now
+        except Exception:
+            self._unattributed_frames += 1
+
+    @property
+    def unattributed_frames(self) -> int:
+        """Messages whose stream the SDK map did not assign to a connection."""
+        return self._unattributed_frames
+
+    def _observe_subscribe_answers(self) -> None:
+        """Record and log the answer to every SUBSCRIBE request the SDK sends.
+
+        `WebSocketStreamBase.subscribe` and the SDK's own reconnect resubscribe both send
+        through `send_message`, which returns a future the SDK resolves when the server answers
+        (`receive_loop`) and which `subscribe` throws away, so nothing reads the answer. The hook
+        is an instance-level wrapper around the client's `send_message` (never the class, never
+        the installed SDK files): it awaits the original with the same arguments, attaches a done
+        callback to the returned future when the payload is a SUBSCRIBE, and returns that same
+        future. One deliberate side effect: the done callback retrieves the exception of a
+        refused request, so asyncio no longer prints "Future exception was never retrieved" for
+        it. The refusal is still logged twice (the SDK's own ERROR line through the bridge, and
+        this adapter's line naming the streams). A client is wrapped once.
+        """
+        client: Any = self._ws
+        if client is self._observed_client:
+            return
+        self._observed_client = client
+        original = getattr(client, "send_message", None)
+        if not callable(original):
+            log.warning(
+                "paper_ws.subscribe_answers_unobservable", client_type=type(client).__name__
+            )
+            return
+
+        async def send_message(*args: Any, **kwargs: Any) -> Any:
+            result = await original(*args, **kwargs)
+            try:
+                self._record_subscribe(args, kwargs, result)
+            except Exception as exc:
+                log.warning("paper_ws.subscribe_answer_unobserved", error=type(exc).__name__)
+            return result
+
+        client.send_message = send_message
+
+    def _record_subscribe(self, args: tuple[Any, ...], kwargs: dict[str, Any], result: Any) -> None:
+        payload = args[0] if args else kwargs.get("payload")
+        connection = args[1] if len(args) > 1 else kwargs.get("connection")
+        if not isinstance(payload, dict) or payload.get("method") != "SUBSCRIBE":
+            return
+        if not isinstance(result, asyncio.Future):
+            return
+        request = _SubscribeRequest(
+            connection=connection,
+            streams=tuple(str(stream) for stream in payload.get("params") or ()),
+        )
+        self._subscribe_requests.append(request)
+        result.add_done_callback(lambda future: self._log_subscribe_answer(request, future))
+
+    def _log_subscribe_answer(
+        self, request: _SubscribeRequest, future: asyncio.Future[Any]
+    ) -> None:
+        """Log the answer to one SUBSCRIBE request once; never the answer body."""
+        try:
+            fields: dict[str, Any] = {}
+            if future.cancelled():
+                request.outcome = "unanswered"
+                emit = log.warning
+            else:
+                exc = future.exception()
+                if exc is None:
+                    request.outcome = "accepted"
+                    emit = log.info
+                else:
+                    request.outcome = "refused"
+                    emit = log.error
+                    fields["error"] = str(exc)[:200]
+            connection = request.connection
+            emit(
+                "paper_ws.subscribe_answer",
+                outcome=request.outcome,
+                streams=list(request.streams),
+                connection_id=str(getattr(connection, "id", None)),
+                url_path=getattr(connection, "url_path", None),
+                **fields,
+            )
+        except Exception as exc:
+            log.warning("paper_ws.subscribe_answer_unobserved", error=type(exc).__name__)
+
+    def connection_diagnostics(self) -> tuple[ConnectionDiagnostics, ...]:
+        """Read-only per-connection snapshot, in SDK order (plain types, no SDK object)."""
+        now = self._feed_clock()
+        stream_map = _sdk_stream_map()
+        own = self._own_stream_names()
+        rows: list[ConnectionDiagnostics] = []
+        for connection in list(self._ws.connections):
+            counter = self._frame_counters.get(id(connection))
+            frames = 0 if counter is None else counter.frames
+            since: float | None = None
+            if counter is not None and counter.last_frame is not None:
+                since = round(now - counter.last_frame, 3)
+            requests = [r for r in self._subscribe_requests if r.connection is connection]
+            rows.append(
+                ConnectionDiagnostics(
+                    connection_id=str(getattr(connection, "id", None)),
+                    url_path=getattr(connection, "url_path", None),
+                    frames_since_connect=frames,
+                    seconds_since_last_frame=since,
+                    streams_assigned=tuple(
+                        sorted(name for name in own if stream_map.get(name) is connection)
+                    ),
+                    subscribe_accepted=sum(1 for r in requests if r.outcome == "accepted"),
+                    subscribe_refused=sum(1 for r in requests if r.outcome == "refused"),
+                    subscribe_unanswered=sum(1 for r in requests if r.outcome == "unanswered"),
+                )
+            )
+        return tuple(rows)
 
     # -- recovery and diagnostics -------------------------------------------- #
 
@@ -467,6 +678,10 @@ class PaperWsAdapter:
         except Exception as exc:
             log.warning("paper_ws.rebuild_old_close_failed", error=repr(exc))
         self._forget_own_streams()
+        # The old client's connections are gone: their counters and SUBSCRIBE records with them.
+        self._frame_counters.clear()
+        self._subscribe_requests.clear()
+        self._unattributed_frames = 0
 
         self._ws = self._client_factory(self._configuration)
         await self.connect()
@@ -577,6 +792,7 @@ def _extract_kline_payload(message: Any) -> dict[str, Any] | None:
 __all__ = [
     "ALLOWED_INTERVALS",
     "LIFECYCLE_EVENTS",
+    "ConnectionDiagnostics",
     "Kline",
     "PaperWsAdapter",
     "RebuildReport",
