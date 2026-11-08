@@ -495,6 +495,27 @@ async def test_unsolicited_close_rebuilds_then_backfills_and_records_both_events
     assert [bar.close_time_utc for bar in rig.live] == [_close_dt(4)]
 
 
+async def test_stop_after_a_rebuild_unsubscribes_the_current_handles_never_the_old_ones() -> None:
+    """16-43 Finding 2: teardown after a rebuild must reach the live client, not the closed one."""
+    rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
+    rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
+    await rig.supervisor.start()
+    old = list(rig.clients[0].handles)
+
+    rig.fake.simulate_unsolicited_close()
+    await rig.supervisor.wait_idle()
+    assert len(rig.clients) == 2
+
+    with capture_logs() as logs:
+        await rig.supervisor.stop()
+
+    assert [handle._unsubscribed for handle in rig.clients[1].handles] == [1]
+    assert [handle._unsubscribed for handle in old] == [0]
+    assert rig.clients[1].close_calls == 1
+    assert rig.adapter.diagnostics().subscribed_streams == ()
+    assert not [e for e in logs if e["event"] == "paper.supervisor.close_failed"]
+
+
 async def test_error_event_also_rebuilds() -> None:
     rig = _make_rig(rest=_pages(1, 2, 3), now=_NOW3)
     rig.supervisor.record_close("BTCUSDT", "1h", _close_dt(0))
