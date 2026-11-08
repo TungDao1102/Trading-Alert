@@ -202,8 +202,9 @@ stamp_build_revision() {
 
 do_update() {
   local retry=0
-  require_live_stopped
+  # Local refusals first (they need no docker); the live probe still precedes every change.
   require_clean_tree
+  require_live_stopped
   if is_retry; then
     retry=1
     log "already at $REF; keeping the rollback state recorded for $(state_value GIT_SHA)" \
@@ -239,7 +240,6 @@ verify_image() {
 
 do_rollback() {
   [[ -f $STATE_FILE ]] || die "no rollback state at $STATE_FILE; nothing to roll back to"
-  require_live_stopped
   local sha app_id ops_id
   sha="$(state_value GIT_SHA)"
   app_id="$(state_value APP_IMAGE_ID)"
@@ -251,6 +251,7 @@ do_rollback() {
   # The :rollback tags must still hold the recorded images before anything is changed.
   verify_image "$APP_REPO:rollback" "$app_id"
   verify_image "$OPS_REPO:rollback" "$ops_id"
+  require_live_stopped
   run git checkout --detach "$sha"
   run docker tag "$APP_REPO:rollback" "$APP_REPO:$TAG"
   run docker tag "$OPS_REPO:rollback" "$OPS_REPO:$TAG"

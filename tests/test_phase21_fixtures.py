@@ -79,7 +79,11 @@ def test_generator_rerun_is_byte_identical(tmp_path: Path) -> None:
     assert generator.main(["--out", str(second)]) == 0
     assert _snapshot(first) == _snapshot(second)
     assert _snapshot(first)  # something was written
-    assert all(b"\r" not in data for data in _snapshot(first).values())
+    # Frames are copied byte for byte from the capture files, which a Windows checkout
+    # turns into CRLF; only the files the generator renders itself must be LF.
+    rendered = {k: v for k, v in _snapshot(first).items() if "/frames/" not in k}
+    assert rendered
+    assert all(b"\r" not in data for data in rendered.values())
 
 
 def test_committed_account_information_equals_a_fresh_run(tmp_path: Path) -> None:
