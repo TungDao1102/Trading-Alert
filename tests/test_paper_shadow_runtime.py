@@ -438,6 +438,10 @@ def exposures(rig: Rig) -> list[tuple[str, str, Decimal]]:
 # --------------------------------------------------------------------------- #
 
 
+def _lines_with(text: str, prefix: str) -> list[str]:
+    return [line for line in text.split("\n") if line.startswith(prefix)]
+
+
 async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulated_position() -> (
     None
 ):
@@ -449,6 +453,9 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     alert = rig.bot.sent[0].text
     assert SHADOW_LABEL in alert
     assert "Mode: SHADOW" in alert
+    # D108: the default sizing equals the planner quantity, so the alert shows it and the loss.
+    assert "Quantity: 0.08" in alert
+    assert "Estimated loss at SL (incl. costs): 48 quote" in alert
     assert [label for label, _ in rig.buttons()] == ["APPROVE", "SKIP"]
     short = rig.buttons()[0][1].removeprefix("APR:")
     assert rig.buttons()[1][1] == f"SKP:{short}"
@@ -458,6 +465,10 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     assert len(rig.bot.edited) == 1
     card = rig.bot.edited[0]
     assert "Confirm this SHADOW plan? No real order will be placed." in card.text
+    assert _lines_with(card.text, "Quantity: ") == _lines_with(alert, "Quantity: ")
+    assert _lines_with(card.text, "Estimated loss at SL") == _lines_with(
+        alert, "Estimated loss at SL"
+    )
     assert [data for _, data in keyboard_buttons(card.reply_markup)] == [
         f"CNF:{short}",
         f"CXL:{short}",
@@ -490,6 +501,38 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     assert payload(opened)["fill_quantity"] == "0.080"
     assert rig.coordinator.open_positions()[0].filled is True
     assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))], "one exposure, never counted twice"
+
+
+async def test_d108_the_alert_and_the_card_show_the_same_risk_stage_figures() -> None:
+    """D108 (owner decision 2026-11-13, option A): one message, one quantity.
+
+    The alert reads the same `verdict.sized` as the card, so both show 0.05 and the loss 31.25,
+    and the alert's `Exposure:` is that same 0.05 x the adverse entry. The approval rows keep the
+    planner quantity 0.08 (D078).
+    """
+    rig = Rig()
+    await rig.alert(make_outcome(quantity="0.05", realized_risk="31.25"))
+    alert = rig.bot.sent[0].text
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    assert _lines_with(alert, "Quantity: ") == ["Quantity: 0.05"]
+    assert _lines_with(alert, "Estimated loss at SL (incl. costs): ") == [
+        "Estimated loss at SL (incl. costs): 31.25 quote"
+    ]
+    assert "Quantity: 0.08" not in alert
+    (exposure_line,) = _lines_with(alert, "Exposure: ")
+    exposure = Decimal(exposure_line.removeprefix("Exposure: ").removesuffix(" quote"))
+    assert exposure == Decimal("0.05") * Decimal("50100")
+    assert rig.stores.approvals
+    for row in rig.stores.approvals.values():
+        assert row.approved_quantity == Decimal("0.08")
+
+    await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
+    card = rig.bot.edited[0].text
+    assert _lines_with(card, "Quantity: ") == _lines_with(alert, "Quantity: ")
+    assert _lines_with(card, "Estimated loss at SL (incl. costs): ") == _lines_with(
+        alert, "Estimated loss at SL (incl. costs): "
+    )
 
 
 async def test_the_confirm_card_shows_what_the_ledger_reserves() -> None:

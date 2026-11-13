@@ -8,6 +8,7 @@ the mode and every time in UTC and Asia/Ho_Chi_Minh. No network, no real Telegra
 
 from __future__ import annotations
 
+import inspect
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
@@ -41,15 +42,29 @@ from tests.shadow_fakes import (
     make_shadow_money,
     make_shadow_plan,
     make_shadow_signal,
+    make_shadow_sized,
 )
 from tests.support.press_identity import OWNER_PRESS
 
 REASONS = ["SETUP_DETECTED"]
 T_CALLBACK = T0 + timedelta(minutes=7)
+EST_LOSS = "Estimated loss at SL (incl. costs): "
 
 
 def _alert_kwargs() -> dict[str, Any]:
     return {"exposure_quote": Decimal("0"), "reason_codes": REASONS}
+
+
+def _small_sized(plan: Any, **overrides: Any) -> Any:
+    """A risk-stage sizing that differs from the planner quantity: 0.05 for a loss of 31.25."""
+    values: dict[str, Any] = {
+        "quantity": Decimal("0.05"),
+        "quantity_before_rounding": Decimal("0.05"),
+        "quantity_after_rounding": Decimal("0.05"),
+        "realized_risk": Decimal("31.25"),
+    }
+    values.update(overrides)
+    return make_shadow_sized(plan, **values)
 
 
 async def _send(
@@ -58,6 +73,7 @@ async def _send(
     book: ShadowApprovalBook,
     *,
     n: int = 1,
+    sized: Any = "agree",
 ) -> Any:
     signal = make_shadow_signal(n)
     plan = make_shadow_plan(signal)
@@ -71,6 +87,7 @@ async def _send(
         plan=plan,
         now_utc=T0,
         sleep=RecordingSleep(),
+        sized=make_shadow_sized(plan) if isinstance(sized, str) else sized,
         **_alert_kwargs(),
     )
     return signal, plan, outcome
@@ -86,7 +103,12 @@ def test_alert_text_carries_label_mode_and_both_time_zones() -> None:
     plan = make_shadow_plan(signal)
 
     text = format_shadow_alert(
-        signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+        signal=signal,
+        plan=plan,
+        mode=Mode.SHADOW,
+        now_utc=T0,
+        sized=make_shadow_sized(plan),
+        **_alert_kwargs(),
     )
 
     assert "SHADOW — no real order" in text
@@ -100,37 +122,193 @@ def test_alert_text_carries_label_mode_and_both_time_zones() -> None:
         assert needle in text
 
 
-def test_r3b_shadow_alert_text_shows_the_plan_quantity() -> None:
+def test_d108_the_alert_shows_the_risk_stage_quantity_and_estimated_loss() -> None:
+    """D108 supersedes D078 item (6) for the SHADOW alert (owner decision 2026-11-13, option A).
+
+    The `Quantity:` line is the risk-stage quantity of `sized`, not the planner quantity (0.08),
+    and the estimated loss at SL (incl. costs) follows it, ahead of the `SL:` line.
+    """
     signal = make_shadow_signal()
     plan = make_shadow_plan(signal)
 
     text = format_shadow_alert(
-        signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+        signal=signal,
+        plan=plan,
+        mode=Mode.SHADOW,
+        now_utc=T0,
+        sized=_small_sized(plan),
+        **_alert_kwargs(),
     )
 
     lines = text.split("\n")
     quantity_lines = [i for i, line in enumerate(lines) if line.startswith("Quantity: ")]
     entry_lines = [i for i, line in enumerate(lines) if line.startswith("Entry: ")]
     assert len(quantity_lines) == 1 and len(entry_lines) == 1
-    assert lines[quantity_lines[0]] == "Quantity: 0.08"
-    assert quantity_lines[0] == entry_lines[0] + 1
+    at = quantity_lines[0]
+    assert lines[at] == "Quantity: 0.05"
+    assert at == entry_lines[0] + 1
+    assert lines[at + 1] == EST_LOSS + "31.25 quote"
+    assert lines[at + 2].startswith("SL: ")
+    assert "Quantity: 0.08" not in text
+    assert_shadow_text(text)
 
 
-async def test_r3b_the_sent_alert_shows_the_quantity_stored_on_both_rows() -> None:
+async def test_d108_the_rows_keep_the_planner_quantity_while_the_alert_shows_the_sizing() -> None:
+    """D078: `approved_quantity` stays the plan's `quantity_after_rounding` on both rows.
+
+    D108 (owner decision 2026-11-13, option A): the alert shows the risk-stage quantity, so the
+    shown quantity differs from `approved_quantity` by design.
+    """
     stores = InMemoryShadowStores()
     bot = FakeBot()
     book = ShadowApprovalBook(stores, clock=lambda: T0)
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
 
-    await _send(stores, bot, book)
+    await _send(stores, bot, book, sized=_small_sized(plan))
 
     quantity_lines = [x for x in bot.sent[0].text.split("\n") if x.startswith("Quantity: ")]
-    assert len(quantity_lines) == 1
+    assert quantity_lines == ["Quantity: 0.05"]
     rows = list(stores.approvals.values())
     assert {row.action for row in rows} == {ApprovalAction.APPROVE, ApprovalAction.SKIP_USER}
     for row in rows:
-        assert row.approved_quantity is not None
-        assert quantity_lines[0] == "Quantity: " + format(row.approved_quantity, "f")
-        assert Decimal(quantity_lines[0][len("Quantity: ") :]) == row.approved_quantity
+        assert row.approved_quantity == Decimal("0.08") == plan.quantity_after_rounding
+        assert Decimal(quantity_lines[0][len("Quantity: ") :]) != row.approved_quantity
+
+
+@pytest.mark.parametrize("no_basis", ["none", "no_trade"])
+def test_d108_without_a_risk_stage_figure_the_alert_says_unavailable(no_basis: str) -> None:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+    sized = None if no_basis == "none" else make_shadow_sized(plan, is_no_trade=True, quantity=None)
+
+    text = format_shadow_alert(
+        signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, sized=sized, **_alert_kwargs()
+    )
+
+    lines = text.split("\n")
+    assert "Quantity: unavailable" in lines
+    assert EST_LOSS + "unavailable" in lines
+    assert "Quantity: 0.08" not in text
+
+
+def test_d108_sized_is_a_required_keyword_with_no_default() -> None:
+    for function in (format_shadow_alert, send_shadow_alert):
+        parameter = inspect.signature(function).parameters["sized"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+
+
+def _v2_alert(*, sized: Any, money: Any, plan: Any = None) -> str:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal) if plan is None else plan
+    return format_shadow_alert(
+        signal=signal,
+        plan=plan,
+        mode=Mode.SHADOW,
+        now_utc=T0,
+        sized=sized,
+        money=money,
+        text_version=SHADOW_TEXT_V2,
+        **_alert_kwargs(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"realized_risk": Decimal("49")}, "risk-stage realized_risk"),
+        (
+            {
+                "quantity": Decimal("0.07"),
+                "quantity_before_rounding": Decimal("0.07"),
+                "quantity_after_rounding": Decimal("0.07"),
+            },
+            "risk-stage quantity",
+        ),
+    ],
+)
+def test_d108_v2_refuses_a_money_block_that_differs_from_the_shown_sizing(
+    overrides: dict[str, Any], message: str
+) -> None:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+    money = make_shadow_money(signal, plan)  # 0.08 / 48.5
+
+    with pytest.raises(ValueError, match=message):
+        _v2_alert(sized=make_shadow_sized(plan, **overrides), money=money, plan=plan)
+
+
+def test_d108_v2_refuses_an_alert_with_no_sizing() -> None:
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+
+    with pytest.raises(ValueError, match="needs the risk-stage sizing"):
+        _v2_alert(sized=None, money=make_shadow_money(signal, plan), plan=plan)
+
+
+@pytest.mark.parametrize("which", ["sized", "money"])
+async def test_d108_v2_refusals_leave_no_trace_and_send_nothing(which: str) -> None:
+    trace: list[str] = []
+    stores, bot = InMemoryShadowStores(trace), FakeBot(trace)
+    book = ShadowApprovalBook(stores, clock=lambda: T0, text_version=SHADOW_TEXT_V2)
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+    sized = None if which == "sized" else make_shadow_sized(plan, realized_risk=Decimal("49"))
+
+    with pytest.raises(ValueError):
+        await send_shadow_alert(
+            stores=stores,
+            book=book,
+            bot=bot,
+            chat_id=CHAT_ID,
+            mode=Mode.SHADOW,
+            signal=signal,
+            plan=plan,
+            now_utc=T0,
+            sleep=RecordingSleep(),
+            sized=sized,
+            money=make_shadow_money(signal, plan),
+            **_alert_kwargs(),
+        )
+
+    assert trace == []
+    assert bot.sent == []
+    assert stores.approvals == {}
+
+
+async def test_d108_v2_planner_check_is_unchanged_and_still_refuses_a_different_quantity() -> None:
+    """The money block of a 0.05 / 31.25 sizing differs from the planner quantity 0.08: refused
+    with the unchanged `differs from approved_quantity` message, even with the matching `sized`."""
+    trace: list[str] = []
+    stores, bot = InMemoryShadowStores(trace), FakeBot(trace)
+    book = ShadowApprovalBook(stores, clock=lambda: T0, text_version=SHADOW_TEXT_V2)
+    signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
+    small = _small_sized(plan)
+    money = make_shadow_money(signal, plan, sized=small)
+
+    with pytest.raises(ValueError, match="differs from approved_quantity"):
+        await send_shadow_alert(
+            stores=stores,
+            book=book,
+            bot=bot,
+            chat_id=CHAT_ID,
+            mode=Mode.SHADOW,
+            signal=signal,
+            plan=plan,
+            now_utc=T0,
+            sleep=RecordingSleep(),
+            sized=small,
+            money=money,
+            **_alert_kwargs(),
+        )
+    with pytest.raises(ValueError, match="differs from approved_quantity"):
+        book.issue(signal=signal, plan=plan, now_utc=T0, money=money)
+
+    assert trace == []
+    assert bot.sent == []
+    assert stores.approvals == {}
 
 
 def test_d19_p23_r1_text_v1_pin_is_unchanged_and_has_no_money_rows() -> None:
@@ -139,7 +317,12 @@ def test_d19_p23_r1_text_v1_pin_is_unchanged_and_has_no_money_rows() -> None:
     plan = make_shadow_plan(signal)
 
     text = format_shadow_alert(
-        signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+        signal=signal,
+        plan=plan,
+        mode=Mode.SHADOW,
+        now_utc=T0,
+        sized=make_shadow_sized(plan),
+        **_alert_kwargs(),
     )
 
     assert not any(
@@ -164,6 +347,7 @@ async def test_d19_p23_r1_text_v2_alert_pin_shows_the_money_after_the_quantity()
         plan=plan,
         now_utc=T0,
         sleep=RecordingSleep(),
+        sized=make_shadow_sized(plan),
         money=make_shadow_money(signal, plan),
         **_alert_kwargs(),
     )
@@ -174,7 +358,8 @@ async def test_d19_p23_r1_text_v2_alert_pin_shows_the_money_after_the_quantity()
     assert lines[quantity_at + 2].startswith("Margin: 801.60 USDT at 5x leverage")
     assert lines[quantity_at + 3].startswith("Loss at SL: 48.00 USDT gross")
     assert lines[quantity_at + 6].startswith("Equity used: 1000 USDT")
-    assert lines[quantity_at + 7] == "SL: 49500"
+    assert lines[quantity_at + 7] == EST_LOSS + "48.5 quote"
+    assert lines[quantity_at + 8] == "SL: 49500"
 
 
 def test_r3b_a_plan_without_a_positive_quantity_is_refused_by_the_alert_formatter() -> None:
@@ -183,7 +368,7 @@ def test_r3b_a_plan_without_a_positive_quantity_is_refused_by_the_alert_formatte
 
     with pytest.raises(ValueError, match="approved_quantity"):
         format_shadow_alert(
-            signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, **_alert_kwargs()
+            signal=signal, plan=plan, mode=Mode.SHADOW, now_utc=T0, sized=None, **_alert_kwargs()
         )
 
 
