@@ -15,6 +15,18 @@ changes values only.
     EVIDENCE_S3_ACCESS_KEY_ID
     EVIDENCE_S3_SECRET_ACCESS_KEY
 
+One more name is optional and read only by the host witness input of the exporter
+(quick task 261114-12e, 16-DEC-HOST-TICK):
+
+    EVIDENCE_S3_WITNESS_PREFIX     fixed prefix of the create-only host witness objects, in the
+                                   same bucket; a SIBLING of EVIDENCE_S3_PREFIX, never equal to
+                                   it, inside it or containing it (the host's create-only
+                                   credential must never be able to write among bundles, and a
+                                   bundle key must never land among witness objects)
+
+It is not in ``EVIDENCE_VARIABLES``: the export and publish paths do not need it.
+``witness_source`` returns the rclone base of the witness objects.
+
 The names are not part of ``ALLOWED_ENV_NAMES`` (`src/paper/runtime_config.py`): the paper runtime
 neither reads nor needs them, and none begins with ``BINANCE_``. Messages here name variables,
 never values. Stdlib only, plus the provider rule shared with the backup mapping.
@@ -28,6 +40,7 @@ from collections.abc import Mapping
 from src.ops.backup_remote import PROVIDERS_WITHOUT_ENDPOINT
 
 EVIDENCE_REMOTE = "EVIDENCES3"
+WITNESS_PREFIX_VARIABLE = "EVIDENCE_S3_WITNESS_PREFIX"
 
 EVIDENCE_VARIABLES: tuple[str, ...] = (
     "EVIDENCE_S3_PROVIDER",
@@ -110,6 +123,34 @@ def rclone_env(environ: Mapping[str, str]) -> dict[str, str]:
         f"{s3}ACCESS_KEY_ID": values["EVIDENCE_S3_ACCESS_KEY_ID"],
         f"{s3}SECRET_ACCESS_KEY": values["EVIDENCE_S3_SECRET_ACCESS_KEY"],
     }
+
+
+def witness_source(environ: Mapping[str, str]) -> str:
+    """``EVIDENCES3:<bucket>/<witness prefix>``: the base of ``<epoch_id>/<slot>-<tick id>.jsonl``.
+
+    The witness prefix must be safe (same segment and credential-word rules as the evidence
+    prefix) and a sibling of ``EVIDENCE_S3_PREFIX``: equal, inside or containing is refused.
+    Messages name variables, never values.
+    """
+    values = _checked(environ)
+    witness = _value(environ, WITNESS_PREFIX_VARIABLE)
+    if not witness:
+        raise EvidenceConfigError(
+            f"the host witness input needs its prefix; set: {WITNESS_PREFIX_VARIABLE}"
+        )
+    segments = witness.split("/")
+    evidence = values["EVIDENCE_S3_PREFIX"].split("/")
+    overlap = segments[: len(evidence)] == evidence or evidence[: len(segments)] == segments
+    if (
+        any(_SEGMENT.fullmatch(s) is None or s in {".", ".."} for s in segments)
+        or _CREDENTIAL_WORDS.search(witness)
+        or overlap
+    ):
+        raise EvidenceConfigError(
+            "the host witness prefix is unusable (a safe prefix that is a sibling of "
+            f"EVIDENCE_S3_PREFIX is required); check: {WITNESS_PREFIX_VARIABLE}"
+        )
+    return f"{EVIDENCE_REMOTE}:{values['EVIDENCE_S3_BUCKET']}/{witness}"
 
 
 def destination(environ: Mapping[str, str]) -> str:

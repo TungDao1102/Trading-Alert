@@ -7,11 +7,33 @@
         --window-start <UTC ISO> --window-end <UTC ISO> [--as-of <UTC ISO>] --out <new directory>
         [--records <runtime_records.jsonl>]        (fixture source only)
         [--analytics-inputs <analytics_inputs.json>]
+        [--host-witness]
 
 The output is one `soak-evidence-bundle/1` directory (layout and loader: `src/paper/
 evidence_bundle.py`, plan 16-25) that `scripts/evaluate_trial_soak.py` accepts. The script is
 location-agnostic until `--publish`: it writes a local directory, and the optional publishing
 step (plan 16-47) copies it to the one durable location the user recorded at O-01.
+
+Host witness input (quick task 261114-12e, decision `16-DEC-HOST-TICK`, option s3-witness):
+
+    python scripts/export_soak_evidence.py ... --out <new dir> --host-witness
+
+- `--host-witness` takes no value. It reads the witness objects of `--epoch` from the evidence
+  remote (`EVIDENCE_S3_*` plus `EVIDENCE_S3_WITNESS_PREFIX`, a sibling of the evidence prefix) and
+  judges them with the GitHub ticks, so a slot the GitHub path missed can be satisfied by a
+  witnessed host tick. LATENESS COMES ONLY FROM THE SERVER TIME: the listing is always
+  `rclone lsjson --use-server-modtime ...` (the provider's LastModified, never client metadata or
+  a time written in the line).
+- The listing is read, every object is read in path order and its byte count must equal the
+  listed size, then the directory is listed again and every first-listing object must still be
+  there with the same size and server time. An unreachable remote, a changing listing, a size
+  mismatch or a missing prefix name exits 2 and writes nothing; there is never a silent
+  GitHub-only bundle while `--host-witness` is asked. An epoch directory that does not exist is a
+  legitimate empty witness (`object_count` 0).
+- The bundle is then `soak-evidence-bundle/2`: `/1` plus `host_witness_listing.json` (the raw
+  listing bytes), `host_ticks.jsonl` (one canonical row per object) and a `host_witness` manifest
+  section. It holds no bucket name, prefix value or credential. Without the flag the bundle is
+  `/1` and unchanged.
 
 Publishing (decision `16-DEC-O-01`, option a: an S3 evidence prefix OUTSIDE the backup crypt
 remote, versioning enabled, no Object Lock, written by the exporter on the operator's schedule):
@@ -93,7 +115,7 @@ Exit codes: 0 bundle written (and published and verified when asked); 2 an input
 destination is unusable (named, never its content); 3 a secret-looking value was found (file
 named, nothing written); 4 the publish or its verification failed (the local bundle is kept), or
 two different freeze lines carry one run identity (nothing written).
-Without `--publish` no network is touched.
+Without `--publish` or `--host-witness` no network is touched.
 """
 
 from __future__ import annotations
@@ -130,15 +152,19 @@ from src.paper.coverage import (  # noqa: E402
     EvidenceGap,
     FreezeEvidenceReport,
     GithubRun,
+    HostTick,
     freeze_evidence_report,
     parse_freeze_log,
     parse_github_runs,
 )
 from src.paper.evidence_bundle import (  # noqa: E402
     BUNDLE_SCHEMA,
+    BUNDLE_SCHEMA_HOST_WITNESS,
     FILE_ANALYTICS,
     FILE_DIFF,
     FILE_GAPS,
+    FILE_HOST_LISTING,
+    FILE_HOST_TICKS,
     FILE_MISSING_TICKS,
     FILE_PINNED,
     FILE_RECORDS,
@@ -231,6 +257,13 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="after the export, publish the bundle to the evidence remote configured by the "
         "EVIDENCE_S3_* environment names and verify it (O-01 a); takes no value",
+    )
+    parser.add_argument(
+        "--host-witness",
+        action="store_true",
+        help="read the witness objects of --epoch from the evidence remote (EVIDENCE_S3_* plus "
+        "EVIDENCE_S3_WITNESS_PREFIX) and judge them with the GitHub ticks by their server time "
+        "(16-DEC-HOST-TICK); writes bundle schema /2; takes no value",
     )
     return parser
 
@@ -665,6 +698,7 @@ def _build(
     state: RuntimeStatePort | None,
     environ: Mapping[str, str],
     now: Callable[[], datetime],
+    witness: WitnessReader | None = None,
 ) -> tuple[dict[str, bytes], dict[str, Any], int, int]:
     """The bundle files and the manifest (without writing anything)."""
     start = _parse_window(args.window_start, "--window-start")
@@ -703,6 +737,14 @@ def _build(
     if not records:
         raise InputError("no runtime record belongs to --epoch")
 
+    host_listing = b""
+    host_rows = b""
+    host_ticks: tuple[HostTick, ...] = ()
+    if witness is not None:
+        if _EPOCH_KEY.fullmatch(args.epoch) is None:
+            raise InputError("--epoch is not usable as a storage key")
+        host_listing, host_ticks, host_rows = collect_host_witness(witness, args.epoch)
+
     try:
         runs = parse_github_runs(_decode(runs_bytes, args.github_runs.name))
         # Only a slot that is already due (slot + grace <= as_of) is judged (B2-WR-06).
@@ -714,6 +756,9 @@ def _build(
             runs=runs,
             grace_seconds=config.health.freeze_tick_grace_seconds,
             detected_at_utc=as_of,
+            host_ticks=host_ticks,
+            pinned_epoch_id=pinned.epoch_id,
+            pinned_hash=pinned.parameter_set_hash,
         )
     except (ValueError, KeyError, TypeError):
         raise InputError("the freeze evidence cannot be reconciled with the run list") from None
@@ -733,7 +778,7 @@ def _build(
     if args.analytics_inputs is not None:
         files[FILE_ANALYTICS] = _analytics_bytes(args.analytics_inputs, args.epoch)
     manifest: dict[str, Any] = {
-        "schema": BUNDLE_SCHEMA,
+        "schema": BUNDLE_SCHEMA if witness is None else BUNDLE_SCHEMA_HOST_WITNESS,
         "epoch_id": args.epoch,
         "window_start_utc": start.isoformat(),
         "window_end_utc": end.isoformat(),
@@ -742,6 +787,22 @@ def _build(
         "freeze_log": _freeze_log_manifest(derived),
         "files": {},
     }
+    if witness is not None:
+        files[FILE_HOST_LISTING] = host_listing
+        files[FILE_HOST_TICKS] = host_rows
+        manifest["host_witness"] = {
+            "listing_file": FILE_HOST_LISTING,
+            "ticks_file": FILE_HOST_TICKS,
+            "object_count": len(host_ticks),
+            "listing": (
+                "rclone lsjson --use-server-modtime --files-only --recursive --no-mimetype "
+                "<witness prefix>/<epoch_id>/"
+            ),
+            "rule": (
+                "16-DEC-HOST-TICK: a host tick counts only through the provider-stamped server "
+                "time of its create-only witness object, never through a time written in the line"
+            ),
+        }
     return files, manifest, len(records), len(report.gaps)
 
 
@@ -860,6 +921,172 @@ def _publisher(environ: Mapping[str, str], uploader: Uploader | None) -> tuple[U
     return RcloneUploader(base, env=mapped), base
 
 
+# --------------------------------------------------------------------------- #
+# Host witness input (quick task 261114-12e, decision 16-DEC-HOST-TICK, option s3-witness).
+# --------------------------------------------------------------------------- #
+
+
+class WitnessError(InputError):
+    """The witness remote is unreachable or inconsistent. Names a step or a path, never a value."""
+
+
+class WitnessReader(Protocol):
+    """The witness objects of one epoch: a listing by server time and the object bytes."""
+
+    def listing(self, epoch_id: str) -> bytes:
+        """The raw `rclone lsjson --use-server-modtime` listing (`[]` when nothing is there)."""
+
+    def read(self, epoch_id: str, path: str) -> bytes:
+        """The bytes of one witness object; `path` is relative to the epoch directory."""
+
+
+class RcloneWitnessReader:
+    """`WitnessReader` over the rclone CLI. `source` is `EVIDENCES3:<bucket>/<witness prefix>`
+    and `env` the `RCLONE_CONFIG_EVIDENCES3_*` mapping; credentials travel in the child
+    environment, never in argv. The listing always carries `--use-server-modtime`: the
+    provider's own time of the object, never client metadata (T-26111412e-02)."""
+
+    def __init__(
+        self,
+        source: str,
+        *,
+        runner: RcloneCall | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        self._base = source.rstrip("/")
+        child_env: Mapping[str, str] = {} if env is None else env
+        self._run: RcloneCall = (
+            runner
+            if runner is not None
+            else lambda argv, stdin: _run_rclone(argv, stdin, child_env)
+        )
+
+    def _directory(self, epoch_id: str) -> str:
+        return f"{self._base}/{epoch_id}/"
+
+    def _call(self, argv: Sequence[str]) -> tuple[int, bytes, bytes]:
+        try:
+            return self._run(argv, None)
+        except PublishError as exc:
+            raise WitnessError(str(exc)) from None
+
+    def listing(self, epoch_id: str) -> bytes:
+        code, out, err = self._call(
+            [
+                "lsjson",
+                "--use-server-modtime",
+                "--files-only",
+                "--recursive",
+                "--no-mimetype",
+                self._directory(epoch_id),
+            ]
+        )
+        if code == 3:  # rclone: directory not found, i.e. no witness object of this epoch yet
+            return b"[]"
+        if code != 0:
+            raise WitnessError(f"listing the witness objects failed (exit {code}): {_excerpt(err)}")
+        return out
+
+    def read(self, epoch_id: str, path: str) -> bytes:
+        code, out, _ = self._call(["cat", f"{self._directory(epoch_id)}{path}"])
+        if code != 0:
+            raise WitnessError(f"{path} cannot be read (exit {code})")
+        return out
+
+
+def _witness_reader(environ: Mapping[str, str], witness: WitnessReader | None) -> WitnessReader:
+    """The reader for `--host-witness`. Without an injected reader the source and the credentials
+    come only from the fixed `EVIDENCE_S3_*` names plus `EVIDENCE_S3_WITNESS_PREFIX`; an
+    incomplete or unusable configuration is an `InputError` naming variables only."""
+    if witness is not None:
+        return witness
+    try:
+        source = evidence_remote.witness_source(environ)
+        mapped = evidence_remote.rclone_env(environ)
+    except evidence_remote.EvidenceConfigError as exc:
+        raise InputError(str(exc)) from None
+    return RcloneWitnessReader(source, env=mapped)
+
+
+@dataclass(frozen=True)
+class _WitnessEntry:
+    size: int
+    modtime_text: str
+    modtime: datetime
+
+
+def _witness_entries(listing: bytes) -> dict[str, _WitnessEntry]:
+    """Parse a witness listing strictly: a JSON array; directories are ignored."""
+    try:
+        raw = json.loads(listing)
+    except ValueError:
+        raise WitnessError("the witness listing is not valid JSON") from None
+    if not isinstance(raw, list):
+        raise WitnessError("the witness listing is not a JSON array")
+    entries: dict[str, _WitnessEntry] = {}
+    for number, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise WitnessError(f"witness listing entry {number} is not an object")
+        if item.get("IsDir") is True:
+            continue
+        path, size, modtime_text = item.get("Path"), item.get("Size"), item.get("ModTime")
+        if not isinstance(path, str) or path == "":
+            raise WitnessError(f"witness listing entry {number} has no Path")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise WitnessError(f"witness listing entry {number} has no valid Size")
+        try:
+            modtime = datetime.fromisoformat(str(modtime_text))
+        except ValueError:
+            raise WitnessError(f"witness listing entry {number} has no valid ModTime") from None
+        if modtime.tzinfo is None or modtime.utcoffset() is None:
+            raise WitnessError(f"witness listing entry {number} ModTime is not UTC-aware")
+        if path in entries:
+            raise WitnessError(f"the witness listing lists a path twice (entry {number})")
+        entries[path] = _WitnessEntry(size, str(modtime_text), modtime.astimezone(UTC))
+    return entries
+
+
+def collect_host_witness(
+    reader: WitnessReader, epoch_id: str
+) -> tuple[bytes, tuple[HostTick, ...], bytes]:
+    """The raw first listing, the host ticks and the `host_ticks.jsonl` bytes of one epoch.
+
+    The listing is read, every object is read in path order (its byte count must equal the listed
+    size), then the directory is listed again and every first-listing object must be present with
+    the same size and server time. Objects that appear later are ignored: they belong to the next
+    export. Any inconsistency raises `WitnessError`; nothing is ever partly used.
+    """
+    first = reader.listing(epoch_id)
+    entries = _witness_entries(first)
+    objects: dict[str, bytes] = {}
+    for path in sorted(entries):
+        data = reader.read(epoch_id, path)
+        if len(data) != entries[path].size:
+            raise WitnessError(f"{path} does not have the listed byte count")
+        objects[path] = data
+    second = _witness_entries(reader.listing(epoch_id))
+    for path, entry in entries.items():
+        again = second.get(path)
+        if again is None or (again.size, again.modtime_text) != (entry.size, entry.modtime_text):
+            raise WitnessError(f"{path} changed between the two listings")
+    ticks: list[HostTick] = []
+    rows: list[str] = []
+    for path in sorted(entries):
+        data = objects[path]
+        try:
+            text: str | None = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        ticks.append(
+            HostTick(
+                path, entries[path].modtime, entries[path].size, None if text is None else data
+            )
+        )
+        row = {"path": path, "size": len(data), "sha256": sha256_of(data), "text": text}
+        rows.append(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+    return first, tuple(ticks), _jsonl(rows)
+
+
 def bundle_prefix(manifest_bytes: bytes) -> tuple[str, str, Mapping[str, str]]:
     """(epoch_id, key prefix, file digests) of a bundle, from its manifest bytes only.
 
@@ -973,11 +1200,13 @@ def main(
     environ: Mapping[str, str] | None = None,
     uploader: Uploader | None = None,
     now: Callable[[], datetime] | None = None,
+    witness: WitnessReader | None = None,
 ) -> int:
     """Export one epoch. `state` is a test seam for the pg source (a fake or an open port);
     `environ` defaults to the process environment (database URL, secret values to scan for);
     `uploader` is a test seam for `--publish` (default: rclone); `now` is the clock the default
-    `--as-of` reads (default: the system clock)."""
+    `--as-of` reads (default: the system clock); `witness` is a test seam for `--host-witness`
+    (default: rclone over the witness prefix)."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if environ is None else environ
     if arguments[:1] == ["publish"]:
@@ -991,9 +1220,16 @@ def main(
         except InputError as exc:
             print(f"cannot export: {exc}", file=sys.stderr)
             return EXIT_INPUT
+    witness_reader: WitnessReader | None = None
+    if args.host_witness:
+        try:
+            witness_reader = _witness_reader(env, witness)
+        except InputError as exc:
+            print(f"cannot export: {exc}", file=sys.stderr)
+            return EXIT_INPUT
     try:
         files, manifest, record_count, gap_count = _build(
-            args, state, env, now if now is not None else _system_now
+            args, state, env, now if now is not None else _system_now, witness_reader
         )
     except FreezeLogConflict as exc:
         print(f"cannot export: {exc}", file=sys.stderr)
@@ -1018,6 +1254,8 @@ def main(
         f"bundle written: {args.out.name} (source {args.source}, {record_count} runtime "
         f"record(s), {gap_count} evidence gap(s))"
     )
+    if witness_reader is not None:
+        print(f"host witness: {manifest['host_witness']['object_count']} object(s) read")
     if publisher is not None:
         return _publish(args.out, publisher, label, env)
     return EXIT_OK
