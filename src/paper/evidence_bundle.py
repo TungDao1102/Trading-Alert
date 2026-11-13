@@ -18,6 +18,12 @@ it; `load_evidence_bundle` is the only reader the evaluator trusts:
                              optional, one per input artifact (plan 16-59): an original freeze-check
                              artifact kept byte for byte (<16 hex> = the start of its sha256)
     analytics_evidence.json  optional SHADOW analytics evidence
+    host_witness_listing.json
+                             schema /2 only (quick task 261114-12e): the raw `rclone lsjson
+                             --use-server-modtime` listing of the host witness objects
+    host_ticks.jsonl         schema /2 only: one canonical row per listed object, sorted by path,
+                             `{"path", "size", "sha256", "text"}` (`text` is null when the bytes
+                             are not UTF-8)
 
 `files` maps each file name to its SHA-256. Every file is hashed and compared BEFORE it is parsed,
 so a file edited after export is refused and named (fail closed). `source` is "pg" (the soak
@@ -42,6 +48,13 @@ file is added: the trial evaluator rebuilds the parity replay from these lines a
 parameter set whose hash equals the pin. `runtime_record_line` is the one canonical writer of such
 a line, for every `RuntimeEventType`.
 
+Schema `soak-evidence-bundle/2` is `/1` plus the two host witness files and a `host_witness`
+manifest section (16-DEC-HOST-TICK). A bundle without witness input stays `/1`; a `/1` manifest
+that lists a host file or carries `host_witness` is refused by schema, and so is a `/2` manifest
+without them. A loader older than `/2` refuses `/2` by schema (fail closed). The listing and the
+rows are matched one to one by path, size and SHA-256; any mismatch is a `BundleError` that
+names the file and never its content.
+
 Pure of the clock and the network: it reads the files of one directory and nothing else.
 """
 
@@ -61,6 +74,7 @@ from src.paper.coverage import (
     EvidenceGapReason,
     FreezeLine,
     GithubRun,
+    HostTick,
     parse_freeze_log,
     parse_github_runs,
 )
@@ -69,6 +83,7 @@ from src.paper.runtime_state import RuntimeRecord
 from src.paper.vocabulary import RuntimeEventType
 
 BUNDLE_SCHEMA = "soak-evidence-bundle/1"
+BUNDLE_SCHEMA_HOST_WITNESS = "soak-evidence-bundle/2"
 MANIFEST_NAME = "manifest.json"
 FILE_PINNED = "pinned_epoch.json"
 FILE_DIFF = "registry_diff.jsonl"
@@ -77,12 +92,15 @@ FILE_RECORDS = "runtime_records.jsonl"
 FILE_GAPS = "evidence_gaps.jsonl"
 FILE_ANALYTICS = "analytics_evidence.json"
 FILE_MISSING_TICKS = "missing_ticks.jsonl"
+FILE_HOST_LISTING = "host_witness_listing.json"
+FILE_HOST_TICKS = "host_ticks.jsonl"
+HOST_WITNESS_FILES: tuple[str, ...] = (FILE_HOST_LISTING, FILE_HOST_TICKS)
 FREEZE_ARTIFACT_PREFIX = "freeze_artifact_"
 FREEZE_ARTIFACT_PATTERN = re.compile(r"freeze_artifact_[0-9a-f]{16}\.jsonl")
 
 REQUIRED_FILES: tuple[str, ...] = (FILE_PINNED, FILE_DIFF, FILE_RUNS, FILE_RECORDS, FILE_GAPS)
 OPTIONAL_FILES: tuple[str, ...] = (FILE_MISSING_TICKS, FILE_ANALYTICS)
-KNOWN_FILES: frozenset[str] = frozenset((*REQUIRED_FILES, *OPTIONAL_FILES))
+KNOWN_FILES: frozenset[str] = frozenset((*REQUIRED_FILES, *OPTIONAL_FILES, *HOST_WITNESS_FILES))
 SOURCES: tuple[str, ...] = ("pg", "fixture")
 
 
@@ -135,6 +153,8 @@ class EvidenceBundle:
     file_sha256: Mapping[str, str]
     as_of_utc: datetime | None = None
     missing_ticks: tuple[MissingTick, ...] = ()
+    host_witness: bool = False
+    host_ticks: tuple[HostTick, ...] = ()
 
 
 def sha256_of(data: bytes) -> str:
@@ -183,8 +203,24 @@ def _parse_manifest(directory: Path) -> dict[str, Any]:
         raise BundleError(f"{MANIFEST_NAME} is not valid JSON") from None
     if not isinstance(manifest, dict):
         raise BundleError(f"{MANIFEST_NAME} is not a JSON object")
-    if manifest.get("schema") != BUNDLE_SCHEMA:
+    schema = manifest.get("schema")
+    if schema not in (BUNDLE_SCHEMA, BUNDLE_SCHEMA_HOST_WITNESS):
         raise BundleError(f"{MANIFEST_NAME} schema must be {BUNDLE_SCHEMA!r}")
+    listed = manifest.get("files")
+    listed_names = listed if isinstance(listed, dict) else {}
+    if schema == BUNDLE_SCHEMA:
+        if "host_witness" in manifest or any(name in listed_names for name in HOST_WITNESS_FILES):
+            raise BundleError(
+                f"{MANIFEST_NAME} schema {BUNDLE_SCHEMA!r} must not carry the host witness section"
+            )
+    else:
+        if not isinstance(manifest.get("host_witness"), dict) or not all(
+            name in listed_names for name in HOST_WITNESS_FILES
+        ):
+            raise BundleError(
+                f"{MANIFEST_NAME} schema {BUNDLE_SCHEMA_HOST_WITNESS!r} needs the host_witness "
+                "section and both host witness files"
+            )
     if manifest.get("source") not in SOURCES:
         raise BundleError(f"{MANIFEST_NAME} source must be one of {list(SOURCES)}")
     return manifest
@@ -339,6 +375,78 @@ def _parse_runs(data: bytes) -> tuple[GithubRun, ...]:
         raise BundleError(f"{FILE_RUNS} is not a run list: {exc}") from None
 
 
+def _parse_host_listing(data: bytes) -> dict[str, tuple[int, datetime]]:
+    """The witness listing (rclone lsjson shape): path -> (size, server ModTime)."""
+    try:
+        raw = json.loads(data)
+    except ValueError:
+        raise BundleError(f"{FILE_HOST_LISTING} is not valid JSON") from None
+    if not isinstance(raw, list):
+        raise BundleError(f"{FILE_HOST_LISTING} is not a JSON array")
+    listing: dict[str, tuple[int, datetime]] = {}
+    for number, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            raise BundleError(f"{FILE_HOST_LISTING} entry {number} is not an object")
+        if entry.get("IsDir") is True:
+            continue
+        path, size = entry.get("Path"), entry.get("Size")
+        if not isinstance(path, str) or path == "":
+            raise BundleError(f"{FILE_HOST_LISTING} entry {number} has no Path")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise BundleError(f"{FILE_HOST_LISTING} entry {number} has no valid Size")
+        try:
+            modtime = _parse_utc(entry.get("ModTime"), "ModTime")
+        except ValueError as exc:
+            raise BundleError(f"{FILE_HOST_LISTING} entry {number}: {exc}") from None
+        if path in listing:
+            raise BundleError(f"{FILE_HOST_LISTING} lists a path twice (entry {number})")
+        listing[path] = (size, modtime)
+    return listing
+
+
+def _host_row_bytes(row: Mapping[str, Any], number: int) -> tuple[str, int, bytes | None]:
+    """One `host_ticks.jsonl` row checked against its own size and SHA-256: (path, size, bytes)."""
+    path, size, digest, text = row.get("path"), row.get("size"), row.get("sha256"), row.get("text")
+    if not isinstance(path, str) or not isinstance(digest, str):
+        raise BundleError(f"{FILE_HOST_TICKS} line {number}: path and sha256 must be strings")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise BundleError(f"{FILE_HOST_TICKS} line {number}: size must be a non-negative integer")
+    if text is None:
+        return path, size, None
+    if not isinstance(text, str):
+        raise BundleError(f"{FILE_HOST_TICKS} line {number}: text must be a string or null")
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise BundleError(f"{FILE_HOST_TICKS} line {number}: text is not UTF-8") from None
+    if len(data) != size or sha256_of(data) != digest:
+        raise BundleError(
+            f"{FILE_HOST_TICKS} line {number}: the text does not match its size and sha256"
+        )
+    return path, size, data
+
+
+def _parse_host_ticks(listing_data: bytes, ticks_data: bytes) -> tuple[HostTick, ...]:
+    """Match the listing and the rows one to one by path; build the ticks sorted by path."""
+    listing = _parse_host_listing(listing_data)
+    rows: dict[str, tuple[int, bytes | None]] = {}
+    for number, row in enumerate(_json_rows(FILE_HOST_TICKS, ticks_data), start=1):
+        path, size, data = _host_row_bytes(row, number)
+        if path in rows:
+            raise BundleError(f"{FILE_HOST_TICKS} line {number}: a path appears twice")
+        rows[path] = (size, data)
+    if set(rows) != set(listing):
+        raise BundleError(f"{FILE_HOST_TICKS} and {FILE_HOST_LISTING} do not list the same paths")
+    ticks: list[HostTick] = []
+    for path in sorted(listing):
+        listed_size, modtime = listing[path]
+        row_size, data = rows[path]
+        if row_size != listed_size:
+            raise BundleError(f"{FILE_HOST_TICKS} size differs from {FILE_HOST_LISTING}: {path}")
+        ticks.append(HostTick(path=path, witnessed_at_utc=modtime, size=listed_size, data=data))
+    return tuple(ticks)
+
+
 def _parse_analytics(data: bytes) -> Mapping[str, Any]:
     try:
         parsed = json.loads(data)
@@ -378,6 +486,12 @@ def load_evidence_bundle(path: Path | str) -> EvidenceBundle:
         except ValueError as exc:
             raise BundleError(f"{MANIFEST_NAME}: {exc}") from None
     analytics = _parse_analytics(contents[FILE_ANALYTICS]) if FILE_ANALYTICS in contents else None
+    host_witness = FILE_HOST_LISTING in contents
+    host_ticks = (
+        _parse_host_ticks(contents[FILE_HOST_LISTING], contents[FILE_HOST_TICKS])
+        if host_witness
+        else ()
+    )
     return EvidenceBundle(
         path=directory,
         epoch_id=epoch_id,
@@ -398,6 +512,8 @@ def load_evidence_bundle(path: Path | str) -> EvidenceBundle:
             if FILE_MISSING_TICKS in contents
             else ()
         ),
+        host_witness=host_witness,
+        host_ticks=host_ticks,
     )
 
 
@@ -414,15 +530,19 @@ def bundle_is_partial(bundle: EvidenceBundle, grace_seconds: int) -> bool:
 
 __all__ = [
     "BUNDLE_SCHEMA",
+    "BUNDLE_SCHEMA_HOST_WITNESS",
     "FILE_ANALYTICS",
     "FILE_DIFF",
     "FILE_GAPS",
+    "FILE_HOST_LISTING",
+    "FILE_HOST_TICKS",
     "FILE_MISSING_TICKS",
     "FILE_PINNED",
     "FILE_RECORDS",
     "FILE_RUNS",
     "FREEZE_ARTIFACT_PATTERN",
     "FREEZE_ARTIFACT_PREFIX",
+    "HOST_WITNESS_FILES",
     "KNOWN_FILES",
     "MANIFEST_NAME",
     "OPTIONAL_FILES",

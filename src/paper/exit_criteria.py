@@ -1366,6 +1366,9 @@ def evaluate_trial(
         runs=bundle.runs,
         grace_seconds=thresholds.freeze_tick_grace_seconds,
         detected_at_utc=end,
+        host_ticks=bundle.host_ticks,
+        pinned_epoch_id=bundle.pinned.epoch_id,
+        pinned_hash=bundle.pinned.parameter_set_hash,
     )
     in_window_gaps = sum(1 for g in bundle.evidence_gaps if pin < g.slot_utc <= end)
 

@@ -62,8 +62,9 @@ one `FreezeSkippedEntry` line (outcome "SKIPPED", reason "allowlist empty") and
 exits 0; it is never a clean tick and never falls back to a set. One entry is
 checked exactly like the explicit-id call, plus the rule that the pinned hash
 equals the entry's hash. Every line may carry `run_metadata` (run id, attempt,
-event name, cron string, commit) read from five named environment variables, so
-a reconciler can tell scheduled ticks from manual runs.
+event name, cron string, commit; the host timer of 16-DEC-HOST-TICK adds the tick
+source and tick id) read from seven named environment variables, so a reconciler
+can tell scheduled ticks from manual runs.
 
 The module owns the freeze-monitor slice: registry reads go through
 `src/domain/registry.py`, cost-key binding through `src/backtest/`
@@ -217,23 +218,27 @@ class DiffLogEntry:
 
 # The only environment variables a diff-log line copies run metadata from, with the key each is
 # written under. GITHUB_* are runner defaults; PAPER_EVENT_SCHEDULE is set by the workflow from
-# `github.event.schedule` (the cron string; empty on a manual run). Nothing else is ever read.
+# `github.event.schedule` (the cron string; empty on a manual run). PAPER_TICK_SOURCE and
+# PAPER_TICK_ID are set only by the host timer of 16-DEC-HOST-TICK (source "host" and the tick id
+# that is also in the witness object key); GitHub never sets them. Nothing else is ever read.
 RUN_METADATA_ENV: tuple[tuple[str, str], ...] = (
     ("GITHUB_RUN_ID", "run_id"),
     ("GITHUB_RUN_ATTEMPT", "run_attempt"),
     ("GITHUB_EVENT_NAME", "event_name"),
     ("GITHUB_SHA", "commit"),
     ("PAPER_EVENT_SCHEDULE", "schedule"),
+    ("PAPER_TICK_SOURCE", "source"),
+    ("PAPER_TICK_ID", "tick_id"),
 )
 _RUN_METADATA_KEYS = frozenset(key for _, key in RUN_METADATA_ENV)
 
 
 def read_run_metadata(environ: Mapping[str, str] | None = None) -> dict[str, str] | None:
-    """Collect run metadata from the five named variables, or None when none is set.
+    """Collect run metadata from the seven named variables, or None when none is set.
 
     A variable that is present but empty is kept as an empty string: `github.event.schedule` is
     empty on a `workflow_dispatch` run and the line must say so rather than omit the key. A
-    variable that is absent is omitted. With none of the five present the result is None and the
+    variable that is absent is omitted. With none of the seven present the result is None and the
     line carries no `run_metadata` key, so lines written outside Actions are unchanged.
     """
     source = os.environ if environ is None else environ
