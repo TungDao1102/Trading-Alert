@@ -119,7 +119,10 @@ _CONTEXT_SKIP_TOKEN: Final = "skip_raw_token"
 # SHADOW alert text versions (plan 24-09, owner answer Q10 at 24-01, 2026-10-31; CONTEXT D-19,
 # ROADMAP P23-R1). A Phase 16 soak is running and its evidence pins the SHADOW alert text, so the
 # money block is a NEW text version and the old text is kept byte for byte:
-#   - SHADOW_TEXT_V1: the alert without money rows; the approval rows carry no `money_json`.
+#   - SHADOW_TEXT_V1: the alert without money rows; the approval rows carry no `money_json`. It is
+#     no longer byte-identical to the Phase 16 soak text: since D108 its `Quantity:` line is the
+#     risk-stage quantity and an estimated-loss line follows (an image built before this change
+#     keeps the old text).
 #   - SHADOW_TEXT_V2: the same alert plus the money rows of the DEMO request card (notional,
 #     margin, loss at SL, profit per TP, equity used); both approval rows carry `money_json`.
 # The version is chosen once, when the `ShadowApprovalBook` is constructed. V1 stays the default
@@ -221,6 +224,31 @@ def _plain_or_unavailable(value: Decimal | None, *, suffix: str = "") -> str:
     return "unavailable" if value is None else _plain(value) + suffix
 
 
+# The two risk-stage lines shared by the confirmation card and the APPROVE alert (D108): one
+# wording and one number format, so the two texts cannot drift apart.
+_QUANTITY_PREFIX: Final = "Quantity: "
+_ESTIMATED_LOSS_PREFIX: Final = "Estimated loss at SL (incl. costs): "
+
+
+def _quantity_line(quantity: Decimal | None) -> str:
+    return _QUANTITY_PREFIX + _plain_or_unavailable(quantity)
+
+
+def _estimated_loss_line(loss: Decimal | None) -> str:
+    return _ESTIMATED_LOSS_PREFIX + _plain_or_unavailable(loss, suffix=" quote")
+
+
+def _risk_stage_figures(sized: SizedResult | None) -> tuple[Decimal | None, Decimal | None]:
+    """The `(quantity, estimated loss incl. costs)` of a sizing, or `(None, None)` without one.
+
+    A missing sizing, a NO_TRADE result or a result without a quantity has no figure to show
+    (D108): the caller says `unavailable`, never a planner figure.
+    """
+    if sized is None or sized.is_no_trade or sized.quantity is None:
+        return None, None
+    return sized.quantity, sized.realized_risk
+
+
 def format_time_pair(instant_utc: datetime) -> str:
     """The instant in UTC and in Asia/Ho_Chi_Minh, e.g. `2026-10-09 03:00:00 UTC (... +7h ...)`."""
     if instant_utc.tzinfo is None:
@@ -288,12 +316,11 @@ def render_shadow_message(
                 "Confirm this SHADOW plan? No real order will be placed.",
                 f"Symbol: {card.symbol}",
                 f"Side: {card.side}",
-                f"Quantity: {_plain_or_unavailable(card.quantity)}",
+                _quantity_line(card.quantity),
                 f"Entry (adverse edge): {_plain(card.entry_ref)}",
                 f"Stop loss: {_plain(card.stop_loss)}",
                 f"Notional: {_plain_or_unavailable(card.notional, suffix=' quote')}",
-                "Estimated loss at SL (incl. costs): "
-                f"{_plain_or_unavailable(card.estimated_loss, suffix=' quote')}",
+                _estimated_loss_line(card.estimated_loss),
                 f"Mark price: {mark}",
                 f"Plan expiry: {format_time_pair(card.plan_expiry_utc)} "
                 f"(remaining {card.plan_remaining_seconds} s)",
@@ -452,6 +479,29 @@ def _require_money_for_version(
     return money
 
 
+def _require_money_matches_sizing(money: MoneyAtStake, sized: SizedResult | None) -> None:
+    """V2 only (D108): the money block must be the one built from the sizing the alert shows.
+
+    The planner-quantity check of `_require_money_for_version` is unchanged and runs first; this
+    check refuses a block whose quantity or net loss differs from the shown risk-stage figures,
+    and a V2 alert with no sizing at all.
+    """
+    quantity, loss = _risk_stage_figures(sized)
+    if quantity is None or loss is None:
+        raise ValueError(
+            f"{SHADOW_TEXT_V2} needs the risk-stage sizing (sized) the money block was built from"
+        )
+    if money.quantity != quantity:
+        raise ValueError(
+            f"money.quantity {money.quantity} differs from the risk-stage quantity {quantity}"
+        )
+    if money.loss_at_stop_net != loss:
+        raise ValueError(
+            f"money.loss_at_stop_net {money.loss_at_stop_net} differs from the risk-stage "
+            f"realized_risk {loss}"
+        )
+
+
 def format_shadow_alert(
     *,
     signal: Signal,
@@ -460,6 +510,7 @@ def format_shadow_alert(
     now_utc: datetime,
     exposure_quote: Decimal,
     reason_codes: Sequence[str],
+    sized: SizedResult | None,
     money: MoneyAtStake | None = None,
     text_version: str = DEFAULT_SHADOW_TEXT_VERSION,
 ) -> str:
@@ -468,22 +519,33 @@ def format_shadow_alert(
     `format_approve` still validates and renders the fields fail-closed; its two UTC time lines
     (`Detected:`, `Expiry:`) are replaced by `render_shadow_message` lines that show the detected
     and expiry times in UTC and Asia/Ho_Chi_Minh (format_approve has no display note since
-    Phase 23, D-14; the SHADOW text keeps both zones). The alert also shows the plan's
-    `quantity_after_rounding` on a `Quantity:` line (D078 item (6)): the value
-    `ShadowApprovalBook.issue` stores as `approved_quantity` on both rows. A plan whose
-    quantity is not above zero is refused here (ValueError), before anything is stored
-    or sent.
+    Phase 23, D-14; the SHADOW text keeps both zones).
 
-    `text_version` (plan 24-09, owner Q10): `SHADOW_TEXT_V1` is the text of the Phase 16 soak,
-    unchanged. `SHADOW_TEXT_V2` adds the money rows (`render_money_block`, the DEMO wording)
-    directly after the `Quantity:` line; it requires `money` (the block stored on the approval
-    rows), which must agree with the plan, or the alert is refused (`MoneyAtStakeUnavailable`
-    for a missing block, ValueError for a disagreement).
+    The `Quantity:` line and the `Estimated loss at SL (incl. costs):` line that follows it are
+    the risk-stage figures of `sized` (`verdict.sized`: the quantity the SHADOW ledger reserves
+    and the loss including the modeled costs), rendered by the helpers and in the wording of the
+    confirmation card (D108, owner decision 2026-11-13, option A). `sized` has no default; None
+    or a NO_TRADE result gives `unavailable` for both lines, never the planner figure. The
+    plan's `quantity_after_rounding` is still validated by `format_approve` (a plan whose
+    quantity is not above zero is refused here with ValueError, before anything is stored or
+    sent) and stays the `approved_quantity` stored on both rows (D078), so the shown quantity
+    and `approved_quantity` can differ by design.
+
+    `text_version` (plan 24-09, owner Q10): `SHADOW_TEXT_V1` is the text without money rows.
+    `SHADOW_TEXT_V2` adds the money rows (`render_money_block`, the DEMO wording) directly after
+    the `Quantity:` line, the estimated-loss line following them; it requires `money` (the block
+    stored on the approval rows), which must agree with the plan (unchanged check against the
+    planner quantity) and with `sized` (D108: its quantity and net loss must equal the shown
+    figures), or the alert is refused (`MoneyAtStakeUnavailable` for a missing block, ValueError
+    for a disagreement). A V2 alert therefore renders only when the planner and risk-stage
+    quantities agree.
     """
     require_shadow(mode)
     shown_money = _require_money_for_version(
         signal=signal, plan=plan, money=money, text_version=text_version
     )
+    if shown_money is not None:
+        _require_money_matches_sizing(shown_money, sized)
     take_profits = _plan_take_profits(plan)
     rr = _json_decimal(_json_object(plan.expected_rr_json, "expected_rr_json"), "tp1_rr", "rr")
     rule = _json_object(plan.invalidation_rule_json, "invalidation_rule_json")
@@ -510,11 +572,18 @@ def format_shadow_alert(
     body_lines = [line for line in all_lines if not line.startswith(("Detected: ", "Expiry: "))]
     if len(all_lines) - len(body_lines) != 2:
         raise RuntimeError("format_approve no longer has the Detected/Expiry lines")
-    if shown_money is not None:
-        quantity_at = [i for i, line in enumerate(body_lines) if line.startswith("Quantity: ")]
-        if len(quantity_at) != 1:
-            raise RuntimeError("format_approve no longer has exactly one Quantity line")
-        body_lines[quantity_at[0] + 1 : quantity_at[0] + 1] = _shadow_money_lines(shown_money)
+    quantity_at = [i for i, line in enumerate(body_lines) if line.startswith(_QUANTITY_PREFIX)]
+    if len(quantity_at) != 1:
+        raise RuntimeError("format_approve no longer has exactly one Quantity line")
+    shown_quantity, shown_loss = _risk_stage_figures(sized)
+    inserted = [] if shown_money is None else _shadow_money_lines(shown_money)
+    inserted.append(_estimated_loss_line(shown_loss))
+    at = quantity_at[0]
+    body_lines[at] = _quantity_line(shown_quantity)
+    body_lines[at + 1 : at + 1] = inserted
+    after = at + 1 + len(inserted)
+    if after >= len(body_lines) or not body_lines[after].startswith("SL: "):
+        raise RuntimeError("format_approve no longer has the SL line after Quantity")
     return render_shadow_message(
         ShadowMessageKind.ALERT,
         mode=mode,
@@ -622,9 +691,9 @@ class ShadowApprovalBook:
         """Build the PENDING APPROVE and SKIP approvals and the short-id mapping.
 
         Both rows carry `approved_quantity` = the plan's `quantity_after_rounding` (D078,
-        19-REVIEW WR-01), the figure the SHADOW alert and
-        `render_confirm_card` show. The SKIP row's value is never read; the two rows of one
-        request stay identical.
+        19-REVIEW WR-01). Since D108 the SHADOW alert and `render_confirm_card` show the
+        risk-stage figures (`verdict.sized`) instead, which may differ from it by design. The
+        SKIP row's value is never read; the two rows of one request stay identical.
 
         With `SHADOW_TEXT_V2` (plan 24-09, D-19, P23-R1) both rows also carry the same
         `money_json`, the canonical JSON of the block built from the pipeline output that sized
@@ -950,6 +1019,7 @@ async def send_shadow_alert(
     exposure_quote: Decimal,
     reason_codes: Sequence[str],
     now_utc: datetime,
+    sized: SizedResult | None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     money: MoneyAtStake | None = None,
 ) -> ShadowSendOutcome:
@@ -957,7 +1027,9 @@ async def send_shadow_alert(
 
     The alert text version is the book's (`ShadowApprovalBook.text_version`). With
     `SHADOW_TEXT_V2` the `money` block (`build_shadow_money`) is shown on the alert and stored on
-    both rows; a missing block refuses the alert before anything is stored or sent.
+    both rows; a missing block refuses the alert before anything is stored or sent. `sized` is
+    the risk-stage sizing (`verdict.sized`) whose quantity and estimated loss the alert shows
+    (D108); it has no default and is passed on to `format_shadow_alert`.
 
     Order: parents first (signal, plan, both approvals, the short-id mapping), the journal row
     next, the send last. A send failure is journaled with its classified kind and approves
@@ -971,6 +1043,7 @@ async def send_shadow_alert(
         now_utc=now_utc,
         exposure_quote=exposure_quote,
         reason_codes=reason_codes,
+        sized=sized,
         money=money,
         text_version=book.text_version,
     )

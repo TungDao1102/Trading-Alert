@@ -70,6 +70,7 @@ from tests.shadow_fakes import (
     make_callback_update,
     make_shadow_plan,
     make_shadow_signal,
+    make_shadow_sized,
 )
 
 T_PRESS = T0 + timedelta(minutes=7)
@@ -145,6 +146,7 @@ class Harness:
             exposure_quote=Decimal("0"),
             reason_codes=["SETUP_DETECTED"],
             now_utc=T0,
+            sized=make_shadow_sized(self.plan),
             sleep=self.sleep,
         )
 
