@@ -1528,6 +1528,116 @@ Mọi đối số sau đó được chuyển nguyên cho compose của project d
 
 **Không bao giờ:** dùng tệp môi trường soak cho buổi diễn tập; đặt giá trị khóa giao dịch hay token vào tệp diễn tập đưa vào git; chạy buổi diễn tập trên cơ sở dữ liệu của project soak.
 
+### Thẻ lệnh: deploy/freeze-witness.sh
+
+> - **Để làm gì:** Chạy một nhịp kiểm tra đóng băng (freeze) mỗi giờ ngay trên máy soak rồi tải đúng dòng kết quả lên S3 theo kiểu chỉ-tạo-mới, để mỗi ô giờ có thêm một nguồn thứ hai ngoài tick của GitHub.
+> - **Giải quyết vấn đề gì:** 7 trong 9 khoảng trống của trial đầu đến từ việc GitHub chạy trễ hoặc bỏ tick, và phút 17 chưa được chứng minh; nhịp của máy soak có đối tượng S3 do nhà cung cấp đóng dấu giờ máy chủ của họ, nên độ trễ không bao giờ dựa vào đồng hồ do chính máy soak tự khai.
+> - **Mức quan trọng:** **NÊN LÀM** trước lần ghim epoch kế tiếp (quyết định của chủ dự án `16-DEC-HOST-TICK`, sửa O-01 theo hướng quyền tối thiểu, ghi thành D109; RUNBOOK 20.10; mức này là đánh giá của hướng dẫn: không bắt buộc về kỹ thuật vì tick của GitHub vẫn chạy).
+
+**Mục đích:** một lần chạy lấy image của container `paper` đang chạy, chép epoch đã ghim ra thư mục tạm, rồi chạy cùng lệnh kiểm tra đóng băng của runtime trong image đó (container tạm, không có mạng, hệ thống tệp chỉ-đọc, chỉ gắn thư mục tạm). Dòng kết quả phải mang nguồn `host`, mã nhịp của lần này và lịch cron; nó được tải lên đúng nguyên byte, chỉ-tạo-mới (tiêu đề `If-None-Match: *`, băm SHA-256 của nội dung được ký), thành đối tượng `<tiền tố witness>/<epoch_id>/<ô giờ>-<mã nhịp>.jsonl`. Tiền tố witness, URL bucket và credential chỉ nằm trong credential systemd `freeze-witness`; chúng đến curl qua cấu hình trên đầu vào chuẩn, không bao giờ qua đối số, biến môi trường hay container. Script ba chế độ: một nhịp (mặc định), `--set-credential` (cất credential, chạy bằng root) và `--install-timer --soak-env-file PATH` (cài hai unit, chạy bằng root). Độ trễ của một nhịp chỉ do giờ máy chủ S3 của đối tượng quyết định; thời gian ân hạn 1800 giây, lưới ô giờ và tiêu chí không đổi.
+
+**Khi nào chạy:** nhịp chạy tự động dưới systemd (xem thẻ của hai unit), không chạy tay hằng giờ. Chạy `--set-credential` và `--install-timer` một lần, sau khi chủ dự án đã tạo credential chỉ-tạo-mới và chính sách bucket theo RUNBOOK 20.10, và trước lần ghim epoch kế tiếp. Điều kiện trước: image dựng từ một commit đã có kế hoạch A của tác vụ 261114-12e; với image cũ hơn, nhịp thoát mã 5 và không tải gì lên.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout, user `trading` thuộc nhóm docker (nhịp) hoặc root (`--set-credential`, `--install-timer`). Cần soak đang chạy với service `paper`.
+
+**Lệnh:** cất credential (năm dòng `khóa=giá trị` nhập qua đầu vào chuẩn, không hiện lên màn hình; tên năm khóa nằm ở RUNBOOK 20.10), xem trước rồi cài timer, và kiểm tra lịch:
+
+```bash
+sudo deploy/freeze-witness.sh --set-credential
+```
+
+```bash
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run
+```
+
+```bash
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env
+```
+
+```bash
+systemctl list-timers trading-soak-freeze-witness.timer
+```
+
+Muốn thử một nhịp thật bằng tay, chạy unit rồi đọc nhật ký (do chủ dự án làm, vì cần credential và mạng):
+
+```bash
+sudo systemctl start trading-soak-freeze-witness.service
+```
+
+```bash
+journalctl -u trading-soak-freeze-witness
+```
+
+**Chạy thử:** `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run` in hai tệp unit sẽ ghi và các lệnh `systemctl`, không ghi gì; cờ `--dry-run` cũng dùng được với `--set-credential` (kiểm tra đầu vào, không ghi tệp) và với một nhịp (in kế hoạch, không gọi docker hay curl, nhưng vẫn kiểm tra credential và lịch).
+
+**Dấu hiệu thành công:** nhật ký có dòng `witness: created <epoch_id>/<ô giờ>-<mã nhịp>.jsonl (clean)` và không chứa URL, khóa hay giá trị nào của credential; `SKIPPED` hoặc `REGISTRY_DIFF` ở cuối dòng là kết quả hợp lệ của nhịp đó. Việc đối tượng thật sự xuất hiện trong bucket và được bộ xuất đọc lại chỉ máy thật mới chứng minh được: `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** 0 đã tải lên, kết quả `clean` hoặc `SKIPPED` (hoặc chạy thử). 1 nhịp không chạy được: không có container paper, không có epoch ghim hoặc không có dòng kết quả. 2 sai cách dùng, lịch `FREEZE_WITNESS_SCHEDULE` không phải cron mỗi giờ, hoặc đang chạy dưới xtrace. 3 đã tải lên một dòng `REGISTRY_DIFF`. 4 credential thiếu hoặc không hợp lệ. 5 dòng không mang danh tính host (image cũ hơn kế hoạch A). 6 tải lên bị từ chối hoặc lỗi (HTTP 412 nghĩa là đã có đối tượng ở khóa đó và không có gì bị ghi đè).
+
+**Khi lỗi:** mã 4: chạy lại `sudo deploy/freeze-witness.sh --set-credential` (thông báo không bao giờ in giá trị); mã 5: dựng lại image từ commit mới hơn (RUNBOOK 20.6) trước khi bật timer; mã 6: nhịp đó không được tính và không bao giờ gửi lại, tick của GitHub vẫn có thể phủ ô giờ; xem RUNBOOK 20.10 mục "When the remote is down".
+
+**Không bao giờ:** đặt credential vào đối số, vào tệp env của soak, vào container hoặc vào cuộc chat; thêm cơ chế chạy bù (một đối tượng tải lên trễ là một nhịp trễ); gửi lại một nhịp đã lỗi; dùng credential này để đọc, liệt kê hoặc xóa đối tượng; dùng nó chung với credential xuất bằng chứng; dừng, khởi động lại hay ghi vào runtime paper.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-freeze-witness.service
+
+> - **Để làm gì:** Đơn vị systemd chạy `deploy/freeze-witness.sh` một lần mỗi khi timer kích hoạt: một nhịp kiểm tra đóng băng của máy soak, tải lên S3 theo kiểu chỉ-tạo-mới.
+> - **Giải quyết vấn đề gì:** Tách nhịp của máy soak khỏi runtime paper và khỏi mọi unit khác: một nhịp lỗi chỉ làm lỗi chính oneshot này, và credential chỉ-tạo-mới được systemd trao dưới dạng bản sao riêng thay vì nằm trong môi trường hay container.
+> - **Mức quan trọng:** **NÊN LÀM** trước lần ghim epoch kế tiếp (quyết định của chủ dự án `16-DEC-HOST-TICK`; RUNBOOK 20.10; mức này là đánh giá của hướng dẫn).
+
+**Mục đích:** unit oneshot chạy `deploy/freeze-witness.sh` bằng user `trading` với `LoadCredential=freeze-witness:/etc/trading/freeze-witness.conf`, `FREEZE_WITNESS_SCHEDULE` lấy từ cron của workflow lúc cài, một thư mục chạy riêng `trading-freeze-witness` quyền 0700, `TimeoutStartSec=15min` làm giới hạn cấu trúc, và `TRADING_ENV_FILE` là tệp env soak cho `deploy/compose-soak.sh`. Chỉ có `Wants` và `After` tới `network-online.target` và `docker.service`; không có phụ thuộc, khởi động lại hay móc lỗi nào tới runtime paper hay unit khác.
+
+**Khi nào chạy:** không chạy tay thường xuyên. Cài một lần bằng `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env`; timer kích hoạt mỗi giờ. Cài lại khi phút của cron trong workflow đổi.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** chạy một nhịp bằng tay (chủ dự án) rồi xem nhật ký:
+
+```bash
+sudo systemctl start trading-soak-freeze-witness.service
+```
+
+```bash
+journalctl -u trading-soak-freeze-witness
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước việc cài bằng `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `journalctl -u trading-soak-freeze-witness` có dòng `witness: created ...` và không chứa URL hay khóa nào; việc unit chạy đúng dưới systemd với credential chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** như `deploy/freeze-witness.sh`: 0 đã tải lên (`clean` hoặc `SKIPPED`), 1 nhịp không chạy được, 2 lỗi cách dùng hoặc lịch, 3 đã tải lên `REGISTRY_DIFF`, 4 credential thiếu hoặc sai, 5 dòng không mang danh tính host, 6 tải lên bị từ chối hoặc lỗi.
+
+**Khi lỗi:** đọc nhật ký và RUNBOOK 20.10; mã 5 nghĩa là image paper cũ hơn kế hoạch A, mã 6 nghĩa là nhịp đó không được tính và không gửi lại. Một nhịp lỗi không ảnh hưởng tới paper.
+
+**Không bao giờ:** thêm `Requires`, `BindsTo`, `PartOf`, `Restart` hay `OnFailure` tới unit khác; sửa tay bản đã cài trong `/etc/systemd/system`; đặt credential vào tệp unit hay biến `Environment`.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-freeze-witness.timer
+
+> - **Để làm gì:** Hẹn giờ gọi `trading-soak-freeze-witness.service` mỗi giờ vào đúng phút của cron trong workflow freeze (hiện là phút 17, giờ UTC).
+> - **Giải quyết vấn đề gì:** Nhịp của máy soak phủ cùng ô giờ với tick của GitHub; không chạy bù và không trễ ngẫu nhiên, vì một nhịp tải lên trễ vẫn bị tính là trễ và chạy bù chỉ che đi khoảng trống thật.
+> - **Mức quan trọng:** **NÊN LÀM** trước lần ghim epoch kế tiếp (`16-DEC-HOST-TICK`; RUNBOOK 20.10; mức này là đánh giá của hướng dẫn).
+
+**Mục đích:** timer kích hoạt `trading-soak-freeze-witness.service` bằng `OnCalendar=*-*-* *:MM:00 UTC`, trong đó MM là phút của cron duy nhất trong workflow, đọc lúc cài. `Persistent=false`, không trễ ngẫu nhiên, `AccuracySec=1s`.
+
+**Khi nào chạy:** không chạy tay; được cài và bật bởi `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env`. Cố ý không có `Persistent=true` và không có `RandomizedDelaySec`.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:**
+
+```bash
+systemctl list-timers trading-soak-freeze-witness.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-soak-freeze-witness.timer` liệt kê timer với thời điểm kích hoạt kế tiếp ở phút của workflow; việc timer kích hoạt đúng giờ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Nếu phút của cron trong workflow đổi, chạy lại lệnh cài để timer đổi theo.
+
+**Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đổi phút khác cron của workflow bằng cách sửa tay timer đã cài.
+
 #### Bước 7.6 Chuỗi đóng (closure chain) và ai quyết định từng bước [THỦ CÔNG] [CHƯA XÂY]
 
 > - **Để làm gì:** Chuỗi bước và ai quyết định từng bước để Phase 16 đóng: giả thuyết, lưới tham số, lệnh cho chạy nghiên cứu, ứng viên, băm trong allowlist, trial soak.
@@ -1592,7 +1702,7 @@ Hai việc, đều chưa xây và đều blocking-human. Lần smoke trực ti�
 
 Làm được hôm nay: hoàn thành mục 2 đến 6; chuẩn bị bot Telegram riêng (mục 8.1). Phải chờ: quyết định O-12 để tạo máy; mọi thứ từ 16-15 đến 16-50. Không có tiến trình paper để khởi động, không có epoch để ghim và không có trial để đo.
 
-Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak.env.example`
+Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak.env.example`, `deploy/freeze-witness.sh`, `deploy/systemd/trading-soak-freeze-witness.service`, `deploy/systemd/trading-soak-freeze-witness.timer`
 
 ## 8. Telegram, Binance và giám sát bên ngoài
 
@@ -2526,6 +2636,11 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | đầu dò độ sống của paper (`--liveness`) | `[MÁY EC2]` | `deploy/heartbeat.sh --target paper --dry-run` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-soak-paper-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-soak-paper-heartbeat` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-soak-paper-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-paper-heartbeat.timer` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| host tick của freeze, cất credential S3 witness (`--set-credential`) | `[MÁY EC2]` | `sudo deploy/freeze-witness.sh --set-credential` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| host tick của freeze, cài timer (`--install-timer`, `--soak-env-file`, `--dry-run`) | `[MÁY EC2]` | `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-freeze-witness.service`: chạy một nhịp bằng tay | `[MÁY EC2]` | `sudo systemctl start trading-soak-freeze-witness.service` | thẻ `deploy/systemd/trading-soak-freeze-witness.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-freeze-witness.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-soak-freeze-witness` | thẻ `deploy/systemd/trading-soak-freeze-witness.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-freeze-witness.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-freeze-witness.timer` | thẻ `deploy/systemd/trading-soak-freeze-witness.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | heartbeat riêng của live, cất URL (`--target live`, `--set-url`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target live --set-url` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | heartbeat riêng của live, cài timer (`--target live`, `--install-timer`, `--interval-seconds`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-live-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-live-heartbeat` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
@@ -2569,7 +2684,7 @@ Tám service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, t
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
 
-Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak-image.sh`
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak-image.sh`, `deploy/freeze-witness.sh`, `deploy/systemd/trading-soak-freeze-witness.service`, `deploy/systemd/trading-soak-freeze-witness.timer`
 
 ## 15. Danh sách kiểm tra cuối cùng
 
