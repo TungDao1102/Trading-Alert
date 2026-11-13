@@ -358,6 +358,7 @@ SCRIPT_SECTION = {
     "backup-drill.sh": 11,
     "backup-real-s3-gate.sh": 11,
     "heartbeat.sh": 11,
+    "freeze-witness.sh": 20,
 }
 
 
