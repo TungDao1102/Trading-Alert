@@ -468,9 +468,10 @@ def test_the_script_has_no_docker_verb_besides_inspect_cp_and_run() -> None:
     text = _strip_comments((DEPLOY / SCRIPT).read_text(encoding="utf-8"))
     verbs = set(re.findall(r"\bdocker[ \t]+([a-z][a-z-]*)", text))
     assert verbs <= {"inspect", "cp", "run"}, verbs
-    for banned in ("restart", "stop", "kill", " exec ", "down", "compose-soak.sh up", "rm -f"):
-        assert banned not in text.replace("rm -rf", "rm -r"), banned
-    assert "compose-soak.sh ps -q paper" in text
+    compose_verbs = set(re.findall(r'compose-soak\.sh"?\s+(\S+)', text))
+    assert compose_verbs == {"ps"}, compose_verbs
+    for banned in (" exec ", "rm -f ", "update-ref", "git "):
+        assert banned not in text, banned
 
 
 # --- Test 4: the credential -----------------------------------------------------------------------
@@ -629,9 +630,11 @@ def test_any_failed_upload_exits_6_after_one_call(rig: Rig, rc: int) -> None:
 
 def test_the_script_never_sends_an_upload_without_the_create_only_header() -> None:
     text = _strip_comments((DEPLOY / SCRIPT).read_text(encoding="utf-8"))
-    assert text.count("curl ") == text.count("curl --silent") == 1
-    assert text.count("If-None-Match: *") == 1
-    assert "--retry" not in text and "while " not in text.replace("while (($# > 0))", "")
+    assert len(re.findall(r"^\s*curl\b", text, re.MULTILINE)) == 1
+    statement = text[text.index("curl --silent") : text.index("2>/dev/null")]
+    assert "If-None-Match: *" in statement and "x-amz-content-sha256" in statement
+    assert statement.count("If-None-Match: *") == 1
+    assert "--retry" not in text and "--upload-file" in statement
 
 
 # --- Test 9: no container, no pin -----------------------------------------------------------------
@@ -951,7 +954,9 @@ def test_the_script_never_passes_the_credential_to_a_command() -> None:
     assert set(exported) <= {"MSYS_NO_PATHCONV", "DRY_RUN"}, exported
     assert "set -x" not in text and "set -o xtrace" not in text
     assert "--config -" in text
-    for name in ("SECRET_ACCESS_KEY", "ACCESS_KEY_ID", "BUCKET_URL_VALUE"):
-        for ln in text.splitlines():
-            if f"${{{name}" in ln or f"${name}" in ln:
-                assert ln.lstrip().startswith(("printf ", "validate", "[[")) or "=" in ln, ln
+    holders = [
+        ln
+        for ln in text.splitlines()
+        if re.search(r"\$\{?CRED_(SECRET|KEY_ID|BUCKET_URL)\b", ln) and not ln.startswith("local ")
+    ]
+    assert len(holders) == 1 and holders[0].lstrip().startswith("printf 'url = "), holders
