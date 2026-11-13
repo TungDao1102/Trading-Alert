@@ -724,10 +724,10 @@ def test_20_7_export_and_publish_commands_use_flags_the_exporter_accepts() -> No
 
 
 def test_20_7_states_the_recorded_cron_reader_crypt_layer_and_loss_window() -> None:
-    from tests.test_paper_freeze_workflow_pin_source import record
+    from tests.test_paper_freeze_workflow_pin_source import Q_Q_RECORD, record
 
     body = _sub20("20.7")
-    cron = record("16-DEC-Q-Q.md")["cron"]
+    cron = record(Q_Q_RECORD)["cron"]
     o01 = record("16-DEC-O-01.md")
     assert f"`{cron}`" in body, "the recorded cron is stated"
     for phrase in ("G15", "REV-18", "unproven", "EVIDENCE_GAP"):

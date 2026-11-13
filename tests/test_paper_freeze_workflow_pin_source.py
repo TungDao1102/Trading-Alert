@@ -2,7 +2,8 @@
 
 The user decided, and recorded in `decisions/`, how the scheduled workflow on `master` obtains the
 pinned epoch (Q-F: `commit-pinned-state`, the file the user commits to `master`) and the cron
-minute it runs at (Q-Q). These tests read the records and hold the workflow text to them:
+minute it runs at (Q-Q; the record in force is `16-DEC-Q-Q-2.md`, which superseded
+`16-DEC-Q-Q.md`). These tests read the records and hold the workflow text to them:
 
 - the workflow copies the committed pin into the path the freeze CLI reads, before the check, with
   no secret, no credential and the read-only token it already had;
@@ -35,6 +36,11 @@ DECISIONS = ROOT / ".planning" / "phases" / "16-paper-runtime-composition" / "de
 
 # The one place the user commits the pinned epoch to (Q-F). RUNBOOK 20.7 names the same path.
 COMMITTED_PIN_PATH = "evidence/paper/pinned_epoch.json"
+
+# The cron-minute record in force (minute 17, 2026-11-13) and the one it superseded (minute 34,
+# the record of the first trial, kept unchanged).
+Q_Q_RECORD = "16-DEC-Q-Q-2.md"
+SUPERSEDED_Q_Q_RECORD = "16-DEC-Q-Q.md"
 PIN_STEP_NAME = "Use the committed pinned epoch"
 
 
@@ -193,13 +199,13 @@ def test_the_serialising_block_changes_nothing_else_in_the_workflow() -> None:
 
 
 def _recorded_cron() -> str:
-    q_q = record("16-DEC-Q-Q.md")
+    q_q = record(Q_Q_RECORD)
     assert q_q["decided by"] == "user"
     return q_q["cron"]
 
 
 def test_the_recorded_cron_is_of_the_form_the_decision_allows() -> None:
-    q_q = record("16-DEC-Q-Q.md")
+    q_q = record(Q_Q_RECORD)
     cron = q_q["cron"]
     if q_q["option"] == "keep-top-of-hour":
         assert cron == "0 * * * *"
@@ -207,6 +213,15 @@ def test_the_recorded_cron_is_of_the_form_the_decision_allows() -> None:
         assert q_q["option"] == "off-hour-minute"
         match = re.fullmatch(r"([1-9]|[1-5][0-9]) \* \* \* \*", cron)
         assert match is not None, cron
+
+
+def test_the_superseded_q_q_record_stays_the_record_of_the_first_trial() -> None:
+    old = record(SUPERSEDED_Q_Q_RECORD)
+    new = record(Q_Q_RECORD)
+    assert old["cron"] == "34 * * * *"
+    assert old["decided by"] == "user"
+    assert new["supersedes"].startswith(SUPERSEDED_Q_Q_RECORD)
+    assert old["cron"] != new["cron"]
 
 
 def _assert_workflow_cron(text: str, recorded: str) -> None:
