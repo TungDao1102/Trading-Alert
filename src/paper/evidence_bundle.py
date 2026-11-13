@@ -77,6 +77,7 @@ from src.paper.coverage import (
     HostTick,
     parse_freeze_log,
     parse_github_runs,
+    parse_host_line,
 )
 from src.paper.freeze import StreamEpoch
 from src.paper.runtime_state import RuntimeRecord
@@ -155,6 +156,7 @@ class EvidenceBundle:
     missing_ticks: tuple[MissingTick, ...] = ()
     host_witness: bool = False
     host_ticks: tuple[HostTick, ...] = ()
+    host_diff_records: tuple[DiffRecord, ...] = ()
 
 
 def sha256_of(data: bytes) -> str:
@@ -268,22 +270,31 @@ def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _diff_record(row: Mapping[str, Any]) -> DiffRecord:
+    try:
+        checked = _parse_utc(row.get("checked_at_utc"), "checked_at_utc")
+    except ValueError:
+        checked = None
+    return DiffRecord(
+        checked_at_utc=checked,
+        epoch_id=_optional_text(row.get("epoch_id")),
+        pinned_hash=_optional_text(row.get("pinned_hash")),
+        current_hash=_optional_text(row.get("current_hash")),
+        outcome=_optional_text(row.get("outcome")),
+    )
+
+
 def _parse_diff_records(data: bytes) -> tuple[DiffRecord, ...]:
+    return tuple(_diff_record(row) for row in _json_rows(FILE_DIFF, data))
+
+
+def _host_diff_records(ticks: tuple[HostTick, ...]) -> tuple[DiffRecord, ...]:
+    """One record per host tick whose bytes are a readable line, with the same field rules."""
     records: list[DiffRecord] = []
-    for row in _json_rows(FILE_DIFF, data):
-        try:
-            checked = _parse_utc(row.get("checked_at_utc"), "checked_at_utc")
-        except ValueError:
-            checked = None
-        records.append(
-            DiffRecord(
-                checked_at_utc=checked,
-                epoch_id=_optional_text(row.get("epoch_id")),
-                pinned_hash=_optional_text(row.get("pinned_hash")),
-                current_hash=_optional_text(row.get("current_hash")),
-                outcome=_optional_text(row.get("outcome")),
-            )
-        )
+    for tick in ticks:
+        parsed = parse_host_line(tick.data)
+        if parsed is not None:
+            records.append(_diff_record(parsed))
     return tuple(records)
 
 
@@ -514,6 +525,7 @@ def load_evidence_bundle(path: Path | str) -> EvidenceBundle:
         ),
         host_witness=host_witness,
         host_ticks=host_ticks,
+        host_diff_records=_host_diff_records(host_ticks),
     )
 
 
