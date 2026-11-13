@@ -572,6 +572,7 @@ class ShadowCoordinator:
             exposure_quote=verdict.sized.quantity * _adverse_entry(signal, plan),
             reason_codes=reasons,
             now_utc=now,
+            sized=verdict.sized,
             sleep=self._sleep,
         )
         # The parents exist now (the alert persisted them first), so the context can be journaled.

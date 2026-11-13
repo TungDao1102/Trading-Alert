@@ -5,7 +5,8 @@ SHADOW text version (`SHADOW_TEXT_V2`) and the old text and pins stay for `SHADO
 
 * V2: both approval rows carry the same `money_json` (canonical JSON of the block built from the
   pipeline output that sized the plan); the alert shows the money rows with the DEMO wording.
-* V1: the alert is byte-identical to before and the rows carry no `money_json`.
+* V1: the alert carries no money rows and the rows carry no `money_json` (its Quantity line and
+  the estimated-loss line follow D108).
 * A plan whose money cannot be built is refused before anything is stored or sent.
 """
 
@@ -72,6 +73,7 @@ async def _send(
         plan=plan,
         now_utc=T0,
         sleep=RecordingSleep(),
+        sized=make_shadow_sized(plan),
         **_alert(**extra),
     )
 
@@ -232,6 +234,7 @@ def test_q10_v2_differs_from_v1_only_by_the_money_rows() -> None:
         plan=plan,
         mode=Mode.SHADOW,
         now_utc=T0,
+        sized=make_shadow_sized(plan),
         **_alert(text_version=SHADOW_TEXT_V1),
     )
     v2 = format_shadow_alert(
@@ -239,6 +242,7 @@ def test_q10_v2_differs_from_v1_only_by_the_money_rows() -> None:
         plan=plan,
         mode=Mode.SHADOW,
         now_utc=T0,
+        sized=make_shadow_sized(plan),
         **_alert(text_version=SHADOW_TEXT_V2, money=money),
     )
 

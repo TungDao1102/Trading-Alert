@@ -60,6 +60,7 @@ from tests.shadow_fakes import (
     make_callback_update,
     make_shadow_plan,
     make_shadow_signal,
+    make_shadow_sized,
 )
 from tests.support.press_identity import OWNER_PRESS
 
@@ -91,6 +92,7 @@ class Harness:
             exposure_quote=Decimal("0"),
             reason_codes=["SETUP_DETECTED"],
             now_utc=T0,
+            sized=make_shadow_sized(plan),
             sleep=self.sleep,
         )
         return outcome, signal.signal_id, plan
@@ -340,6 +342,7 @@ async def test_restart_expires_pending_approvals_and_later_callbacks_are_rejecte
 async def test_demo_and_live_cannot_reach_the_alert_path(mode: Mode) -> None:
     h = Harness()
     signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
 
     with pytest.raises(ModeNotConstructible):
         await send_shadow_alert(
@@ -349,10 +352,11 @@ async def test_demo_and_live_cannot_reach_the_alert_path(mode: Mode) -> None:
             chat_id=CHAT_ID,
             mode=mode,
             signal=signal,
-            plan=make_shadow_plan(signal),
+            plan=plan,
             exposure_quote=Decimal("0"),
             reason_codes=["SETUP_DETECTED"],
             now_utc=T0,
+            sized=make_shadow_sized(plan),
             sleep=h.sleep,
         )
 
