@@ -130,7 +130,9 @@ def test_the_evidence_template_lists_exactly_the_names_and_no_value() -> None:
             continue
         name, _, value = stripped.partition("=")
         assigned[name] = value
-    assert tuple(sorted(assigned)) == tuple(sorted(ev.EVIDENCE_VARIABLES))
+    # One more optional name since quick task 261114-12e: the host witness prefix.
+    expected = (*ev.EVIDENCE_VARIABLES, ev.WITNESS_PREFIX_VARIABLE)
+    assert tuple(sorted(assigned)) == tuple(sorted(expected))
     assert all(value == "" for value in assigned.values())
 
 
@@ -138,3 +140,59 @@ def test_the_shared_soak_environment_file_does_not_carry_the_evidence_names() ->
     """The paper container shares that file; the evidence credential stays out of it."""
     text = (ROOT / "deploy" / "soak.env.example").read_text(encoding="utf-8")
     assert "EVIDENCE_" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Host witness prefix (quick task 261114-12e; 16-DEC-HOST-TICK).
+# --------------------------------------------------------------------------- #
+
+
+def test_the_witness_source_is_a_sibling_prefix_of_the_same_bucket() -> None:
+    environ = {**GOOD, "EVIDENCE_S3_WITNESS_PREFIX": "paper/witness"}
+    assert ev.witness_source(environ) == "EVIDENCES3:evidence-bucket/paper/witness"
+    assert ev.witness_source({**GOOD, "EVIDENCE_S3_WITNESS_PREFIX": "witness"}) == (
+        "EVIDENCES3:evidence-bucket/witness"
+    )
+    # The evidence names are unchanged: the witness prefix is one more, optional, name.
+    assert len(ev.EVIDENCE_VARIABLES) == 7
+    assert ev.WITNESS_PREFIX_VARIABLE == "EVIDENCE_S3_WITNESS_PREFIX"
+    assert ev.WITNESS_PREFIX_VARIABLE not in ev.EVIDENCE_VARIABLES
+    assert ev.destination(environ) == "EVIDENCES3:evidence-bucket/paper/soak"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",  # unset behaves the same
+        "paper/soak",  # equal to the evidence prefix
+        "paper/soak/witness",  # inside it
+        "paper",  # contains it
+        "/",
+        "/abs",
+        "a/../b",
+        "a//b",
+        "two words",
+        "a?b",
+        "a:b",
+        "p?secret_access_key=abc",
+        "token-in-the-prefix",
+    ],
+)
+def test_an_overlapping_or_unsafe_witness_prefix_is_refused_naming_only_the_variable(
+    value: str,
+) -> None:
+    environ = {**GOOD, "EVIDENCE_S3_WITNESS_PREFIX": value}
+    with pytest.raises(ev.EvidenceConfigError) as raised:
+        ev.witness_source(environ)
+    message = str(raised.value)
+    assert "EVIDENCE_S3_WITNESS_PREFIX" in message
+    if len(value) > 6:
+        assert value not in message
+    assert "evidence-bucket" not in message and "evidence-secret-value" not in message
+
+
+def test_the_witness_source_still_needs_the_evidence_configuration() -> None:
+    bad = {**GOOD, "EVIDENCE_S3_WITNESS_PREFIX": "witness", "EVIDENCE_S3_REGION": ""}
+    with pytest.raises(ev.EvidenceConfigError) as raised:
+        ev.witness_source(bad)
+    assert "EVIDENCE_S3_REGION" in str(raised.value)
