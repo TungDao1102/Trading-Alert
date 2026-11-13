@@ -775,14 +775,14 @@ The paper-start allowlist is a source constant (O-04, plan 16-42), so the image 
 
 ### 20.7 Exporting trial evidence
 
-This is the procedure for getting the evidence of one epoch off the soak host and into the place the user chose, and for reading the hourly freeze ticks back from GitHub (plan 16-47; D-22, L-01, REV-02, REV-08, REV-18). It applies six decision records and invents no value: `decisions/16-DEC-O-01.md` (where evidence is kept), `decisions/16-DEC-Q-F.md` (how the hourly check gets its pin), `decisions/16-DEC-Q-Q.md` (the cron minute of the first trial, minute 34), `decisions/16-DEC-Q-Q-2.md` (the cron minute since 2026-11-13, minute 17), `decisions/16-DEC-EVIDENCE-KEYS.md` (the object keys of the hourly and final bundles, plan 16-59) and `decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md` (how the freeze log is assembled from the run artifacts, plan 16-59).
+This is the procedure for getting the evidence of one epoch off the soak host and into the place the user chose, and for reading the hourly freeze ticks back from GitHub (plan 16-47; D-22, L-01, REV-02, REV-08, REV-18). It applies seven decision records and invents no value: `decisions/16-DEC-O-01.md` (where evidence is kept), `decisions/16-DEC-Q-F.md` (how the hourly check gets its pin), `decisions/16-DEC-Q-Q.md` (the cron minute of the first trial, minute 34), `decisions/16-DEC-Q-Q-2.md` (the cron minute since 2026-11-13, minute 17), `decisions/16-DEC-EVIDENCE-KEYS.md` (the object keys of the hourly and final bundles, plan 16-59) `decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md` (how the freeze log is assembled from the run artifacts, plan 16-59) and `decisions/16-DEC-HOST-TICK.md` (the second tick source, a host timer with an S3 witness, 20.10).
 
 **What the records say.**
 
 - **Where (O-01, option a).** An S3 evidence prefix outside the backup crypt remote, with its own remote and its own credential. Versioning is enabled; there is no Object Lock and no retention. Object Lock can be added later but never removed, so it is the user's later decision, not part of this procedure.
 - **Reader.** The recorded reader is project owner only (the user). GitHub never reads this store: the pin reaches GitHub through a commit (below), so no credential for the evidence store is ever placed on GitHub.
 - **Crypt layer.** The evidence is written outside the backup crypt remote, on a plain S3 remote with no crypt layer, so it is not ciphertext to a holder of the evidence remote's credential and no crypt passphrase is needed to read it. It is also not covered by the encryption of the backup chain (11); what protects it is the bucket policy the user sets in plan 16-49, not this procedure. The two records are compatible because the workflow reads the pin from a commit and never from the store.
-- **Write timing and loss window.** `exporter-schedule`, hourly: the operator runs the export and publish steps below every hour, and nothing on the host writes evidence by itself. The loss window is what was recorded on the host since the last successful publish: at most the last hour while the hourly runs succeed, longer for every skipped or failed run, and everything not yet published if the host disk is lost. The database backups of 11 are a separate copy with their own window; this store is not a backup of the database.
+- **Write timing and loss window.** `exporter-schedule`, hourly: the operator runs the export and publish steps below every hour, and nothing on the host writes evidence by itself. Since D109 (owner decision `16-DEC-HOST-TICK`) the only exception to "nothing on the host writes evidence by itself" is the one create-only witness object per host freeze tick of 20.10. The loss window is what was recorded on the host since the last successful publish: at most the last hour while the hourly runs succeed, longer for every skipped or failed run, and everything not yet published if the host disk is lost. The database backups of 11 are a separate copy with their own window; this store is not a backup of the database.
 - **Object keys (`decisions/16-DEC-EVIDENCE-KEYS.md`, Q1 = A).** Every hourly bundle and the final bundle is published under its own key `<epoch-id>/<as-of>-<sha12>/<file>`: `<as-of>` is the manifest `as_of_utc` as `YYYYMMDDTHHMMSSZ` and `<sha12>` the first 12 hex characters of the SHA-256 of the manifest bytes, so the key comes from the manifest and from nothing typed. The key is create-only: publishing the very same bundle again finds identical bytes, uploads nothing and succeeds (identical bytes are a success), while different bytes at an existing key are an error (exit 4) and nothing is ever replaced. The bucket keeps versioning, with no retention and no Object Lock; O-01 is unchanged. The second hourly publish of an epoch therefore no longer collides with the first, and the final bundle can always be published.
 - **Freeze log (`decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md`, Q2 = B).** The diff log is not read from one run only. Step 1 downloads every available run artifact and the exporter merges the freeze lines of all of them into one derived `registry_diff.jsonl`, deduplicated by run identity `(run_id, run_attempt)`, ordered by time, with the manifest `freeze_log` listing each input artifact with its sha256 and the run ids it carried. The derived file is not a byte copy of one artifact: every original artifact is kept unchanged in the bundle as `freeze_artifact_<16 hex>.jsonl`. Identical lines of one run identity collapse; two different lines of one identity stop the export (exit 4). A line without run metadata is deduplicated by its exact bytes.
 - **One run at a time, and what is still missing.** The workflow has a `concurrency` group `paper-freeze-check` with `cancel-in-progress: false` and `queue: max` (the owner's amendment of 2026-10-16), so two runs never restore the same cache state and the line of one is not lost by an overlap. GitHub documents (https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs, read 2026-10-16, not verified live, `docs/SOURCES.md`) that a group keeps at most one running run; with the default `queue: single` a newly queued run replaces the pending one; `queue: max` allows up to 100 pending runs and is invalid together with `cancel-in-progress: true`. With `queue: max` up to 100 runs may wait and an additional run is cancelled; with fewer pending a tick is not lost. The residual risk is a cancelled, dropped or delayed run, and the rule for it does not depend on the queue: a tick without a usable line is never inferred clean. The expected slots and the run list make it an EVIDENCE_GAP, `missing_ticks.jsonl` records it with its slot, its run id and the run's conclusion (for example `cancelled`), and any cancelled or skipped tick breaks the qualifying window (REV-02). The first live run on GitHub shows that the `queue` key is accepted; no test can.
@@ -809,6 +809,8 @@ python scripts/export_soak_evidence.py --source pg --epoch <epoch-id> --pinned <
 `--diff-log` is given once per downloaded artifact (a shell loop that builds the arguments is fine); the order does not matter and an artifact given twice counts once. The bundle is one epoch, written to a new directory (an existing one is never overwritten) with `manifest.json` last. A secret-looking value anywhere in it stops the export (exit 3) and removes the partial bundle.
 
 `--as-of` is the UTC instant the freeze ticks are judged as of (default: now, and never later than the window end plus the ratified `freeze_tick_grace_seconds`). Only a slot whose slot time plus that grace is at or before it is judged, so an hourly export records a gap only for a tick that has already happened (never for a slot in the future), and the manifest records `as_of_utc`. An `--as-of` before the epoch pin, after the window end plus the grace, or later than the current time (plan 16-65; nothing is written or published) is refused (exit 2). A bundle exported before the window end plus the grace is **partial**: it loads and it is published, but `scripts/evaluate_trial_soak.py` refuses to judge it (exit 2, one line); the final bundle is the first one whose as-of is at or after the window end plus the grace.
+
+**Host witness (20.10).** Once the host timer of 20.10 is installed for an epoch, every export of that epoch adds `--host-witness` with `EVIDENCE_S3_WITNESS_PREFIX` loaded, so the witnessed host ticks join the GitHub ticks in the bundle (`soak-evidence-bundle/2`); an export without it judges the GitHub ticks only. The fenced commands above stay as they are; 20.10 shows the same command with the flag.
 
 **3. Publish and verify.** With the evidence names loaded, either add the flag `--publish` (it takes no value) to the command above, or publish an exported bundle on its own:
 
@@ -913,6 +915,95 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 ```
 
 **Fail-open.** The sender never stops, restarts or touches the paper runtime: the only `docker` subcommand it runs is `exec` of the read-only liveness probe, and the paper units carry no dependency, restart or failure link to any other unit. Live delivery to the monitor, the systemd credential and the timer firing are operator verification on the soak host before plan 16-43.
+
+### 20.10 Host freeze tick and its S3 witness
+
+The soak host runs a second, independent freeze tick beside the GitHub one, by the owner's decision `decisions/16-DEC-HOST-TICK.md` (option s3-witness, 2026-11-14), recorded as D109 in `docs/DECISIONS.md`, which amends O-01 with a least-privilege host credential. Seven of the nine gaps of the first trial came from GitHub lateness and drops, and minute 17 is unproven (G15), so a slot can now also be satisfied by a witnessed host tick. This is quick task 261114-12e: the evidence side (plan A) and the host side (plan B, `deploy/freeze-witness.sh` and the units `trading-soak-freeze-witness.service` and `trading-soak-freeze-witness.timer`).
+
+**What it is.** At the minute of the freeze workflow cron the timer starts the unit. One run takes the image of the running `paper` container, copies the pinned epoch out of the container to a scratch directory, and runs the same freeze CLI, `python -m src.paper.freeze --check --from-allowlist`, in that image: `docker run --rm --network none --read-only`, only the scratch directory mounted and only `PAPER_TICK_SOURCE`, `PAPER_TICK_ID` and `PAPER_EVENT_SCHEDULE` in its environment. It then uploads the exact line the CLI appended, create-only (`If-None-Match: *`, the payload SHA-256 signed), as `<witness prefix>/<epoch_id>/<YYYYMMDDTHHMMZ>-<tick id>.jsonl`. The timer has `Persistent=false` and no randomised delay: there is no catch-up, no retry and no re-send, because a late object is a late tick. The lateness of a tick is decided only by the S3 server time of its object, never by a time the host writes; the grace of `freeze_tick_grace_seconds` (1800), the slot grid, the thresholds, the criteria and D065 item 4 are unchanged, and a line without a witness object is not evidence.
+
+**Prerequisite.** An image built and recorded by 20.6 from a commit that contains plan A of quick task 261114-12e (the freeze CLI that reads `PAPER_TICK_SOURCE` and `PAPER_TICK_ID`). With an older image the unit exits 5 and uploads nothing. This change does not touch the running soak image. Install the timer before the next pin, so that both sources cover the trial from its pin.
+
+**Credential (owner-run).** Create a dedicated user or key for this purpose only: it can create objects under one witness prefix and do nothing else. The witness prefix is a sibling of `EVIDENCE_S3_PREFIX` (not equal to it, inside it or containing it) in the same bucket. AWS example, placeholders only; check it with the provider's policy simulator, no agent has run it. The identity policy of `<witness-user>`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<evidence-bucket>/<witness-prefix>/*"
+    }
+  ]
+}
+```
+
+The bucket policy, with three Deny statements for that principal: everything except `s3:PutObject`; everything outside the witness prefix; and `s3:PutObject` without the create-only condition (`s3:if-none-match`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WitnessOnlyPutObject",
+      "Effect": "Deny",
+      "Principal": {"AWS": "arn:aws:iam::<account-id>:user/<witness-user>"},
+      "NotAction": "s3:PutObject",
+      "Resource": ["arn:aws:s3:::<evidence-bucket>", "arn:aws:s3:::<evidence-bucket>/*"]
+    },
+    {
+      "Sid": "WitnessOnlyItsPrefix",
+      "Effect": "Deny",
+      "Principal": {"AWS": "arn:aws:iam::<account-id>:user/<witness-user>"},
+      "Action": "s3:*",
+      "NotResource": "arn:aws:s3:::<evidence-bucket>/<witness-prefix>/*"
+    },
+    {
+      "Sid": "WitnessCreateOnly",
+      "Effect": "Deny",
+      "Principal": {"AWS": "arn:aws:iam::<account-id>:user/<witness-user>"},
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<evidence-bucket>/<witness-prefix>/*",
+      "Condition": {"Null": {"s3:if-none-match": "true"}}
+    }
+  ]
+}
+```
+
+The export credential of 20.7 is a different one: it gets `s3:ListBucket` limited to the witness prefix and `s3:GetObject` on it (besides its rights on the bundle prefix), and it must never be the witness credential. For another provider use its equivalent. Where a provider cannot refuse an overwrite, bucket versioning (O-01) keeps the first version, and an overwrite can only make a tick later, never earlier.
+
+**Store and install (owner-run, on the soak host).** The credential is five `key=value` lines, each key once and no other line, by name only here: `bucket_url` (an https bucket URL, virtual-hosted or path style with the bucket as its one path segment), `region`, `witness_prefix` (the same value as `EVIDENCE_S3_WITNESS_PREFIX` of the exporter), `access_key_id` and `secret_access_key`. The script reads them from standard input without echo and stores them in the root-only file `/etc/trading/freeze-witness.conf` (mode 0600); systemd hands the unit a private copy as the credential `freeze-witness` (`LoadCredential`). The credential is never an argument, never in the soak env file, a container, the repository or a log, and the script refuses to run under xtrace.
+
+```text
+sudo deploy/freeze-witness.sh --set-credential
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env
+systemctl list-timers trading-soak-freeze-witness.timer
+```
+
+The install reads the minute of the one hourly cron of `.github/workflows/paper_freeze_check.yml` and writes it into the timer as `OnCalendar=*-*-* *:MM:00 UTC`; if the workflow minute changes, run the install again. `--dry-run` shows what would be written without changing anything. Exit codes of one tick: 0 uploaded (clean or SKIPPED), 1 the tick could not run (no paper container, no pin, no line), 2 usage, an invalid schedule or xtrace, 3 uploaded REGISTRY_DIFF, 4 the credential is missing or invalid, 5 the line does not carry the host identity (an older image), 6 the upload was refused or failed.
+
+**Verify with one manual tick (owner-run; agents cannot, as there is no network and no credential).** Start the unit once and read its journal, then export once with the witness and an `--as-of` after the tick:
+
+```text
+sudo systemctl start trading-soak-freeze-witness.service
+journalctl -u trading-soak-freeze-witness
+```
+
+```text
+python scripts/export_soak_evidence.py --source pg --epoch <epoch-id> --pinned <pinned-epoch-file> --diff-log <download-dir>/<run-id>/registry_diff.jsonl --github-runs <github-runs-file> --config <runtime-config> --window-start <window-start-utc> --window-end <window-end-utc> --as-of <as-of-utc> --host-witness --out <new-bundle-dir>
+```
+
+Use every placeholder and the repeated `--diff-log` of 20.7. The exporter prints `host witness: N object(s) read`, and the bundle's `host_witness_listing.json` lists the object with its server ModTime. Last, with the witness credential and the provider's own tool, confirm that a list, a read, a delete and a second PUT to the same key are refused (403 or 412).
+
+**How the exporter reads it.** With `--host-witness` and `EVIDENCE_S3_WITNESS_PREFIX` loaded (a name beside the other `EVIDENCE_` names of `deploy/evidence.env.example`, no value in the repository) the exporter runs `rclone lsjson --use-server-modtime` on `<witness prefix>/<epoch id>/` (the server time of the provider, never client metadata) and `rclone cat` per object, then lists again to detect a change; the bundle becomes `soak-evidence-bundle/2` with `host_witness_listing.json` and `host_ticks.jsonl`. The evaluator judges each witnessed tick by its server time against its slot and the grace of 1800.
+
+**When the remote is down.** At tick time the unit exits 6: that host tick does not count and is never re-sent (a later upload would be a late tick), and the GitHub tick may still cover the slot. At export time the export exits 2 and writes nothing; repeat it later. Never drop `--host-witness` to get a bundle for an epoch that has a host timer.
+
+**What it never does.** It never stops, restarts, execs into or writes the paper runtime, never writes the runtime's own pin (the CLI works on a copy), never passes the credential to a container, and has no dependency, restart or failure link to any other unit. A failed tick only fails its oneshot.
+
+**Not shown by any test.** The real upload, the bucket policy and its Deny conditions, the delivery of the systemd credential, the firing of the timer and the permissions of the scratch directory inside the container are owner-run checks on the soak host and the real bucket. `tests/test_deploy_freeze_witness.py` runs the script against stubs of `docker`, `curl`, `systemctl` and `date` with a fake credential, and `tests/test_soak_runbook.py` holds this section to the exporter flags and to placeholders only. The first tick on the real host shows the shape of the container run and of the S3 answer.
 
 ## 21. Reconcile loop, SAFE_MODE exit and recovery (Phase 20)
 
