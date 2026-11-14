@@ -12,6 +12,7 @@ import dataclasses
 import hashlib
 import json
 import re
+import subprocess
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -1836,6 +1837,77 @@ def test_publish_reaches_rclone_through_the_environment_only(
         assert env["RCLONE_CONFIG_EVIDENCES3_NO_CHECK_BUCKET"] == "true"
         assert not any("CRYPT" in key for key in env if key.startswith("RCLONE_CONFIG_EVIDENCES3"))
     assert len(runner.store) == len(manifest_of(out)["files"]) + 1
+
+
+def test_the_rclone_child_gets_a_whitelisted_environment_never_the_whole_parent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Fake values only. Every name below is set in the PARENT process of the exporter.
+    parent_secrets = {
+        "BINANCE_DEMO_API_SECRET": "fake-binance-demo-secret",
+        "BINANCE_LIVE_API_KEY": "fake-binance-live-key",
+        "TELEGRAM_LIVE_BOT_TOKEN": "fake-telegram-token",
+        "DATABASE_URL": "fake-database-url",
+        "PGPASSWORD": "fake-pg-password",
+        "EVIDENCE_S3_SECRET_ACCESS_KEY": "fake-evidence-secret",
+        "BACKUP_S3_SECRET_ACCESS_KEY": "fake-backup-secret",
+        "GITHUB_TOKEN": "fake-github-token",
+        "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+    }
+    basics = {
+        "PATH": "fake-path",
+        "SYSTEMROOT": "fake-systemroot",
+        "HOME": "fake-home",
+        "USERPROFILE": "fake-userprofile",
+        "TEMP": "fake-temp",
+        "TMP": "fake-tmp",
+        "HTTPS_PROXY": "fake-proxy",
+        "SSL_CERT_FILE": "fake-ca-bundle",
+        "RCLONE_VERBOSE": "1",
+        "RCLONE_BIN": "fake-rclone",
+        "RCLONE_CONFIG_EVIDENCES3_SECRET_ACCESS_KEY": "parent-value-that-must-lose",
+    }
+    for name, value in {**parent_secrets, **basics}.items():
+        monkeypatch.setenv(name, value)
+    mapped = {
+        "RCLONE_CONFIG_EVIDENCES3_TYPE": "s3",
+        "RCLONE_CONFIG_EVIDENCES3_SECRET_ACCESS_KEY": SECRET_KEY,
+    }
+    calls: list[tuple[Sequence[str], Mapping[str, str]]] = []
+
+    def fake_run(args: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append((args, kwargs["env"]))
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(export.subprocess, "run", fake_run)
+
+    code, _, _ = export._run_rclone(["lsf", "EVIDENCES3:evidence-bucket/paper/"], None, mapped)
+
+    assert code == 0
+    ((args, env),) = calls
+    assert args[0] == "fake-rclone", "RCLONE_BIN of the parent still picks the binary"
+    for name in parent_secrets:
+        assert name not in env, f"{name} of the parent reached the rclone child"
+    forbidden = ("BINANCE_", "TELEGRAM_", "EVIDENCE_S3_", "BACKUP_", "PG", "GITHUB_", "GH_", "AWS_")
+    assert not [key for key in env if key.startswith(forbidden)]
+    assert "DATABASE_URL" not in env
+    for name in (
+        "PATH",
+        "SYSTEMROOT",
+        "HOME",
+        "USERPROFILE",
+        "TEMP",
+        "TMP",
+        "HTTPS_PROXY",
+        "SSL_CERT_FILE",
+        "RCLONE_VERBOSE",
+    ):
+        assert env[name] == basics[name], f"{name} of the parent must reach the child"
+    for key, value in mapped.items():
+        assert env[key] == value
+    assert env["RCLONE_CONFIG_EVIDENCES3_SECRET_ACCESS_KEY"] != "parent-value-that-must-lose"
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
 
 
 def test_no_credential_value_reaches_the_output(

@@ -47,7 +47,8 @@ remote, versioning enabled, no Object Lock, written by the exporter on the opera
   secret. They are separate from the `BACKUP_*` names and from the backup remotes `BACKUPS3` and
   `BACKUPS3CRYPT`; the evidence remote is the plain S3 remote `EVIDENCES3`, with no crypt layer.
   They are mapped to `RCLONE_CONFIG_EVIDENCES3_*` in the rclone child process only, so a
-  credential is never in argv. A missing or empty name, an empty or unsafe prefix, or a
+  credential is never in argv. The rclone child gets a whitelisted environment, never the whole
+  parent environment. A missing or empty name, an empty or unsafe prefix, or a
   credential shared with the backup chain exits 2 before anything is exported or uploaded,
   naming variables and never values.
 - Objects go to `<bucket>/<prefix>/<epoch_id>/<as_of>-<sha12>/<file>` (plan 16-59, decision
@@ -145,6 +146,7 @@ from scripts.evaluate_trial_soak import (  # noqa: E402
     read_workflow_cron,
 )
 from src.ops import evidence_remote  # noqa: E402
+from src.ops.backup import child_env  # noqa: E402
 from src.ops.redaction import Redactor, scrub  # noqa: E402
 from src.paper.attribution import ShadowOutcome  # noqa: E402
 from src.paper.coverage import (  # noqa: E402
@@ -839,13 +841,17 @@ RcloneCall = Callable[[Sequence[str], bytes | None], tuple[int, bytes, bytes]]
 def _run_rclone(
     argv: Sequence[str], stdin: bytes | None, env: Mapping[str, str]
 ) -> tuple[int, bytes, bytes]:
-    """Run rclone; the evidence remote's credentials reach it through `env` only (never argv)."""
+    """Run rclone with a whitelisted environment; the credentials reach it through `env` only.
+
+    The child gets `child_env` of `src/ops/backup.py` (the base OS names, every `RCLONE_*`
+    name, then `env`), never the whole parent environment, and never through argv.
+    """
     binary = os.environ.get("RCLONE_BIN") or "rclone"
     try:
         proc = subprocess.run(
             [binary, *argv],
             input=stdin,
-            env={**os.environ, **env},
+            env=child_env(prefixes=("RCLONE_",), extra=env),
             capture_output=True,
             timeout=_RCLONE_TIMEOUT_S,
             check=False,
@@ -875,11 +881,11 @@ class RcloneUploader:
         env: Mapping[str, str] | None = None,
     ) -> None:
         self._base = destination.rstrip("/")
-        child_env: Mapping[str, str] = {} if env is None else env
+        remote_env: Mapping[str, str] = {} if env is None else env
         self._run: RcloneCall = (
             runner
             if runner is not None
-            else lambda argv, stdin: _run_rclone(argv, stdin, child_env)
+            else lambda argv, stdin: _run_rclone(argv, stdin, remote_env)
         )
 
     def _target(self, key: str) -> str:
@@ -954,11 +960,11 @@ class RcloneWitnessReader:
         env: Mapping[str, str] | None = None,
     ) -> None:
         self._base = source.rstrip("/")
-        child_env: Mapping[str, str] = {} if env is None else env
+        remote_env: Mapping[str, str] = {} if env is None else env
         self._run: RcloneCall = (
             runner
             if runner is not None
-            else lambda argv, stdin: _run_rclone(argv, stdin, child_env)
+            else lambda argv, stdin: _run_rclone(argv, stdin, remote_env)
         )
 
     def _directory(self, epoch_id: str) -> str:
