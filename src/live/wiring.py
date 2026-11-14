@@ -136,6 +136,7 @@ from src.live.wiring_parts import (
     LateBound,
     SignalContextBook,
     alembic_revisions_reader,
+    alert_task_stall,
     make_kill_gate_sources,
     make_reservation_registrar,
     task_event_journal,
@@ -1025,7 +1026,12 @@ class LiveAssembly:
         )
 
     async def _record_task(self, event: Any) -> None:
-        await self.record(task_event_journal(event))
+        # The journal row first; a `stall` event then also raises TASK_STALLED (D111). The alert
+        # runs in a `finally` so a failing journal write does not lose it.
+        try:
+            await self.record(task_event_journal(event))
+        finally:
+            alert_task_stall(event, self.alerts.sink)
 
     # ---- the scheduler specs ---------------------------------------------------------------- #
 

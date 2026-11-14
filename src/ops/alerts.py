@@ -123,6 +123,10 @@ ALERT_EVENTS = MappingProxyType(
         # carries a deadline (`OperationalAlert.until_utc`).
         "REST_GATE_BAN_ENTERED": AlertSeverity.HIGH,
         "REST_GATE_RECOVERY_REQUIRED": AlertSeverity.CRITICAL,
+        # Quick 261114-mp1 (D111): a live scheduler task is still running past its bound
+        # `scheduler.protection_stall_after_ms`. Observe only: the run is never cancelled. While the
+        # key is NOT_CONFIGURED nothing produces it.
+        "TASK_STALLED": AlertSeverity.HIGH,
     }
 )
 
@@ -867,6 +871,7 @@ _SOURCE_OPS05 = "OPS-05"
 _SOURCE_D24 = "D-24 (entry path)"
 _SOURCE_STALE_ENTRY = "owner request 2026-10-23 (stale entry)"
 _SOURCE_REST_GATE = "W8 of 20-VERIFICATION (REST gate alert hook, D083 point 5)"
+_SOURCE_TASK_STALL = "owner approval 2026-11-14 (scheduler stall watchdog, D111)"
 _PRODUCER_DAILY_STOP = "src/execution/daily_stop.py"
 _DAILY_PRODUCER_TEXT = (
     "Phase 21 producer (enforce_daily_state): cancels the resting entries through "
@@ -1002,6 +1007,17 @@ OPS05_MATRIX: tuple[Ops05Row, ...] = (
         "the gate hook calls the sink once per gate whose saved state is missing, unreadable or "
         "not trusted at start (GATE_STATE_UNKNOWN); no deadline is known (plan 24-13)",
         "src/adapters/binance_ratelimit_gate.py",
+        True,
+        _SINK_BEHAVIOR,
+    ),
+    Ops05Row(
+        "TASK_STALLED",
+        _SOURCE_TASK_STALL,
+        "the scheduler watchdog records a stall event for a run still going past "
+        "scheduler.protection_stall_after_ms and the record path (LiveWiring._record_task) "
+        "alerts it after the journal row; the run is never cancelled and nothing is re-sent; "
+        "while the key is NOT_CONFIGURED the watchdog is off and nothing produces it (D111)",
+        "src/live/wiring_parts.py",
         True,
         _SINK_BEHAVIOR,
     ),

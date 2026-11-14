@@ -414,6 +414,26 @@ EVENT_WORDING: MappingProxyType[str, AlertWording] = MappingProxyType(
                 "describes."
             ),
         ),
+        # Quick 261114-mp1 (D111). The subject line of the header names the task.
+        "TASK_STALLED": AlertWording(
+            what_happened=(
+                "A live task has been running longer than its bound (TASK_STALLED, "
+                "STALL_BOUND_EXCEEDED). The subject line of the header names the task."
+            ),
+            position=(
+                "A position may be open, with or without a stop. While the protection step is "
+                "stalled, a new fill may wait for its stop."
+            ),
+            system_did=(
+                "The task was not stopped or restarted, nothing was cancelled and nothing was "
+                "re-sent (a placement is never re-sent). The stall is recorded in the journal."
+            ),
+            operator_must=(
+                "Check the process log and the exchange position and its stop now, and close or "
+                "protect the position if it needs it. Restart the process if the task does not "
+                "finish."
+            ),
+        ),
     }
 )
 

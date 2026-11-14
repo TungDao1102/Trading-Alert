@@ -102,6 +102,8 @@ ALERT_CASES: tuple[tuple[str, str, str, str], ...] = (
         "GATE_STATE_UNKNOWN",
         SYSTEM_SUBJECT,
     ),
+    # Quick 261114-mp1 (D111): the scheduler stall alert; the subject is the task name.
+    ("TASK_STALLED", "TASK_STALLED", "STALL_BOUND_EXCEEDED", "protection_step"),
 )
 
 

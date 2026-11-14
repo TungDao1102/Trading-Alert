@@ -15,6 +15,7 @@ Each class or function here closes one gap named in a hand-off of an earlier Pha
   as evaluated WITHIN_BUDGET and the rule is journaled on every enable; in every other mode the
   only source is the persisted evaluated state, and its absence keeps the enable refused.
 - `alembic_revisions_reader`: the read-only Alembic head check of start step 3.
+- `alert_task_stall`: the TASK_STALLED alert of a scheduler `stall` event (D111).
 
 No wall clock is read here: every clock is injected.
 """
@@ -26,7 +27,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
+
+import structlog
 
 from src.adapters.binance_client import Environment
 from src.domain.enums import KillGateState
@@ -44,8 +47,13 @@ from src.persistence.system_state import PgSystemStateStore
 from src.risk.money_at_stake import MoneyAtStake
 from src.risk.reservations import ReservationRequest, margin_for_reservation
 
+log = structlog.get_logger(__name__)
+
 EVENT_DEMO_KILL_GATE_RULE = "DEMO_KILL_GATE_RULE_APPLIED"
 EVENT_TASK = "LIVE_TASK_EVENT"
+# D111: the alert event and its fixed reason for a scheduler `stall` event.
+TASK_STALLED_EVENT = "TASK_STALLED"
+TASK_STALL_REASON = "STALL_BOUND_EXCEEDED"
 DEMO_KILL_GATE_RULE_CODE = "D092_DEMO_ONLY_TREATED_AS_WITHIN_BUDGET"
 
 Record = Callable[[JournalEvent], Awaitable[None]]
@@ -239,6 +247,34 @@ def task_event_journal(event: TaskEvent) -> JournalEvent:
     )
 
 
+class TaskAlertSink(Protocol):
+    """The `alert` call of the journal-first alert sink (`JournalFirstAlertSink.alert`)."""
+
+    def alert(self, *, event: str, subject: str, reason: str, now_utc: datetime) -> None: ...
+
+
+def alert_task_stall(event: TaskEvent, sink: TaskAlertSink) -> bool:
+    """Raise the HIGH TASK_STALLED alert for a scheduler `stall` event; True when it was raised.
+
+    Only `kind == "stall"` alerts (the other kinds are journaled and stay quiet). The subject is
+    the task name and the reason is fixed, so nothing from the run (no exception text) reaches the
+    message. A failing sink is logged by class name and never raised: the watchdog only observes.
+    """
+    if event.kind != "stall":
+        return False
+    try:
+        sink.alert(
+            event=TASK_STALLED_EVENT,
+            subject=event.task,
+            reason=TASK_STALL_REASON,
+            now_utc=event.at_utc,
+        )
+    except Exception as exc:  # noqa: BLE001 - observe only; class name, never text
+        log.error("live.task_stall_alert_failed", error_class=type(exc).__name__)
+        return False
+    return True
+
+
 @dataclass(frozen=True, kw_only=True)
 class KillGateSources:
     """The two kill-gate readers of the composition (D092).
@@ -337,8 +373,12 @@ __all__ = [
     "KillGateSources",
     "LateBound",
     "LiveBotProxy",
+    "TASK_STALLED_EVENT",
+    "TASK_STALL_REASON",
     "SignalContextBook",
+    "TaskAlertSink",
     "alembic_revisions_reader",
+    "alert_task_stall",
     "make_kill_gate_sources",
     "make_reservation_registrar",
     "task_event_journal",

@@ -53,7 +53,7 @@ def test_one_golden_alert_text_per_wording_entry() -> None:
     expected.update(f"{event}.txt" for event in EVENT_WORDING)
 
     assert names == sorted(expected)
-    assert len(names) == 18  # nine branch codes, the generic one and eight events
+    assert len(names) == 19  # nine branch codes, the generic one and nine events
 
 
 def test_the_message_goldens_exist_and_name_no_local_zone() -> None:

@@ -255,8 +255,11 @@ def test_the_event_contract_is_closed_and_maps_every_event_to_a_severity() -> No
         "STALE_ENTRY_ORDER",
         "REST_GATE_BAN_ENTERED",
         "REST_GATE_RECOVERY_REQUIRED",
+        "TASK_STALLED",  # quick 261114-mp1, D111
     }
+    assert len(ALERT_EVENTS) == 23
     assert all(isinstance(s, AlertSeverity) for s in ALERT_EVENTS.values())
+    assert ALERT_EVENTS["TASK_STALLED"] is AlertSeverity.HIGH
     assert ALERT_EVENTS["STALE_ENTRY_ORDER"] is AlertSeverity.HIGH
     assert ALERT_EVENTS["DAILY_STOP"] is AlertSeverity.CRITICAL
     assert ALERT_EVENTS["DAILY_LOSS_WARNING"] is AlertSeverity.WARNING
@@ -788,3 +791,14 @@ async def test_an_event_without_wording_is_drained_exactly_as_before() -> None:
     assert h.bot.sent[0].text == (
         "[HIGH] STALE_DATA\nsubject: SYSTEM\nreason: STALE_FEED\nat: 2026-09-19T00:00:00Z"
     )
+
+
+def test_a_task_stalled_alert_validates_with_the_task_as_its_subject() -> None:
+    alert = OperationalAlert.create(
+        event="TASK_STALLED",
+        subject="protection_step",
+        reason="STALL_BOUND_EXCEEDED",
+        occurred_at_utc=NOW,
+    )
+    assert alert.severity is AlertSeverity.HIGH
+    assert alert.subject == "protection_step" and alert.reason == "STALL_BOUND_EXCEEDED"

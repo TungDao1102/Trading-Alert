@@ -97,6 +97,7 @@ WORDED_EVENTS = {
     "DB_FAILURE",
     "REST_GATE_BAN_ENTERED",
     "REST_GATE_RECOVERY_REQUIRED",
+    "TASK_STALLED",  # quick 261114-mp1, D111
 }
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -122,8 +123,9 @@ def test_the_branch_literals_equal_the_coordinator_branch_constants_exactly() ->
     assert len(_protection_branch_codes()) == 9
 
 
-def test_every_event_wording_key_is_an_alert_event_and_the_eight_are_worded() -> None:
+def test_every_event_wording_key_is_an_alert_event_and_the_nine_are_worded() -> None:
     assert set(EVENT_WORDING) == WORDED_EVENTS
+    assert len(WORDED_EVENTS) == 9
     assert set(EVENT_WORDING) <= set(ALERT_EVENTS)
     assert "CLOSE_REQUIRED" in ALERT_EVENTS  # worded by branch code, not by EVENT_WORDING
 
@@ -218,9 +220,18 @@ def test_the_module_imports_nothing_from_the_execution_layer_and_reads_no_clock(
 
 
 def test_the_alert_contract_of_phase_20_is_untouched() -> None:
-    assert len(ALERT_EVENTS) == 22
+    assert len(ALERT_EVENTS) == 23  # 22 until quick 261114-mp1 (D111) added TASK_STALLED
     alert = _alert("CLOSE_REQUIRED", "B2_STOP_UNCONFIRMED")
     assert render_alert_text(alert) == (
         "[CRITICAL] CLOSE_REQUIRED\nsubject: plan-0001\nreason: B2_STOP_UNCONFIRMED\n"
         "at: 2026-10-09T03:00:00Z"
     )
+
+
+def test_task_stalled_says_the_run_was_not_stopped_cancelled_or_re_sent() -> None:
+    wording = EVENT_WORDING["TASK_STALLED"]
+    system_did = wording.system_did.lower()
+
+    assert "not stopped" in system_did and "cancelled" in system_did and "re-sent" in system_did
+    assert "TASK_STALLED" in wording.what_happened
+    assert "check" in wording.operator_must.lower()

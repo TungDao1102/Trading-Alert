@@ -37,6 +37,7 @@ from src.live.wiring_parts import (
     LateBound,
     LiveBotProxy,
     SignalContextBook,
+    alert_task_stall,
     make_kill_gate_sources,
     make_reservation_registrar,
     task_event_journal,
@@ -503,3 +504,52 @@ async def test_the_completed_wiring_registers_the_commands_on_the_application(
         assert "callback_query" in application.updater.kwargs["allowed_updates"]
     finally:
         await runner.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261114-mp1 (D111): a scheduler stall event raises the TASK_STALLED alert.
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingAlertSink:
+    def __init__(self, *, error: BaseException | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._error = error
+
+    def alert(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+
+
+def test_a_stall_event_raises_one_task_stalled_alert_with_the_task_as_subject() -> None:
+    sink = _RecordingAlertSink()
+    event = TaskEvent(task="protection_step", kind="stall", at_utc=T0, error_class=None)
+
+    assert alert_task_stall(event, sink) is True
+
+    assert sink.calls == [
+        {
+            "event": "TASK_STALLED",
+            "subject": "protection_step",
+            "reason": "STALL_BOUND_EXCEEDED",
+            "now_utc": T0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("kind", ["first_run", "failure", "recovery"])
+def test_the_other_task_event_kinds_raise_no_alert(kind: str) -> None:
+    sink = _RecordingAlertSink()
+    event = TaskEvent(task="protection_step", kind=kind, at_utc=T0, error_class=None)  # type: ignore[arg-type]
+
+    assert alert_task_stall(event, sink) is False
+    assert sink.calls == []
+
+
+def test_a_raising_alert_sink_is_swallowed_by_the_stall_alert() -> None:
+    sink = _RecordingAlertSink(error=RuntimeError("sink down"))
+    event = TaskEvent(task="protection_step", kind="stall", at_utc=T0, error_class=None)
+
+    assert alert_task_stall(event, sink) is False
+    assert len(sink.calls) == 1

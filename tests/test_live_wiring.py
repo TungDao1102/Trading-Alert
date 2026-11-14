@@ -595,3 +595,66 @@ async def test_a_set_stall_bound_reaches_only_the_protection_task(
     bounds = {spec.name: spec.stall_after_seconds for spec in complete.specs}
     assert bounds.pop("protection_step") == 5.353
     assert set(bounds.values()) == {None}
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261114-mp1 (D111): the production record path alerts a stall.
+# --------------------------------------------------------------------------- #
+
+
+def _stall_event(kind: str = "stall") -> Any:
+    from src.live.scheduler import TaskEvent
+
+    from tests.shadow_fakes import T0
+
+    return TaskEvent(task="protection_step", kind=kind, at_utc=T0, error_class=None)  # type: ignore[arg-type]
+
+
+async def test_a_stall_event_is_journaled_and_raises_one_task_stalled_alert(
+    handles: WiringHandles,
+) -> None:
+    from src.live.wiring_parts import task_event_journal
+
+    journaled: list[Any] = []
+
+    async def record(event: Any) -> None:
+        journaled.append(event)
+
+    handles.assembly.record = record  # type: ignore[assignment]
+    event = _stall_event()
+
+    await handles.assembly._record_task(event)
+
+    assert journaled == [task_event_journal(event)]
+    queued = list(handles.assembly.alerts.sink.queue)
+    assert [(a.event, a.subject, a.reason) for a in queued] == [
+        ("TASK_STALLED", "protection_step", "STALL_BOUND_EXCEEDED")
+    ]
+
+
+async def test_a_failure_event_is_journaled_and_raises_no_alert(handles: WiringHandles) -> None:
+    journaled: list[Any] = []
+
+    async def record(event: Any) -> None:
+        journaled.append(event)
+
+    handles.assembly.record = record  # type: ignore[assignment]
+
+    await handles.assembly._record_task(_stall_event("failure"))
+
+    assert len(journaled) == 1
+    assert list(handles.assembly.alerts.sink.queue) == []
+
+
+async def test_the_stall_alert_is_still_attempted_when_the_journal_write_raises(
+    handles: WiringHandles,
+) -> None:
+    async def record(event: Any) -> None:
+        raise RuntimeError("journal down (test)")
+
+    handles.assembly.record = record  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="journal down"):
+        await handles.assembly._record_task(_stall_event())
+
+    assert [a.event for a in handles.assembly.alerts.sink.queue] == ["TASK_STALLED"]

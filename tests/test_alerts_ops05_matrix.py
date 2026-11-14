@@ -57,11 +57,15 @@ STALE_ENTRY_SOURCE = "owner request 2026-10-23 (stale entry)"
 # Plan 24-13 (W8 of 20-VERIFICATION): the two REST gate events, produced by the gate's alert hook.
 REST_GATE_EVENTS = ("REST_GATE_BAN_ENTERED", "REST_GATE_RECOVERY_REQUIRED")
 REST_GATE_SOURCE = "W8 of 20-VERIFICATION (REST gate alert hook, D083 point 5)"
+# Quick 261114-mp1 (D111): the scheduler stall alert, produced by the live scheduler record path.
+TASK_STALL_EVENTS = ("TASK_STALLED",)
+TASK_STALL_SOURCE = "owner approval 2026-11-14 (scheduler stall watchdog, D111)"
 ALL_ROW_EVENTS = (
     [e for events in OPS05_REQUIREMENT_EVENTS.values() for e in events]
     + list(D24_EVENTS)
     + list(STALE_ENTRY_EVENTS)
     + list(REST_GATE_EVENTS)
+    + list(TASK_STALL_EVENTS)
 )
 
 
@@ -128,6 +132,7 @@ def test_each_row_is_in_the_event_contract_and_states_its_sink_behavior(alert: s
         "D-24 (entry path)",
         STALE_ENTRY_SOURCE,
         REST_GATE_SOURCE,
+        TASK_STALL_SOURCE,
     )
     assert row.phase20_delivers.strip() != ""
     assert row.producer.strip() != ""
@@ -188,6 +193,16 @@ def test_the_rest_gate_rows_are_produced_by_the_gate_hook(alert: str) -> None:
     assert row.producer == "src/adapters/binance_ratelimit_gate.py"
     assert "plan 24-13" in row.phase20_delivers
     assert ALERT_EVENTS[alert].value in ("HIGH", "CRITICAL")
+
+
+def test_the_task_stalled_row_is_produced_by_the_wiring_parts_and_never_cancels_a_run() -> None:
+    row = _row("TASK_STALLED")
+
+    assert row.requirement_source == TASK_STALL_SOURCE
+    assert row.producer == "src/live/wiring_parts.py"
+    assert ALERT_EVENTS["TASK_STALLED"].value == "HIGH"
+    assert "never cancelled" in row.phase20_delivers
+    assert "NOT_CONFIGURED" in row.phase20_delivers
 
 
 def test_only_the_ban_row_carries_a_deadline() -> None:
