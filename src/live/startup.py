@@ -92,6 +92,7 @@ from src.ops.health import HealthVerdict
 from src.reconcile.loop import TICK_COMPARED, TickReport
 from src.reconcile.startup import (
     CloseAttemptsReader,
+    PartialRestore,
     PlansBuilder,
     RestorableCloser,
     RestorableCoordinator,
@@ -431,6 +432,20 @@ class RestoreSourceMissing(RuntimeError):  # noqa: N818 - a fail-closed refusal 
     """A restorable entry has no persisted plan or snapshot: the plans cannot be rebuilt."""
 
 
+# These are faults of ONE row: a missing plan or snapshot, a row the rebuild refuses (ValueError,
+# TypeError), a malformed value (LookupError, ArithmeticError incl. decimal.InvalidOperation).
+# Any other class (a store or journal outage) still propagates and fails the whole build, because
+# restoring zero plans as "complete" during an outage would let the reconcile loop read a
+# half-restored registry (plan 20-19 F6).
+_ROW_FAULTS: tuple[type[Exception], ...] = (
+    RestoreSourceMissing,
+    ValueError,
+    TypeError,
+    LookupError,
+    ArithmeticError,
+)
+
+
 class RestoreIntentReader(Protocol):
     """The intent reads the rebuild needs beyond `ExecutionIntentStore` (synchronous).
 
@@ -562,28 +577,36 @@ def restored_plans_builder(
     and the spill rows the recovery hands in. The client-id index is filled before the builder
     returns, so it is complete before the stream starts.
 
-    A missing plan or snapshot raises `RestoreSourceMissing` (recovery then enters SAFE_MODE
-    DB_FAILURE and the coordinator stays unrestored, so no entry opens).
+    Each entry is isolated: a fault of one row (`_ROW_FAULTS`: no persisted plan or snapshot, a
+    row the rebuild refuses, a malformed value) is logged by ids and class name only and skipped.
+    The client-id index is then filled for the healthy plans, and `PartialRestore(plans, n)` is
+    raised when any entry failed, so recovery restores the healthy plans (they stay supervised)
+    and enters SAFE_MODE `RESTORE_INCONSISTENT` for the rest (entries stay blocked). A fault
+    outside that family (a store or journal outage) still propagates: the whole build fails and
+    recovery enters SAFE_MODE `DB_FAILURE` with the coordinator unrestored.
     """
 
     def build(spill_rows_for: SpillRowsFor) -> Sequence[RestoredPlan]:
         plans: list[RestoredPlan] = []
+        unrestorable: list[tuple[str, str, str]] = []
         for entry in intents.restorable_entries():
             if entry.role != OrderRole.ENTRY.value or entry.intent_status not in _RESTORABLE_STATES:
                 continue
-            plan = plan_for(entry.trade_plan_id)
-            snapshot = snapshot_for(entry.trade_plan_id)
-            if plan is None or snapshot is None:
-                raise RestoreSourceMissing("a restorable entry has no persisted plan or snapshot")
-            resting = resting_entry_from_intent(
-                entry=entry,
-                plan=plan,
-                snapshot=snapshot,
-                tp1_quantity_fraction=tp1_quantity_fraction,
-                snapshot_ttl=snapshot_ttl,
-            )
-            plans.append(
-                rebuild_plan(
+            try:
+                plan = plan_for(entry.trade_plan_id)
+                snapshot = snapshot_for(entry.trade_plan_id)
+                if plan is None or snapshot is None:
+                    raise RestoreSourceMissing(
+                        "a restorable entry has no persisted plan or snapshot"
+                    )
+                resting = resting_entry_from_intent(
+                    entry=entry,
+                    plan=plan,
+                    snapshot=snapshot,
+                    tp1_quantity_fraction=tp1_quantity_fraction,
+                    snapshot_ttl=snapshot_ttl,
+                )
+                rebuilt = rebuild_plan(
                     entry=resting,
                     transition_events=transition_events_for(resting.plan_hash),
                     entry_intent=entry,
@@ -592,8 +615,21 @@ def restored_plans_builder(
                     ),
                     spill_rows=spill_rows_for(resting.plan_hash),
                 )
-            )
+            except _ROW_FAULTS as fault:
+                # Ids and the class name only, never the message (no row text in a log).
+                fault_class = type(fault).__name__
+                unrestorable.append((entry.trade_plan_id, entry.approval_id, fault_class))
+                log.error(
+                    "live.restore.entry_unrestorable",
+                    trade_plan_id=entry.trade_plan_id,
+                    approval_id=entry.approval_id,
+                    fault_class=fault_class,
+                )
+                continue
+            plans.append(rebuilt)
         rebuild_client_id_index(index, plans, intents)
+        if unrestorable:
+            raise PartialRestore(plans, len(unrestorable))
         return plans
 
     return build

@@ -10,7 +10,10 @@ tick, in a fixed order (D-30, D-08):
    corrupt entry enters SAFE_MODE ``RESTORE_INCONSISTENT`` and the plans' spill rows become None,
    so a stop history that depended on it is UNKNOWN);
 4. rebuild the coordinator (``restored_plans_builder`` -> ``coordinator.restore``) and the closer
-   (``close_attempts_reader`` plus the spill -> ``closer.restore_pending``);
+   (``close_attempts_reader`` plus the spill -> ``closer.restore_pending``). A builder that
+   raises ``PartialRestore`` rebuilt the healthy plans but not every entry: the healthy plans are
+   restored (they stay supervised), then the step fails with SAFE_MODE ``RESTORE_INCONSISTENT``;
+   any other builder exception still restores nothing and enters ``DB_FAILURE``;
 5. ``resolve_unresolved_intents`` (AFTER the rebuild, so a live plan's protective legs stay
    UNKNOWN for the coordinator to place or confirm, research F5);
 6. replay the spill into the journal (a conflict or a corrupt file enters SAFE_MODE
@@ -106,6 +109,22 @@ class SpillReader(Protocol):
 
 type SpillRowsFor = Callable[[str], Sequence[JournalEvent] | None]
 type PlansBuilder = Callable[[SpillRowsFor], Sequence[RestoredPlan]]
+
+
+class PartialRestore(Exception):  # noqa: N818 - a partial result, not an error to the caller
+    """A plans builder rebuilt the healthy plans but could not rebuild `unrestorable` others.
+
+    Raised by a `PlansBuilder` after its client-id index holds the healthy plans. Recovery
+    restores `plans` (they stay supervised), then fails COORDINATOR_RESTORED with SAFE_MODE
+    `RESTORE_INCONSISTENT`. The message carries the count only, never row text.
+    """
+
+    def __init__(self, plans: Sequence[RestoredPlan], unrestorable: int) -> None:
+        super().__init__(f"{unrestorable} restorable entries could not be rebuilt")
+        self.plans: tuple[RestoredPlan, ...] = tuple(plans)
+        self.unrestorable = unrestorable
+
+
 type CloseAttemptsReader = Callable[[], Mapping[str, Sequence[JournalEvent]]]
 type SpillReplay = Callable[[Any, Any], Any]
 
@@ -134,6 +153,7 @@ class StartupReport:
     close_attempts_adopted: tuple[tuple[str, int], ...]
     intents: RecoveryReport | None
     spill_replay: Any
+    plans_unrestorable: int = 0
 
 
 class _Run:
@@ -268,8 +288,18 @@ async def run_startup_recovery(
     # 4a. the coordinator
     restore_report: RestoreReport | None = None
     plans_restored = 0
+    plans_unrestorable = 0
     try:
         plans = restored_plans_builder(spill_rows_for)
+    except PartialRestore as partial:
+        # The healthy plans stay supervised; the unrestorable ones fail the step closed.
+        plans_unrestorable = partial.unrestorable
+        try:
+            restore_report = coordinator.restore(partial.plans, now_utc=now_utc)
+            plans_restored = len(restore_report.restored)
+        except Exception:  # noqa: BLE001 - a refused restore leaves restore_complete False
+            pass
+        run.fail(STEP_COORDINATOR_RESTORED, SAFE_MODE_RESTORE_INCONSISTENT)
     except Exception:  # noqa: BLE001 - the plans cannot be read: nothing is restored, entries stay blocked
         run.fail(STEP_COORDINATOR_RESTORED, SAFE_MODE_DB_FAILURE)
     else:
@@ -353,6 +383,7 @@ async def run_startup_recovery(
         close_attempts_adopted=tuple(adopted),
         intents=intents,
         spill_replay=replay_report,
+        plans_unrestorable=plans_unrestorable,
     )
 
 
@@ -374,6 +405,7 @@ __all__ = [
     "RestorableCloser",
     "RestorableCoordinator",
     "CloseAttemptsReader",
+    "PartialRestore",
     "PlansBuilder",
     "SafeModeLike",
     "SpillReader",

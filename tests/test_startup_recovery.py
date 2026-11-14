@@ -42,6 +42,7 @@ from src.reconcile.startup import (
     STEP_SAFE_MODE_LOADED,
     STEP_SPILL_READ,
     STEP_SPILL_REPLAYED,
+    PartialRestore,
     StartupReport,
     run_startup_recovery,
 )
@@ -777,6 +778,41 @@ async def test_a_restore_that_is_refused_is_reported_and_the_coordinator_keeps_b
     assert "DB_FAILURE" in h.safe_mode.entered_reasons
     assert report.restore_complete is False  # the plans are unknown: nothing claims "no plans"
     assert h.coordinator.blocks_new_entries() is True
+
+
+async def test_a_partial_restore_restores_the_healthy_plans_then_fails_the_step_closed(
+    tmp_path: Path,
+) -> None:
+    rig = await make_rig(real_closer=True)
+    h = harness(rig, tmp_path)
+    healthy = h.builder()
+
+    def partial_builder(spill_rows_for: Callable[[str], Any]) -> Sequence[RestoredPlan]:
+        raise PartialRestore(healthy(spill_rows_for), 1)
+
+    report = await run_startup_recovery(
+        safe_mode_load=lambda: h.safe_mode,
+        pending_store=h.pending,
+        coordinator=h.coordinator,
+        closer=h.closer,
+        restored_plans_builder=partial_builder,
+        close_attempts_reader=h.close_reader(),
+        intent_store=rig.inner_store,  # type: ignore[arg-type]
+        probe_adapter=rig.fake,
+        journal=h.journal,
+        spill=h.spill,
+        now_utc=rig.clock.now(),
+    )
+
+    assert h.coordinator.protection_of(TEST_ONLY_PLAN_HASH) is not None, (
+        "the healthy plan is tracked"
+    )
+    assert h.coordinator.restore_complete is True
+    assert STEP_COORDINATOR_RESTORED in report.failed_steps
+    assert STEP_COORDINATOR_RESTORED not in report.steps
+    assert "RESTORE_INCONSISTENT" in h.safe_mode.entered_reasons
+    assert "DB_FAILURE" not in h.safe_mode.entered_reasons
+    assert report.plans_restored == 1 and report.plans_unrestorable == 1
 
 
 # --------------------------------------------------------------------------- #

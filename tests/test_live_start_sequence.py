@@ -47,6 +47,7 @@ from src.ops.health import (
 from src.ops.rest_gate_state import FileGateStateStore
 from src.reconcile.loop import TICK_COMPARED, TickReport
 from src.reconcile.safe_mode import SafeModeController
+from src.reconcile.startup import PartialRestore
 
 from tests.shadow_fakes import T0
 from tests.support.limits import test_only_rate_limit_policy
@@ -718,6 +719,10 @@ def _builder_raises(spill_rows_for: Callable[[str], Any]) -> list[Any]:
     raise RuntimeError("plans unreadable")
 
 
+def _builder_partial(spill_rows_for: Callable[[str], Any]) -> list[Any]:
+    raise PartialRestore((), 1)
+
+
 def _expire_raises(now: datetime) -> list[str]:
     raise RuntimeError("journal down")
 
@@ -727,6 +732,7 @@ FAILING_STEPS: list[Any] = [
     pytest.param("CLOCK_DRIFT", {"drift": _raises("drift")}, id="clock-drift"),
     pytest.param("EXCHANGE_INFO", {"exchange_info": _raises("info")}, id="exchange-info"),
     pytest.param("RECOVERY", {"builder": _builder_raises}, id="recovery-builder"),
+    pytest.param("RECOVERY", {"builder": _builder_partial}, id="recovery-builder-partial"),
     pytest.param("RECONCILE", {"reconcile": _tick_raises}, id="reconcile-raises"),
     pytest.param("RECONCILE", {"reconcile": _tick_diverged}, id="reconcile-divergence"),
     pytest.param("RECONCILE", {"reconcile": _tick_read_failed}, id="reconcile-read-failed"),

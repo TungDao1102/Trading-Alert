@@ -15,7 +15,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Callable, Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import Any
@@ -48,7 +48,6 @@ from src.live import startup
 from src.live.order_index import ClientIdIndex
 from src.live.startup import (
     RecoveryPorts,
-    RestoreSourceMissing,
     close_attempts_reader,
     protection_correlation,
     rebuild_client_id_index,
@@ -60,7 +59,7 @@ from src.reconcile.safe_mode import SafeModeController
 from src.reconcile.startup import (
     _PROTECTION_CORRELATION_PREFIX as PROTECTION_PREFIX,
 )
-from src.reconcile.startup import StartupReport, run_startup_recovery
+from src.reconcile.startup import PartialRestore, StartupReport, run_startup_recovery
 
 from tests.shadow_fakes import (
     AUTHORIZED_USER_IDS,
@@ -128,7 +127,14 @@ class MemoryRestoreReader:
 class Restart:
     """The objects of the second process over the first process' stores."""
 
-    def __init__(self, rig: LiveRig, snapshot: PlanConstraintSnapshot, store: Any) -> None:
+    def __init__(
+        self,
+        rig: LiveRig,
+        snapshot: PlanConstraintSnapshot,
+        store: Any,
+        *,
+        on_enter: Callable[[str, datetime], None] | None = None,
+    ) -> None:
         self.rig = rig
         self.snapshot = snapshot
         self.alerts = RecordingAlerts()
@@ -138,6 +144,7 @@ class Restart:
             journal=rig.journal,
             state_store=store,
             now_utc=rig.clock.now(),
+            on_enter=on_enter,
         )
         self.closer = MarketEmergencyCloser(
             adapter=rig.fake,  # type: ignore[arg-type]
@@ -236,7 +243,12 @@ class _NoPending:
         return []
 
 
-async def _restart(rig: LiveRig, *, crash_in_safe_mode: str | None = SM_REASON) -> Restart:
+async def _restart(
+    rig: LiveRig,
+    *,
+    crash_in_safe_mode: str | None = SM_REASON,
+    on_enter: Callable[[str, datetime], None] | None = None,
+) -> Restart:
     """Persist run 1's SAFE_MODE state (the controller saves it) and build the new process."""
     now = rig.clock.now()
     if crash_in_safe_mode is not None:
@@ -246,7 +258,7 @@ async def _restart(rig: LiveRig, *, crash_in_safe_mode: str | None = SM_REASON) 
     approval = rig.approve_row()
     placement = await rig.inputs.for_plan(approval, rig.plan, now)
     snapshot = placement.live_context.plan_constraint_snapshot
-    return Restart(rig, snapshot, store)
+    return Restart(rig, snapshot, store, on_enter=on_enter)
 
 
 async def _run_one_resting_entry() -> LiveRig:
@@ -540,9 +552,9 @@ def test_close_attempts_reader_groups_by_plan_and_drops_foreign_correlations() -
     assert dict(reader()) == {"p1": [mine]}
 
 
-async def test_a_restorable_entry_without_its_plan_or_snapshot_fails_closed() -> None:
+async def test_a_restorable_entry_without_its_plan_or_snapshot_is_isolated() -> None:
     rig = await _run_one_resting_entry()
-    restart = await _restart(rig)
+    restart = await _restart(rig, crash_in_safe_mode=None)
     builder = restored_plans_builder(
         intents=restart.reader,
         plan_for=lambda trade_plan_id: None,
@@ -552,13 +564,128 @@ async def test_a_restorable_entry_without_its_plan_or_snapshot_fails_closed() ->
         tp1_quantity_fraction=TEST_ONLY_TP1_FRACTION,
         snapshot_ttl=TEST_ONLY_SNAPSHOT_TTL,
     )
-    with pytest.raises(RestoreSourceMissing):
+    with pytest.raises(PartialRestore) as raised:
+        builder(lambda plan_hash: ())
+    assert raised.value.plans == () and raised.value.unrestorable == 1
+
+    restart.builder = builder
+    report = await restart.recover()
+    assert "COORDINATOR_RESTORED" in report.failed_steps
+    assert "RESTORE_INCONSISTENT" in report.safe_mode_reasons
+    assert "DB_FAILURE" not in report.safe_mode_reasons
+    assert report.plans_restored == 0 and report.plans_unrestorable == 1
+    assert restart.safe_mode.in_safe_mode
+    assert restart.coordinator.restore_complete, "the (empty) restore ran"
+    assert restart.safe_mode.guard_new_entries(None).is_no_trade, "SAFE_MODE blocks new entries"
+
+
+class _TwoRowReader:
+    """The real restore reader plus one extra (corrupt) restorable ENTRY row of its own."""
+
+    def __init__(self, inner: Any, extra: IntentRecord) -> None:
+        self._inner = inner
+        self._extra = extra
+
+    def restorable_entries(self) -> Sequence[IntentRecord]:
+        return (*self._inner.restorable_entries(), self._extra)
+
+    def get_intent(self, *, approval_id: str, role: str) -> IntentRecord | None:
+        return self._inner.get_intent(approval_id=approval_id, role=role)
+
+
+def _extra_row(real: IntentRecord, **overrides: Any) -> IntentRecord:
+    """A second restorable ENTRY row: distinct approval id, a later intended time."""
+    fields: dict[str, Any] = {
+        "approval_id": "TEST_ONLY_second_approval",
+        "trade_plan_id": "TEST_ONLY_second_plan",
+        "intended_at_utc": real.intended_at_utc + timedelta(seconds=5),
+        **overrides,
+    }
+    return dataclasses.replace(real, **fields)
+
+
+async def _two_rows_one_corrupt(
+    *, plan_for_extra_is_none: bool, on_enter: Callable[[str, datetime], None] | None = None
+) -> tuple[LiveRig, Restart, Callable[[Any], Sequence[Any]], ClientIdIndex]:
+    rig = await _run_one_resting_entry()
+    restart = await _restart(rig, crash_in_safe_mode=None, on_enter=on_enter)
+    real = rig.intents.get_entry(approval_id=rig.approve_row().approval_id)
+    assert real is not None
+    if plan_for_extra_is_none:
+        extra = _extra_row(real)  # its trade_plan_id has no persisted plan
+        corrupt_plan_id = extra.trade_plan_id
+    else:  # the healthy plan, but a client id that plan does not derive: the rebuild refuses it
+        extra = _extra_row(real, trade_plan_id=real.trade_plan_id, client_order_id="not-the-id")
+        corrupt_plan_id = "TEST_ONLY_no_such_plan"
+    index = ClientIdIndex()
+
+    def plan_for(trade_plan_id: str) -> Any:
+        return None if trade_plan_id == corrupt_plan_id else rig.stores.plans.get(trade_plan_id)
+
+    builder = restored_plans_builder(
+        intents=_TwoRowReader(restart.reader, extra),
+        plan_for=plan_for,
+        snapshot_for=lambda trade_plan_id: restart.snapshot,
+        transition_events_for=restart._events_of,
+        index=index,
+        tp1_quantity_fraction=TEST_ONLY_TP1_FRACTION,
+        snapshot_ttl=TEST_ONLY_SNAPSHOT_TTL,
+    )
+    restart.builder = builder
+    return rig, restart, builder, index
+
+
+@pytest.mark.parametrize("plan_for_extra_is_none", [True, False], ids=["no-plan", "row-refused"])
+async def test_one_corrupt_row_does_not_stop_the_healthy_plan_from_being_restored(
+    plan_for_extra_is_none: bool,
+) -> None:
+    entered: list[str] = []
+    rig, restart, builder, index = await _two_rows_one_corrupt(
+        plan_for_extra_is_none=plan_for_extra_is_none,
+        on_enter=lambda reason, now_utc: entered.append(reason),
+    )
+    with pytest.raises(PartialRestore) as raised:
+        builder(lambda plan_hash: ())
+    assert [p.entry.plan_hash for p in raised.value.plans] == [rig.plan.plan_hash]
+    assert raised.value.unrestorable == 1
+
+    report = await restart.recover()
+
+    assert restart.coordinator.protection_of(rig.plan.plan_hash) is not None
+    assert index.known_order(rig.entry_id) is not None, "the healthy client ids are indexed"
+    assert report.plans_restored == 1 and report.plans_unrestorable == 1
+    assert "COORDINATOR_RESTORED" in report.failed_steps
+    assert "RESTORE_INCONSISTENT" in report.safe_mode_reasons
+    assert restart.safe_mode.in_safe_mode
+    assert "RESTORE_INCONSISTENT" in entered, "the alert hook saw the entry"
+    assert restart.coordinator.restore_complete
+    assert restart.safe_mode.guard_new_entries(None).is_no_trade, "SAFE_MODE blocks new entries"
+
+
+async def test_a_store_outage_while_building_still_fails_the_whole_build() -> None:
+    rig = await _run_one_resting_entry()
+    restart = await _restart(rig, crash_in_safe_mode=None)
+
+    def outage(correlation: str) -> list[JournalEvent]:
+        raise OSError("journal is down (test)")
+
+    builder = restored_plans_builder(
+        intents=restart.reader,
+        plan_for=rig.stores.plans.get,
+        snapshot_for=lambda trade_plan_id: restart.snapshot,
+        transition_events_for=outage,
+        index=ClientIdIndex(),
+        tp1_quantity_fraction=TEST_ONLY_TP1_FRACTION,
+        snapshot_ttl=TEST_ONLY_SNAPSHOT_TTL,
+    )
+    with pytest.raises(OSError):
         builder(lambda plan_hash: ())
 
     restart.builder = builder
     report = await restart.recover()
     assert "COORDINATOR_RESTORED" in report.failed_steps
     assert "DB_FAILURE" in report.safe_mode_reasons
+    assert report.plans_unrestorable == 0
     assert not restart.coordinator.restore_complete, "entries stay blocked"
     assert restart.coordinator.blocks_new_entries()
 
