@@ -1051,7 +1051,7 @@ If the bot does not answer (stream down, process held, bot token conflict), the 
 
 The start order is, after the recovery below, STREAM, then one RECONCILE tick, then the bot, the scheduler, HEALTH and ENABLE (DECISIONS D094): the user-data stream is up before the first tick, so a clean start, including a restart with an open position, is enabled by the start sequence itself and needs no `/safemode_exit`. SAFE_MODE after a start means something real: read its reason in the journal. A placement records the verified plan constraint snapshot before the entry is sent, which is what lets a restart rebuild a live plan; a reservation is released by the `reservation_release_sweep` task when its plan expired unplaced, when its CONFIRM was refused for a final reason, when its entry was rejected, or when its position closed or its entry ended with no fill (DECISIONS D095); an entry that may still fill stays counted.
 
-After a restart the coordinator is rebuilt from the intent rows, the persisted plans and the journal, and no new entry opens until that restore is complete. The rows it reads are the ENTRY intents in SENT, UNKNOWN and ACKED for plans that have not ended (a `PROTECTION_TRANSITION` into `FLAT` or `ENTRY_ENDED_NO_FILL` ends a plan; no age limit, DECISIONS D093).
+After a restart the coordinator is rebuilt from the intent rows, the persisted plans and the journal, and no new entry opens until that restore is complete. The rows it reads are the ENTRY intents in SENT, UNKNOWN and ACKED for plans that have not ended (a `PROTECTION_TRANSITION` into `FLAT` or `ENTRY_ENDED_NO_FILL` ends a plan; no age limit, DECISIONS D093). A row that cannot be rebuilt: section 21.6.
 
 ### 21.1b Injecting a Demo smoke signal (DEMO only)
 
@@ -1101,6 +1101,36 @@ Known limit, observed on the Demo smoke run and deferred by the owner on 2026-11
 
 The eight drills in `src/ops/drills.py` (sections 3, 4, 5, 7, 9, 10 and 12, and the restore path) are fake-exchange rehearsals: they run the Phase 20 components against fakes and never touch Binance or Telegram. A passing drill shows that the code path behaves as designed with the fakes, not that a real host or exchange behaves that way. The rehearsal on a real stack is Phases 25 and 26 and is not done.
 
+### 21.6 Partial restore after a restart (D110)
+
+Status: built and tested with fakes (the Binance-semantics fake exchange) by quick tasks 261114-kxu and 261114-mp1, DECISIONS D110. Not observed on Binance Demo or on a host: a real cancel answer and the real position read after a restart, for a plan that could not be restored, are owner-run checks that have not been made.
+
+**What the restore does.** At the RECOVERY step the coordinator is rebuilt from the ENTRY rows of section 21.1a, each row on its own. A fault of one row skips that row: no persisted plan or constraint snapshot for it (`RestoreSourceMissing`), or a value the rebuild refuses (`ValueError`, `TypeError`, `LookupError` or `ArithmeticError`). The log line `live.restore.entry_unrestorable` carries only `trade_plan_id`, `approval_id` and the fault class, never the row text. The healthy plans are restored and stay supervised, and the step `COORDINATOR_RESTORED` fails with SAFE_MODE `RESTORE_INCONSISTENT`. A fault of the store itself (any other exception class) restores nothing, enters SAFE_MODE `DB_FAILURE` with the restore incomplete, and sends no cancel; there fix the database or its connection first, then restart.
+
+**What the process does next.** RECOVERY is not a hold step, so its failure degrades the start instead of holding it: the process is admitted, in SAFE_MODE, with RECOVERY among its degraded steps. The stream, the reconcile tick, the bot and the scheduler start, so monitoring continues. HEALTH and ENABLE are skipped, so that start never enables entries (entries start disabled at every start, section 22.2). `--hold-on-refusal` does not apply, because a degraded start is admitted. After a partial restore the coordinator's restore counts as complete, so the reconcile loop runs its ticks; leaving SAFE_MODE stays the operator's, through section 21.1.
+
+**The one cancel.** With SAFE_MODE already on, the start sends ONE cancel request for the resting entry of each unrestorable plan, one per distinct plan hash. It cancels by the deterministic client order id of that entry (the plan hash and the symbol come from the intent row, which exists even when the persisted plan does not), through `expire_pending_entry` with the existing trigger `protection_handoff_failed`, and queries that order once afterwards. The audit row is a journal `ENTRY_EXPIRY` row that carries that trigger. This code never places an order, never closes a position and never sends a second cancel. One request here is not always one request on the wire: the adapter's `cancel_normal_order` keeps its existing bounded retry on STATUS_UNKNOWN (`_cancel_retrying` in `src/adapters/binance_usdm.py`, at most `_RECONCILER_CANCEL_MAX_ATTEMPTS` = 3 attempts), and an order that is already absent counts as success, so the request can become a few identical requests, all idempotent by the client order id. A row whose plan hash equals the hash of a rebuilt plan is never cancelled, because the same client order id would hit the order of the supervised plan; it is refused and alerted instead.
+
+| Alert (severity) | Reason | When |
+|---|---|---|
+| PROTECTION_HANDOFF_FAILED (CRITICAL) | `UNRESTORED_CANCEL_UNVERIFIED` | the query after the cancel says the entry is still open, or its state is unknown |
+| PROTECTION_HANDOFF_FAILED (CRITICAL) | `UNRESTORED_CANCEL_FAILED` | the cancel request raised |
+| PROTECTION_HANDOFF_FAILED (CRITICAL) | `UNRESTORED_CANCEL_REFUSED` | refused before any call (a symbol outside the live-5 universe, or a malformed plan hash), or the plan hash is shared with a rebuilt plan |
+| DIVERGENCE (HIGH) | `UNRESTORED_PLAN_POSITION` | the one position read of the symbol shows a non-zero amount, or an amount that is not a Decimal |
+| DIVERGENCE (HIGH) | `UNRESTORED_POSITION_UNKNOWN` | the position read failed, or the symbol is outside the live-5 universe and nothing was read |
+
+A cancelled entry, an entry that left the book by itself and an entry that filled raise no cancel alert; a fill shows up through the position read. A failing alert sink, or a failure of the whole cancel step, is logged by class name and never stops the start.
+
+**What stays the operator's.** The unrestorable plan has no stop placed by the coordinator, and its order ids are unknown to the stream router, so a fill of it is not protected by the system. The system never closes that position and does not decide whose it is. Operator steps:
+
+1. Read the journal and the log: the `LIVE_STARTUP_STEP` row of RECOVERY (section 22.2), the `live.restore.entry_unrestorable` line (which row, which fault class), the `ENTRY_EXPIRY` rows with the trigger `protection_handoff_failed`, and the alerts of the table.
+2. Check the named symbol by hand on Binance: its position and its open orders. A position there has no stop from the system: protect or close it by hand if it needs it (an order made by hand is a foreign order to the reconcile, section 21.4). An entry that still rests after an `UNRESTORED_CANCEL_*` alert: cancel it by hand.
+3. Fix the database row the log names (by `trade_plan_id` and `approval_id`): `RestoreSourceMissing` means its persisted plan or constraint snapshot is missing; the other classes mean a value the rebuild refuses. The repository has no tool for this: it is a manual correction in the database. Until it is fixed, every start repeats the partial restore, because the cancel does not rewrite the intent row and the restore reads the same rows (section 21.1a), and every such start sends its own one cancel request.
+4. Restart the process (commands in section 21.1c; read section 22.5 on what a stop leaves resting).
+5. Leave SAFE_MODE only through section 21.1 (`/safemode_exit` and `/confirm`, section 21.1a); its readiness rows decide.
+
+A single wire request for this cancel, bypassing the adapter retry, would be an adapter change with its own decision; it is not done.
+
 ## 22. Live process (Phase 24)
 
 Status: built and tested with fakes and with local PostgreSQL. It was observed on Binance Demo once, by the owner-run smoke rehearsal of 2026-11-06 (21 of 21 steps passed, section 22.6). Not observed: any run on a host (the owner VPS session, plan 24-33), the heartbeat, the compose service on a host, and everything Phases 25 and 26 are for. Live placement is disabled (`LIVE_ORDERS_DISABLED`, `src/execution/enablement.py`). The decisions are DECISIONS D098 to D107; this section says how to run what they decided. Reading it is not a statement that live execution is safe or ready.
@@ -1119,7 +1149,7 @@ One process, `python -m src.live.runtime`, one asyncio loop (D098): Telegram bot
 
 ### 22.2 Start sequence
 
-Each step is journaled as `LIVE_STARTUP_STEP` (name, outcome, a code; never a value). The order, after D094 (owner, 2026-11-01), is: CONFIG, GATE, ALEMBIC, SAFE_MODE, ENABLEMENT, SNAPSHOTS, SPILL_SENTINEL, CLOCK_DRIFT, EXCHANGE_INFO, RECOVERY, STREAM, RECONCILE, CONFIRM_EXPIRY, ALERT_REQUEUE, BOT, SCHEDULER, HEALTH, ENABLE. A failure in CONFIG, GATE, ALEMBIC, SAFE_MODE or ENABLEMENT holds the process (nothing starts); a failure elsewhere continues in SAFE_MODE with entries blocked and monitoring running. ENABLE runs in DEMO only, after a passing health verdict (D102); entries start disabled at every start. SAFE_MODE is never left by a restart (section 21.1). A `live.health.not_ok failing=['telegram_delivery']` warning at start is expected: that item reads FAIL until the first real Telegram send.
+Each step is journaled as `LIVE_STARTUP_STEP` (name, outcome, a code; never a value). The order, after D094 (owner, 2026-11-01), is: CONFIG, GATE, ALEMBIC, SAFE_MODE, ENABLEMENT, SNAPSHOTS, SPILL_SENTINEL, CLOCK_DRIFT, EXCHANGE_INFO, RECOVERY, STREAM, RECONCILE, CONFIRM_EXPIRY, ALERT_REQUEUE, BOT, SCHEDULER, HEALTH, ENABLE. A failure in CONFIG, GATE, ALEMBIC, SAFE_MODE or ENABLEMENT holds the process (nothing starts); a failure elsewhere continues in SAFE_MODE with entries blocked and monitoring running. ENABLE runs in DEMO only, after a passing health verdict (D102); entries start disabled at every start. SAFE_MODE is never left by a restart (section 21.1). A `live.health.not_ok failing=['telegram_delivery']` warning at start is expected: that item reads FAIL until the first real Telegram send. A RECOVERY step that restores only part of the plans: section 21.6.
 
 CLOCK_DRIFT passes when the measurement WORKS, not when the host is inside its limits. `place_entry` then refuses (`ENTRY_REFUSED_BEFORE_SEND`, journaled with the guard's reason) while the drift guard says OUT_OF_LIMITS.
 
@@ -1160,3 +1190,49 @@ Observed on Demo (smoke rehearsal of 2026-11-06, `09-DEMO-REHEARSAL-EVIDENCE-smo
 - The `restart: "no"` policy of the live service is the owner's switch (section 22.4).
 - Review items of 2026-11-07 deferred to Phase 25, each with a row in `24-DEFERRED.md` and an entry in the ROADMAP Phase 25 inherited items: R-21 margin reservations never advance (`mark_placed` and `mark_open` have no caller; needs a DECISIONS row on when `mark_placed` is stamped), R-22 cancel-on-stop (the stop procedure in 22.5 is the interim), R-23 sync store calls on the event loop in the operator commands and start-time rehydration, R-24 pool-timeout error not wrapped as `StoreUnavailable`, R-25 health tick journal volume (about 63,000 rows a day).
 - Stuck first install (R-26): if a host ever has the REST gate state file but no `spill/.spill-initialized` in the `livestate` volume, the start enters SAFE_MODE `RESTORE_INCONSISTENT` and `--initialize-gate-state` refuses (`GATE_STATE_EXISTS`); create the sentinel file by hand. New installs cannot reach this state since commit cc9a9df8.
+- The value of `scheduler.protection_stall_after_ms` is the owner's: it ships `NOT_CONFIGURED`, so the stall watchdog is off and no `TASK_STALLED` alert can fire until it is set (section 22.8, D111).
+- A literal single wire request for the restart cancel of an unrestorable plan needs an adapter change and its own decision (section 21.6).
+
+### 22.8 TASK_STALLED and the protection stall bound (D111)
+
+Status: built and tested with fakes by quick tasks 261114-kxu (the watchdog) and 261114-mp1 (the alert and the key), DECISIONS D111. The shipped limits leave it off. Nothing was observed on Demo or on a host.
+
+**Meaning.** The scheduler runs the protection task `protection_step`. When that task has a stall bound, a watchdog starts beside each run; if the run is still going after the bound, it logs one error line naming the task and the bound in seconds and records one stall event for that run. `LiveWiring._record_task` journals it as a `LIVE_TASK_EVENT` row (correlation `live_scheduler`, entity `protection_step`, payload `task`, `kind` and `error_class`) and then raises the HIGH alert `TASK_STALLED`, whose header subject is the task name and whose reason is `STALL_BOUND_EXCEEDED`; the alert is raised also when the journal write failed. Only the protection task has a bound.
+
+**Observe only.** The run is never cancelled, cut short, stopped or restarted by the watchdog or the alert. Nothing is cancelled and nothing is re-sent.
+
+**The key.** `scheduler.protection_stall_after_ms` in section `[scheduler]` of `config/execution/execution-limits-v1.toml` ships `NOT_CONFIGURED` as its value and as its provenance. It is alert-only: unlike a required key (section 22.1), unset it never refuses the start. While it is unset the watchdog is off, no stall row is written and no `TASK_STALLED` is raised. It stays off until the owner sets a value with its own DECISIONS row and the provenance `DECISION`. An integer value needs a provenance of STRUCTURAL, COST_GUARD, DECISION or EXPERIMENT; PLACEHOLDER refuses to load. To fire before the unprotected deadline the value must stay below `protection.max_unprotected_ms`. Limits are baked into the image (section 22.4, D106), so a set value is a rebuilt and re-pinned image.
+
+**How to react.** Check the process log and the exchange position and its stop now. Close or protect the position by hand if it needs it. Restart the process if the task does not finish (a restart never leaves SAFE_MODE, section 21.1; a stop leaves resting entries, section 22.5). Repeated stalls inside `alerts.dedupe_window_ms` are suppressed in Telegram and journaled as `ALERT_SUPPRESSED`, while every stall keeps its `LIVE_TASK_EVENT` row.
+
+**Measuring a bound (owner; no value is chosen here).** The journal holds no per-run duration: `protection_step` rows exist only for `first_run`, `failure`, `recovery` and, with a bound set, `stall`. Read-only query 1, the stall rows (empty while the key is unset):
+
+```sql
+SELECT occurred_at_utc, payload_json
+FROM journal_events
+WHERE correlation_id = 'live_scheduler'
+  AND entity_id = 'protection_step'
+  AND event_type = 'LIVE_TASK_EVENT'
+  AND payload_json LIKE '%"kind":"stall"%'
+ORDER BY occurred_at_utc;
+```
+
+Read-only query 2, the protection transitions of every plan (correlation `protection_<plan hash>`, event type `PROTECTION_TRANSITION`):
+
+```sql
+SELECT correlation_id, occurred_at_utc, payload_json
+FROM journal_events
+WHERE correlation_id LIKE 'protection\_%'
+  AND event_type = 'PROTECTION_TRANSITION'
+ORDER BY correlation_id, occurred_at_utc;
+```
+
+Reading query 2: per plan, take the time from the transition to `UNPROTECTED` (fill seen) to the transition to `PROTECTED_ENTRY_OPEN` or `PROTECTED` (stop confirmed). That is a lower bound only, and only when both rows were journaled by the same run: the journal does not say which run wrote a row, so a gap across two runs includes the wait between runs, and a fill also wakes the protection task. The direct method, owner-run on Demo only and never by an agent:
+
+1. No command-line flag selects the limits file, so the owner edits the Demo host's copy of `config/execution/execution-limits-v1.toml` for the measurement only (an image or checkout used only for that run) and never commits it.
+2. Set a trial value of `protection_stall_after_ms` in `[scheduler]` and the provenance `EXPERIMENT` in `[provenance.scheduler]`.
+3. Run Demo sessions that exercise the protection step (fills, stop placement, restarts, take-profit attach) and count the stall rows of query 1 per trial bound; lower the bound until the first stall rows appear.
+4. Adopt the observed maximum plus a margin the owner chooses, below `protection.max_unprotected_ms`.
+5. Record it with a DECISIONS row and the provenance `DECISION`.
+
+A per-run duration record would make this direct but needs a new decision; it is not built.
