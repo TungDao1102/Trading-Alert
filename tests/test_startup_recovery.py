@@ -44,6 +44,7 @@ from src.reconcile.startup import (
     STEP_SPILL_REPLAYED,
     PartialRestore,
     StartupReport,
+    UnrestorableEntry,
     run_startup_recovery,
 )
 
@@ -787,8 +788,16 @@ async def test_a_partial_restore_restores_the_healthy_plans_then_fails_the_step_
     h = harness(rig, tmp_path)
     healthy = h.builder()
 
+    unrestorable = UnrestorableEntry(
+        trade_plan_id="TEST_ONLY_plan",
+        approval_id="TEST_ONLY_approval",
+        plan_hash="b" * 64,
+        symbol="ETHUSDT",
+        fault_class="RestoreSourceMissing",
+    )
+
     def partial_builder(spill_rows_for: Callable[[str], Any]) -> Sequence[RestoredPlan]:
-        raise PartialRestore(healthy(spill_rows_for), 1)
+        raise PartialRestore(healthy(spill_rows_for), 1, entries=(unrestorable,))
 
     report = await run_startup_recovery(
         safe_mode_load=lambda: h.safe_mode,
@@ -813,6 +822,7 @@ async def test_a_partial_restore_restores_the_healthy_plans_then_fails_the_step_
     assert "RESTORE_INCONSISTENT" in h.safe_mode.entered_reasons
     assert "DB_FAILURE" not in h.safe_mode.entered_reasons
     assert report.plans_restored == 1 and report.plans_unrestorable == 1
+    assert report.unrestorable_entries == (unrestorable,)
 
 
 # --------------------------------------------------------------------------- #

@@ -49,6 +49,7 @@ The module reads no clock: every time is injected. It places, cancels and closes
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import os
@@ -101,6 +102,7 @@ from src.reconcile.startup import (
     SpillReplay,
     SpillRowsFor,
     StartupReport,
+    UnrestorableEntry,
     run_startup_recovery,
 )
 
@@ -304,6 +306,11 @@ class RecoveryPorts:
     journal: Any
     spill: SpillReader | None
     spill_replay: SpillReplay | None = None
+    # D110: awaited once with the unrestorable entries of a partial restore and the start time
+    # (one cancel of each resting entry, fail closed). None = nothing is cancelled.
+    unrestored_entries: (
+        Callable[[Sequence[UnrestorableEntry], datetime], Awaitable[object]] | None
+    ) = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -584,11 +591,15 @@ def restored_plans_builder(
     and enters SAFE_MODE `RESTORE_INCONSISTENT` for the rest (entries stay blocked). A fault
     outside that family (a store or journal outage) still propagates: the whole build fails and
     recovery enters SAFE_MODE `DB_FAILURE` with the coordinator unrestored.
+
+    An unrestorable entry is handed to the start sequence as an `UnrestorableEntry` (ids, symbol,
+    plan hash, fault class name): the sequence cancels its resting entry once by the deterministic
+    client id (D110). `plan_hash_rebuilt` marks a row whose plan hash equals a rebuilt plan's.
     """
 
     def build(spill_rows_for: SpillRowsFor) -> Sequence[RestoredPlan]:
         plans: list[RestoredPlan] = []
-        unrestorable: list[tuple[str, str, str]] = []
+        unrestorable: list[UnrestorableEntry] = []
         for entry in intents.restorable_entries():
             if entry.role != OrderRole.ENTRY.value or entry.intent_status not in _RESTORABLE_STATES:
                 continue
@@ -618,7 +629,15 @@ def restored_plans_builder(
             except _ROW_FAULTS as fault:
                 # Ids and the class name only, never the message (no row text in a log).
                 fault_class = type(fault).__name__
-                unrestorable.append((entry.trade_plan_id, entry.approval_id, fault_class))
+                unrestorable.append(
+                    UnrestorableEntry(
+                        trade_plan_id=entry.trade_plan_id,
+                        approval_id=entry.approval_id,
+                        plan_hash=entry.plan_hash,
+                        symbol=entry.symbol,
+                        fault_class=fault_class,
+                    )
+                )
                 log.error(
                     "live.restore.entry_unrestorable",
                     trade_plan_id=entry.trade_plan_id,
@@ -629,7 +648,12 @@ def restored_plans_builder(
             plans.append(rebuilt)
         rebuild_client_id_index(index, plans, intents)
         if unrestorable:
-            raise PartialRestore(plans, len(unrestorable))
+            rebuilt_hashes = {p.entry.plan_hash for p in plans}
+            flagged = tuple(
+                dataclasses.replace(item, plan_hash_rebuilt=item.plan_hash in rebuilt_hashes)
+                for item in unrestorable
+            )
+            raise PartialRestore(plans, len(flagged), entries=flagged)
         return plans
 
     return build
@@ -984,6 +1008,13 @@ async def _drive(run: _Run) -> None:
             spill_replay=parts.spill_replay,
         )
         run.recovery = report
+        if report.unrestorable_entries and parts.unrestored_entries is not None:
+            # D110: SAFE_MODE is already on; one cancel of each unwatched resting entry. The port
+            # alerts its own failures; nothing it raises may stop the start (fail closed).
+            try:
+                await parts.unrestored_entries(report.unrestorable_entries, run.now_utc)
+            except Exception as exc:  # noqa: BLE001 - class name only; the step still fails below
+                log.error("live.restore.unrestored_cancel_failed", error_class=type(exc).__name__)
         if report.failed_steps or not report.restore_complete:
             raise StartupStepFailed(CODE_RECOVERY_INCOMPLETE, SAFE_MODE_RESTORE_INCONSISTENT)
         return None

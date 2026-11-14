@@ -22,11 +22,25 @@ next scheduled run looks again. Nothing here raises for an exchange or store fai
 text can carry a signed URL and the journal is append-only.
 
 The clock is injected (`now_utc`); no wall clock is read.
+
+Restart cancel (quick 261114-mp1, D110). `cancel_unrestored_entries` is called once by the start
+sequence after a PARTIAL restore: a restorable ENTRY row whose plan or snapshot could not be
+rebuilt is not supervised, so nobody would place its stop if its resting entry filled. For each
+such row (one per distinct plan hash) it sends ONE cancel through `expire_pending_entry` by the
+deterministic client id (trigger `protection_handoff_failed`: the same meaning, nobody watches the
+entry), then ONE position read of the symbol. It never places and never closes. A row whose plan
+hash equals a rebuilt plan's is never cancelled (that id is a supervised order). An ambiguous or
+failed cancel, or a refused row, raises PROTECTION_HANDOFF_FAILED with an `UNRESTORED_CANCEL_*`
+reason; a non-zero or unreadable position raises DIVERGENCE (`UNRESTORED_PLAN_POSITION`,
+`UNRESTORED_POSITION_UNKNOWN`) and is left to the operator. There is no retry in this module: the
+adapter's own bounded retry of a cancel request is unchanged and is not counted here. Alerts carry
+codes only.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -37,9 +51,10 @@ import structlog
 from src.domain.enums import OrderRole
 from src.domain.journal import JournalEvent, correlated_event_id
 from src.execution.cancel_verification import CancelVerdict
-from src.execution.manager import ExecutionAdapter, expire_pending_entry
+from src.execution.manager import LIVE5_SYMBOLS, ExecutionAdapter, expire_pending_entry
 from src.execution.order_ids import derive_client_order_id
-from src.execution.protection import PlanProtection, ProtectionState
+from src.execution.protection import CriticalAlertSink, PlanProtection, ProtectionState
+from src.reconcile.startup import UnrestorableEntry
 
 log = structlog.get_logger(__name__)
 
@@ -53,6 +68,18 @@ OUTCOME_LEFT_TO_COORDINATOR = "left_to_coordinator"
 OUTCOME_READ_FAILED = "read_failed"
 OUTCOME_EXPIRY_UNKNOWN = "expiry_unknown"
 OUTCOME_NOT_RESTING = "not_resting"
+OUTCOME_REFUSED = "refused"
+
+# D110: the canonical expiry trigger of `expire_pending_entry` for an entry nobody watches.
+TRIGGER_PROTECTION_HANDOFF_FAILED = "protection_handoff_failed"
+# D110: existing alert events (no new event): the cancel's own failures, and a position.
+ALERT_EVENT_CANCEL = "PROTECTION_HANDOFF_FAILED"
+ALERT_EVENT_POSITION = "DIVERGENCE"
+REASON_UNRESTORED_CANCEL_UNVERIFIED = "UNRESTORED_CANCEL_UNVERIFIED"
+REASON_UNRESTORED_CANCEL_FAILED = "UNRESTORED_CANCEL_FAILED"
+REASON_UNRESTORED_CANCEL_REFUSED = "UNRESTORED_CANCEL_REFUSED"
+REASON_UNRESTORED_PLAN_POSITION = "UNRESTORED_PLAN_POSITION"
+REASON_UNRESTORED_POSITION_UNKNOWN = "UNRESTORED_POSITION_UNKNOWN"
 
 REASON_EXECUTED = "executed"
 REASON_QUANTITY_UNKNOWN = "quantity_unknown"
@@ -96,6 +123,29 @@ class ScheduledCancelResult:
     outcome: str
     detail: str | None = None
     verdict: CancelVerdict | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class UnrestoredCancelResult:
+    """What the restart cancel of one unrestorable plan came to (codes and class names only).
+
+    `outcome` is `canceled`, `cancel_unverified`, `cancel_failed` or `refused`; `detail` is the
+    verdict value or an exception class name; `position` is None (flat, nothing alerted) or the
+    DIVERGENCE reason code.
+    """
+
+    plan_hash: str
+    symbol: str
+    outcome: str
+    verdict: CancelVerdict | None = None
+    detail: str | None = None
+    position: str | None = None
+
+
+class PositionReadingAdapter(ExecutionAdapter, Protocol):
+    """The execution adapter plus the one read the restart cancel makes (`snapshot_positions`)."""
+
+    async def snapshot_positions(self, *, symbol: str | None = None) -> Sequence[Any]: ...
 
 
 def _require_utc(value: object, name: str) -> None:
@@ -202,6 +252,154 @@ async def _check_plan(
     return result(OUTCOME_CANCEL_UNVERIFIED, verdict.value, verdict)
 
 
+async def cancel_unrestored_entries(
+    *,
+    entries: Sequence[UnrestorableEntry],
+    adapter: PositionReadingAdapter,
+    journal: JournalWriter,
+    spill: Any,
+    alerts: CriticalAlertSink,
+    now_utc: datetime,
+) -> tuple[UnrestoredCancelResult, ...]:
+    """Cancel the resting entry of each unrestorable plan once (D110); one result per plan hash.
+
+    Never places, never closes, never retries. A `BaseException` propagates; an `Exception` of the
+    exchange, the journal or the alert sink is kept by class name and the next entry still runs.
+    """
+    _require_utc(now_utc, "now_utc")
+    results: list[UnrestoredCancelResult] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if entry.plan_hash in seen:
+            continue
+        seen.add(entry.plan_hash)
+        results.append(
+            await _cancel_unrestored_one(
+                entry, adapter=adapter, journal=journal, spill=spill, alerts=alerts, now_utc=now_utc
+            )
+        )
+    return tuple(results)
+
+
+def _alert(
+    alerts: CriticalAlertSink,
+    entry: UnrestorableEntry,
+    *,
+    event: str,
+    reason: str,
+    now_utc: datetime,
+) -> None:
+    try:
+        alerts.critical(
+            event=event,
+            plan_hash=entry.plan_hash,
+            symbol=entry.symbol,
+            reason=reason,
+            now_utc=now_utc,
+        )
+    except Exception as exc:  # noqa: BLE001 - a failing sink must not stop the next entry
+        log.error("live.restore.unrestored_alert_failed", error_class=type(exc).__name__)
+
+
+async def _cancel_unrestored_one(
+    entry: UnrestorableEntry,
+    *,
+    adapter: PositionReadingAdapter,
+    journal: JournalWriter,
+    spill: Any,
+    alerts: CriticalAlertSink,
+    now_utc: datetime,
+) -> UnrestoredCancelResult:
+    plan_hash, symbol = entry.plan_hash, entry.symbol
+    outcome, verdict, detail = await _one_cancel(
+        entry, adapter=adapter, journal=journal, spill=spill, alerts=alerts, now_utc=now_utc
+    )
+    position = await _position_check(entry, adapter=adapter, alerts=alerts, now_utc=now_utc)
+    return UnrestoredCancelResult(
+        plan_hash=plan_hash,
+        symbol=symbol,
+        outcome=outcome,
+        verdict=verdict,
+        detail=detail,
+        position=position,
+    )
+
+
+async def _one_cancel(
+    entry: UnrestorableEntry,
+    *,
+    adapter: PositionReadingAdapter,
+    journal: JournalWriter,
+    spill: Any,
+    alerts: CriticalAlertSink,
+    now_utc: datetime,
+) -> tuple[str, CancelVerdict | None, str | None]:
+    """The single cancel request of one plan: (outcome, verdict, detail)."""
+
+    def failed(reason: str) -> None:
+        _alert(alerts, entry, event=ALERT_EVENT_CANCEL, reason=reason, now_utc=now_utc)
+
+    if entry.plan_hash_rebuilt:
+        # The deterministic id belongs to a rebuilt, supervised plan: cancelling it is not ours.
+        failed(REASON_UNRESTORED_CANCEL_REFUSED)
+        return OUTCOME_REFUSED, None, "plan_hash_rebuilt"
+    try:
+        verdict = await expire_pending_entry(
+            plan_hash=entry.plan_hash,
+            symbol=entry.symbol,
+            adapter=adapter,
+            journal=journal,
+            now_utc=now_utc,
+            trigger_reason=TRIGGER_PROTECTION_HANDOFF_FAILED,
+            spill=spill,
+        )
+    except ValueError as exc:  # the symbol or the plan hash was refused before any call
+        log.error("live.restore.unrestored_cancel_refused", error_class=type(exc).__name__)
+        failed(REASON_UNRESTORED_CANCEL_REFUSED)
+        return OUTCOME_REFUSED, None, type(exc).__name__
+    except Exception as exc:  # noqa: BLE001 - class name only; no second cancel
+        log.error("live.restore.unrestored_cancel_failed", error_class=type(exc).__name__)
+        failed(REASON_UNRESTORED_CANCEL_FAILED)
+        return OUTCOME_CANCEL_FAILED, None, type(exc).__name__
+    if verdict is CancelVerdict.CANCELED:
+        return OUTCOME_CANCELED, verdict, None
+    if verdict in (CancelVerdict.STILL_OPEN, CancelVerdict.UNKNOWN):
+        failed(REASON_UNRESTORED_CANCEL_UNVERIFIED)
+    # GONE_NOT_CANCELED left the book on its own; FILLED_OR_PARTIAL is a position, read next.
+    return OUTCOME_CANCEL_UNVERIFIED, verdict, verdict.value
+
+
+async def _position_check(
+    entry: UnrestorableEntry,
+    *,
+    adapter: PositionReadingAdapter,
+    alerts: CriticalAlertSink,
+    now_utc: datetime,
+) -> str | None:
+    """ONE position read of the symbol: None when flat, else the DIVERGENCE reason raised."""
+    reason = await _position_reason(entry.symbol, adapter)
+    if reason is not None:
+        _alert(alerts, entry, event=ALERT_EVENT_POSITION, reason=reason, now_utc=now_utc)
+    return reason
+
+
+async def _position_reason(symbol: str, adapter: PositionReadingAdapter) -> str | None:
+    if symbol not in LIVE5_SYMBOLS:
+        return REASON_UNRESTORED_POSITION_UNKNOWN
+    try:
+        rows = await adapter.snapshot_positions(symbol=symbol)
+    except Exception as exc:  # noqa: BLE001 - an unreadable position counts as open
+        log.error("live.restore.unrestored_position_unreadable", error_class=type(exc).__name__)
+        return REASON_UNRESTORED_POSITION_UNKNOWN
+    for row in rows:
+        if getattr(row, "symbol", None) != symbol:
+            continue
+        amount = getattr(row, "position_amt", None)
+        if not isinstance(amount, Decimal) or amount != _ZERO:
+            return REASON_UNRESTORED_PLAN_POSITION
+    return None
+
+
 def _left_reason(probe: Any) -> str | None:
     """None when the entry rests with zero executed quantity; else why it is not cancelled.
 
@@ -272,8 +470,18 @@ __all__ = [
     "OUTCOME_LEFT_TO_COORDINATOR",
     "OUTCOME_NOT_RESTING",
     "OUTCOME_READ_FAILED",
+    "OUTCOME_REFUSED",
+    "REASON_UNRESTORED_CANCEL_FAILED",
+    "REASON_UNRESTORED_CANCEL_REFUSED",
+    "REASON_UNRESTORED_CANCEL_UNVERIFIED",
+    "REASON_UNRESTORED_PLAN_POSITION",
+    "REASON_UNRESTORED_POSITION_UNKNOWN",
+    "TRIGGER_PROTECTION_HANDOFF_FAILED",
     "CoordinatorView",
     "PlanStore",
+    "PositionReadingAdapter",
     "ScheduledCancelResult",
+    "UnrestoredCancelResult",
     "cancel_expired_entries_once",
+    "cancel_unrestored_entries",
 ]

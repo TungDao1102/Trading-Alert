@@ -41,11 +41,12 @@ from src.execution.emergency_close import (
     MarketEmergencyCloser,
 )
 from src.execution.intent_store import IntentRecord
-from src.execution.order_ids import derive_algo_client_id
+from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.pre_placement import check_remaining_validity
 from src.execution.protection import ProtectionCoordinator, ProtectionState
 from src.live import startup
 from src.live.order_index import ClientIdIndex
+from src.live.scheduled_cancel import cancel_unrestored_entries
 from src.live.startup import (
     RecoveryPorts,
     close_attempts_reader,
@@ -59,7 +60,12 @@ from src.reconcile.safe_mode import SafeModeController
 from src.reconcile.startup import (
     _PROTECTION_CORRELATION_PREFIX as PROTECTION_PREFIX,
 )
-from src.reconcile.startup import PartialRestore, StartupReport, run_startup_recovery
+from src.reconcile.startup import (
+    PartialRestore,
+    StartupReport,
+    UnrestorableEntry,
+    run_startup_recovery,
+)
 
 from tests.shadow_fakes import (
     AUTHORIZED_USER_IDS,
@@ -746,3 +752,208 @@ def test_the_restart_module_has_no_clock_and_no_placement() -> None:
     for forbidden in ("place_entry", "place_algo_protective", "place_market_close", "create_all"):
         assert forbidden not in source
     assert "datetime.now" not in source and "time.time" not in source
+
+
+# --------------------------------------------------------------------------- #
+# Quick 261114-mp1 (D110): the resting entry of an unrestorable plan is cancelled once.
+# --------------------------------------------------------------------------- #
+
+# A plan hash whose first 32 hex characters differ from the rig's plan (the entry client id is
+# `x-<plan_hash[:32]><role_code>`), so its deterministic entry id is another order.
+TEST_ONLY_HASH_B = "b" * 64
+TEST_ONLY_SYMBOL_B = "ETHUSDT"
+
+
+def _entry_id_of(plan_hash: str) -> str:
+    return derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value)
+
+
+async def _partial_restart_with_resting_b(
+    *, partial_fill: Decimal | None = None, on_enter: Callable[[str, datetime], None] | None = None
+) -> tuple[LiveRig, Restart, str]:
+    """Plan A rests and is restorable; plan B rests on the exchange but cannot be rebuilt.
+
+    B's row is a second restorable ENTRY row with a distinct plan hash whose trade plan id has no
+    persisted plan. The fake exchange holds B's entry under its deterministic client id.
+    """
+    rig = await _run_one_resting_entry()
+    restart = await _restart(rig, crash_in_safe_mode=None, on_enter=on_enter)
+    real = rig.intents.get_entry(approval_id=rig.approve_row().approval_id)
+    assert real is not None
+    b_id = _entry_id_of(TEST_ONLY_HASH_B)
+    extra = _extra_row(
+        real, plan_hash=TEST_ONLY_HASH_B, symbol=TEST_ONLY_SYMBOL_B, client_order_id=b_id
+    )
+    placed = dict(rig.fake.calls_to("place_entry")[0]["kwargs"])
+    placed.update(symbol=TEST_ONLY_SYMBOL_B, new_client_order_id=b_id)
+    await rig.fake.place_entry(**placed)
+    if partial_fill is not None:
+        rig.fake.fill(b_id, quantity=partial_fill)
+    restart.builder = restored_plans_builder(
+        intents=_TwoRowReader(restart.reader, extra),
+        plan_for=lambda trade_plan_id: (
+            None if trade_plan_id == extra.trade_plan_id else rig.stores.plans.get(trade_plan_id)
+        ),
+        snapshot_for=lambda trade_plan_id: restart.snapshot,
+        transition_events_for=restart._events_of,
+        index=restart.index,
+        tp1_quantity_fraction=TEST_ONLY_TP1_FRACTION,
+        snapshot_ttl=TEST_ONLY_SNAPSHOT_TTL,
+    )
+    return rig, restart, b_id
+
+
+def _unrestored_port(rig: LiveRig, restart: Restart) -> Callable[[Any, datetime], Any]:
+    async def port(entries: Any, now_utc: datetime) -> Any:
+        return await cancel_unrestored_entries(
+            entries=entries,
+            adapter=rig.fake,  # type: ignore[arg-type]
+            journal=rig.journal,
+            spill=None,
+            alerts=restart.alerts,
+            now_utc=now_utc,
+        )
+
+    return port
+
+
+async def test_the_partial_restore_carries_the_unrestorable_entry_with_its_shared_hash_flag() -> (
+    None
+):
+    rig, restart, builder, _ = await _two_rows_one_corrupt(plan_for_extra_is_none=True)
+    with pytest.raises(PartialRestore) as raised:
+        builder(lambda plan_hash: ())
+    (entry,) = raised.value.entries
+    assert isinstance(entry, UnrestorableEntry)
+    assert entry.trade_plan_id == "TEST_ONLY_second_plan"
+    assert entry.approval_id == "TEST_ONLY_second_approval"
+    assert entry.plan_hash == rig.plan.plan_hash and entry.symbol == TEST_ONLY_SYMBOL
+    assert entry.fault_class == "RestoreSourceMissing"
+    assert entry.plan_hash_rebuilt is True, "the healthy plan has this plan hash"
+
+    report = await restart.recover()
+    assert report.unrestorable_entries == (entry,)
+
+
+async def test_a_distinct_hash_unrestorable_entry_is_not_flagged_as_rebuilt() -> None:
+    rig, restart, b_id = await _partial_restart_with_resting_b()
+    with pytest.raises(PartialRestore) as raised:
+        restart.builder(lambda plan_hash: ())
+    (entry,) = raised.value.entries
+    assert entry.plan_hash == TEST_ONLY_HASH_B and entry.symbol == TEST_ONLY_SYMBOL_B
+    assert entry.plan_hash_rebuilt is False
+    assert [p.entry.plan_hash for p in raised.value.plans] == [rig.plan.plan_hash]
+
+
+async def test_a_full_restore_and_a_store_outage_leave_no_unrestorable_entries() -> None:
+    rig = await _run_one_resting_entry()
+    restart = await _restart(rig, crash_in_safe_mode=None)
+    assert (await restart.recover()).unrestorable_entries == ()
+
+    def outage(correlation: str) -> list[JournalEvent]:
+        raise OSError("journal is down (test)")
+
+    other = await _restart(rig, crash_in_safe_mode=None)
+    other.builder = restored_plans_builder(
+        intents=other.reader,
+        plan_for=rig.stores.plans.get,
+        snapshot_for=lambda trade_plan_id: other.snapshot,
+        transition_events_for=outage,
+        index=ClientIdIndex(),
+        tp1_quantity_fraction=TEST_ONLY_TP1_FRACTION,
+        snapshot_ttl=TEST_ONLY_SNAPSHOT_TTL,
+    )
+    assert (await other.recover()).unrestorable_entries == ()
+
+
+async def test_the_start_sequence_cancels_the_unrestored_plans_entry_once_and_keeps_the_rest(
+    tmp_path: Any,
+) -> None:
+    rig, restart, b_id = await _partial_restart_with_resting_b()
+    harness = Harness(tmp=tmp_path)
+    harness.install()
+    placements_before = {
+        name: len(rig.fake.calls_to(name))
+        for name in ("place_entry", "place_algo_protective", "place_market_close")
+    }
+    cancels_before = len(rig.fake.calls_to("cancel_normal_order"))
+    ports = dataclasses.replace(
+        harness.ports(),
+        load_safe_mode=lambda: restart.safe_mode,
+        recovery=dataclasses.replace(
+            restart.recovery_ports(), unrestored_entries=_unrestored_port(rig, restart)
+        ),
+    )
+
+    outcome = await startup.run_start_sequence(ports, now_utc=T0)
+
+    assert outcome.admitted and outcome.recovery is not None
+    assert outcome.recovery.plans_restored == 1 and outcome.recovery.plans_unrestorable == 1
+    new_cancels = rig.fake.calls_to("cancel_normal_order")[cancels_before:]
+    assert [c["kwargs"] for c in new_cancels] == [
+        {"symbol": TEST_ONLY_SYMBOL_B, "orig_client_order_id": b_id}
+    ]
+    assert b_id not in rig.fake.open_orders, "the unwatched resting entry is gone"
+    assert rig.entry_id in rig.fake.open_orders, "the healthy plan's entry stays open"
+    protection = restart.coordinator.protection_of(rig.plan.plan_hash)
+    assert protection is not None and protection.state is ProtectionState.AWAITING_FILL
+    for name, before in placements_before.items():
+        assert len(rig.fake.calls_to(name)) == before, f"{name} was called during the start"
+    assert outcome.in_safe_mode and restart.safe_mode.entered_reason == "RESTORE_INCONSISTENT"
+    assert "RECOVERY" in outcome.degraded_steps
+    assert restart.alerts.alerts == [], "a clean cancel of a flat symbol raises no alert"
+    triggers = {
+        json.loads(row.payload_json)["trigger_reason"]
+        for row in rig.journal.by_type("ENTRY_EXPIRY")
+        if row.entity_id == b_id
+    }
+    assert triggers == {"protection_handoff_failed"}
+
+
+async def test_a_position_on_the_unrestored_plans_symbol_is_alerted_and_never_closed(
+    tmp_path: Any,
+) -> None:
+    rig, restart, b_id = await _partial_restart_with_resting_b(partial_fill=D("0.03"))
+    position_before = dict(rig.fake.positions)
+    assert position_before.get(TEST_ONLY_SYMBOL_B) == D("0.03")
+    harness = Harness(tmp=tmp_path)
+    harness.install()
+    cancels_before = len(rig.fake.calls_to("cancel_normal_order"))
+    ports = dataclasses.replace(
+        harness.ports(),
+        load_safe_mode=lambda: restart.safe_mode,
+        recovery=dataclasses.replace(
+            restart.recovery_ports(), unrestored_entries=_unrestored_port(rig, restart)
+        ),
+    )
+
+    outcome = await startup.run_start_sequence(ports, now_utc=T0)
+
+    assert outcome.admitted
+    assert len(rig.fake.calls_to("cancel_normal_order")) == cancels_before + 1, "the remainder"
+    assert b_id not in rig.fake.open_orders
+    (alert,) = restart.alerts.alerts
+    assert alert.event == "DIVERGENCE" and alert.reason == "UNRESTORED_PLAN_POSITION"
+    assert alert.symbol == TEST_ONLY_SYMBOL_B and alert.plan_hash == TEST_ONLY_HASH_B
+    assert rig.fake.calls_to("place_market_close") == []
+    assert rig.fake.positions == position_before, "nothing was closed"
+    assert outcome.in_safe_mode and "RECOVERY" in outcome.degraded_steps
+
+
+async def test_a_start_without_the_port_behaves_as_before(tmp_path: Any) -> None:
+    rig, restart, b_id = await _partial_restart_with_resting_b()
+    harness = Harness(tmp=tmp_path)
+    harness.install()
+    cancels_before = len(rig.fake.calls_to("cancel_normal_order"))
+    ports = dataclasses.replace(
+        harness.ports(),
+        load_safe_mode=lambda: restart.safe_mode,
+        recovery=restart.recovery_ports(),
+    )
+    assert ports.recovery.unrestored_entries is None
+
+    outcome = await startup.run_start_sequence(ports, now_utc=T0)
+
+    assert outcome.admitted and "RECOVERY" in outcome.degraded_steps
+    assert len(rig.fake.calls_to("cancel_normal_order")) == cancels_before
+    assert b_id in rig.fake.open_orders

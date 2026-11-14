@@ -111,18 +111,46 @@ type SpillRowsFor = Callable[[str], Sequence[JournalEvent] | None]
 type PlansBuilder = Callable[[SpillRowsFor], Sequence[RestoredPlan]]
 
 
+@dataclass(frozen=True)
+class UnrestorableEntry:
+    """One restorable ENTRY row a builder could not rebuild (quick 261114-mp1, D110).
+
+    Ids and the fault class NAME only, never row text. The plan hash and the symbol come from the
+    intent row, so the deterministic entry client id is known even when the persisted plan is
+    missing. `plan_hash_rebuilt` is True when another, rebuilt row has the same plan hash: its
+    deterministic order id then belongs to a supervised plan and must never be cancelled.
+
+    This module only CARRIES the entry: recovery issues no cancel (its probe adapter is read-only).
+    """
+
+    trade_plan_id: str
+    approval_id: str
+    plan_hash: str
+    symbol: str
+    fault_class: str
+    plan_hash_rebuilt: bool = False
+
+
 class PartialRestore(Exception):  # noqa: N818 - a partial result, not an error to the caller
     """A plans builder rebuilt the healthy plans but could not rebuild `unrestorable` others.
 
     Raised by a `PlansBuilder` after its client-id index holds the healthy plans. Recovery
     restores `plans` (they stay supervised), then fails COORDINATOR_RESTORED with SAFE_MODE
-    `RESTORE_INCONSISTENT`. The message carries the count only, never row text.
+    `RESTORE_INCONSISTENT`. `entries` describes the unrestorable rows (D110) so the start
+    sequence can cancel their resting entries once. The message carries the count only, never
+    row text.
     """
 
-    def __init__(self, plans: Sequence[RestoredPlan], unrestorable: int) -> None:
+    def __init__(
+        self,
+        plans: Sequence[RestoredPlan],
+        unrestorable: int,
+        entries: Sequence[UnrestorableEntry] = (),
+    ) -> None:
         super().__init__(f"{unrestorable} restorable entries could not be rebuilt")
         self.plans: tuple[RestoredPlan, ...] = tuple(plans)
         self.unrestorable = unrestorable
+        self.entries: tuple[UnrestorableEntry, ...] = tuple(entries)
 
 
 type CloseAttemptsReader = Callable[[], Mapping[str, Sequence[JournalEvent]]]
@@ -154,6 +182,7 @@ class StartupReport:
     intents: RecoveryReport | None
     spill_replay: Any
     plans_unrestorable: int = 0
+    unrestorable_entries: tuple[UnrestorableEntry, ...] = ()
 
 
 class _Run:
@@ -289,11 +318,13 @@ async def run_startup_recovery(
     restore_report: RestoreReport | None = None
     plans_restored = 0
     plans_unrestorable = 0
+    unrestorable_entries: tuple[UnrestorableEntry, ...] = ()
     try:
         plans = restored_plans_builder(spill_rows_for)
     except PartialRestore as partial:
         # The healthy plans stay supervised; the unrestorable ones fail the step closed.
         plans_unrestorable = partial.unrestorable
+        unrestorable_entries = partial.entries
         try:
             restore_report = coordinator.restore(partial.plans, now_utc=now_utc)
             plans_restored = len(restore_report.restored)
@@ -384,6 +415,7 @@ async def run_startup_recovery(
         intents=intents,
         spill_replay=replay_report,
         plans_unrestorable=plans_unrestorable,
+        unrestorable_entries=unrestorable_entries,
     )
 
 
@@ -412,5 +444,6 @@ __all__ = [
     "SpillReplay",
     "SpillRowsFor",
     "StartupReport",
+    "UnrestorableEntry",
     "run_startup_recovery",
 ]

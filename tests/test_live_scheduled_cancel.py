@@ -11,14 +11,16 @@ to the coordinator and journaled by class name. Protective legs are never touche
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from src.domain.enums import OrderRole
 from src.domain.journal import JournalEvent
 from src.execution.cancel_verification import CancelVerdict
+from src.execution.order_ids import derive_client_order_id
 from src.execution.protection import ProtectionState
 from src.live.scheduled_cancel import (
     EVENT_SCHEDULED_CANCEL,
@@ -28,10 +30,22 @@ from src.live.scheduled_cancel import (
     OUTCOME_LEFT_TO_COORDINATOR,
     OUTCOME_NOT_RESTING,
     OUTCOME_READ_FAILED,
+    OUTCOME_REFUSED,
+    REASON_UNRESTORED_CANCEL_FAILED,
+    REASON_UNRESTORED_CANCEL_REFUSED,
+    REASON_UNRESTORED_CANCEL_UNVERIFIED,
+    REASON_UNRESTORED_PLAN_POSITION,
+    REASON_UNRESTORED_POSITION_UNKNOWN,
     cancel_expired_entries_once,
+    cancel_unrestored_entries,
 )
+from src.ops.alerts import ALERT_EVENTS, AlertSeverity
+from src.reconcile.startup import UnrestorableEntry
 
+from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.support.live_rig import LiveRig, forbid_real_sleep, make_live_rig
+from tests.support.protection_doubles import RecordingAlerts
+from tests.support.reconcile_doubles import RecordingJournal
 
 D = Decimal
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "live" / "scheduled_cancel.py"
@@ -333,3 +347,282 @@ def test_the_module_names_no_protective_cancel_or_placement_call() -> None:
         assert forbidden not in text
     assert "expire_pending_entry(" in text
     assert "datetime.now" not in text and "time.time" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Quick 261114-mp1 (D110): the resting entry of an unrestorable plan after a partial restore.
+# --------------------------------------------------------------------------- #
+
+NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
+HASH_B = "b" * 64
+HASH_C = "c" * 64
+SYMBOL_B = "ETHUSDT"
+
+
+def entry_id(plan_hash: str) -> str:
+    return derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value)
+
+
+def unrestored(
+    plan_hash: str = HASH_B, symbol: str = SYMBOL_B, *, rebuilt: bool = False
+) -> UnrestorableEntry:
+    return UnrestorableEntry(
+        trade_plan_id="TEST_ONLY_plan",
+        approval_id="TEST_ONLY_approval",
+        plan_hash=plan_hash,
+        symbol=symbol,
+        fault_class="RestoreSourceMissing",
+        plan_hash_rebuilt=rebuilt,
+    )
+
+
+async def exchange_with_entry(
+    plan_hash: str = HASH_B, symbol: str = SYMBOL_B
+) -> BinanceSemanticsFakeAdapter:
+    fake = BinanceSemanticsFakeAdapter()
+    await fake.place_entry(
+        symbol=symbol,
+        side="BUY",
+        position_side="BOTH",
+        quantity=D("1"),
+        price=D("100"),
+        time_in_force="GTC",
+        new_client_order_id=entry_id(plan_hash),
+    )
+    return fake
+
+
+async def cancel_unrestored(
+    fake: BinanceSemanticsFakeAdapter,
+    entries: list[UnrestorableEntry],
+    *,
+    alerts: Any = None,
+    journal: RecordingJournal | None = None,
+) -> Any:
+    return await cancel_unrestored_entries(
+        entries=entries,
+        adapter=fake,  # type: ignore[arg-type]
+        journal=journal if journal is not None else RecordingJournal(),
+        spill=None,
+        alerts=alerts if alerts is not None else RecordingAlerts(),
+        now_utc=NOW,
+    )
+
+
+async def test_an_unrestored_resting_entry_is_cancelled_once_by_its_client_id() -> None:
+    fake = await exchange_with_entry()
+    alerts = RecordingAlerts()
+    journal = RecordingJournal()
+
+    (result,) = await cancel_unrestored(fake, [unrestored()], alerts=alerts, journal=journal)
+
+    assert result.outcome == OUTCOME_CANCELED and result.verdict is CancelVerdict.CANCELED
+    assert result.plan_hash == HASH_B and result.symbol == SYMBOL_B
+    (cancel,) = fake.calls_to("cancel_normal_order")
+    assert cancel["kwargs"] == {"symbol": SYMBOL_B, "orig_client_order_id": entry_id(HASH_B)}
+    assert entry_id(HASH_B) not in fake.open_orders
+    assert len(fake.calls_to("snapshot_positions")) == 1, "one position read"
+    assert alerts.alerts == []
+    triggers = {
+        json.loads(e.payload_json)["trigger_reason"]
+        for e in journal.events
+        if e.event_type == "ENTRY_EXPIRY"
+    }
+    assert triggers == {"protection_handoff_failed"}
+    for forbidden in ("place_algo_protective", "place_market_close"):
+        assert fake.calls_to(forbidden) == []
+    assert len(fake.calls_to("place_entry")) == 1, "only the test's own setup placement"
+
+
+async def test_a_cancel_that_raises_is_alerted_once_and_never_retried() -> None:
+    fake = await exchange_with_entry()
+    fake.fail_next("cancel_normal_order", RuntimeError("scripted"))
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored()], alerts=alerts)
+
+    assert len(fake.calls_to("cancel_normal_order")) == 1, "no second cancel"
+    assert result.outcome == OUTCOME_CANCEL_FAILED and result.detail == "RuntimeError"
+    (alert,) = alerts.alerts
+    assert alert.event == "PROTECTION_HANDOFF_FAILED"
+    assert alert.reason == REASON_UNRESTORED_CANCEL_FAILED
+    assert alert.plan_hash == HASH_B and alert.symbol == SYMBOL_B and alert.now_utc == NOW
+    assert entry_id(HASH_B) in fake.open_orders, "the entry is still resting: SAFE_MODE stays"
+
+
+async def test_an_entry_the_exchange_does_not_find_is_an_unverified_cancel() -> None:
+    fake = BinanceSemanticsFakeAdapter()  # nothing rests: the cancel answers absent
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored()], alerts=alerts)
+
+    assert result.verdict is CancelVerdict.UNKNOWN
+    (alert,) = alerts.alerts
+    assert alert.event == "PROTECTION_HANDOFF_FAILED"
+    assert alert.reason == REASON_UNRESTORED_CANCEL_UNVERIFIED
+    assert len(fake.calls_to("cancel_normal_order")) == 1
+
+
+async def test_a_still_open_entry_after_the_cancel_is_an_unverified_cancel() -> None:
+    fake = await exchange_with_entry()
+    open_order = fake.open_orders[entry_id(HASH_B)]
+
+    async def cancel_does_nothing(**kwargs: Any) -> None:
+        fake.calls.append({"method": "cancel_normal_order", "kwargs": dict(kwargs)})
+
+    fake.cancel_normal_order = cancel_does_nothing  # type: ignore[method-assign]
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored()], alerts=alerts)
+
+    assert open_order.status == "NEW" and result.verdict is CancelVerdict.STILL_OPEN
+    (alert,) = alerts.alerts
+    assert alert.reason == REASON_UNRESTORED_CANCEL_UNVERIFIED
+    assert len(fake.calls_to("cancel_normal_order")) == 1
+
+
+async def test_a_plan_hash_shared_with_a_rebuilt_plan_is_never_cancelled() -> None:
+    fake = await exchange_with_entry()
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored(rebuilt=True)], alerts=alerts)
+
+    assert fake.calls_to("cancel_normal_order") == []
+    assert result.outcome == OUTCOME_REFUSED
+    assert entry_id(HASH_B) in fake.open_orders
+    assert [a.reason for a in alerts.alerts[:1]] == [REASON_UNRESTORED_CANCEL_REFUSED]
+    assert alerts.alerts[0].event == "PROTECTION_HANDOFF_FAILED"
+
+
+async def test_a_symbol_outside_the_live_universe_is_refused_before_any_exchange_call() -> None:
+    fake = await exchange_with_entry(symbol="DOGEUSDT")
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored(symbol="DOGEUSDT")], alerts=alerts)
+
+    assert fake.calls_to("cancel_normal_order") == []
+    assert fake.calls_to("snapshot_positions") == [], "no position read for a refused symbol"
+    assert result.outcome == OUTCOME_REFUSED
+    assert [(a.event, a.reason) for a in alerts.alerts] == [
+        ("PROTECTION_HANDOFF_FAILED", REASON_UNRESTORED_CANCEL_REFUSED),
+        ("DIVERGENCE", REASON_UNRESTORED_POSITION_UNKNOWN),
+    ]
+
+
+async def test_a_position_read_that_raises_is_a_divergence_with_an_unknown_position() -> None:
+    fake = await exchange_with_entry()
+    fake.fail_next("snapshot_positions", RuntimeError("scripted"))
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored()], alerts=alerts)
+
+    assert result.outcome == OUTCOME_CANCELED
+    assert result.position == REASON_UNRESTORED_POSITION_UNKNOWN
+    (alert,) = alerts.alerts
+    assert alert.event == "DIVERGENCE" and alert.reason == REASON_UNRESTORED_POSITION_UNKNOWN
+    assert len(fake.calls_to("snapshot_positions")) == 1
+
+
+async def test_a_non_zero_position_is_a_divergence_and_nothing_is_closed() -> None:
+    fake = await exchange_with_entry()
+    fake.fill(entry_id(HASH_B), quantity=D("0.4"))
+    alerts = RecordingAlerts()
+
+    (result,) = await cancel_unrestored(fake, [unrestored()], alerts=alerts)
+
+    assert result.position == REASON_UNRESTORED_PLAN_POSITION
+    (alert,) = alerts.alerts
+    assert alert.event == "DIVERGENCE" and alert.reason == REASON_UNRESTORED_PLAN_POSITION
+    assert fake.calls_to("place_market_close") == [] and fake.positions[SYMBOL_B] == D("0.4")
+
+
+async def test_two_entries_with_the_same_plan_hash_cancel_once() -> None:
+    fake = await exchange_with_entry()
+
+    results = await cancel_unrestored(fake, [unrestored(), unrestored()])
+
+    assert len(results) == 1
+    assert len(fake.calls_to("cancel_normal_order")) == 1
+
+
+async def test_two_distinct_plans_are_each_cancelled_once() -> None:
+    fake = await exchange_with_entry(HASH_B)
+    await fake.place_entry(
+        symbol="SOLUSDT",
+        side="BUY",
+        position_side="BOTH",
+        quantity=D("1"),
+        price=D("100"),
+        time_in_force="GTC",
+        new_client_order_id=entry_id(HASH_C),
+    )
+
+    results = await cancel_unrestored(
+        fake, [unrestored(HASH_B), unrestored(HASH_C, symbol="SOLUSDT")]
+    )
+
+    assert [r.plan_hash for r in results] == [HASH_B, HASH_C]
+    assert len(fake.calls_to("cancel_normal_order")) == 2
+    assert fake.open_orders == {}
+
+
+class RaisingAlerts:
+    """An alert sink that fails on every call (the next entry must still run)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def critical(self, **kwargs: Any) -> None:
+        self.calls += 1
+        raise RuntimeError("sink down")
+
+
+async def test_a_raising_alert_sink_does_not_stop_the_next_entry() -> None:
+    fake = BinanceSemanticsFakeAdapter()  # both entries are absent: each one wants an alert
+    sink = RaisingAlerts()
+
+    results = await cancel_unrestored(fake, [unrestored(HASH_B), unrestored(HASH_C)], alerts=sink)
+
+    assert len(results) == 2
+    assert len(fake.calls_to("cancel_normal_order")) == 2
+    assert sink.calls >= 2
+
+
+class _Stop(BaseException):
+    """A BaseException that is not an Exception (it must propagate)."""
+
+
+async def test_a_base_exception_propagates() -> None:
+    fake = await exchange_with_entry()
+    fake.fail_next("cancel_normal_order", _Stop())
+
+    with pytest.raises(_Stop):
+        await cancel_unrestored(fake, [unrestored()])
+
+
+def test_every_event_the_restart_cancel_uses_is_in_the_alert_contract() -> None:
+    assert ALERT_EVENTS["PROTECTION_HANDOFF_FAILED"] is AlertSeverity.CRITICAL
+    assert ALERT_EVENTS["DIVERGENCE"] is AlertSeverity.HIGH
+    from src.ops.alerts import OperationalAlert
+
+    for event, reason in (
+        ("PROTECTION_HANDOFF_FAILED", REASON_UNRESTORED_CANCEL_UNVERIFIED),
+        ("PROTECTION_HANDOFF_FAILED", REASON_UNRESTORED_CANCEL_FAILED),
+        ("PROTECTION_HANDOFF_FAILED", REASON_UNRESTORED_CANCEL_REFUSED),
+        ("DIVERGENCE", REASON_UNRESTORED_PLAN_POSITION),
+        ("DIVERGENCE", REASON_UNRESTORED_POSITION_UNKNOWN),
+    ):
+        OperationalAlert.create(
+            event=event,
+            subject=SYMBOL_B,
+            reason=reason,
+            occurred_at_utc=NOW,
+            plan_hash=HASH_B,
+            symbol=SYMBOL_B,
+        )
+
+
+def test_the_restart_cancel_names_no_placement_or_close_call() -> None:
+    text = SOURCE.read_text(encoding="utf-8")
+    assert "cancel_unrestored_entries" in text
+    assert "float(" not in text and "tenacity" not in text

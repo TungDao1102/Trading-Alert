@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -110,7 +110,7 @@ from src.live.risk_inputs import (
     make_cost_rates_for,
     read_pre_placement_inputs,
 )
-from src.live.scheduled_cancel import cancel_expired_entries_once
+from src.live.scheduled_cancel import cancel_expired_entries_once, cancel_unrestored_entries
 from src.live.scheduler import LiveCadences, Scheduler, TaskSpec
 from src.live.signal_source import DemoSmokeSignalSource, SignalSource, build_request_money
 from src.live.smoke_injection import (
@@ -157,6 +157,7 @@ from src.persistence.snapshots import PgPlanConstraintSnapshotStore
 from src.persistence.system_state import PgSystemStateStore
 from src.persistence.uow import OperationalDatabase
 from src.reconcile.safe_mode import SafeModeController
+from src.reconcile.startup import UnrestorableEntry
 from src.risk.daily_loss import FundingPolicy
 
 SleepFn = Callable[[float], Awaitable[None]]
@@ -1182,6 +1183,19 @@ class LiveAssembly:
             plan_hashes=lambda: [e.plan_hash for e in stores.execution_state.restorable_entries()],
             events_for_correlation=stores.journal.list_by_correlation,
         )
+
+        async def unrestored_entries(
+            entries: Sequence[UnrestorableEntry], now_utc: datetime
+        ) -> None:
+            await cancel_unrestored_entries(
+                entries=entries,
+                adapter=self.exchange.adapter,  # type: ignore[arg-type]
+                journal=stores.journal,
+                spill=self.spill,
+                alerts=self.alerts.sink,
+                now_utc=now_utc,
+            )
+
         recovery = RecoveryPorts(
             pending_store=stores.pending_actions,
             coordinator=late_coordinator,
@@ -1192,6 +1206,7 @@ class LiveAssembly:
             probe_adapter=self.exchange.adapter,
             journal=stores.journal,
             spill=self.spill,
+            unrestored_entries=unrestored_entries,
         )
         return StartupPorts(
             mode=self.config.mode,
