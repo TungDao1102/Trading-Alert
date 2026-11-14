@@ -22,6 +22,14 @@ of the same class is not journaled again. A ``record`` that raises is logged by 
 loop goes on. The per-task ``TaskResult`` (last started, last ok, last error class, consecutive
 failures) is kept in memory for the liveness stamp and the health probes.
 
+Stall watchdog: a ``TaskSpec`` may carry ``stall_after_seconds``. While one run of that task is
+still going once the bound has passed (measured with the injected sleep), the scheduler journals
+ONE ``TaskEvent(kind="stall")`` for that run through the same ``record``. It observes only. The run
+is never cancelled and never cut short, because a cancelled placement POST would break the rule
+that a placement is never re-sent (AGENTS.md, D080); the run ends when it ends and the loop
+continues as before. One event per stalled run, not one per interval. The default is None (off): a
+task without a bound behaves exactly as before (same sleeps, same journal).
+
 No number lives here as a cadence: ``LiveCadences.from_limits`` reads the loaded limits only.
 """
 
@@ -29,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -45,7 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 # (the age is 300000 ms by D087), not a cadence of its own.
 DAILY_LOSS_AGE_DIVISOR = 2
 
-TaskEventKind = Literal["first_run", "failure", "recovery"]
+TaskEventKind = Literal["first_run", "failure", "recovery", "stall"]
 
 
 @dataclass(frozen=True)
@@ -55,19 +64,24 @@ class TaskSpec:
     ``interval`` comes from a loaded limit at build time (``LiveCadences``) and has no default.
     ``wake`` is an optional event that runs the task at once (for example the protection step
     after a fill, because a periodic-only step would add its whole period to the unprotected
-    window); the scheduler clears it when it has used it.
+    window); the scheduler clears it when it has used it. ``stall_after_seconds`` (default None,
+    off) turns on the observe-only stall watchdog described in the module docstring.
     """
 
     name: str
     run: Callable[[], Awaitable[None]]
     interval: timedelta
     wake: asyncio.Event | None = None
+    stall_after_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("TaskSpec name must not be empty")
         if self.interval <= timedelta(0):
             raise ValueError(f"TaskSpec {self.name!r} interval must be positive")
+        stall = self.stall_after_seconds
+        if stall is not None and not (math.isfinite(stall) and stall > 0):
+            raise ValueError(f"TaskSpec {self.name!r} stall_after_seconds must be finite and > 0")
 
 
 @dataclass(frozen=True)
@@ -171,12 +185,40 @@ class Scheduler:
         while not self._stop_event.is_set():
             started = self._clock()
             error_class: str | None = None
+            watchdog: asyncio.Task[None] | None = None
+            if spec.stall_after_seconds is not None:
+                watchdog = asyncio.ensure_future(self._watch_stall(spec, spec.stall_after_seconds))
             try:
                 await spec.run()
             except Exception as exc:  # a task never takes the loop or the others down
                 error_class = type(exc).__name__  # class name only: a message may hold a value
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()
+                    await asyncio.gather(watchdog, return_exceptions=True)
             await self._note(spec.name, started, error_class)
             await self._wait(spec)
+
+    async def _watch_stall(self, spec: TaskSpec, bound_seconds: float) -> None:
+        """Observe only: after the bound, journal one stall event for the run still going.
+
+        This coroutine never touches the run (no cancel, no cut-off). The loop cancels it when the
+        run ends; the journal write is shielded so a run that ends during the write does not lose
+        the row.
+        """
+        await self._sleep(bound_seconds)
+        _LOGGER.error(
+            "scheduler task %s is still running after %s seconds", spec.name, bound_seconds
+        )
+        await asyncio.shield(self._record_stall(spec.name))
+
+    async def _record_stall(self, name: str) -> None:
+        try:
+            await self._record(
+                TaskEvent(task=name, kind="stall", at_utc=self._clock(), error_class=None)
+            )
+        except Exception as exc:  # the journal must not stop the task loop
+            _LOGGER.warning("scheduler journal write failed for %s: %s", name, type(exc).__name__)
 
     async def _note(self, name: str, started: datetime, error_class: str | None) -> None:
         state = self._state[name]

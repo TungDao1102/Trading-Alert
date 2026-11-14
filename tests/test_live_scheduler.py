@@ -30,7 +30,7 @@ from src.live.scheduler import (
 from tests.support import execution_limits as limits_support
 from tests.support.execution_limits import TEST_ONLY_EXECUTION_LIMIT_VALUES
 from tests.support.limits import test_only_binance_limits
-from tests.support.virtual_time import VirtualTime
+from tests.support.virtual_time import TEST_ONLY_VIRTUAL_START, VirtualTime
 
 
 @pytest.fixture(autouse=True)
@@ -283,6 +283,168 @@ async def test_stop_ends_every_loop_and_run_returns() -> None:
     assert runner.done() is True
     await runner
     assert time.pending_sleepers() == 0
+
+
+# --------------------------------------------------------------------------- #
+# The observe-only stall watchdog (quick 261114-kxu): journal once per stalled run, never cancel.
+# --------------------------------------------------------------------------- #
+
+
+def _stall_spec(
+    run: Callable[[], Awaitable[None]], *, stall: float | None = 30, interval: float = 15
+) -> TaskSpec:
+    return TaskSpec("a", run, timedelta(seconds=interval), stall_after_seconds=stall)
+
+
+def _other_pending_tasks() -> list[asyncio.Task[Any]]:
+    current = asyncio.current_task()
+    return [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+
+
+async def test_a_stalled_run_is_journaled_once_and_never_cancelled() -> None:
+    time = VirtualTime()
+    release = asyncio.Event()
+    cancelled: list[bool] = []
+
+    async def run_a() -> None:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    journal = Journal()
+    scheduler = _scheduler(time, [_stall_spec(run_a)], journal)
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(31)
+
+    assert journal.kinds() == [("a", "stall")]
+    assert journal.events[0].at_utc == TEST_ONLY_VIRTUAL_START + timedelta(seconds=30)
+    assert journal.events[0].error_class is None
+
+    await time.advance(120)
+    assert journal.kinds() == [("a", "stall")], "one event per stalled run, not one per interval"
+
+    release.set()
+    await time.settle()
+    assert journal.kinds() == [("a", "stall"), ("a", "first_run")]
+    assert cancelled == [], "the run was never cancelled"
+    scheduler.stop()
+    await time.advance(15)
+    await runner
+    assert _other_pending_tasks() == []
+
+
+async def test_the_next_stalled_run_is_journaled_again() -> None:
+    time = VirtualTime()
+    gates = [asyncio.Event(), asyncio.Event()]
+    started = {"n": 0}
+
+    async def run_a() -> None:
+        gate = gates[min(started["n"], 1)]
+        started["n"] += 1
+        await gate.wait()
+
+    journal = Journal()
+    scheduler = _scheduler(time, [_stall_spec(run_a)], journal)
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(31)
+    gates[0].set()
+    await time.settle()
+    await time.advance(15 + 31)  # the next run starts after the interval and stalls again
+
+    assert journal.kinds() == [("a", "stall"), ("a", "first_run"), ("a", "stall")]
+    gates[1].set()
+    scheduler.stop()
+    await time.advance(15)
+    await runner
+    assert _other_pending_tasks() == []
+
+
+async def test_a_run_that_ends_before_the_bound_leaves_no_event_and_no_watchdog() -> None:
+    time = VirtualTime()
+    counts = {"a": 0}
+
+    async def run_a() -> None:
+        counts["a"] += 1
+
+    journal = Journal()
+    scheduler = _scheduler(time, [_stall_spec(run_a)], journal)
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(100)
+    scheduler.stop()
+    await time.advance(15)
+    await runner
+
+    assert counts["a"] >= 6
+    assert journal.kinds() == [("a", "first_run")]
+    assert time.pending_sleepers() == 0
+    assert _other_pending_tasks() == []
+
+
+async def test_cancelling_the_scheduler_cancels_a_stalled_run_as_before_and_the_watchdog() -> None:
+    time = VirtualTime()
+    never = asyncio.Event()
+    cancelled: list[bool] = []
+
+    async def run_a() -> None:
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    scheduler = _scheduler(time, [_stall_spec(run_a)], Journal())
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(10)  # stalled-to-be: the watchdog is sleeping
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    await time.settle()
+
+    assert cancelled == [True]
+    assert time.pending_sleepers() == 0
+    assert _other_pending_tasks() == []
+
+
+async def test_a_journal_that_raises_on_the_stall_event_does_not_stop_the_loop() -> None:
+    time = VirtualTime()
+    release = asyncio.Event()
+    seen: list[str] = []
+
+    async def record(event: TaskEvent) -> None:
+        seen.append(event.kind)
+        if event.kind == "stall":
+            raise RuntimeError("journal down")
+
+    async def run_a() -> None:
+        await release.wait()
+
+    scheduler = _scheduler(time, [_stall_spec(run_a)], record)
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(31)
+    assert seen == ["stall"]
+
+    release.set()
+    await time.settle()
+    assert seen == ["stall", "first_run"], "the loop went on"
+    scheduler.stop()
+    await time.advance(15)
+    await runner
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_a_stall_bound_must_be_finite_and_positive(bad: float) -> None:
+    async def noop() -> None:
+        return None
+
+    with pytest.raises(ValueError, match="'a'"):
+        TaskSpec("a", noop, timedelta(seconds=15), stall_after_seconds=bad)
 
 
 async def test_a_cancelled_error_inside_a_task_propagates_and_is_not_a_failure() -> None:

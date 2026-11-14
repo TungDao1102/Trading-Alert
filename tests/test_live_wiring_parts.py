@@ -343,6 +343,16 @@ def test_a_scheduler_event_journals_the_task_kind_and_class_name_only() -> None:
     assert dataclasses.is_dataclass(event)
 
 
+def test_a_stall_event_journals_as_the_stall_kind_with_no_error_class() -> None:
+    event = task_event_journal(
+        TaskEvent(task="protection", kind="stall", at_utc=T0, error_class=None)
+    )
+    assert event.event_type == "LIVE_TASK_EVENT"
+    assert event.entity_id == "protection"
+    assert '"kind":"stall"' in event.payload_json
+    assert '"error_class":null' in event.payload_json
+
+
 # --------------------------------------------------------------------------- #
 # The new PostgreSQL reads: the statements build and compile for the PostgreSQL dialect.
 # --------------------------------------------------------------------------- #
