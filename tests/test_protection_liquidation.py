@@ -35,6 +35,8 @@ from src.execution.protection import (
     EVENT_LIQUIDATION_CHECKED,
     EVENT_LIQUIDATION_FAILED_ALERT_ONLY,
     EVENT_LIQUIDATION_PRICE_DIFFERS,
+    EVENT_LIQUIDATION_SKIPPED_FLAT,
+    LIQUIDATION_FLAT_READS_LIMIT,
     ProtectionCoordinator,
     ProtectionState,
 )
@@ -53,6 +55,7 @@ LIQUIDATION_TYPES = {
     EVENT_LIQUIDATION_PRICE_DIFFERS,
     EVENT_LIQUIDATION_FAILED_ALERT_ONLY,
     EVENT_LIQUIDATION_CHECK_ERROR,
+    EVENT_LIQUIDATION_SKIPPED_FLAT,
 }
 # TEST_ONLY liquidation price put on the fake's position rows.
 ROW_LIQUIDATION = D("41000.5")
@@ -416,21 +419,101 @@ async def test_an_unreadable_position_read_is_journaled_and_the_next_step_tries_
     assert _liquidation_events(rig) == [EVENT_LIQUIDATION_CHECKED]
 
 
-async def test_a_flat_position_marks_the_plan_checked_without_asking_the_watch() -> None:
+def _tracked_plan(rig: ProtectionRig) -> Any:
+    return rig.coordinator._tracked[TEST_ONLY_PLAN_HASH]
+
+
+class _PositionReads:
+    """Script the liquidation check's positionRisk read: "flat" (no row), "fail", then real rows.
+
+    Only the FIRST positionRisk read of a step (the liquidation check's own, which runs first in
+    PROTECTED and COMPLETE) follows the script; later reads of the same step (the take-profit
+    attach) see the real rows. The fake's own position stays open, so its stop stays ACTIVE: only
+    the read lags, which is the case the flat-read bound covers (a manual `positions[...] = 0`
+    would also lose the stop).
+    """
+
+    def __init__(self, rig: ProtectionRig, script: list[str]) -> None:
+        self._rig = rig
+        self._pending = list(script)
+        self._first = False
+        original = rig.fake.snapshot_positions
+
+        async def scripted(**kwargs: Any) -> Any:
+            step = "position"
+            if self._first:
+                self._first = False
+                step = self._pending.pop(0) if self._pending else "position"
+            if step == "fail":
+                raise RuntimeError("down")
+            if step == "flat":
+                return []
+            return await original(**kwargs)
+
+        rig.fake.snapshot_positions = scripted  # type: ignore[method-assign]
+
+    async def step(self) -> None:
+        self._first = True
+        await self._rig.coordinator.step()
+        await self._rig.clock.advance(1)
+
+
+async def test_a_flat_read_does_not_end_the_check_a_later_position_is_judged() -> None:
+    watch = ScriptedWatch(_verdict(LiquidationWatchAction.OK, "OK"))
+    rig = await _rig_with_price(watch)
+    await _to_protected(rig)
+    reads = _PositionReads(rig, ["flat"])
+
+    await reads.step()  # positionRisk lags the fill: a flat row
+    assert watch.calls == []
+    assert _liquidation_events(rig) == []
+    assert _tracked_plan(rig).liquidation_checked is False
+
+    await reads.step()  # the position is visible now
+
+    assert len(watch.calls) == 1
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_CHECKED]
+
+
+async def test_three_consecutive_flat_reads_end_the_check_with_one_journal_note() -> None:
+    assert LIQUIDATION_FLAT_READS_LIMIT == 3
     watch = ScriptedWatch(_verdict(LiquidationWatchAction.CLOSE, LIQUIDATION_TOO_CLOSE_AFTER_FILL))
     rig = await _rig_with_price(watch)
     await _to_protected(rig)
-    rig.fake.positions[rig.entry.symbol] = D("0")
+    reads = _PositionReads(rig, ["flat"] * LIQUIDATION_FLAT_READS_LIMIT)
 
-    await rig.coordinator.step()
-    assert watch.calls == []
-    assert _liquidation_events(rig) == []
+    for _ in range(LIQUIDATION_FLAT_READS_LIMIT):
+        assert _liquidation_events(rig) == []
+        await reads.step()
 
-    # Checked: a position that appears later is not judged by this hook.
-    rig.fake.positions[rig.entry.symbol] = D("0.004")
-    await rig.clock.advance(1)
-    await rig.coordinator.step()
     assert watch.calls == []
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_SKIPPED_FLAT]
+    (note,) = _events(rig, EVENT_LIQUIDATION_SKIPPED_FLAT)
+    assert note["flat_reads"] == "3"
+    assert _tracked_plan(rig).liquidation_checked is True
+
+    # Checked: a position that is visible afterwards is not judged by this hook.
+    await reads.step()
+    assert watch.calls == []
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_SKIPPED_FLAT]
+
+
+async def test_an_unreadable_read_between_flat_reads_neither_counts_nor_resets() -> None:
+    watch = ScriptedWatch(_verdict(LiquidationWatchAction.OK, "OK"))
+    rig = await _rig_with_price(watch)
+    await _to_protected(rig)
+    reads = _PositionReads(rig, ["flat", "fail", "flat"])
+
+    for _ in range(3):
+        await reads.step()
+    assert watch.calls == []
+    assert _tracked_plan(rig).liquidation_flat_reads == 2
+    assert _tracked_plan(rig).liquidation_checked is False
+
+    await reads.step()  # the position is visible now: judged once
+
+    assert len(watch.calls) == 1
+    assert _liquidation_events(rig) == [EVENT_LIQUIDATION_CHECKED]
 
 
 # --- where and when it runs --------------------------------------------------------------------
@@ -504,6 +587,7 @@ async def test_a_restored_plan_starts_unchecked() -> None:
     rig = await make_rig(register=False)
     tracked = _Tracked(rig.entry, restored_state=ProtectionState.PROTECTED)
     assert tracked.liquidation_checked is False
+    assert tracked.liquidation_flat_reads == 0
 
 
 class _NoBrackets:

@@ -190,7 +190,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import ExecutionIntentStatus, LiveInputsStatus, OrderRole
@@ -315,6 +315,13 @@ EVENT_LIQUIDATION_CHECKED = "PROTECTION_LIQUIDATION_CHECKED"
 EVENT_LIQUIDATION_PRICE_DIFFERS = "PROTECTION_LIQUIDATION_PRICE_DIFFERS"
 EVENT_LIQUIDATION_FAILED_ALERT_ONLY = "PROTECTION_LIQUIDATION_FAILED_ALERT_ONLY"
 EVENT_LIQUIDATION_CHECK_ERROR = "PROTECTION_LIQUIDATION_CHECK_ERROR"
+# The check gave up after LIQUIDATION_FLAT_READS_LIMIT consecutive flat positionRisk reads (the
+# position never became visible): one note with the read count, no watch call, no alert.
+EVENT_LIQUIDATION_SKIPPED_FLAT = "PROTECTION_LIQUIDATION_SKIPPED_FLAT"
+# STRUCTURAL retry bound for the positionRisk lag right after a fill (a flat row can precede the
+# position by a moment): the number of consecutive flat reads after which the check is dropped.
+# Not an owner number; it bounds a retry and changes no limit, price or size.
+LIQUIDATION_FLAT_READS_LIMIT: Final = 3
 
 # Plan 20-17 (D-26): the audit rows of the two operator controls (ids, codes and states only).
 EVENT_OPERATOR_CLOSE_REQUESTED = "OPERATOR_CLOSE_REQUESTED"
@@ -783,6 +790,9 @@ class _Tracked:
         # Plan 22-13: whether the post-fill liquidation comparison has run for this plan. A
         # restored plan starts False, so the comparison runs once after a restart as well.
         self.liquidation_checked = False
+        # Consecutive flat positionRisk reads seen by that check (an unreadable read neither
+        # counts nor resets); the check ends at LIQUIDATION_FLAT_READS_LIMIT.
+        self.liquidation_flat_reads = 0
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -1746,7 +1756,10 @@ class ProtectionCoordinator:
         already REST-confirmed (the last two are reached unchecked after an unreadable position
         read in the PROTECTED step, which also attaches the take-profits, or after a restore). An
         unreadable position read is journaled and the plan stays unchecked (the next step tries
-        again); a flat read marks it checked without a call; a watch that raises, a position row
+        again; it neither counts nor resets the flat counter). A flat read also leaves the plan
+        unchecked and counts: after ``LIQUIDATION_FLAT_READS_LIMIT`` consecutive flat reads the
+        plan is marked checked without a call and one ``EVENT_LIQUIDATION_SKIPPED_FLAT`` note is
+        journaled. A watch that raises, a position row
         the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed),
         unless the watch's policy is explicitly ``ALERT_ONLY`` (owner item O-4, WR-04): then it is
         journaled and alerted as an unknown value, like the watch's own unknown verdict. The check
@@ -1779,9 +1792,21 @@ class ProtectionCoordinator:
             ),
             None,
         )
-        tracked.liquidation_checked = True
         if row is None:
+            # A flat row can precede the position (positionRisk lags the fill): the check stays
+            # pending and the next step reads again. After LIQUIDATION_FLAT_READS_LIMIT
+            # consecutive flat reads it is dropped with one note and no watch call.
+            tracked.liquidation_flat_reads += 1
+            if tracked.liquidation_flat_reads >= LIQUIDATION_FLAT_READS_LIMIT:
+                tracked.liquidation_checked = True
+                self._journal_note(
+                    tracked,
+                    EVENT_LIQUIDATION_SKIPPED_FLAT,
+                    {"flat_reads": str(tracked.liquidation_flat_reads)},
+                    self._now(),
+                )
             return False
+        tracked.liquidation_checked = True
         verdict: LiquidationWatchVerdict | None = None
         try:
             amount = _attr(row, "position_amt")
@@ -3229,6 +3254,7 @@ __all__ = [
     "EVENT_LIQUIDATION_CHECK_ERROR",
     "EVENT_LIQUIDATION_FAILED_ALERT_ONLY",
     "EVENT_LIQUIDATION_PRICE_DIFFERS",
+    "EVENT_LIQUIDATION_SKIPPED_FLAT",
     "EVENT_OPERATOR_CLOSE_REQUESTED",
     "EVENT_OPERATOR_PROTECT_REFUSED",
     "EVENT_OPERATOR_PROTECT_STEPPED",
@@ -3248,6 +3274,7 @@ __all__ = [
     "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
     "EVIDENCE_REST_STOP_CONFIRMED",
     "FILLED_ENTRY_STATUSES",
+    "LIQUIDATION_FLAT_READS_LIMIT",
     "NOTIFIABLE_DIVERGENCE_KINDS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
