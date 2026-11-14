@@ -51,7 +51,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -249,6 +249,32 @@ def backup_lock(bundle_root: Path) -> Iterator[None]:
         yield
 
 
+def _check_root_name(source: Path) -> None:
+    """Refuse a parquet root whose name cannot be a safe `parquet/<name>` directory."""
+    if source.name in ("", ".", ".."):
+        raise ValueError(
+            f"refusing parquet root {str(source)!r}: its name is empty, '.' or '..' "
+            "(pass the directory by its real name)"
+        )
+
+
+def _checked_parquet_roots(parquet_roots: Sequence[Path], bundle_root: Path) -> None:
+    """Fail closed on a parquet root that escapes its name or overlaps the bundle root."""
+    resolved_bundle = bundle_root.resolve()
+    for source in parquet_roots:
+        _check_root_name(source)
+        resolved = source.resolve()
+        if (
+            resolved == resolved_bundle
+            or resolved.is_relative_to(resolved_bundle)
+            or resolved_bundle.is_relative_to(resolved)
+        ):
+            raise ValueError(
+                f"refusing parquet root {str(source)!r}: it equals, lies inside or contains "
+                f"the bundle root {str(bundle_root)!r}"
+            )
+
+
 def backup(
     *,
     bundle_root: Path,
@@ -278,7 +304,14 @@ def backup(
     claim ticks that the restored files do not contain. Dump first means the
     watermark can only be behind the files, never ahead. Atomic-write temp files
     (``.<name>.<pid>.tmp``) are never copied or hashed.
+
+    Refused with ``ValueError`` BEFORE any side effect (no directory is created, pg_dump does not
+    run, nothing is deleted): a parquet root whose name is empty, ``.`` or ``..`` (it would be
+    copied to ``parquet/<name>``, which then names the bundle itself), or whose resolved path
+    equals, lies inside or contains the resolved bundle root (the copy would recurse into itself
+    and the pre-copy ``rmtree`` would delete the source).
     """
+    _checked_parquet_roots(parquet_roots, bundle_root)
     bundle_root.mkdir(parents=True, exist_ok=True)
     pg_dump_path = bundle_root / pg_dump_name
     pg_dump_runner(pg_dump_path)
@@ -359,11 +392,24 @@ def prune_bundle(
     manifest so it describes the source of truth again. With
     `dry_run=True` nothing is deleted or rewritten — the report lists
     what WOULD be pruned.
+
+    Refused with ``ValueError`` (nothing deleted, manifest untouched) when any manifest key is
+    unsafe (empty, absolute, backslash, drive letter, ``.``/``..``/empty segment) or resolves
+    outside the bundle root: a tampered or corrupt manifest must never make prune delete a file
+    outside the bundle.
     """
     manifest_path = bundle_root / MANIFEST_NAME
     if not manifest_path.exists():
         raise FileNotFoundError(f"refusing prune: no manifest at {manifest_path}")
     manifest: dict[str, str] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    resolved_bundle = bundle_root.resolve()
+    escaping = [
+        key
+        for key in manifest
+        if _is_unsafe_key(key) or not (bundle_root / key).resolve().is_relative_to(resolved_bundle)
+    ]
+    if escaping:
+        raise ValueError(f"refusing prune: {len(escaping)} manifest keys escape the bundle root")
     by_basename = {s.name: s for s in parquet_roots}
     pruned: list[str] = []
     for key in sorted(manifest):
@@ -380,7 +426,10 @@ def prune_bundle(
             pruned.append(key)
     if not dry_run:
         for key in pruned:
-            (bundle_root / key).unlink(missing_ok=True)
+            victim = bundle_root / key
+            if not victim.resolve().is_relative_to(resolved_bundle):
+                continue  # defensive: the key check above already refused such a manifest
+            victim.unlink(missing_ok=True)
         _remove_empty_dirs(bundle_root / "parquet")
         remaining = {k: v for k, v in manifest.items() if k not in set(pruned)}
         manifest_path.write_text(
@@ -473,6 +522,8 @@ def run_drill(
     argument.
     """
     report = RestoreReport(bundle_root=bundle_root, scratch_root=scratch_root)
+    for source in parquet_roots:
+        _check_root_name(source)  # before any delete: `parquet/<name>` is rmtree'd below
     # Destructive recursive delete on an operator-supplied path: validate
     # FIRST, fail closed on any dangerous layout (never wipe blindly).
     _assert_safe_scratch_root(scratch_root, bundle_root)
@@ -851,6 +902,73 @@ def restore_bundle(
 # --------------------------------------------------------------------------- #
 
 
+# Names a child process (pg_dump, pg_restore, rclone, alembic) may inherit from this process:
+# executable lookup, the OS runtime, locale, temp dirs, proxies and CA bundles, and the Python
+# runtime switches `python -m alembic` needs. Everything else (Binance, Telegram, bucket and
+# database credentials of this process) is dropped; a child gets what its caller passes
+# explicitly (`extra`) plus the names under its own prefixes.
+_CHILD_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "WINDIR",
+        "COMSPEC",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "PYTHONPATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONUNBUFFERED",
+        "PYTHONUTF8",
+        "PYTHONIOENCODING",
+    }
+)
+
+
+def child_env(
+    *,
+    prefixes: Sequence[str] = (),
+    extra: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """The environment of a child process: a whitelist of this one, never all of it.
+
+    A parent secret (a Binance or Telegram credential, a bucket key) must not reach pg_dump,
+    pg_restore, rclone or alembic. Copies from ``environ`` (default: the process environment,
+    read at call time) only the names in ``_CHILD_ENV_NAMES`` and every name that starts with
+    one of ``prefixes`` (``PG`` for the PostgreSQL tools, ``RCLONE_`` for rclone), then applies
+    ``extra`` last, so an explicit value (``PGPASSWORD``, ``DATABASE_URL``, ``RCLONE_CONFIG_*``)
+    always wins. Values are never logged.
+    """
+    source = os.environ if environ is None else environ
+    child = {
+        name: value
+        for name, value in source.items()
+        if name in _CHILD_ENV_NAMES or any(name.startswith(prefix) for prefix in prefixes)
+    }
+    if extra:
+        child.update(extra)
+    return child
+
+
 def _run_pg_tool(argv: list[str], *, env: dict[str, str]) -> None:
     """Run a PostgreSQL client tool; a failure never carries argv or the URL in its text."""
     try:
@@ -881,7 +999,7 @@ def _prod_pg_dump_runner(out: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
     _run_pg_tool(
         [pg_bin, "--format=custom", "-f", str(out), "--dbname", target.url_without_password],
-        env={**os.environ, **target.env},
+        env=child_env(prefixes=("PG",), extra=target.env),
     )
     return out
 
@@ -904,7 +1022,7 @@ def _prod_pg_restore_runner(dump: Path, target: LibpqTarget) -> None:
             target.url_without_password,
             str(dump),
         ],
-        env={**os.environ, **target.env},
+        env=child_env(prefixes=("PG",), extra=target.env),
     )
 
 
@@ -915,7 +1033,7 @@ def _prod_migrate_runner(database_url: str) -> None:
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         check=True,
         cwd=_PROJECT_ROOT,
-        env={**os.environ, "DATABASE_URL": url},
+        env=child_env(extra={"DATABASE_URL": url}),
     )
 
 

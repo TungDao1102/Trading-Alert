@@ -475,6 +475,84 @@ def test_prod_migrate_runner_uses_alembic_with_database_url(
     assert (Path(str(spy.kwargs["cwd"])) / "alembic.ini").exists()
 
 
+_PARENT_SECRETS = {
+    "BINANCE_DEMO_API_SECRET": "placeholder-binance-secret",
+    "TELEGRAM_BOT_TOKEN": "placeholder-telegram-token",
+    "BACKUP_S3_SECRET_ACCESS_KEY": "placeholder-bucket-secret",
+}
+
+
+def _plant_parent_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in _PARENT_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PATH", os.environ.get("PATH", "/usr/bin"))
+    monkeypatch.setenv("SYSTEMROOT", "C:\\TEST_ONLY_WINDOWS")
+
+
+def _assert_whitelisted(env: dict[str, str]) -> None:
+    for name in _PARENT_SECRETS:
+        assert name not in env, f"{name} reached the child environment"
+    assert "PATH" in env and env["SYSTEMROOT"] == "C:\\TEST_ONLY_WINDOWS"
+
+
+def test_child_env_keeps_only_whitelisted_prefixed_and_extra_names() -> None:
+    environ = {
+        **_PARENT_SECRETS,
+        "PATH": "/usr/bin",
+        "SYSTEMROOT": "C:\\Windows",
+        "PGSSLMODE": "require",
+        "RCLONE_CONFIG_X": "kept-with-rclone-prefix",
+        "UNRELATED": "dropped",
+    }
+
+    plain = backup_mod.child_env(environ=environ)
+    assert plain == {"PATH": "/usr/bin", "SYSTEMROOT": "C:\\Windows"}
+
+    pg = backup_mod.child_env(prefixes=("PG",), extra={"PGPASSWORD": "pw"}, environ=environ)
+    assert pg["PGSSLMODE"] == "require" and pg["PGPASSWORD"] == "pw"
+    assert "RCLONE_CONFIG_X" not in pg
+
+    rclone = backup_mod.child_env(prefixes=("RCLONE_",), environ=environ)
+    assert rclone["RCLONE_CONFIG_X"] == "kept-with-rclone-prefix"
+    assert "PGSSLMODE" not in rclone
+
+    overridden = backup_mod.child_env(extra={"PATH": "/override"}, environ=environ)
+    assert overridden["PATH"] == "/override"
+
+
+def test_child_env_reads_the_process_environment_at_call_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _plant_parent_secrets(monkeypatch)
+    _assert_whitelisted(backup_mod.child_env())
+
+
+def test_pg_dump_pg_restore_and_migrate_children_get_a_whitelisted_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _plant_parent_secrets(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", SECRET_URL)
+    monkeypatch.delenv("DATABASE_URL_SYNC", raising=False)
+
+    dump_spy = _RunSpy()
+    monkeypatch.setattr(backup_mod.subprocess, "run", dump_spy)
+    backup_mod._prod_pg_dump_runner(tmp_path / "pg.dump")
+    _assert_whitelisted(dump_spy.env)
+    assert dump_spy.env["PGPASSWORD"] == SECRET_PW
+
+    restore_spy = _RunSpy()
+    monkeypatch.setattr(backup_mod.subprocess, "run", restore_spy)
+    backup_mod._prod_pg_restore_runner(tmp_path / "pg.dump", libpq_target(SECRET_URL))
+    _assert_whitelisted(restore_spy.env)
+    assert restore_spy.env["PGPASSWORD"] == SECRET_PW
+
+    migrate_spy = _RunSpy()
+    monkeypatch.setattr(backup_mod.subprocess, "run", migrate_spy)
+    backup_mod._prod_migrate_runner(SECRET_URL)
+    _assert_whitelisted(migrate_spy.env)
+    assert migrate_spy.env["DATABASE_URL"] == SECRET_URL
+
+
 def test_main_prints_calledprocesserror_without_password(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

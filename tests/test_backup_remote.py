@@ -515,6 +515,30 @@ def test_production_runner_puts_credentials_in_env_only(monkeypatch: pytest.Monk
     assert not any(value in " ".join(seen["cmd"]) for value in SECRET_VALUES)
 
 
+def test_production_runner_drops_unrelated_parent_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:placeholder@db/x")
+    monkeypatch.setenv("BINANCE_DEMO_API_SECRET", "placeholder-binance-secret")
+    monkeypatch.setenv("RCLONE_TRANSFERS", "2")
+    runner = remote.make_rclone_runner({**S3_ENV, "RCLONE_BIN": "rclone-test"})
+
+    runner(["lsf", "BACKUPS3CRYPT:snapshots/"], {"RCLONE_EXTRA": "x"})
+
+    env = seen["env"]
+    assert "DATABASE_URL" not in env and "BINANCE_DEMO_API_SECRET" not in env
+    assert env["RCLONE_CONFIG_BACKUPS3_SECRET_ACCESS_KEY"] == "SecretKeyValue-abcdef-98765"
+    assert env["RCLONE_TRANSFERS"] == "2", "the RCLONE_ prefix of the parent is kept"
+    assert env["RCLONE_EXTRA"] == "x"
+
+
 def test_production_runner_reports_a_missing_binary_without_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

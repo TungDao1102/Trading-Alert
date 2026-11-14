@@ -61,6 +61,7 @@ from src.ops.backup import (
     _read_manifest,
     _sqlalchemy_url,
     backup,
+    child_env,
     restore_database,
     verify_bundle,
 )
@@ -281,7 +282,7 @@ def make_rclone_runner(
         try:
             proc = subprocess.run(
                 [binary, *argv],
-                env={**os.environ, **mapped, **extra},
+                env=child_env(prefixes=("RCLONE_",), extra={**mapped, **extra}),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
