@@ -1103,7 +1103,13 @@ class LiveAssembly:
                 await parts.sender.send_request(request)
 
         return (
-            TaskSpec(TASK_PROTECTION, protection, cadences.protection_step, wake=parts.stream.wake),
+            TaskSpec(
+                TASK_PROTECTION,
+                protection,
+                cadences.protection_step,
+                wake=parts.stream.wake,
+                stall_after_seconds=cadences.protection_stall_after_seconds,
+            ),
             TaskSpec(TASK_RECONCILE, errors.wrap(reconcile), cadences.reconcile_tick),
             TaskSpec(TASK_DRIFT, drift, cadences.drift_remeasure),
             TaskSpec(TASK_MARKS, marks, cadences.reconcile_tick),

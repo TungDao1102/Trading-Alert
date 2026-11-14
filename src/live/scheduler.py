@@ -283,6 +283,10 @@ class LiveCadences:
     re-measure runs at the ratified ``drift.periodic_remeasure_interval_seconds``. The day-risk
     backfill runs at ``account.max_daily_loss_age_ms`` divided by ``DAILY_LOSS_AGE_DIVISOR``
     (D087). The lot-filter refresh runs at ``reconcile.lot_filter_refresh_interval_ms``.
+    ``protection_stall_after`` is the alert-only bound of one protection run
+    (``scheduler.protection_stall_after_ms``, D111): None while the key is NOT_CONFIGURED, which
+    keeps the stall watchdog off. It is the only cadence field with a default, and the default is
+    not a number.
     """
 
     protection_step: timedelta
@@ -295,6 +299,13 @@ class LiveCadences:
     drift_remeasure: timedelta
     day_risk_backfill: timedelta
     lot_filter_refresh: timedelta
+    protection_stall_after: timedelta | None = None
+
+    @property
+    def protection_stall_after_seconds(self) -> float | None:
+        """The stall bound in seconds for ``TaskSpec.stall_after_seconds``; None = watchdog off."""
+        bound = self.protection_stall_after
+        return None if bound is None else bound.total_seconds()
 
     @classmethod
     def from_limits(
@@ -347,6 +358,8 @@ class LiveCadences:
             drift_remeasure=timedelta(seconds=drift_seconds),
             day_risk_backfill=timedelta(milliseconds=loss_age_ms) / daily_loss_age_divisor,
             lot_filter_refresh=timedelta(milliseconds=lot_ms),
+            # Alert-only: an unset key is not refused, it leaves the watchdog off.
+            protection_stall_after=execution_limits.scheduler_protection_stall_after,
         )
 
 

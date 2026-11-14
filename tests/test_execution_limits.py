@@ -100,6 +100,8 @@ ALL_REQUIRED_KEYS = (*EXPECTED_UNSET, EQUITY_AGE_KEY, DAILY_LOSS_AGE_KEY, *MARGI
 # never keeps the live path refused.
 BAN_END_MARGIN_KEY = "rest_gate.ban_end_clock_margin_ms"
 BAN_END_MARGIN_FIELD = "rest_gate_ban_end_clock_margin_ms"
+STALL_KEY = "scheduler.protection_stall_after_ms"
+STALL_FIELD = "scheduler_protection_stall_after_ms"
 
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
 # "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
@@ -246,8 +248,11 @@ def _document() -> dict[str, Any]:
     document: dict[str, Any] = {"provenance": {}}
     for dotted, value in tl.TEST_ONLY_EXECUTION_LIMIT_VALUES.items():
         section, key = dotted.split(".", 1)
-        document.setdefault(section, {})[key] = value
-        document["provenance"].setdefault(section, {})[key] = "DECISION"
+        unset = value is None  # an alert-only key left NOT_CONFIGURED (D111)
+        document.setdefault(section, {})[key] = el.NOT_CONFIGURED_WORD if unset else value
+        document["provenance"].setdefault(section, {})[key] = (
+            el.NOT_CONFIGURED_WORD if unset else "DECISION"
+        )
     return document
 
 
@@ -440,9 +445,10 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         margin_max_bracket_age_ms=None,
         margin_headroom_bps=None,
         rest_gate_ban_end_clock_margin_ms=None,
+        scheduler_protection_stall_after_ms=None,
     )
     assert limits.unset_keys() == ALL_REQUIRED_KEYS
-    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms",)
+    assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms", STALL_KEY)
     assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
 
 
@@ -507,7 +513,9 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # minus 6 = 30; the D083 clock margin (plan 24-03) adds a value and a label: 32. D089 (plan
     # 24-06) sets 14 more keys, a value and a label each: 32 - 28 = 4 (the user-data silence bound
     # and the D083 clock margin, each a value and a label).
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 2  # D091 set key 14: only the D083 margin
+    # D091 set key 14: only the D083 margin and, since quick 261114-mp1 (D111), the alert-only
+    # stall bound remain unset, a value and a label each.
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 4
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -542,7 +550,7 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     not_required = el.ALERT_ONLY_LIMIT_KEYS | el.OPTIONAL_REFINEMENT_LIMIT_KEYS
     assert [k for k in dotted_keys if k not in not_required] == list(ALL_REQUIRED_KEYS)
     assert el.OPTIONAL_REFINEMENT_LIMIT_KEYS == {BAN_END_MARGIN_KEY}
-    assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms"}
+    assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms", STALL_KEY}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
         dotted_keys.index("reconcile.lot_filter_refresh_interval_ms") + 1
     )
@@ -790,7 +798,8 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     assert _ACCOUNT_KEY not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
     assert len(limits.unset_keys()) == 0  # D091 set the last one
-    assert limits.unset_alert_only_keys() == ()  # D089 set the stale-entry grace
+    # D089 set the stale-entry grace; the D111 stall key is unset and alert-only.
+    assert limits.unset_alert_only_keys() == (STALL_KEY,)
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
     # Since D091 every required key is set, so the file is live-ready (LIVE_ORDERS_DISABLED still
     # blocks real orders).
@@ -798,7 +807,7 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
 
 
 def test_the_account_section_precedes_margin_and_has_the_prefixed_field() -> None:
-    assert list(el.EXECUTION_LIMIT_KEYS)[-3:] == ["account", "margin", "rest_gate"]
+    assert list(el.EXECUTION_LIMIT_KEYS)[-4:] == ["account", "margin", "rest_gate", "scheduler"]
     assert el.EXECUTION_LIMIT_KEYS["account"] == ("max_equity_age_ms", "max_daily_loss_age_ms")
     assert el.EXECUTION_LIMIT_FIELDS[DAILY_LOSS_AGE_KEY] == "account_max_daily_loss_age_ms"
     assert el.EXECUTION_LIMIT_FIELDS[_ACCOUNT_KEY] == _ACCOUNT_FIELD
@@ -874,7 +883,8 @@ _MARGIN_KEYS_UNDER_TEST = MARGIN_KEYS
 
 
 def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fields() -> None:
-    assert list(el.EXECUTION_LIMIT_KEYS)[-2] == "margin"  # rest_gate (plan 24-03) follows it
+    # rest_gate (plan 24-03) and scheduler (quick 261114-mp1) follow it
+    assert list(el.EXECUTION_LIMIT_KEYS)[-3] == "margin"
     assert el.EXECUTION_LIMIT_KEYS["margin"] == (
         "liquidation_buffer_bps",
         "max_bracket_age_ms",
@@ -884,8 +894,8 @@ def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fi
         assert el.EXECUTION_LIMIT_FIELDS[dotted] == field_name, dotted
         assert field_name in el.ExecutionLimits.__dataclass_fields__, field_name
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    assert len(dotted_keys) == 21
-    assert dotted_keys[-4:-1] == list(MARGIN_KEYS)
+    assert len(dotted_keys) == 22
+    assert dotted_keys[-5:-2] == list(MARGIN_KEYS)
 
 
 def test_the_margin_keys_are_required_not_alert_only() -> None:
@@ -905,7 +915,7 @@ def test_the_committed_file_holds_the_margin_keys_set_with_the_decision_label() 
     for dotted in MARGIN_KEYS:
         assert dotted not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
-    assert limits.unset_alert_only_keys() == ()  # D089 set the stale-entry grace
+    assert limits.unset_alert_only_keys() == (STALL_KEY,)  # D089 set the grace; D111 key unset
 
 
 def test_require_live_ready_still_refuses_and_no_longer_names_the_margin_keys() -> None:
@@ -1015,7 +1025,7 @@ def test_overriding_one_margin_field_with_none_leaves_exactly_that_key_unset(dot
 
 def test_the_ban_end_margin_key_is_declared_last_with_a_prefixed_field() -> None:
     assert el.EXECUTION_LIMIT_KEYS["rest_gate"] == ("ban_end_clock_margin_ms",)
-    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "rest_gate"
+    assert list(el.EXECUTION_LIMIT_KEYS)[-2] == "rest_gate"  # `scheduler` (D111) follows it
     assert el.EXECUTION_LIMIT_FIELDS[BAN_END_MARGIN_KEY] == BAN_END_MARGIN_FIELD
     assert BAN_END_MARGIN_FIELD in el.ExecutionLimits.__dataclass_fields__
     assert BAN_END_MARGIN_KEY in el.OPTIONAL_REFINEMENT_LIMIT_KEYS
@@ -1096,3 +1106,94 @@ def test_a_document_without_the_rest_gate_section_is_refused_by_name() -> None:
     with pytest.raises(el.ExecutionLimitsInvalid) as info:
         el.parse_execution_limits(document)
     assert BAN_END_MARGIN_KEY in str(info.value)
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261114-mp1 (DECISIONS D111): scheduler.protection_stall_after_ms, an ALERT-ONLY key.
+# NOT_CONFIGURED until the owner sets it from a Demo measurement; unset, the observe-only stall
+# watchdog of the protection task is off and nothing else changes. No number is chosen.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_stall_key_is_declared_last_alert_only_with_a_prefixed_field() -> None:
+    assert el.EXECUTION_LIMIT_KEYS["scheduler"] == ("protection_stall_after_ms",)
+    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "scheduler"
+    assert el.EXECUTION_LIMIT_FIELDS[STALL_KEY] == STALL_FIELD
+    assert STALL_FIELD in el.ExecutionLimits.__dataclass_fields__
+    assert STALL_KEY in el.ALERT_ONLY_LIMIT_KEYS
+    assert STALL_KEY not in el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+    assert not el.ALERT_ONLY_LIMIT_KEYS & el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+
+
+def test_the_committed_file_leaves_the_stall_key_unset_and_labelled_not_configured() -> None:
+    import tomllib
+
+    document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
+    assert document["scheduler"]["protection_stall_after_ms"] == el.NOT_CONFIGURED_WORD
+    assert document["provenance"]["scheduler"]["protection_stall_after_ms"] == (
+        el.NOT_CONFIGURED_WORD
+    )
+    limits = el.load_execution_limits(LIMITS_FILE)
+    assert limits.scheduler_protection_stall_after_ms is None
+    assert limits.scheduler_protection_stall_after is None
+    assert limits.unset_alert_only_keys() == (STALL_KEY,)
+    assert STALL_KEY not in limits.unset_keys()
+    assert STALL_KEY not in limits.unset_optional_refinement_keys()
+    limits.require_live_ready()  # an unset alert-only key never keeps the live path refused
+
+
+def test_require_live_ready_never_names_the_stall_key() -> None:
+    from dataclasses import replace
+
+    limits = replace(
+        el.load_execution_limits(LIMITS_FILE), stale_feed_max_user_data_silence_ms=None
+    )
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        limits.require_live_ready()
+    assert STALL_KEY not in info.value.keys
+    assert "protection_stall_after" not in str(info.value)
+
+
+def test_a_set_stall_bound_loads_as_milliseconds_and_as_a_timedelta() -> None:
+    from datetime import timedelta
+
+    assert tl.test_only_execution_limits().scheduler_protection_stall_after_ms is None
+    limits = tl.test_only_execution_limits(scheduler_protection_stall_after_ms=5353)
+    assert limits.scheduler_protection_stall_after_ms == 5353
+    assert limits.scheduler_protection_stall_after == timedelta(milliseconds=5353)
+    assert limits.unset_alert_only_keys() == ()
+
+
+def _stall_document(value: Any) -> dict[str, Any]:
+    document = _all_set_document()
+    document["scheduler"]["protection_stall_after_ms"] = value
+    return document
+
+
+def test_a_positive_int_stall_bound_loads_and_a_set_value_needs_a_real_label() -> None:
+    limits = el.parse_execution_limits(_stall_document(250))
+    assert limits.scheduler_protection_stall_after_ms == 250
+    placeholder = _stall_document(250)
+    placeholder["provenance"]["scheduler"]["protection_stall_after_ms"] = "PLACEHOLDER"
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(placeholder)
+    assert STALL_KEY in str(info.value)
+    labelled_unset = _stall_document(250)
+    labelled_unset["provenance"]["scheduler"]["protection_stall_after_ms"] = el.NOT_CONFIGURED_WORD
+    with pytest.raises(el.ExecutionLimitsInvalid):
+        el.parse_execution_limits(labelled_unset)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, False, "250", "not_configured", ""])
+def test_a_malformed_stall_bound_is_refused_by_name(bad: Any) -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(_stall_document(bad))
+    assert STALL_KEY in str(info.value)
+
+
+def test_a_document_without_the_scheduler_section_is_refused_by_name() -> None:
+    document = _all_set_document()
+    del document["scheduler"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert STALL_KEY in str(info.value)

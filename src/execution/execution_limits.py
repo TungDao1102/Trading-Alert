@@ -15,7 +15,10 @@ validated like the others but left out of ``unset_keys`` and ``require_live_read
 ``rest_gate.ban_end_clock_margin_ms``) is an OPTIONAL REFINEMENT: unset, the 418 ban keeps the
 fallback wait and nothing else changes, so it too is left out of ``unset_keys`` and
 ``require_live_ready`` and is listed by ``unset_optional_refinement_keys``; no number is chosen for
-it. ``tests/test_no_unratified_defaults.py`` scans ``src``
+it. A last key (quick task 261114-mp1, DECISIONS D111, ``scheduler.protection_stall_after_ms``)
+is a second ALERT-ONLY key: unset, the observe-only stall watchdog of the protection task is off
+and nothing else changes; no number is chosen for it. ``tests/test_no_unratified_defaults.py``
+scans ``src``
 and ``scripts`` so that no numeric default for these names ever appears.
 
 The file is separate from ``config/binance/binance-limits-v1.toml``: that file is sha256-pinned
@@ -24,9 +27,11 @@ by a DECISIONS row and its loader demands exactly 27 keys, so it is not extended
 The file format (``config/execution/README.md``):
 
 * exactly the sections ``protection``, ``pre_placement``, ``reconcile``, ``stale_feed``,
-  ``alerts``, ``account``, ``margin``, ``rest_gate`` and ``provenance`` (plan 20-01 adds
+  ``alerts``, ``account``, ``margin``, ``rest_gate``, ``scheduler`` and
+  ``provenance`` (plan 20-01 adds
   ``reconcile``, ``stale_feed`` and ``alerts``, D-25; plan 21-02 adds ``account``, D-03; plan 22-02
-  adds ``margin``, D-10, D-11, D-13; plan 24-03 adds ``rest_gate``, D083);
+  adds ``margin``, D-10, D-11, D-13; plan 24-03 adds ``rest_gate``, D083; quick 261114-mp1 adds
+  ``scheduler``, D111);
 * exactly the keys of ``EXECUTION_LIMIT_KEYS``; a missing or unknown key refuses to load;
 * each value is a positive integer (not a boolean, not a float, not zero) or exactly the
   string ``NOT_CONFIGURED`` (read as ``None``);
@@ -75,6 +80,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "account": ("max_equity_age_ms", "max_daily_loss_age_ms"),
         "margin": ("liquidation_buffer_bps", "max_bracket_age_ms", "headroom_bps"),
         "rest_gate": ("ban_end_clock_margin_ms",),
+        "scheduler": ("protection_stall_after_ms",),
     }
 )
 
@@ -107,6 +113,7 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "margin.max_bracket_age_ms": "margin_max_bracket_age_ms",
         "margin.headroom_bps": "margin_headroom_bps",
         "rest_gate.ban_end_clock_margin_ms": "rest_gate_ban_end_clock_margin_ms",
+        "scheduler.protection_stall_after_ms": "scheduler_protection_stall_after_ms",
     }
 )
 
@@ -114,7 +121,11 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
 # check is skipped and says so; the key never keeps the live path refused (`unset_keys` and
 # `require_live_ready` leave it out, `unset_alert_only_keys` lists it). It is still loaded,
 # validated and given a provenance label like every other key, and no number is chosen for it.
-ALERT_ONLY_LIMIT_KEYS: frozenset[str] = frozenset({"reconcile.entry_stale_grace_ms"})
+# `scheduler.protection_stall_after_ms` (quick 261114-mp1, D111): unset, the observe-only stall
+# watchdog of the protection task is off and nothing else changes; no number is chosen.
+ALERT_ONLY_LIMIT_KEYS: frozenset[str] = frozenset(
+    {"reconcile.entry_stale_grace_ms", "scheduler.protection_stall_after_ms"}
+)
 
 # The keys that only REFINE a behaviour that already has a safe fallback (plan 24-03, D083 item 4).
 # While one is NOT_CONFIGURED the fallback applies (here: the 418 ban keeps its ratified fallback
@@ -164,7 +175,7 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The twenty-one execution limits; ``None`` means NOT_CONFIGURED (the owner has not chosen).
+    """The twenty-two execution limits; ``None`` means NOT_CONFIGURED (the owner has not chosen).
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
@@ -223,7 +234,13 @@ class ExecutionLimits:
     margin, in milliseconds, added to the ban end time read from a 418 / -1003 body. It is an
     OPTIONAL REFINEMENT key (``OPTIONAL_REFINEMENT_LIMIT_KEYS``): unset, the body time is not used
     and the ratified 418 fallback wait applies. ``rest_gate_ban_end_clock_margin`` gives it as a
-    ``timedelta``. The file holds twenty-one keys: nineteen required, one alert-only, one optional.
+    ``timedelta``.
+    ``scheduler_protection_stall_after_ms`` (quick task 261114-mp1, DECISIONS D111): the longest
+    time, in milliseconds, one run of the protection task may take before the observe-only stall
+    watchdog records a stall (a journal row and the TASK_STALLED alert); the run itself is never
+    cancelled. It is an ALERT-ONLY key (``ALERT_ONLY_LIMIT_KEYS``): unset, the watchdog is off and
+    nothing else changes. ``scheduler_protection_stall_after`` gives it as a ``timedelta``. The file
+    holds twenty-two keys: nineteen required, two alert-only, one optional.
     """
 
     max_unprotected_ms: int | None
@@ -247,11 +264,18 @@ class ExecutionLimits:
     margin_max_bracket_age_ms: int | None
     margin_headroom_bps: int | None
     rest_gate_ban_end_clock_margin_ms: int | None
+    scheduler_protection_stall_after_ms: int | None
 
     @property
     def rest_gate_ban_end_clock_margin(self) -> timedelta | None:
         """The D083 clock margin as a ``timedelta``, or None while it is NOT_CONFIGURED."""
         value = self.rest_gate_ban_end_clock_margin_ms
+        return None if value is None else timedelta(milliseconds=value)
+
+    @property
+    def scheduler_protection_stall_after(self) -> timedelta | None:
+        """The D111 stall bound as a ``timedelta``, or None while it is NOT_CONFIGURED."""
+        value = self.scheduler_protection_stall_after_ms
         return None if value is None else timedelta(milliseconds=value)
 
     def _unset(self, group: frozenset[str] | None) -> tuple[str, ...]:

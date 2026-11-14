@@ -570,3 +570,28 @@ def test_the_wiring_module_is_the_only_one_constructing_the_coordinator_in_src_l
     ]
     assert all(site.startswith("src/live/wiring.py") for site in sites), sites
     assert wiring_module.LINK_COMMANDS == LINK_COMMANDS
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261114-mp1 (D111): the protection stall bound reaches only the protection TaskSpec.
+# --------------------------------------------------------------------------- #
+
+
+async def test_with_the_default_limits_no_task_has_a_stall_bound(
+    complete: CompleteLiveWiring,
+) -> None:
+    assert {spec.stall_after_seconds for spec in complete.specs} == {None}
+
+
+async def test_a_set_stall_bound_reaches_only_the_protection_task(
+    handles: WiringHandles,
+) -> None:
+    import datetime as dt
+
+    handles.assembly.cadences = dataclasses.replace(
+        handles.assembly.cadences, protection_stall_after=dt.timedelta(milliseconds=5353)
+    )
+    complete = await complete_assembly(handles)
+    bounds = {spec.name: spec.stall_after_seconds for spec in complete.specs}
+    assert bounds.pop("protection_step") == 5.353
+    assert set(bounds.values()) == {None}

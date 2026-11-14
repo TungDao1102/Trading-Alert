@@ -19,6 +19,7 @@
 #   account.max_equity_age_ms                  Phase 21, D-03 (F-012): maximum age of the account equity reading used for live sizing, the daily-loss base and the reservation gate
 #   account.max_daily_loss_age_ms              Phase 21 review WR-05: maximum age of a known daily loss, counted from the backfill that made it known (owner answer 2026-10-25, DECISIONS D087)
 #   rest_gate.ban_end_clock_margin_ms          Plan 24-03, D083 item 4 (OPTIONAL): clock-difference margin added to the ban end time read from a 418 / -1003 body
+#   scheduler.protection_stall_after_ms        Quick 261114-mp1, D111 (ALERT ONLY): stall bound of one protection run; unset, the stall watchdog is off
 # A value is the string NOT_CONFIGURED until the owner fills it (OWNER-OPEN O-04). Set so far:
 # the account keys (D084, D087), the margin keys (D085) and, by DECISIONS D089 (Phase 24, plan
 # 24-06, owner answer 2026-10-31), every other key except rest_gate.ban_end_clock_margin_ms
@@ -27,7 +28,10 @@
 # reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
 # stale-entry check is skipped (and says so) and nothing else changes, and
 # rest_gate.ban_end_clock_margin_ms: it only refines the 418 ban wait, so while it is NOT_CONFIGURED
-# the ratified fallback wait applies and nothing else changes (D083 item 4). A set value needs
+# the ratified fallback wait applies and nothing else changes (D083 item 4), and
+# scheduler.protection_stall_after_ms: it only switches the observe-only stall watchdog and its
+# TASK_STALLED alert on, so while it is NOT_CONFIGURED the watchdog is off and nothing else
+# changes (D111). A set value needs
 # a DECISIONS row and the provenance label DECISION. Key meanings and the file format:
 # config/execution/README.md. The ratified config/binance/binance-limits-v1.toml is a
 # separate, sha256-pinned file and is not edited.
@@ -69,6 +73,9 @@ headroom_bps = 1000
 [rest_gate]
 ban_end_clock_margin_ms = "NOT_CONFIGURED"
 
+[scheduler]
+protection_stall_after_ms = "NOT_CONFIGURED"
+
 [provenance.protection]
 max_unprotected_ms = "DECISION"
 entry_terminal_timeout_ms = "DECISION"
@@ -105,3 +112,6 @@ headroom_bps = "DECISION"
 
 [provenance.rest_gate]
 ban_end_clock_margin_ms = "NOT_CONFIGURED"
+
+[provenance.scheduler]
+protection_stall_after_ms = "NOT_CONFIGURED"

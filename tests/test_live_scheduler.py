@@ -669,6 +669,37 @@ def test_every_cadence_is_a_positive_timedelta() -> None:
         limits_support.test_only_execution_limits(), test_only_binance_limits()
     )
     for item in fields(cadences):
+        if item.name == "protection_stall_after":
+            continue  # alert-only (D111): None while NOT_CONFIGURED, covered by its own tests
         value = getattr(cadences, item.name)
         assert isinstance(value, timedelta)
         assert value > timedelta(0), item.name
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261114-mp1 (D111): the protection stall bound comes from an alert-only limit key.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unset_stall_bound_keeps_the_watchdog_off_and_never_refuses() -> None:
+    limits = limits_support.test_only_execution_limits()
+    assert limits.scheduler_protection_stall_after_ms is None
+    cadences = LiveCadences.from_limits(limits, test_only_binance_limits())
+    assert cadences.protection_stall_after is None
+    assert cadences.protection_stall_after_seconds is None
+
+
+def test_a_set_stall_bound_is_carried_as_a_timedelta_and_in_seconds() -> None:
+    limits = limits_support.test_only_execution_limits(scheduler_protection_stall_after_ms=5353)
+    cadences = LiveCadences.from_limits(limits, test_only_binance_limits())
+    assert cadences.protection_stall_after == timedelta(milliseconds=5353)
+    assert cadences.protection_stall_after_seconds == 5.353
+
+
+def test_the_stall_key_is_never_named_by_the_unset_refusal() -> None:
+    limits = limits_support.test_only_execution_limits(
+        **{EXECUTION_LIMIT_FIELDS["reconcile.tick_interval_ms"]: None}
+    )
+    with pytest.raises(ExecutionLimitsNotConfigured) as caught:
+        LiveCadences.from_limits(limits, test_only_binance_limits())
+    assert caught.value.keys == ("reconcile.tick_interval_ms",)

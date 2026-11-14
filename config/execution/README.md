@@ -32,7 +32,7 @@ are not edited.
 ## File format
 
 - Exactly the sections `[protection]`, `[pre_placement]`, `[reconcile]`, `[stale_feed]`,
-  `[alerts]`, `[account]`, `[margin]`, `[rest_gate]` and `[provenance]`.
+  `[alerts]`, `[account]`, `[margin]`, `[rest_gate]`, `[scheduler]` and `[provenance]`.
 - Exactly the nineteen keys below, each written once; nothing else is accepted.
 - Every value is a TOML integer that is not a boolean, strictly positive (a float, a boolean,
   zero or a negative number is refused), or exactly the TOML string `"NOT_CONFIGURED"`, which
@@ -108,6 +108,12 @@ The one key of this section is OPTIONAL (`OPTIONAL_REFINEMENT_LIMIT_KEYS` in the
 
 - `rest_gate.ban_end_clock_margin_ms` - OPTIONAL: the clock-difference margin added to the ban end time that the REST gate may read from an HTTP 418 answer with body code -1003 (D083). Unset (the shipped state), the body time is not used and the ratified 259200 s fallback wait applies (`signed_calls.rate_limit_418_no_retry_after_wait_seconds` of the Binance limits file; `signed_calls.rate_limit_retry_after_cap_seconds` is the same 259200). Set, the gate takes the time only when it is in the future and not later than now plus 259200 s, pads it by this margin and stores it like any deadline; the restriction never ends before the padded time. The owner value comes with plan 24-06; setting it needs a DECISIONS row and the provenance label `DECISION` (milliseconds).
 
+### `[scheduler]` (quick task 261114-mp1; DECISIONS D111)
+
+The one key of this section is ALERT ONLY (`ALERT_ONLY_LIMIT_KEYS` in the loader), like `reconcile.entry_stale_grace_ms`: it never keeps the live path refused. `ExecutionLimits.unset_keys()` and `require_live_ready()` leave it out, and `ExecutionLimits.unset_alert_only_keys()` lists it. It is `NOT_CONFIGURED` in the shipped file with provenance `NOT_CONFIGURED`; the code carries no default and no number is proposed here.
+
+- `scheduler.protection_stall_after_ms` - ALERT ONLY: the longest time, in milliseconds, one run of the protection task may take before the observe-only stall watchdog records a stall (a `stall` row in the journal and the `TASK_STALLED` alert, D111). Unset (the shipped state), the watchdog is off and nothing else changes. Set, the run is still never cancelled or cut short and nothing is re-sent; only the record and the alert are added. The owner measures a value in a Demo session; the method is in `.planning/quick/261114-mp1-follow-ups-to-kxu-cancel-resting-entry-o/261114-mp1-SUMMARY.md` and in D111. To fire before the unprotected deadline the value must stay below `protection.max_unprotected_ms`. Setting it needs a DECISIONS row and the provenance label `DECISION` (milliseconds).
+
 ## Phase 20 notes
 
 Of the twenty keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
@@ -146,3 +152,4 @@ Still `NOT_CONFIGURED`, on purpose:
 
 - The key `stale_feed.max_user_data_silence_ms` is REQUIRED and not answered. The official user-data-streams page states no server ping interval, so no recommendation and no number exist; the owner chooses it from the ping and pong times a Demo run observes. The live path keeps refusing, naming this key, until then.
 - The key `rest_gate.ban_end_clock_margin_ms` is optional (D083 item 4); the owner left it unset until a real Futures 418 body has been seen.
+- The key `scheduler.protection_stall_after_ms` is alert only (D111); it stays unset until the owner has a measured bound, and while it is unset the stall watchdog of the protection task is off.

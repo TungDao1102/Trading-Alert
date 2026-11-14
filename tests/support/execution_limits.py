@@ -23,7 +23,7 @@ from src.execution.execution_limits import (
     ExecutionLimits,
 )
 
-TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
+TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int | None] = {
     "protection.max_unprotected_ms": 7777,
     "protection.entry_terminal_timeout_ms": 13333,
     # 19-REVIEW WR-05: a FAKE grace past the GTD time of an ENTRY_STATE_UNKNOWN entry.
@@ -62,6 +62,10 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int] = {
     # Plan 24-03 (D083 item 4): a FAKE clock margin for the 418 ban end; the real one is the owner's
     # (OWNER-OPEN O-1) and the shipped file keeps it NOT_CONFIGURED.
     "rest_gate.ban_end_clock_margin_ms": 4545,
+    # Quick task 261114-mp1 (D111): the protection stall bound is ALERT ONLY and unset (None), like
+    # the shipped file, so every wiring test keeps the stall watchdog off. A test that needs a bound
+    # overrides the field (`scheduler_protection_stall_after_ms=...`).
+    "scheduler.protection_stall_after_ms": None,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"
