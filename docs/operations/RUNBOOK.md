@@ -1191,10 +1191,11 @@ Observed on Demo (smoke rehearsal of 2026-11-06, `09-DEMO-REHEARSAL-EVIDENCE-smo
 - Review items of 2026-11-07 deferred to Phase 25, each with a row in `24-DEFERRED.md` and an entry in the ROADMAP Phase 25 inherited items: R-21 margin reservations never advance (`mark_placed` and `mark_open` have no caller; needs a DECISIONS row on when `mark_placed` is stamped), R-22 cancel-on-stop (the stop procedure in 22.5 is the interim), R-23 sync store calls on the event loop in the operator commands and start-time rehydration, R-24 pool-timeout error not wrapped as `StoreUnavailable`, R-25 health tick journal volume (about 63,000 rows a day).
 - Stuck first install (R-26): if a host ever has the REST gate state file but no `spill/.spill-initialized` in the `livestate` volume, the start enters SAFE_MODE `RESTORE_INCONSISTENT` and `--initialize-gate-state` refuses (`GATE_STATE_EXISTS`); create the sentinel file by hand. New installs cannot reach this state since commit cc9a9df8.
 - The value of `scheduler.protection_stall_after_ms` is the owner's: it ships `NOT_CONFIGURED`, so the stall watchdog is off and no `TASK_STALLED` alert can fire until it is set (section 22.8, D111).
+- The value of `scheduler.duration_summary_interval_ms` is the owner's: it ships `NOT_CONFIGURED`, so only the new-maximum duration rows (`LIVE_TASK_DURATION`) are written and no window row exists until it is set (section 22.8, D112).
 
 ### 22.8 TASK_STALLED and the protection stall bound (D111)
 
-Status: built and tested with fakes by quick tasks 261114-kxu (the watchdog) and 261114-mp1 (the alert and the key), DECISIONS D111. The shipped limits leave it off. Nothing was observed on Demo or on a host.
+Status: built and tested with fakes by quick tasks 261114-kxu (the watchdog), 261114-mp1 (the alert and the key) and 261115-kra (the per-run duration record), DECISIONS D111 and D112. The shipped limits leave the watchdog off and the duration window unset. Nothing was observed on Demo or on a host.
 
 **Meaning.** The scheduler runs the protection task `protection_step`. When that task has a stall bound, a watchdog starts beside each run; if the run is still going after the bound, it logs one error line naming the task and the bound in seconds and records one stall event for that run. `LiveWiring._record_task` journals it as a `LIVE_TASK_EVENT` row (correlation `live_scheduler`, entity `protection_step`, payload `task`, `kind` and `error_class`) and then raises the HIGH alert `TASK_STALLED`, whose header subject is the task name and whose reason is `STALL_BOUND_EXCEEDED`; the alert is raised also when the journal write failed. Only the protection task has a bound.
 
@@ -1204,7 +1205,9 @@ Status: built and tested with fakes by quick tasks 261114-kxu (the watchdog) and
 
 **How to react.** Check the process log and the exchange position and its stop now. Close or protect the position by hand if it needs it. Restart the process if the task does not finish (a restart never leaves SAFE_MODE, section 21.1; a stop leaves resting entries, section 22.5). Repeated stalls inside `alerts.dedupe_window_ms` are suppressed in Telegram and journaled as `ALERT_SUPPRESSED`, while every stall keeps its `LIVE_TASK_EVENT` row.
 
-**Measuring a bound (owner; no value is chosen here).** The journal holds no per-run duration: `protection_step` rows exist only for `first_run`, `failure`, `recovery` and, with a bound set, `stall`. Read-only query 1, the stall rows (empty while the key is unset):
+**The duration record (D112).** Every run of every scheduler task that ends, successful or failed, is timed in whole milliseconds with the process clock (`datetime.now(UTC)`, the wall clock, so a clock step can distort one sample; a negative difference counts as 0). The scheduler writes at most one `LIVE_TASK_DURATION` row per run (correlation `live_scheduler`, entity the task name): at each new maximum of the process (the first run of each task is one) and, only when `scheduler.duration_summary_interval_ms` is set, once per window. The payload keys are `task`, `runs`, `total_ms`, `max_ms`, `window_max_ms`, `new_max` and `window_end`: `runs`, `total_ms` and `max_ms` count since the process started and restart at zero after a restart, `window_max_ms` is the longest run since the current window started, and the two booleans say what triggered the row. Unset (the shipped state) only the new-maximum rows are written: about ln(n) + 0.58 rows per task over n runs, so about 9 rows on the first day and about 13 over 30 days for a task on the 15 s tick. It is observe only and never an alert: it is not in the alert contract, a failing journal write is logged by exception class name and the scheduler goes on, and the task itself is never changed or cancelled. A run that never ends is not in it (the stall watchdog covers that once its bound is set), a run cancelled at shutdown is not counted and no row is written at stop.
+
+**Measuring a bound (owner; no value is chosen here).** The longest observed run of each task is in the journal. Read-only query 1, the stall rows (empty while the key is unset):
 
 ```sql
 SELECT occurred_at_utc, payload_json
@@ -1216,22 +1219,35 @@ WHERE correlation_id = 'live_scheduler'
 ORDER BY occurred_at_utc;
 ```
 
-Read-only query 2, the protection transitions of every plan (correlation `protection_<plan hash>`, event type `PROTECTION_TRANSITION`):
+Read-only query 2, the longest observed run and the number of duration rows per task (`max_ms` counts since each process start, so the maximum over the rows is the maximum over every process in the journal):
 
 ```sql
-SELECT correlation_id, occurred_at_utc, payload_json
+SELECT entity_id AS task,
+       MAX((payload_json::jsonb ->> 'max_ms')::bigint) AS longest_run_ms,
+       COUNT(*) AS duration_rows
 FROM journal_events
-WHERE correlation_id LIKE 'protection\_%'
-  AND event_type = 'PROTECTION_TRANSITION'
-ORDER BY correlation_id, occurred_at_utc;
+WHERE correlation_id = 'live_scheduler'
+  AND event_type = 'LIVE_TASK_DURATION'
+GROUP BY entity_id
+ORDER BY entity_id;
 ```
 
-Reading query 2: per plan, take the time from the transition to `UNPROTECTED` (fill seen) to the transition to `PROTECTED_ENTRY_OPEN` or `PROTECTED` (stop confirmed). That is a lower bound only, and only when both rows were journaled by the same run: the journal does not say which run wrote a row, so a gap across two runs includes the wait between runs, and a fill also wakes the protection task. The direct method, owner-run on Demo only and never by an agent:
+Read-only query 3, the history of the protection task (a filter on `occurred_at_utc` may be added to look at one Demo session):
 
-1. No command-line flag selects the limits file, so the owner edits the Demo host's copy of `config/execution/execution-limits-v1.toml` for the measurement only (an image or checkout used only for that run) and never commits it.
-2. Set a trial value of `protection_stall_after_ms` in `[scheduler]` and the provenance `EXPERIMENT` in `[provenance.scheduler]`.
-3. Run Demo sessions that exercise the protection step (fills, stop placement, restarts, take-profit attach) and count the stall rows of query 1 per trial bound; lower the bound until the first stall rows appear.
-4. Adopt the observed maximum plus a margin the owner chooses, below `protection.max_unprotected_ms`.
-5. Record it with a DECISIONS row and the provenance `DECISION`.
+```sql
+SELECT occurred_at_utc, payload_json
+FROM journal_events
+WHERE correlation_id = 'live_scheduler'
+  AND entity_id = 'protection_step'
+  AND event_type = 'LIVE_TASK_DURATION'
+ORDER BY occurred_at_utc;
+```
 
-A per-run duration record would make this direct but needs a new decision; it is not built.
+The procedure, owner-run on Demo only and never by an agent:
+
+1. Run Demo sessions that exercise the protection step (fills, stop placement, restarts, take-profit attach) with the shipped image. No limits edit is needed: the new-maximum rows are written while the window key is unset.
+2. Read the `protection_step` row of query 2: `longest_run_ms` is the longest observed run of that task. Query 3 shows when each new maximum was set.
+3. The rule: the bound is the longest observed run of `protection_step` times a margin the owner chooses, and it must stay below `protection.max_unprotected_ms` (180000 ms in `config/execution/execution-limits-v1.toml`, D089), or the alert cannot fire before the unprotected deadline. If the longest run times the margin is not below 180000 ms, do not set it and treat the slow protection run as the finding.
+4. Adopt it with a DECISIONS row and the provenance `DECISION` in `[provenance.scheduler]`, then rebuild and re-pin the image (section 22.4, D106).
+
+No number is proposed here for the bound or for the window.
