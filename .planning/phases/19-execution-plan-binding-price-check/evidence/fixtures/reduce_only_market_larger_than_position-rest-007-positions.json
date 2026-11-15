@@ -1,0 +1,13 @@
+{
+  "case_id": "reduce_only_market_larger_than_position",
+  "index": 7,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

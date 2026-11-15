@@ -1,0 +1,15 @@
+{
+  "case_id": "stop_rejected_after_acceptance",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "live_mark_price",
+    "summary": {
+      "exchange_time_utc": "2026-10-23T14:10:34+00:00",
+      "mark_price": "81840.62385350",
+      "symbol": "BTCUSDT"
+    }
+  }
+}

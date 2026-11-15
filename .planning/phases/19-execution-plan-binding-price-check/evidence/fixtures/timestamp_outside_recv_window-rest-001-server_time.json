@@ -1,0 +1,14 @@
+{
+  "case_id": "timestamp_outside_recv_window",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "server_time",
+    "summary": {
+      "server_time_ms": "1792764412664",
+      "server_time_utc": "2026-10-23T14:06:52.664000+00:00"
+    }
+  }
+}

@@ -31,7 +31,8 @@ from src.persistence.engine import make_sync_engine
 from src.persistence.journal import PgJournalStore
 from src.persistence.system_state import PgSystemStateStore
 from src.persistence.uow import OperationalDatabase
-from src.reconcile.safe_mode import SafeModeController
+from src.reconcile.local_intent import LocalIntent
+from src.reconcile.safe_mode import ExitReadiness, SafeModeController
 
 T0 = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 T1 = T0 + timedelta(minutes=5)
@@ -105,6 +106,9 @@ SAFE_OFF: dict[str, Any] = {
     "entered_at_utc": None,
     "entered_reason": None,
 }
+# The snapshot is the five-key format since plan 20-15 (D-15); the three-key SAFE_ON / SAFE_OFF
+# rows of plan 20-06 are still accepted by rehydrate and read as last_exit_* None.
+NO_EXIT: dict[str, Any] = {"last_exit_operator_id": None, "last_exit_at_utc": None}
 ENABLED: dict[str, Any] = {
     "disabled": False,
     "enabled_at_utc": T0.isoformat(),
@@ -119,14 +123,14 @@ DISABLED: dict[str, Any] = {"disabled": True, "enabled_at_utc": None, "operator_
 
 
 def test_safe_mode_default_snapshot_is_off() -> None:
-    assert _safe_mode().state_snapshot() == SAFE_OFF
+    assert _safe_mode().state_snapshot() == {**SAFE_OFF, **NO_EXIT}
 
 
 def test_safe_mode_snapshot_after_entry_uses_the_documented_format() -> None:
     controller = _safe_mode()
     controller.enter_safe_mode(reason="UNSYNCED_POSITION", now_utc=T0)
 
-    assert controller.state_snapshot() == SAFE_ON
+    assert controller.state_snapshot() == {**SAFE_ON, **NO_EXIT}
 
 
 def test_safe_mode_snapshot_after_exit_is_off() -> None:
@@ -134,9 +138,14 @@ def test_safe_mode_snapshot_after_exit_is_off() -> None:
 
     controller = _safe_mode()
     controller.enter_safe_mode(reason="UNSYNCED_POSITION", now_utc=T0)
-    assert asyncio.run(controller.exit_safe_mode(now_utc=T1)) is True
+    assert asyncio.run(_operator_exit(controller)).exited is True
 
-    assert controller.state_snapshot() == SAFE_OFF
+    # The exit is attributed (plan 20-15, D-15): the five-key snapshot names the operator.
+    assert controller.state_snapshot() == {
+        **SAFE_OFF,
+        "last_exit_operator_id": "operator-1",
+        "last_exit_at_utc": T1.isoformat(),
+    }
 
 
 def test_safe_mode_rehydrate_restores_the_entered_state_and_blocks_entries() -> None:
@@ -180,10 +189,22 @@ def test_a_rehydrated_safe_mode_exits_only_through_the_normal_journaled_path() -
     journal = FakeJournal()
     restored = _rehydrate_safe_mode(SAFE_ON, journal)
 
-    assert asyncio.run(restored.exit_safe_mode(now_utc=T1)) is True
+    assert asyncio.run(_operator_exit(restored)).exited is True
 
     assert [event.event_type for event in journal.events] == ["SAFE_MODE_EXIT"]
     assert restored.in_safe_mode is False
+
+
+def _operator_exit(controller: SafeModeController) -> Any:
+    """The operator exit with a clean local read and clean readiness (plan 20-15, D-15)."""
+    return controller.exit_safe_mode(
+        operator_id="operator-1",
+        local_intent_fn=lambda: LocalIntent(orders=(), algos=(), positions=()),
+        readiness=lambda: ExitReadiness(0, 0, 0, True),
+        gate_status=lambda: (None, "RESTORED_DURABLE"),
+        stream_state=lambda: "LIVE",
+        now_utc=T1,
+    )
 
 
 def _without(state: dict[str, Any], key: str) -> dict[str, Any]:
@@ -314,9 +335,24 @@ def test_enablement_rehydrate_fails_closed_on_malformed_state(state: Any) -> Non
 
 def test_constructor_signatures_are_unchanged() -> None:
     safe = inspect.signature(SafeModeController.__init__)
-    assert list(safe.parameters) == ["self", "adapter", "journal", "compare_fn"]
+    # Plan 20-06 (D-14) adds the optional `state_store` keyword and plan 20-22 (D-24) the optional
+    # `on_enter` observer and plan 24-20 (row 41) the optional `spill`; the others keep their order.
+    assert list(safe.parameters) == [
+        "self",
+        "adapter",
+        "journal",
+        "compare_fn",
+        "state_store",
+        "on_enter",
+        "spill",
+    ]
+    assert safe.parameters["state_store"].default is None
+    assert safe.parameters["on_enter"].default is None
+    assert safe.parameters["spill"].default is None
     enable = inspect.signature(LiveEnablementController.__init__)
-    assert list(enable.parameters) == ["self", "journal"]
+    # Plan 20-08 (D-16) adds the optional `spill` keyword; `journal` keeps its place.
+    assert list(enable.parameters) == ["self", "journal", "spill"]
+    assert enable.parameters["spill"].default is None
 
 
 @pytest.mark.parametrize("module", ["reconcile/safe_mode.py", "execution/enablement.py"])

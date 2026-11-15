@@ -1,21 +1,21 @@
 ---
 gsd_state_version: "1.0"
 milestone: v0.3
-current_phase: 16
-current_phase_name: Paper Runtime Composition + SHADOW Approval Mode
-current_plan: "65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host"
+current_phase: 24
+current_phase_name: Live Runtime Composition + Demo Rehearsal
+current_plan: 33
 status: executing
-stopped_at: Phase 19 (17 of 17 plans) merged into develop 2026-10-20; AGENTS.md reduced to a router; next is the owner full gate on the merged tree, then 16-43 on the soak host
-last_updated: "2026-10-20T10:00:00.000Z"
-last_activity: 2026-10-19
-state_head: e0be1935b45442cae13e63e0d51d39b291a5d9de
+stopped_at: Phase 25 context gathered
+last_updated: "2026-11-07T06:13:23.005Z"
+last_activity: 2026-11-07
+last_activity_desc: Phase 24 code complete (35 of 36 plans have a SUMMARY); 24-33 waits for owner results
+state_head: 10dc431099a98797903305aeab1657b0f72a00c0
 progress:
   total_phases: 29
-  completed_phases: 18
-  total_plans: 252
-  completed_plans: 231
+  completed_phases: 19
+  total_plans: 364
+  completed_plans: 360
 milestone_name: milestone
-last_activity_desc: Phase 19 merged into develop; AGENTS.md trimmed to a router
 ---
 
 <!-- STATE-MD-SCHEMA:END:frontmatter -->
@@ -27,19 +27,23 @@ last_activity_desc: Phase 19 merged into develop; AGENTS.md trimmed to a router
 See: .planning/PROJECT.md (updated 2026-09-19)
 
 **Core value:** Every trading decision is deterministic, reproducible, and explainable from market data plus a versioned strategy spec — no AI/LLM in the decision path.
-**Current focus:** Phase 16 close-out (plan 16-43 on the soak host after a fresh full gate on the merged tree); Phase 19 is executed and merged, waiting for the owner read of its gap register
+**Current focus:** Phase 24 — Live Runtime Composition + Demo Rehearsal
 
 ## Current Position
 
-Phase: 16 (Paper Runtime Composition + SHADOW Approval Mode) — EXECUTING
-Current Plan: 65 with Total Plans in Phase: 65 — 63 done (16-61 closed as partial, its Tasks 3 and 4 done by 16-63; 16-65 done: review fixes and soak IMAGE_COMMIT 9b27da5, superseding 6f73e5b of 16-64); open: 16-43, 16-44; next is the re-review of 6f73e5b..9b27da5, then 16-43 on the soak host
-Status: Executing Phase 16
-Last activity: 2026-10-15 — REEFUSDT terminal settlement as a bounded interval landed (quick 261014-nnl: simulator 2.1.0, protocol v2.4.0 D070/D071); REEF diagnostic on the new code: 48 of 48 points run (old: 33 FundingCoverageError). Manifest NOT frozen, O-03 to be re-issued, S0/S1 manifests need the REEF terminal_settlements row
+Phase: 24 (Live Runtime Composition + Demo Rehearsal) — EXECUTING
+Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, verification human_needed
+Current Plan: 33 (owner steps; 35 of 36 plans have a SUMMARY, 24-27B and 24-37 are extra summaries)
+Total Plans in Phase: 36
+Status: Code complete, waiting for the owner's host results (24-OWNER-RUNBOOK.md); Demo smoke 21/21 on 2026-11-06
+Last activity: 2026-11-07 — STATE synced with the disk (360 of 364 plans have a SUMMARY)
 
-Progress: [██████░░░░] 61%
+Progress: [█████████░] 99%
 
 ### Cross-phase status (2026-10-16)
 
+- Phase 22 (leverage, margin and liquidation guard): all 16 plans executed on develop (2026-10-24), verification human_needed, no blocking gap (`22-VERIFICATION.md`). Library level only: `MarginGuard`, `SymbolConfigGuard`, `BracketCache`, `LiquidationWatch` and gate 5f2 exist but no running process composes them (Phase 24); nothing writes `required_margin` yet and the post-fill watch is inactive until Phase 24. The owner ran six Demo cases on 2026-10-24 (`22-DEMO-RESULTS.md`, single samples, demo-observed, not mainnet): -4047, -4028, -2019 observed; `availableBalance` netted a resting order (flag `AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED` stays False until the owner's DECISIONS row); the isolated liquidation formula matches the exchange only with the entry fee netted from the isolated wallet (one long sample). BTCUSDT on Demo is now ISOLATED x5. Open owner items: O-1 target leverage, O-2 liquidation buffer, O-3 bracket age and margin headroom, O-4 close or alert after a failed post-fill check.
+- Phase 21 (account equity and daily loss from Binance): all 16 plans executed on develop (2026-10-23), verification human_needed, no gap (`21-VERIFICATION.md`). Library level only: `LiveEquitySource`, `LiveDayRiskService`, `enforce_daily_state`, `build_live_risk_inputs` and `make_reserving_save_atomic` are composed into no running process until Phase 24. Migrations 0010 (daily risk state) and 0011 (risk reservations); signed adapter registry at sixteen methods. Owner decision O-2 (2026-10-23): option A, `FundingPolicy.TRADES_WITH_UNVERIFIED_FUNDING`; O-1, O-3, O-4, O-5 and O-6 stay OPEN (`21-OWNER-DECISIONS.md`); the assistant's pre-canary FUNDING_FEE check is an OPEN recommendation, not an owner decision. `account.max_equity_age_ms` is `NOT_CONFIGURED` and required. Demo income (2026-10-23, demo-observed, not mainnet): one COMMISSION row, no FUNDING_FEE row. The 2026-10-23 Demo runs of the eight sj2 cases are in `19-OWNER-GAPS.md` section 2b. No requirement was marked complete (EXEC-01 and OPS-02 stay Pending). Full non-docker suite (`-n 4`, strict, PostgreSQL) had one failure, `test_paper_shadow_isolation` (five new read-only adapter methods unclassified), fixed in 90d10ef7; the full suite was not re-run after that fix and no recorded sequential gate exists for Phase 21 yet.
 - Phase 19 (execution plan binding and pre-placement checks): all 17 plans executed on branches phase-19 / p19-15 and merged into develop by the owner (2026-10-20, merges e5ba20a and 6d90d84). Model: fill-driven protection (D-10), GTD LIMIT entry with no entry-time stop, coordinator `src/execution/protection.py`, emergency close, live TP sizing, migration 0005 (sized realized risk); quick task 261020-jua made Q5 true in code (one `place_entry` POST per approval, ambiguous result probed once, otherwise UNKNOWN + SAFE_MODE). Status: complete-pending-owner-read. NOT closed: no requirement is marked complete (EXEC-01, EXEC-02, RISK-04, APRV-01, APRV-02, EXEC-07 stay Pending, no Demo run), D055 stays OPEN (decision rows D079 for D-10 and D080 for Q5 are drafts, not written; D077 and D078 are written rows: D077 the stop-lost row of 19-REVIEW WR-04, D078 the approved-quantity row of 19-REVIEW WR-01), live placement stays disabled, the four `NOT_CONFIGURED` limit keys and the 11 Demo probes belong to the owner (`.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`). The whole suite was NOT run on the merged tree; the owner runs the fresh sequential gate and records `IMAGE_COMMIT=<40 hex>` under `.planning/phases/16-paper-runtime-composition/evidence/`, and plan 16-43 must then read that record instead of `16-65-gate.txt` (the 9b27da5 image predates Phase 19).
 - AGENTS.md (2026-10-20): the generated blocks of commit 0884fea (1,222 lines) were removed; the file is now a ~190-line router (rules, commands, tests with `-n 4`, commit-trailer rule, secrets, execution model, source-of-truth order, a table of where to read). `tests/test_agents_md.py` caps it and checks its paths. `.planning/codebase/` and `.planning/research/` each have a README that states role and trust. `.planning/codebase/*.md` were mapped at commit 4e37e15 (before the Phase 16 fix plans and the Phase 19 merge): run `/gsd-map-codebase` to refresh them; do not run `generate-claude-md` on AGENTS.md.
 - Phase 18 (user-data stream and error taxonomy): CLOSED 2026-10-18, status human_needed (no gap, no BLOCKER). All 26 plans are executed on develop (18-19 skipped by design: gate result `transport: sdk`). The user integrated `phase-18-smoke` with `git merge --no-ff` (merge commit dde100b); plan 18-26 recorded the owner's taxonomy decision of 2026-10-17 (-1106, -4016, -4024 REJECTED_DEFINITIVE on placement, -1125 Demo provenance); fix 1291caa made the Demo credential names `BINANCE_DEMO_API_KEY` and `BINANCE_DEMO_API_SECRET`; the verification report is c45bbfc (`18-VERIFICATION.md`, verified at fea8e2e). The gates are green at fea8e2e (`18-TRACEABILITY.md`). Nothing is pushed. All evidence is Demo-observed, not mainnet. Human items left: the user signs `18-VALIDATION.md` (still draft), the no-withdrawal key and IP-allowlist attestation (OPS-02, Phases 24 to 26), and the D055 decision. D055 stays OPEN (no DECISIONS row); the Demo evidence is `decisions/18-DRAFT-D055-evidence-for-user.md` and the adopted direction is noted, not decided, in `.planning/phases/19-execution-plan-binding-price-check/19-NOTES.md` for `/gsd-discuss-phase 19`. Requirements EXEC-01, EXEC-02, EXEC-05 and OPS-02 stay Pending in REQUIREMENTS.md (library-proven, Demo-observed, no running-process proof). Next for Phase 18's successors: Phase 19 discussion, in order after Phase 16 closes.
@@ -238,6 +242,18 @@ Progress: [██████░░░░] 61%
 | Phase 16 P60 | 3h | 4 tasks | 33 files |
 | Phase 19 P01 | 28 min | 3 tasks | 8 files |
 | Phase 19 P16 | about 30 min (commit clock, 13:45 to 14:13) | 3 tasks | 13 files |
+| Phase 20 P01 | 15 min | 3 tasks | 7 files |
+| Phase 20 P02 | 18 min | 3 tasks | 6 files |
+| Phase 23 P01 | approx 1h | 3 tasks | 25 files |
+| Phase 23 P02 | 35min | 2 tasks | 3 files |
+| Phase 23 P08 | 1 session | 3 tasks | 12 files |
+| Phase 23 P10 | 40min | 2 tasks | 3 files |
+| Phase 23 P11 | 70min | 3 tasks | 5 files |
+| Phase 23 P12 | 25min | 3 tasks | 9 files |
+| Phase 24 P02 | 35min | 3 tasks | 21 files |
+| Phase 24 P03 | ~1h | 3 tasks | 17 files |
+| Phase 24 P01 | 1 session | 3 tasks | 2 files |
+| Phase 24 P04 | 1 session | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -565,6 +581,25 @@ Recent decisions affecting current work:
 - [Phase 16]: 16-63: a plan whose stored TP2 is not above zero is NO_TRADE RR_TOO_LOW (owner Option A, strict reading); simulator semantics 2.3.0, protocol v2.6.0, D075 and D076
 - [Phase 16]: 16-63: research run 1 regenerated under 2.3.0 (240 records, families in parallel by owner decision); the 2.1.0 records are superseded in the owner's wording with only the versions replaced (16-DEC-RUN1-SUPERSEDED.md)
 - [Phase 16]: 16-63: R7: the soak image is rebuilt from a commit containing the TP2 guard and the 16-62 gate repeated before plan 16-43 pins the epoch
+- [Phase 20]: 20-01: Phase 20 ExecutionLimits fields are <section>_<key> (EXECUTION_LIMIT_FIELDS); Phase 19 field names unchanged; the numeric-default guard covers key texts and field names
+- [Phase 20]: 20-02: PROTECTION is a seventh TransitionKind (not persisted, no GLOSSARY block until O-01); ProtectionCoordinator._transition is the only place a protection state changes and refuses moves outside the table (journal PROTECTION_TRANSITION_REJECTED, SAFE_MODE PROTECTION_STATE_INVALID). — D-29, T-A, D077. Audit added the edges PROTECTED_ENTRY_OPEN -> FLAT and AWAITING_FILL -> ENTRY_UNRESOLVED (covered by the docstring intent). O-H exception not built (default NO). Phase 20 has no exchange event-time column: no general stale-event detection (deferred to Phase 24).
+- [Phase 23]: 23-01: new Telegram edge refusal codes are plain strings in src/approval/reason_codes.py, not RejectionReason members (enum stays 21; DispatchResult.reason_code is RejectionReason | str | None)
+- [Phase 23]: 23-01: authorized_user_ids is a required keyword-only frozenset[int] on on_callback, build_application, ShadowCoordinator, ShadowWiring and RehearsalSettings; a configured Telegram without TELEGRAM_AUTHORIZED_USER_IDS refuses the paper start
+- [Phase 23]: [23-02] MoneyAtStake computed once in src/risk/money_at_stake.py from the SizedResult (net SL loss = realized_risk read, margin via required_initial_margin truncated at 18 digits, TP legs via per_unit_round_trip_cost); stored form money-at-stake/1 canonical JSON, strict parser
+- [Phase 23]: O-2 (G4-042) decided (a) by owner 2026-10-26: EXPIRED excluded from uq_approvals_one_decided_per_plan (0014); store refuses EXPIRED on a plan with an APPROVED/SKIPPED approval
+- [Phase 23]: TP fractions of the DEMO/LIVE request come from the stored money block, not a constant (no src.backtest import in src.execution; Phase 19 invariant 7)
+- [Phase 23]: Desk answers an unreadable entry intent on an APPROVED expired redelivery as needs reconciliation (never expired/rejected, Q5)
+- [Phase 23]: Desk final message text is derived from stored approval rows, edited once per request
+- [Phase 23]: 23-12: validity_rule is called with keywords (expiry_utc, now_utc) so a partial over check_remaining_validity binds directly; a refused-before-recheck CONFIRM awaits no prefetch; a handler that raised is answered with the neutral text; the confirm core was not changed
+- [Phase 24]: 24-02: NO_FILL and HEALTH_CHECK_FAILED are RejectionReason members (23), values unchanged (G3-005, D-35)
+- [Phase 24]: 24-03: D083 clock margin is rest_gate.ban_end_clock_margin_ms, an OPTIONAL NOT_CONFIGURED key outside require_live_ready; ban-entry alert is REST_GATE_BAN_ENTERED until_utc=<ISO>
+- [Phase 24]: Q1: one live process python -m src.live.runtime, one asyncio loop (24-01, owner 2026-10-31)
+- [Phase 24]: Q2: sync stores kept; on-loop store calls go through src/ops/store_executor.py with one writer thread, no async pool (24-01, owner 2026-10-31)
+- [Phase 24]: Q3: migration 0015_order_event_time with a monotonic event-time guard (24-01, owner 2026-10-31)
+- [Phase 24]: Q9/Q14: CLOSE_POSITION after a failed post-fill liquidation check (D085); LIVE_NET_PNL_SEMANTICS_VERIFIED stays False until the Phase 26 canary (D086) (24-01, owner 2026-10-31)
+- [Phase 24]: Q10: Phase 16 soak is running, so the SHADOW money block ships as a new text version with old pins kept (24-01, owner 2026-10-31)
+- [Phase 24]: 24-04: ExecutionService is the single execute_approved_plan call site (src/live), sync on_confirmed schedules on the loop (call_soon_threadsafe from other threads); entry client id is registered in the in-memory ClientIdIndex before the manager is awaited (P-4)
+- [Phase 24]: 24-04: build_execution_path in src/live/wiring.py is the only constructor of live objects (D-04); PlacementInputsSource is the port plan 24-16 implements
 
 ### Pending Todos
 
@@ -651,6 +686,6 @@ Recorded as open; none is decided here. Each line names where the item is owned.
 
 ## Session Continuity
 
-Last session: 2026-10-20T10:00:00Z
-Stopped at: Phase 19 merged into develop (2026-10-20); AGENTS.md reduced to a router; owner gate and 16-43 next
-Resume file: .planning/phases/16-paper-runtime-composition/16-43-CHECKLIST.md
+Last session: 2026-11-07T06:13:13.794Z
+Stopped at: Phase 25 context gathered
+Resume file: .planning/phases/25-demo-integration-test-campaign/25-CONTEXT.md

@@ -77,6 +77,7 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
 - Demo (`BINANCE_DEMO_*`) and live (`BINANCE_LIVE_*`) credential names are separate on purpose; the
   paper runtime refuses to start if any `BINANCE_*` variable is present.
 - No mainnet or LIVE use. Demo smoke/probe scripts (`--execute`) are run by the owner only.
+- `pytest -m demo` (`tests/demo/`, needs `TRADING_DEMO_RUN=1`) is owner-only like `--execute`; agents never run it.
 - Live placement is **disabled** (`src/execution/enablement.py`, `LIVE_ORDERS_DISABLED`).
 - Alembic reads `DATABASE_URL`; `alembic upgrade head` only, `create_all` is never used.
 
@@ -90,6 +91,7 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
 | `src/backtest/` | project-owned closed-candle simulator — the canonical execution semantics |
 | `src/paper/` | paper runtime, freeze, shadow mode, liveness |
 | `src/execution/` | human-approved placement; since Phase 19 the fill-driven protection model (below) |
+| `src/live/` | the live process (Phase 24): composition, start sequence, operator commands, Demo smoke |
 | `src/approval/`, `src/reconcile/` | approval tokens + replay; exchange reconciliation, SAFE_MODE |
 | `src/adapters/` | Binance + Telegram behind project-owned interfaces (SDK types never leave) |
 | `src/persistence/`, `src/db/` | SQLAlchemy stores, Alembic migrations |
@@ -101,9 +103,11 @@ Windows helpers: `scripts/dev/test.ps1`, `clean.ps1`, `migrate.ps1`, `journal-re
 
 Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
 (`--healthcheck` / `--pin-epoch` / `--hold-on-refusal` / `--liveness`),
+`python -m src.live.runtime` (`--healthcheck` / `--liveness` / `--hold-on-refusal` /
+`--initialize-gate-state`; owner-run Demo rehearsal: `scripts/demo_rehearsal.py --execute`),
 `python -m src.ops.backup scheduled`, `python -m src.research.run`, `src/analytics/cli.py`.
 
-## Execution model since Phase 19 (D-10; the DECISIONS row is not written yet)
+## Execution model since Phase 19 (D-10; DECISIONS D079, D080)
 
 - The entry is a **GTD LIMIT** with **no entry-time stop** (Demo rejects a conditional stop with no
   position, -4509). Protection is **fill-driven**: the coordinator in `src/execution/protection.py`
@@ -112,8 +116,13 @@ Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
 - **A placement is never re-sent** (owner, 2026-10-20): one `place_entry` POST per approval; an
   ambiguous result is probed once by client order id; not found or probe error ⇒ UNKNOWN + SAFE_MODE.
 - Plan binding: symbol and side come from the hashed plan; quantity may be ≤ approved, never larger.
-- Still open (owner): D055 closure, the `NOT_CONFIGURED` limit keys in
-  `config/execution/execution-limits-v1.toml`, the 11 Demo probes. Register:
+- The composition exists since Phase 24 (`src/live/`, DECISIONS D098–D107, `docs/operations/RUNBOOK.md`
+  section 22): one process, one loop; the Demo smoke passed 21/21 steps on 2026-11-06. Placement stays
+  disabled (`LIVE_ORDERS_DISABLED`); nothing was observed on a host.
+- Still open (owner): the optional `NOT_CONFIGURED` key `rest_gate.ban_end_clock_margin_ms` in
+  `config/execution/execution-limits-v1.toml`;
+  the optional `NOT_CONFIGURED` key `scheduler.duration_summary_interval_ms` (D112, RUNBOOK 22.8);
+  what Demo cannot show (P3, P7, A2) waits for Phases 25/26. Register:
   `.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`.
 
 ## Invariants that are machine-enforced

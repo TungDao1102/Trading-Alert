@@ -20,11 +20,12 @@ from typing import Any
 import pytest
 
 # The one cron line the freeze workflow is expected to carry: the line recorded in
-# decisions/16-DEC-Q-Q.md (hourly at minute 34, the user's checkpoint Q-Q of plan 16-30; before
-# plan 16-47 it was `0 * * * *`, the line on master). It must stay of the hourly form
-# `M * * * *` (M from 0 to 59), the only form the reconciler of plan 16-15 accepts. Moving the
-# cron does not relax the rule that a missing tick is an EVIDENCE_GAP.
-EXPECTED_FREEZE_CRON = "34 * * * *"
+# decisions/16-DEC-Q-Q-2.md (hourly at minute 17, the owner's choice of 2026-11-13). It superseded
+# decisions/16-DEC-Q-Q.md (minute 34, plan 16-47); before plan 16-47 it was `0 * * * *`, the line
+# on master. It must stay of the hourly form `M * * * *` (M from 0 to 59), the only form the
+# reconciler of plan 16-15 accepts. Moving the cron does not relax the rule that a missing tick is
+# an EVIDENCE_GAP.
+EXPECTED_FREEZE_CRON = "17 * * * *"
 HOURLY_CRON_RE = re.compile(r"^([0-9]|[1-5][0-9]) \* \* \* \*$")
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "paper_freeze_check.yml"
@@ -563,7 +564,8 @@ def test_workflow_has_exactly_the_expected_cron_line() -> None:
 def test_cron_check_fails_on_a_changed_a_second_or_a_missing_cron() -> None:
     """Negative control: the checker is not vacuous."""
     text = _workflow_text()
-    changed = text.replace(f'"{EXPECTED_FREEZE_CRON}"', '"17 * * * *"', 1)
+    other = "18 * * * *" if EXPECTED_FREEZE_CRON == "17 * * * *" else "17 * * * *"
+    changed = text.replace(f'"{EXPECTED_FREEZE_CRON}"', f'"{other}"', 1)
     assert changed != text
     with pytest.raises(AssertionError, match="cron"):
         _check_freeze_cron(changed)

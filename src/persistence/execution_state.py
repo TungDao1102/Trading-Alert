@@ -34,12 +34,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models import ApprovalRow, ExecutionIntentRow
+from src.db.models import ApprovalRow, ExecutionIntentRow, JournalEventRow
 from src.domain.enums import (
     ApprovalConsumptionStatus,
     ApprovalResult,
@@ -47,7 +47,7 @@ from src.domain.enums import (
     OrderRole,
 )
 from src.domain.transitions import IllegalTransition, TransitionKind, assert_transition
-from src.execution.intent_store import IntentRecord, RecordedOutcome
+from src.execution.intent_store import IntentRecord, RecordedOutcome, required_source_status
 from src.persistence.errors import (
     ApprovedQuantityInconsistent,
     ApprovedQuantityMissing,
@@ -55,6 +55,12 @@ from src.persistence.errors import (
     ParentRowMissing,
 )
 from src.persistence.uow import OperationalDatabase
+
+# The journal rows `restorable_entries` reads (the coordinator writes them; a test pins the values
+# to `src.execution.protection`, which this persistence module does not import).
+PROTECTION_CORRELATION_PREFIX = "protection_"
+PROTECTION_TRANSITION_EVENT = "PROTECTION_TRANSITION"
+PROTECTION_ENDED_STATES = ("FLAT", "ENTRY_ENDED_NO_FILL")
 
 _SQLSTATE_UNIQUE_VIOLATION = "23505"
 _SQLSTATE_FOREIGN_KEY_VIOLATION = "23503"
@@ -103,6 +109,7 @@ def _to_record(row: ExecutionIntentRow) -> IntentRecord:
         resolved_at_utc=row.resolved_at_utc,
         updated_at_utc=row.updated_at_utc,
         sized_realized_risk=row.sized_realized_risk,
+        resolution_reason_code=row.resolution_reason_code,
     )
 
 
@@ -182,6 +189,77 @@ class PgExecutionStateStore:
                 )
             ).scalars()
             return tuple(_to_record(row) for row in rows)
+
+    def get_intent(self, *, approval_id: str, role: str) -> IntentRecord | None:
+        """The row of one (approval, role) pair, or None (plan 24-27, 24-26 hand-off 1)."""
+        with self._db.transaction() as session:
+            row = session.execute(
+                select(ExecutionIntentRow).where(
+                    ExecutionIntentRow.approval_id == approval_id,
+                    ExecutionIntentRow.role == role,
+                )
+            ).scalar_one_or_none()
+            return None if row is None else _to_record(row)
+
+    def restorable_entries(self) -> Sequence[IntentRecord]:
+        """Every ENTRY row that may still have a live order or a live position after a restart.
+
+        SENT, UNKNOWN and ACKED rows of the ENTRY role, oldest first, for plans that have NOT
+        ended (DECISIONS D093; no age limit and no new number). A plan has ended when its
+        journal holds a `PROTECTION_TRANSITION` row into `FLAT` or `ENTRY_ENDED_NO_FILL`: both
+        states have no successor (`src.domain.transitions.PROTECTION`), so the presence of one
+        row is conclusive and a later row cannot revive the plan. `list_unresolved_intents`
+        returns neither the ACKED rows nor the protective rows, so a resting or filled entry
+        that was acknowledged would not be re-tracked without this read; an ACKED row is never
+        moved by the protection lifecycle, hence the journal test. A plan with no ended row
+        stays (fail toward re-tracking: the rebuild reads REST and the journal, never trusts
+        age).
+        """
+        restorable = (
+            ExecutionIntentStatus.SENT.value,
+            ExecutionIntentStatus.UNKNOWN.value,
+            ExecutionIntentStatus.ACKED.value,
+        )
+        ended = (
+            select(JournalEventRow.journal_event_id)
+            .where(
+                JournalEventRow.correlation_id
+                == literal(PROTECTION_CORRELATION_PREFIX) + ExecutionIntentRow.plan_hash,
+                JournalEventRow.event_type == PROTECTION_TRANSITION_EVENT,
+                or_(
+                    *(
+                        JournalEventRow.payload_json.contains(f'"to":"{state}"')
+                        for state in PROTECTION_ENDED_STATES
+                    )
+                ),
+            )
+            .exists()
+        )
+        with self._db.transaction() as session:
+            rows = session.execute(
+                select(ExecutionIntentRow)
+                .where(
+                    ExecutionIntentRow.role == OrderRole.ENTRY.value,
+                    ExecutionIntentRow.intent_status.in_(restorable),
+                    ~ended,
+                )
+                .order_by(ExecutionIntentRow.intended_at_utc, ExecutionIntentRow.approval_id)
+            ).scalars()
+            return tuple(_to_record(row) for row in rows)
+
+    def intent_for_client_id(self, client_order_id: str) -> IntentRecord | None:
+        """The row behind a client order id (entry id or protective algo id), or None.
+
+        The stream persistence writer reads it on the writer thread (plan 24-19 hand-off 2).
+        """
+        with self._db.transaction() as session:
+            row = session.execute(
+                select(ExecutionIntentRow).where(
+                    (ExecutionIntentRow.client_order_id == client_order_id)
+                    | (ExecutionIntentRow.algo_client_id == client_order_id)
+                )
+            ).scalar_one_or_none()
+            return None if row is None else _to_record(row)
 
     def consume_and_record_entry_intent(
         self,
@@ -363,6 +441,77 @@ class PgExecutionStateStore:
             },
             now_utc=now_utc,
         )
+
+    def finalize_reconciled_resolution(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        reason_code: str,
+        now_utc: datetime,
+    ) -> None:
+        """Close one row as REJECTED by a reconciliation conclusion (Phase 20, T-B, D-11).
+
+        The only writer of `resolution_reason_code`. The source status is read `FOR UPDATE` and
+        judged under the lock: RECONCILED_ABSENT needs UNKNOWN, NEVER_SENT needs INTENDED
+        (`required_source_status`); `assert_transition` still runs for the move to REJECTED.
+        `exchange_status` and `exchange_order_id` are written NULL, `resolved_at_utc` is
+        `now_utc`. An identical repeat is a no-op; anything else is `IntentStateConflict`, and
+        a code outside the closed set is a `ValueError` before any database access.
+        """
+        required = required_source_status(reason_code)
+        target = ExecutionIntentStatus.REJECTED
+        try:
+            with self._db.transaction() as session:
+                current = session.execute(
+                    select(
+                        ExecutionIntentRow.intent_status,
+                        ExecutionIntentRow.resolution_reason_code,
+                    )
+                    .where(
+                        ExecutionIntentRow.approval_id == approval_id,
+                        ExecutionIntentRow.role == role,
+                    )
+                    .with_for_update()
+                ).one_or_none()
+                if current is None:
+                    raise IntentStateConflict(f"no intent row for role {role}")
+                if (
+                    current.intent_status == target.value
+                    and current.resolution_reason_code == reason_code
+                ):
+                    return  # identical repeat: idempotent no-op
+                if current.intent_status != required.value:
+                    raise IntentStateConflict(
+                        f"{reason_code} needs status {required.value}, "
+                        f"row for role {role} is {current.intent_status}"
+                    )
+                try:
+                    assert_transition(
+                        TransitionKind.EXECUTION_INTENT, current.intent_status, target
+                    )
+                except IllegalTransition as exc:
+                    raise IntentStateConflict(
+                        f"illegal intent transition {current.intent_status} -> {target.value} "
+                        f"for role {role}"
+                    ) from exc
+                session.execute(
+                    update(ExecutionIntentRow)
+                    .where(
+                        ExecutionIntentRow.approval_id == approval_id,
+                        ExecutionIntentRow.role == role,
+                    )
+                    .values(
+                        intent_status=target.value,
+                        resolution_reason_code=reason_code,
+                        exchange_order_id=None,
+                        exchange_status=None,
+                        resolved_at_utc=now_utc,
+                        updated_at_utc=now_utc,
+                    )
+                )
+        except IntegrityError as exc:
+            raise _translate_integrity(exc, what=f"finalize {reason_code}") from exc
 
     def finalize_entry_outcome(
         self,

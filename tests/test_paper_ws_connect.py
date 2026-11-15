@@ -24,7 +24,12 @@ from binance_common.constants import DERIVATIVES_TRADING_USDS_FUTURES_WS_STREAMS
 from src.adapters.paper_ws import Kline, PaperWsAdapter
 from structlog.testing import capture_logs
 
-from tests.paper_ws_fakes import FakeSdkWsClient, fresh_sdk_stream_map, make_kline_model
+from tests.paper_ws_fakes import (
+    FakeSdkWsClient,
+    FakeStreamHandle,
+    fresh_sdk_stream_map,
+    make_kline_model,
+)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -347,6 +352,39 @@ async def test_rebuild_does_not_resubscribe_an_unsubscribed_stream() -> None:
     await adapter.rebuild()
 
     assert clients[0].subscribe_frames == ["ethusdt@kline_4h"]
+
+
+async def test_a_handle_from_before_a_rebuild_unsubscribes_the_current_stream() -> None:
+    """16-43 Finding 2: the handle `subscribe` returned stays valid across a rebuild."""
+    first = FakeSdkWsClient()
+    clients: list[FakeSdkWsClient] = []
+    adapter, _btc, _eth = await _two_stream_adapter(first, clients)
+    btc_old = first.handles[0]
+
+    first.simulate_unsolicited_close()
+    await adapter.rebuild()
+    await adapter.unsubscribe(btc_old)
+
+    assert clients[0].handles[0]._unsubscribed == 1
+    assert btc_old._unsubscribed == 0
+    assert adapter.diagnostics().subscribed_streams == ("ethusdt@kline_4h",)
+
+    clients[0].simulate_unsolicited_close()
+    await adapter.rebuild()
+    assert clients[1].subscribe_frames == ["ethusdt@kline_4h"]
+
+
+async def test_an_unknown_handle_is_still_awaited_and_changes_nothing() -> None:
+    first = FakeSdkWsClient()
+    clients: list[FakeSdkWsClient] = []
+    adapter, _btc, _eth = await _two_stream_adapter(first, clients)
+    stranger = FakeStreamHandle("x@kline_1h")
+
+    await adapter.unsubscribe(stranger)
+
+    assert stranger._unsubscribed == 1
+    assert adapter.diagnostics().subscribed_streams == _OWN_STREAMS
+    assert [h._unsubscribed for h in first.handles] == [0, 0]
 
 
 def test_adapter_has_no_reconnect_or_schedule_reconnect() -> None:

@@ -155,6 +155,7 @@ class RehearsalSettings:
 
     symbol: str
     chat_id: int
+    authorized_user_ids: frozenset[int]
     initial_equity: Decimal
     risk_rate: Decimal
     minute_poll_interval_seconds: int
@@ -314,6 +315,13 @@ class RecordingBot:
         )
         self.delivered.append(text)
         return result
+
+    async def edit_message_reply_markup(
+        self, *, chat_id: str | int, message_id: int, reply_markup: Any = None
+    ) -> object:
+        return await self._require().edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -704,6 +712,7 @@ async def run_rehearsal(
         stores=marked,
         bot=recording,
         chat_id=settings.chat_id,
+        authorized_user_ids=settings.authorized_user_ids,
         clock=clock,
         ledger=ledger,
         public=public,

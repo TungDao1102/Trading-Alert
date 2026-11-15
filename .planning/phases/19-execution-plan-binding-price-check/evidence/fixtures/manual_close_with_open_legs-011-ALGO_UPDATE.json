@@ -1,0 +1,29 @@
+{
+  "E": 1792670829960,
+  "T": 1792670829956,
+  "e": "ALGO_UPDATE",
+  "o": {
+    "R": true,
+    "S": "SELL",
+    "V": "EXPIRE_MAKER",
+    "X": "EXPIRED",
+    "ai": "",
+    "aid": 1000000251915737,
+    "at": "CONDITIONAL",
+    "caid": "dprobe-mcs-20261022T120704Z-6",
+    "cp": true,
+    "f": "GTE_GTC",
+    "gtd": 0,
+    "ia": false,
+    "o": "STOP_MARKET",
+    "p": "0",
+    "pP": false,
+    "pm": "NONE",
+    "ps": "BOTH",
+    "q": "0",
+    "s": "BTCUSDT",
+    "tp": "78525.2",
+    "tt": 0,
+    "wt": "MARK_PRICE"
+  }
+}

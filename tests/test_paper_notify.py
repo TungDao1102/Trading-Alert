@@ -20,12 +20,15 @@ The tests cover:
 from __future__ import annotations
 
 import ast
-from datetime import UTC, datetime
+import importlib.util
 from decimal import Decimal
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
+
+from tests.support.simulate_payload import make_money, make_simulate_payload
 
 PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
 
@@ -36,27 +39,8 @@ PHASE7_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase7"
 
 
 def _make_payload() -> dict[str, Any]:
-    """Build a canonical 12-field SIMULATE payload for tests."""
-    return {
-        "symbol": "BTCUSDT",
-        "direction": "LONG",
-        "setup": "TREND_PULLBACK_LONG",
-        "entry_min": Decimal("100.10"),
-        "entry_max": Decimal("100.30"),
-        "stop_loss": Decimal("99.50"),
-        "take_profits": [
-            (Decimal("101.50"), Decimal("0.5")),
-            (Decimal("103.00"), Decimal("0.5")),
-        ],
-        "rr": Decimal("2.0"),
-        "risk_pct": Decimal("0.005"),
-        "expiry_utc": datetime(2026, 9, 19, 13, 0, tzinfo=UTC),
-        "invalidation": "CANDLE_CLOSE < 99.50",
-        "exposure_quote": Decimal("50.00"),
-        "reason_codes": ["SETUP_DETECTED"],
-        "signal_id": "sig_test_0000000000000000000000000000000000000000000000000000",
-        "detected_at_utc": datetime(2026, 9, 19, 9, 0, tzinfo=UTC),
-    }
+    """A canonical SIMULATE payload: 12 APRV-01 fields, the quantity and the money block."""
+    return make_simulate_payload()
 
 
 # --------------------------------------------------------------------------- #
@@ -89,7 +73,10 @@ def test_format_simulate_renders_all_12_aprv01_fields() -> None:
     assert "101.50" in text and "103.00" in text  # 6. TP(s)
     assert "2.0" in text  # 7. R:R
     assert "0.005" in text  # 8. risk percentage
-    assert "2026-09-19T13:00:00+00:00" in text  # 9. expiry
+    # 9. expiry: local +07 with UTC in brackets since Phase 23 (D-14, O-3), no ISO text.
+    assert "Expiry: 2026-09-19 20:00:00 +07 (2026-09-19 13:00:00 UTC)" in text
+    assert "Detected: 2026-09-19 16:00:00 +07 (2026-09-19 09:00:00 UTC)" in text
+    assert "Display:" not in text and "Asia/Ho_Chi_Minh" not in text
     assert "CANDLE_CLOSE < 99.50" in text  # 10. invalidation
     assert "50.00" in text  # 11. current exposure
     assert "SETUP_DETECTED" in text  # 12. reason codes
@@ -277,3 +264,117 @@ def test_telegram_adapter_is_the_only_telegram_importer() -> None:
         src_dir / "adapters" / "telegram_callbacks.py",
         src_dir / "adapters" / "telegram_notify.py",
     ], f"only the two telegram adapters may import telegram; found: {importers}"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 23-09 task 3 (D-13, D-14): the SIMULATE message carries the quantity and the money block.
+# --------------------------------------------------------------------------- #
+
+
+def _golden_simulate() -> str:
+    path = Path(__file__).parent / "fixtures" / "phase23" / "messages" / "simulate.txt"
+    return path.read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+
+
+def _generator() -> ModuleType:
+    path = Path(__file__).resolve().parent.parent / "scripts" / "gen_phase23_fixtures.py"
+    spec = importlib.util.spec_from_file_location("gen_phase23_fixtures_simulate", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_format_simulate_equals_the_generated_golden() -> None:
+    from src.paper.notify import format_simulate
+    from src.risk.money_at_stake import parse_money_json
+
+    generator = _generator()
+    text = format_simulate(
+        **generator.approve_fields(), money=parse_money_json(generator.fixture_money_json())
+    )
+
+    assert text + "\n" == _golden_simulate()
+    lines = text.split("\n")
+    assert lines[0] == "SIMULATE BTCUSDT LONG TREND_PULLBACK_LONG"
+    assert "Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)" in lines
+    assert "Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)" in lines
+    assert "Quantity: 0.08" in lines
+    assert lines.index("Quantity: 0.08") == lines.index("Notional: 4008.00 USDT") - 1
+    assert "Asia/Ho_Chi_Minh" not in text and "Display:" not in text
+
+
+def test_format_simulate_money_lines_match_the_approve_request() -> None:
+    from src.adapters.telegram_notify import render_money_block
+    from src.paper.notify import format_simulate
+
+    payload = _make_payload()
+    lines = format_simulate(**payload).split("\n")
+    block = list(render_money_block(payload["money"]))
+
+    start = lines.index(block[0])
+    assert lines[start : start + len(block)] == block
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"money": None},
+        {"approved_quantity": Decimal("2.4")},
+        {"stop_loss": Decimal("99.40")},
+        {"take_profits": [(Decimal("101.50"), Decimal("1"))]},
+        {
+            "take_profits": [
+                (Decimal("101.60"), Decimal("0.5")),
+                (Decimal("103.00"), Decimal("0.5")),
+            ]
+        },
+    ],
+)
+def test_format_simulate_refuses_money_that_is_missing_or_disagrees(
+    change: dict[str, Any],
+) -> None:
+    from src.paper.notify import format_simulate
+
+    payload = _make_payload()
+    payload.update(change)
+    with pytest.raises(ValueError):
+        format_simulate(**payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"delete": "money"},
+        {"delete": "approved_quantity"},
+        {"update": {"approved_quantity": Decimal("2.4")}},
+        {"update": {"stop_loss": Decimal("99.40")}},
+        {"update": {"take_profits": [(Decimal("101.50"), Decimal("1"))]}},
+        {"update": {"money": make_money(leverage=3)}, "expect": "SENT"},
+    ],
+)
+async def test_notify_simulate_fails_closed_without_consistent_money(
+    change: dict[str, Any],
+) -> None:
+    from src.paper.notify import NotifyOutcomeKind, notify_simulate
+
+    payload = _make_payload()
+    if "delete" in change:
+        del payload[change["delete"]]
+    payload.update(change.get("update", {}))
+    bot = _FakeBot()
+    outcomes: list[Any] = []
+
+    outcome = await notify_simulate(
+        bot=bot, chat_id="123456", payload=payload, on_outcome=outcomes.append
+    )
+
+    if change.get("expect") == "SENT":
+        # Control: a different leverage with the same quantity, stop and take-profits is consistent.
+        assert outcome.kind == NotifyOutcomeKind.SENT
+        return
+    assert outcome.kind == NotifyOutcomeKind.FAILED
+    assert outcome.attempts == 0
+    assert bot.calls == []
+    assert outcomes == [outcome]

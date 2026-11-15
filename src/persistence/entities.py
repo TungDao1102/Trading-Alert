@@ -37,6 +37,15 @@ Exchange state (G4-043). `update_order_exchange_state` is the writer of an Order
 it never changes `local_status`, so it also works on a terminal order. The router finds orders
 through `get_order_by_client_order_id` and `get_order_by_algo_client_id`.
 
+Exchange event time (Phase 24 plan 24-07, D-10, T-24-17). Binance orders user-data updates by the
+event time `E`. Migration 0015 stores the newest applied time in `orders.exchange_event_time_utc`
+and `positions.snapshot_event_time_utc` (NULL = none yet). `update_order_exchange_state` (when it
+is given an event time) and `update_position_snapshot` apply an update only when its event time is
+NOT OLDER than the stored one: the check runs under the row lock and again inside the conditional
+UPDATE. An older event changes nothing and comes back as `StateUpdate(stored, stale=True)`. An
+update without an event time behaves as before and leaves a stored event time alone.
+`update_position_snapshot` never touches `status` (that is `transition_position`).
+
 Precision (D-12, F-410, T-17-27). Before any write, every Decimal bound for a NUMERIC column
 must equal `quantize_for_storage(value)`, else `PrecisionError` naming the table and field (never
 the value). PostgreSQL would otherwise round a 19th fractional digit silently and the stored
@@ -67,7 +76,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, overload
 
 from sqlalchemy import Numeric, and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -157,6 +166,7 @@ _ORDER = _Spec(
             "exchange_order_id",
             "updated_at_utc",
             "canceled_at_utc",
+            "exchange_event_time_utc",
         }
     ),
 )
@@ -176,9 +186,27 @@ _POSITION = _Spec(
             "updated_at_utc",
             "closed_at_utc",
             "status",
+            "snapshot_event_time_utc",
         }
     ),
 )
+
+
+@dataclass(frozen=True)
+class StateUpdate[E]:
+    """Outcome of an event-time-guarded write (24-07, D-10).
+
+    `entity` is the stored entity after the call. `stale` is True when the event was older than
+    the stored event time: nothing was written and `entity` is the unchanged stored entity.
+    """
+
+    entity: E
+    stale: bool
+
+
+def _require_utc(name: str, value: datetime) -> None:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError(f"{name} must be a UTC-aware datetime")
 
 
 def _constraint_name(exc: IntegrityError) -> str:
@@ -290,12 +318,19 @@ def _apply[E, R](
     status_column: str,
     old_status: str,
     changes: dict[str, Any],
+    *extra_where: Any,
 ) -> E:
-    """Conditional UPDATE `WHERE <status column> = old`; exactly one row must change."""
+    """Conditional UPDATE `WHERE <status column> = old [AND extra]`; exactly one row must change.
+
+    `extra_where` carries the event-time guard of 24-07 (T-24-17): the UPDATE itself refuses to
+    move an event time backwards, even if the caller's read-then-check were ever bypassed.
+    """
     id_attr = getattr(spec.model, spec.id_column)
     status_attr = getattr(spec.model, status_column)
     stmt: Any = (
-        update(spec.model).where(id_attr == entity_id, status_attr == old_status).values(**changes)
+        update(spec.model)
+        .where(id_attr == entity_id, status_attr == old_status, *extra_where)
+        .values(**changes)
     )
     result: Any = session.execute(stmt)
     if result.rowcount != 1:
@@ -403,6 +438,22 @@ class PgTradingEntityStore:
             row = _fetch(session, _TRADE_PLAN, trade_plan_id)
             return None if row is None else _TRADE_PLAN.from_row(row)
 
+    def get_trade_plan_by_hash(
+        self, plan_hash: str, *, tx: Session | None = None
+    ) -> TradePlan | None:
+        """The stored plan whose `plan_hash` is given (plan 24-21 hand-off: expiry by hash)."""
+        with self._unit(tx) as session:
+            row = (
+                session.execute(
+                    select(TradePlanRow)
+                    .where(TradePlanRow.plan_hash == plan_hash)
+                    .order_by(TradePlanRow.created_at_utc)
+                )
+                .scalars()
+                .first()
+            )
+            return None if row is None else _TRADE_PLAN.from_row(row)
+
     def transition_trade_plan(
         self,
         trade_plan_id: str,
@@ -462,6 +513,7 @@ class PgTradingEntityStore:
             row: OrderRow | None = session.execute(stmt).scalar_one_or_none()
             return None if row is None else _ORDER.from_row(row)
 
+    @overload
     def update_order_exchange_state(
         self,
         order_id: str,
@@ -469,8 +521,32 @@ class PgTradingEntityStore:
         exchange_status: str,
         exchange_order_id: str | None = None,
         now_utc: datetime,
+        exchange_event_time_utc: None = None,
         tx: Session | None = None,
-    ) -> Order:
+    ) -> Order: ...
+
+    @overload
+    def update_order_exchange_state(
+        self,
+        order_id: str,
+        *,
+        exchange_status: str,
+        exchange_order_id: str | None = None,
+        now_utc: datetime,
+        exchange_event_time_utc: datetime,
+        tx: Session | None = None,
+    ) -> StateUpdate[Order]: ...
+
+    def update_order_exchange_state(
+        self,
+        order_id: str,
+        *,
+        exchange_status: str,
+        exchange_order_id: str | None = None,
+        now_utc: datetime,
+        exchange_event_time_utc: datetime | None = None,
+        tx: Session | None = None,
+    ) -> Order | StateUpdate[Order]:
         """Record the exchange's view of an order (G4-043); `local_status` is never touched.
 
         Sets `exchange_status` and `updated_at_utc`; sets `exchange_order_id` when none is stored
@@ -479,9 +555,15 @@ class PgTradingEntityStore:
         `local_status` back through the conditional UPDATE. An unchanged state is an idempotent
         no-op returning the stored order.
 
+        Event time (24-07, D-10): with `exchange_event_time_utc` (Binance `E`) the update is
+        applied only when that time is not older than the stored one; an older update changes
+        nothing. The return value is then `StateUpdate(order, stale)`; without an event time the
+        return value is the `Order`, as before, and a stored event time is left as it is.
+
         Raises:
             ValueError: `exchange_status` is empty or longer than 32 characters, or
-                `exchange_order_id` is empty or longer than 64 characters.
+                `exchange_order_id` is empty or longer than 64 characters, or a time is not
+                UTC-aware.
             RowConflict: the order does not exist, or a DIFFERENT exchange order id is stored.
         """
         if not isinstance(exchange_status, str) or not 0 < len(exchange_status) <= 32:
@@ -494,6 +576,8 @@ class PgTradingEntityStore:
             )
         if now_utc.tzinfo is None or now_utc.utcoffset() != timedelta(0):
             raise ValueError("now_utc must be a UTC-aware datetime")
+        if exchange_event_time_utc is not None:
+            _require_utc("exchange_event_time_utc", exchange_event_time_utc)
         with self._unit(tx) as session:
             row = _lock(session, _ORDER, order_id)
             stored_id = row.exchange_order_id
@@ -505,15 +589,41 @@ class PgTradingEntityStore:
                 raise RowConflict(
                     f"order {order_id}: a different exchange_order_id is already stored"
                 )
+            stored_event = row.exchange_event_time_utc
+            if (
+                exchange_event_time_utc is not None
+                and stored_event is not None
+                and exchange_event_time_utc < stored_event
+            ):
+                return StateUpdate(_ORDER.from_row(row), True)
             new_id = stored_id if exchange_order_id is None else exchange_order_id
-            if row.exchange_status == exchange_status and new_id == stored_id:
-                return _ORDER.from_row(row)
+            if (
+                row.exchange_status == exchange_status
+                and new_id == stored_id
+                and (exchange_event_time_utc is None or exchange_event_time_utc == stored_event)
+            ):
+                unchanged = _ORDER.from_row(row)
+                return (
+                    unchanged if exchange_event_time_utc is None else StateUpdate(unchanged, False)
+                )
             changes: dict[str, Any] = {
                 "exchange_status": exchange_status,
                 "exchange_order_id": new_id,
                 "updated_at_utc": now_utc,
             }
-            return _apply(session, _ORDER, order_id, "local_status", row.local_status, changes)
+            guard: list[Any] = []
+            if exchange_event_time_utc is not None:
+                changes["exchange_event_time_utc"] = exchange_event_time_utc
+                guard.append(
+                    or_(
+                        OrderRow.exchange_event_time_utc.is_(None),
+                        OrderRow.exchange_event_time_utc <= exchange_event_time_utc,
+                    )
+                )
+            applied = _apply(
+                session, _ORDER, order_id, "local_status", row.local_status, changes, *guard
+            )
+            return applied if exchange_event_time_utc is None else StateUpdate(applied, False)
 
     def transition_order(
         self,
@@ -686,5 +796,76 @@ class PgTradingEntityStore:
                 )
             return out
 
+    def update_position_snapshot(
+        self,
+        position_id: str,
+        *,
+        quantity: Decimal,
+        entry_price: Decimal,
+        break_even_price: Decimal,
+        unrealized_pnl: Decimal,
+        realized_pnl: Decimal,
+        event_time_utc: datetime,
+        now_utc: datetime,
+        tx: Session | None = None,
+    ) -> StateUpdate[Position]:
+        """Write the exchange's snapshot of a position, unless a newer one is stored (G4-043).
 
-__all__ = ["PgTradingEntityStore"]
+        Sets `quantity` (signed), `entry_price`, `break_even_price`, `unrealized_pnl`,
+        `realized_pnl`, `snapshot_event_time_utc` and `updated_at_utc`. `status` and
+        `closed_at_utc` are never touched: transitions stay in `transition_position`. The update
+        is applied only when `event_time_utc` is not older than the stored snapshot time; an
+        older one changes nothing and returns `StateUpdate(stored, stale=True)`. Identical
+        values at an equal event time are an idempotent no-op.
+
+        Raises:
+            TypeError: a money value is not a `Decimal` (a float is refused, never converted).
+            PrecisionError: a value has more than 18 fractional digits or is not finite; it is
+                refused, never rounded.
+            ValueError: `event_time_utc` or `now_utc` is not a UTC-aware datetime.
+            RowConflict: the position does not exist.
+        """
+        values: dict[str, Decimal] = {
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "break_even_price": break_even_price,
+            "unrealized_pnl": unrealized_pnl,
+            "realized_pnl": realized_pnl,
+        }
+        for name, value in values.items():
+            if not isinstance(value, Decimal):
+                raise TypeError(f"{name} must be Decimal, got {type(value).__name__}")
+        _require_utc("event_time_utc", event_time_utc)
+        _require_utc("now_utc", now_utc)
+        for name, value in values.items():
+            _guard_precision(PositionRow.__tablename__, name, value)
+        with self._unit(tx) as session:
+            row = _lock(session, _POSITION, position_id)
+            stored_event = row.snapshot_event_time_utc
+            if stored_event is not None and event_time_utc < stored_event:
+                return StateUpdate(_POSITION.from_row(row), True)
+            if event_time_utc == stored_event and all(
+                getattr(row, name) == value for name, value in values.items()
+            ):
+                return StateUpdate(_POSITION.from_row(row), False)
+            changes: dict[str, Any] = {
+                **values,
+                "snapshot_event_time_utc": event_time_utc,
+                "updated_at_utc": now_utc,
+            }
+            applied: Position = _apply(
+                session,
+                _POSITION,
+                position_id,
+                "status",
+                row.status,
+                changes,
+                or_(
+                    PositionRow.snapshot_event_time_utc.is_(None),
+                    PositionRow.snapshot_event_time_utc <= event_time_utc,
+                ),
+            )
+            return StateUpdate(applied, False)
+
+
+__all__ = ["PgTradingEntityStore", "StateUpdate"]

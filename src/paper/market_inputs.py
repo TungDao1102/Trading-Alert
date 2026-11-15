@@ -6,9 +6,12 @@ What the per-bar tick needs from outside the candle stream, and where each value
   `exchangeInfo`, never hard-coded (AGENTS.md exchange authority);
 - the refresh cadence and the time-to-live of a constraint snapshot: only from the ratified
   runtime configuration;
-- the account inputs: the initial equity and the risk rate from the ratified configuration;
-- open positions and the daily loss: through the required `RiskInputsProvider` port. This module
-  holds NO default implementation of the port; plan 16-31 binds it to the SHADOW ledger.
+- the account inputs: the risk rate from the ratified configuration; the equity to size with and
+  the absolute portfolio thresholds from the required `RiskInputsProvider` port, i.e. the SHADOW
+  ledger as of the bar close (16-DEC-EQUITY-BASE; the configured initial equity only starts the
+  ledger, in `build_coordinator`);
+- open positions and the daily loss: through the same port. This module holds NO default
+  implementation of the port; plan 16-31 binds it to the SHADOW ledger.
 
 The module never reads the wall clock: every time arrives through the injected clock.
 """
@@ -20,7 +23,7 @@ import threading
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 
@@ -32,7 +35,6 @@ from src.domain.registry import ParameterSet
 from src.paper.loop import BarContext
 from src.paper.runtime_config import AccountConfig
 from src.paper.vocabulary import INTERVAL_MS, SourceTag, TaggedBar
-from src.risk.portfolio import resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
 
 log = structlog.get_logger()
@@ -66,7 +68,7 @@ class PublicDataLike(Protocol):
 
 
 class RiskInputsProvider(Protocol):
-    """Open positions and the daily loss at an instant (required port; D-17, plan 16-31).
+    """Portfolio state at an instant (required port; D-17, plan 16-31, 16-DEC-EQUITY-BASE).
 
     There is deliberately NO implementation in src: plan 16-31 binds this port to the SHADOW
     ledger, and a stub here would let a run decide with invented portfolio state.
@@ -75,6 +77,11 @@ class RiskInputsProvider(Protocol):
     def open_positions(self, at_utc: datetime) -> Sequence[OpenPosition]: ...
 
     def daily_loss_quote(self, at_utc: datetime) -> Decimal | None: ...
+
+    def equity_and_thresholds(self, at_utc: datetime) -> tuple[Decimal, dict[str, Any]]:
+        """The equity to size with and the absolute portfolio thresholds, both from the SHADOW
+        ledger as of `at_utc` (the thresholds resolved against the UTC day-start equity)."""
+        ...
 
 
 class ConstraintsUnavailable(Exception):
@@ -176,20 +183,19 @@ def make_context_factory(
     """The `context_factory` of the bar pipeline (plan 16-24): one `BarContext` per 1h bar.
 
     The cost model is the registry slice of the pinned parameter set (the same source
-    `run_paper_tick` binds), the absolute portfolio thresholds are the registry rates times the
-    initial equity, equity and risk rate come from the ratified configuration (never defaulted
-    here), and open positions and the daily loss come from the required `risk_inputs` port,
-    asked at the bar close.
+    `run_paper_tick` binds). The risk rate comes from the ratified configuration (never defaulted
+    here). The equity to size with and the absolute portfolio thresholds, the open positions and
+    the daily loss come from the required `risk_inputs` port, asked at the bar close: the SHADOW
+    ledger as the backtest engine reads it (16-DEC-EQUITY-BASE), so sizing, the signal-time gates
+    and the CONFIRM-time gates judge the same numbers.
     """
     cost_model = build_cost_model(cost_slice(parameter_set.params))
-    account_state = AccountState(equity=account.initial_equity, risk_rate=account.risk_rate)
-    thresholds = resolve_absolute_thresholds(
-        parameter_set=parameter_set.params, equity=account.initial_equity
-    )
     ttl = timedelta(seconds=ttl_seconds)
 
     def factory(candle: Candle) -> BarContext:
         close = candle.close_time_utc
+        equity, thresholds = risk_inputs.equity_and_thresholds(close)
+        account_state = AccountState(equity=equity, risk_rate=account.risk_rate)
         return BarContext(
             symbol=candle.symbol,
             strategy_version=parameter_set.strategy_version,

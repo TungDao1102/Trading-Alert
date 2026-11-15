@@ -1,0 +1,28 @@
+{
+  "case_id": "triggered_close_position_bracket",
+  "index": 9,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "query_algo_order",
+    "summary": {
+      "actual_order_id": "",
+      "algo_id": "1000000251917513",
+      "algo_status": "EXPIRED",
+      "algo_type": "CONDITIONAL",
+      "client_algo_id": "dprobe-tbt-20261022T120704Z-13",
+      "close_position": "true",
+      "order_type": "TAKE_PROFIT_MARKET",
+      "position_side": "BOTH",
+      "price": "0.00",
+      "quantity": "0.0000",
+      "reduce_only": "true",
+      "side": "SELL",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTE_GTC",
+      "trigger_price": "81776.50",
+      "working_type": "MARK_PRICE"
+    }
+  }
+}

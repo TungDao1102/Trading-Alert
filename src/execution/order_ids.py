@@ -66,6 +66,15 @@ _CLOSE_PREFIX = "xc-"
 _CLOSE_PLAN_SLICE_LEN = 29
 _CLOSE_MAX_ATTEMPT_NO = 9999
 
+# The three id families this system mints (Phase 20, plan 20-04). The reconcile compare
+# classifies an exchange order by these, so no other module spells a prefix.
+SYSTEM_ID_PREFIXES: tuple[str, ...] = (_CLIENT_PREFIX, _ALGO_PREFIX, _CLOSE_PREFIX)
+
+# The plan-hash characters all three families carry: the shortest of the three slices.
+_COMMON_PLAN_PREFIX_LEN = min(_CLIENT_PLAN_SLICE_LEN, _ALGO_PLAN_SLICE_LEN, _CLOSE_PLAN_SLICE_LEN)
+
+_ROLE_BY_CODE: dict[str, str] = {code: role for role, code in ROLE_CODES.items()}
+
 
 def _require_plan_hash(plan_hash: object) -> str:
     """Validate plan_hash is a 64-char lowercase hex string (D-12 boundary)."""
@@ -180,8 +189,73 @@ def derive_close_order_id(*, plan_hash: str, attempt_no: int) -> str:
     return _CLOSE_PREFIX + validated_hash[:_CLOSE_PLAN_SLICE_LEN] + f"{attempt_no:04d}"
 
 
+def _family_prefix(client_id: object) -> str | None:
+    """The system id family prefix of `client_id`, or None for anything else."""
+    if not isinstance(client_id, str) or len(client_id) != _ID_LENGTH:
+        return None
+    for prefix in SYSTEM_ID_PREFIXES:
+        if client_id.startswith(prefix):
+            return prefix
+    return None
+
+
+def is_system_client_id(client_id: object) -> bool:
+    """True when `client_id` has the shape of an id this system mints (Phase 20, D-02).
+
+    The shape is a 36-character string that starts with one of the three family prefixes
+    (normal order, algo order, emergency close). A UI order that happens to carry such an id
+    is classified as a system id too; the reconcile compare then reports it as
+    UNTRACKED_SYSTEM_ORDER, still a divergence. The predicate grants no sweep right.
+    Anything that is not a string is False.
+    """
+    return _family_prefix(client_id) is not None
+
+
+def is_close_client_id(client_id: object) -> bool:
+    """True when `client_id` has the shape of an emergency-close id (``xc-`` family)."""
+    return _family_prefix(client_id) == _CLOSE_PREFIX
+
+
+def plan_hash_prefix_of(client_id: object) -> str | None:
+    """The 29-character plan-hash prefix shared by the three id families, or None.
+
+    An entry id (plan_hash[:32]), an algo id (plan_hash[:31]) and a close id (plan_hash[:29])
+    of one plan all agree on their first 29 plan-hash characters, so this is the key that ties
+    an exchange order back to its plan. Two different plans that collide on 29 hex characters
+    would be treated as one owner (probability 2^-116, accepted). A non-system id gives None.
+    """
+    prefix = _family_prefix(client_id)
+    if prefix is None or not isinstance(client_id, str):
+        return None
+    start = len(prefix)
+    return client_id[start : start + _COMMON_PLAN_PREFIX_LEN]
+
+
+def role_of_client_id(client_id: object) -> str | None:
+    """The `OrderRole` value encoded in a normal or algo id, or None.
+
+    Only the normal (x-) and algo (xa-) families carry a role code. A close id (xc-), a
+    foreign id and an unknown role code give None.
+    """
+    prefix = _family_prefix(client_id)
+    if not isinstance(client_id, str):
+        return None
+    if prefix == _CLIENT_PREFIX:
+        code = client_id[len(prefix) + _CLIENT_PLAN_SLICE_LEN :]
+    elif prefix == _ALGO_PREFIX:
+        code = client_id[len(prefix) + _ALGO_PLAN_SLICE_LEN :]
+    else:
+        return None
+    return _ROLE_BY_CODE.get(code)
+
+
 __all__ = [
     "ROLE_CODES",
+    "SYSTEM_ID_PREFIXES",
+    "is_close_client_id",
+    "is_system_client_id",
+    "plan_hash_prefix_of",
+    "role_of_client_id",
     "derive_client_order_id",
     "derive_algo_client_id",
     "derive_close_order_id",

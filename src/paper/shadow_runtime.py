@@ -24,7 +24,11 @@ every message leaves through `send_shadow_alert`, the confirm callbacks and the 
 all of which build their text with the one composer.
 
 Threads: the event loop runs the Telegram application and the poller; every synchronous store
-call of a press (`dispatch_callback`) and of a poll step runs through `asyncio.to_thread`.
+call of a press (`dispatch_callback`) and of a poll step runs through `asyncio.to_thread`, except
+the confirm TTL sweep (`ConfirmBook.expire_due`): it runs on the one `StoreExecutor` writer
+thread (plan 24-05, D-25, P16R-03), never on the loop thread. The sweep may adopt a stored CONFIRM
+and call `_on_confirmed` there; that hook only builds drivers under the coordinator lock (the same
+code the poll step already runs on a worker thread) and touches nothing loop-bound.
 `ShadowLedger` and `ShadowReservations` serialise on the ledger lock; the position table has its
 own lock (the coordinator lock).
 
@@ -63,6 +67,7 @@ from src.domain.journal import JournalEvent, correlated_event_id
 from src.domain.registry import ParameterSet
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.ops.store_executor import StoreExecutor
 from src.paper.attribution import (
     EVENT_CONFIRM_EXPIRED,
     EVENT_CONFIRMED,
@@ -95,6 +100,7 @@ from src.paper.shadow_confirm import (
     TERMINAL_CONFIRM_EVENTS,
     ConfirmBook,
     ConfirmStores,
+    finalize_expired_cards,
     make_confirm_callbacks,
 )
 from src.paper.shadow_fill import (
@@ -232,20 +238,24 @@ class FillContext:
 class LedgerRiskInputs:
     """The `RiskInputsProvider` port (`market_inputs.py`) bound to a `ShadowLedger` (D-17).
 
-    Built by `bind_risk_inputs`; the two members are functions over the ledger rather than
+    Built by `bind_risk_inputs`; the three members are functions over the ledger rather than
     methods, so there is no class in `src` that implements the port with invented state
-    (`tests/test_paper_market_inputs.py` keeps asserting that).
+    (`tests/test_paper_market_inputs.py` keeps asserting that). `equity_and_thresholds` is the
+    equity to size with and the absolute portfolio thresholds, both as of the instant
+    (16-DEC-EQUITY-BASE).
     """
 
     open_positions: Callable[[datetime], Sequence[OpenPosition]]
     daily_loss_quote: Callable[[datetime], Decimal | None]
+    equity_and_thresholds: Callable[[datetime], tuple[Decimal, dict[str, Any]]]
 
 
 def bind_risk_inputs(ledger: ShadowLedger) -> LedgerRiskInputs:
-    """The open positions (fills and still-valid reservations) and the simulated daily loss."""
+    """Open positions (fills and still-valid reservations), daily loss, equity and thresholds."""
     return LedgerRiskInputs(
         open_positions=lambda at_utc: tuple(ledger.risk_inputs(at_utc)[0]),
         daily_loss_quote=lambda at_utc: ledger.risk_inputs(at_utc)[1],
+        equity_and_thresholds=lambda at_utc: ledger.equity_and_thresholds(at_utc),
     )
 
 
@@ -310,6 +320,13 @@ class _BotProxy:
             chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
         )
 
+    async def edit_message_reply_markup(
+        self, *, chat_id: str | int, message_id: int, reply_markup: Any = None
+    ) -> object:
+        return await self._require().edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=reply_markup
+        )
+
 
 def _approval_dict(approval: Approval) -> dict[str, str | None]:
     """The approval row as the paper record assembler reads it (the measured timestamps)."""
@@ -357,6 +374,7 @@ class ShadowCoordinator:
         stores: ShadowRuntimeStores,
         bot: TelegramTextBot | None,
         chat_id: int,
+        authorized_user_ids: frozenset[int],
         clock: Callable[[], datetime],
         ledger: ShadowLedger,
         public: ShadowPublicFeed,
@@ -370,9 +388,18 @@ class ShadowCoordinator:
         application_factory: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         require_shadow(mode)
+        # Phase 23 (D-02): the allow-list is required and never allow-all. The members are never
+        # put in the message.
+        if (
+            not isinstance(authorized_user_ids, frozenset)
+            or not authorized_user_ids
+            or any(isinstance(m, bool) or not isinstance(m, int) for m in authorized_user_ids)
+        ):
+            raise ValueError("authorized_user_ids must be a non-empty frozenset of int user ids")
         self._mode = mode
         self._stores = stores
         self._chat_id = chat_id
+        self._authorized_user_ids = authorized_user_ids
         self._clock = clock
         self._ledger = ledger
         self._public = public
@@ -394,6 +421,10 @@ class ShadowCoordinator:
         self._telegram_errors: dict[str, int] = {}
         self._conflict_logged = False
         self._lost: list[str] = []
+        # D-25 / P16R-03: the confirm TTL sweep writes to the stores, so it runs on the one
+        # ordered writer thread. The coordinator owns the executor and closes it in `stop()`.
+        self._store_executor = StoreExecutor()
+        self._stopped = False
 
         self._book = ShadowApprovalBook(stores, clock=clock)
         self._reservations = ShadowReservations(ledger, stores, basis_for=self._basis_for)
@@ -406,9 +437,15 @@ class ShadowCoordinator:
             on_confirmed=self._on_confirmed,
             recheck=self._open_check,
             reservations=self._reservations,
+            sizing=self._basis_for,
         )
         self._callbacks = make_confirm_callbacks(
-            approvals=self._book, confirm=self._confirm, bot=self._bot, mode=mode, sleep=sleep
+            approvals=self._book,
+            confirm=self._confirm,
+            bot=self._bot,
+            mode=mode,
+            sleep=sleep,
+            stores=stores,
         )
         self._reply = make_shadow_reply_fn(
             self._bot, mode=mode, clock=clock, book=self._book, confirm_book=self._confirm
@@ -461,15 +498,19 @@ class ShadowCoordinator:
 
         The resolver, the dispatcher and the reply function are the SHADOW ones (16-04, 16-11);
         the dispatcher runs the synchronous `dispatch_callback` off the event loop. The chat gate
-        is `authorized_chat_gate` (D-16); user-id authorization is Phase 23.
+        is `authorized_chat_gate` (D-16); since Phase 23 the user and chat-type gate is
+        `authorized_user_gate` over the required allow-list (D-01, D-02).
         """
         return {
             "authorized_chat_id": self._chat_id,
+            "authorized_user_ids": self._authorized_user_ids,
             "binding_context_resolver": self._book.resolve,
             "dispatch": self._dispatch,
             "reply_text_fn": self._reply,
             "confirm_handler": self._callbacks.confirm_handler,
             "approved_handler": self._callbacks.approved_handler,
+            "finalize_message": self._callbacks.finalize_message,
+            "error_journal": self._stores.record_journal,
             "clock": self._clock,
         }
 
@@ -531,6 +572,7 @@ class ShadowCoordinator:
             exposure_quote=verdict.sized.quantity * _adverse_entry(signal, plan),
             reason_codes=reasons,
             now_utc=now,
+            sized=verdict.sized,
             sleep=self._sleep,
         )
         # The parents exist now (the alert persisted them first), so the context can be journaled.
@@ -806,9 +848,23 @@ class ShadowCoordinator:
         for position in active:
             await self._advance(position, settled[position.reservation.symbol])
         await asyncio.to_thread(self._sweep, now)
-        # The confirm book is driven by the callback handlers on this thread, so its TTL sweep runs
-        # here too (its state is not shared with the worker thread).
-        self._confirm.expire_due(now)
+        if self._stopped:
+            return  # the runtime stopped the chain while this step ran: no sweep after the drain
+        # The TTL sweep journals EXPIRED events (store writes): it goes through the ordered writer
+        # and never blocks this loop (P16R-03). A cancelled step does not cancel the sweep, which
+        # is idempotent (a second call writes nothing).
+        expired = await self._store_executor.write(self._confirm.expire_due, now)
+        # D-06: a delivered card whose TTL just ran out loses its keyboard (keyboard-only edit,
+        # the card text stays). No sweep at startup: raw tokens and message ids do not survive a
+        # restart (expire_on_restart journals RUNTIME_RESTART as before).
+        await finalize_expired_cards(
+            confirm=self._confirm,
+            bot=self._bot,
+            chat_id=self._chat_id,
+            approval_ids=expired,
+            sleep=self._sleep,
+            stores=self._stores,
+        )
 
     async def _advance(self, position: _Position, horizon: datetime) -> None:
         symbol = position.reservation.symbol
@@ -1119,8 +1175,9 @@ class ShadowCoordinator:
         if approve is not None and approve.status is ApprovalResult.APPROVED:
             return self._approved_records(plan, approve, assemble)
         if any(row is not None and row.status is ApprovalResult.EXPIRED for row in (approve, skip)):
-            # The restart sweep decides ONE row of a plan EXPIRED (the database allows one decided
-            # approval per plan); the sibling stays PENDING with a token nobody holds any more.
+            # The restart sweep decides every PENDING row of an undecided plan EXPIRED (EXPIRED
+            # rows are outside the one-decided-per-plan index since Alembic 0014, D088); a plan
+            # with an APPROVED or SKIPPED row was answered by the branches above.
             return assemble(ShadowOutcome(approval_rejection_reason=REASON_RUNTIME_RESTART))
         for row in (approve, skip):
             if row is not None and any(
@@ -1245,13 +1302,20 @@ class ShadowCoordinator:
         self._application = application
 
     async def stop(self) -> None:
-        """Stop the application in the reverse order of `start` (idempotent)."""
+        """Stop the application in the reverse order of `start`, then drain the writer (idempotent).
+
+        The store executor is closed last: a sweep in flight finishes (no write is cut off) and a
+        poll step that runs afterwards skips its sweep. The close does not block the loop.
+        """
+        self._stopped = True
         application, self._application = self._application, None
-        if application is None:
-            return
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        try:
+            if application is not None:
+                await application.updater.stop()
+                await application.stop()
+                await application.shutdown()
+        finally:
+            await self._store_executor.aclose()
 
     async def on_telegram_error(self, update: object, context: Any) -> None:
         """The application error handler: log the class, count it, change nothing.
@@ -1278,9 +1342,12 @@ class ShadowCoordinator:
             self._conflict_logged = True
             log.error("paper.shadow.bot_token_conflict", rule=BOT_TOKEN_RULE)
 
-    def expire_due(self) -> list[str]:
-        """Journal EXPIRED for every confirm past its TTL (reason CONFIRM_TTL_ELAPSED)."""
-        return self._confirm.expire_due(self._clock())
+    async def expire_due(self) -> list[str]:
+        """Journal EXPIRED for every confirm past its TTL (reason CONFIRM_TTL_ELAPSED).
+
+        Runs on the store writer thread (D-25); raises `RuntimeError` after `stop()`.
+        """
+        return await self._store_executor.write(self._confirm.expire_due, self._clock())
 
 
 class SnapshotSource(Protocol):
@@ -1299,6 +1366,7 @@ class ShadowWiring:
 
     stores: ShadowRuntimeStores
     chat_id: int
+    authorized_user_ids: frozenset[int]
     bot: TelegramTextBot | None = None
     confirm_ttl_seconds: int = CONFIRM_TTL_SECONDS_DEFAULT
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
@@ -1335,6 +1403,7 @@ def build_coordinator(
             stores=wiring.stores,
             bot=wiring.bot,
             chat_id=wiring.chat_id,
+            authorized_user_ids=wiring.authorized_user_ids,
             clock=clock,
             ledger=ledger,
             public=public,

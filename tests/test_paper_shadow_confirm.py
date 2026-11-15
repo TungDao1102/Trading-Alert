@@ -53,8 +53,10 @@ from src.paper.shadow_confirm import (
     make_confirm_callbacks,
     render_confirm_card,
 )
+from src.paper.shadow_ledger import ReservationBasis
 
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
     OTHER_CHAT_ID,
     OTHER_USER_ID,
@@ -68,9 +70,12 @@ from tests.shadow_fakes import (
     make_callback_update,
     make_shadow_plan,
     make_shadow_signal,
+    make_shadow_sized,
 )
 
 T_PRESS = T0 + timedelta(minutes=7)
+# The risk stage's figures for the fixture plan: what the ledger reserves and the card shows.
+SIZED = ReservationBasis(sized_realized_risk=Decimal("48"), planned_quantity=Decimal("0.08"))
 MARK = Decimal("50050")
 Recheck = Callable[[Any, TradePlan, datetime], RejectionReason | None]
 
@@ -89,6 +94,7 @@ class Harness:
         stores: Any = None,
         reservations: Any = None,
         dispatch_lag: timedelta = timedelta(0),
+        sizing: Callable[[Any, TradePlan], ReservationBasis | None] = lambda s, p: SIZED,
     ) -> None:
         self.trace: list[str] = []
         self.stores = InMemoryShadowStores(self.trace) if stores is None else stores
@@ -108,6 +114,7 @@ class Harness:
             recheck=recheck,
             on_confirmed=lambda a, p, t: self.confirmed.append((a, p, t)),
             reservations=reservations,
+            sizing=sizing,
             **kwargs,
         )
         self.callbacks = make_confirm_callbacks(
@@ -139,6 +146,7 @@ class Harness:
             exposure_quote=Decimal("0"),
             reason_codes=["SETUP_DETECTED"],
             now_utc=T0,
+            sized=make_shadow_sized(self.plan),
             sleep=self.sleep,
         )
 
@@ -166,6 +174,7 @@ class Harness:
             update,
             cast(Any, None),
             authorized_chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
             binding_context_resolver=self.book.resolve,
             dispatch=self.book.dispatch,
             reply_text_fn=self.reply,
@@ -225,7 +234,7 @@ async def test_approve_edits_the_alert_into_a_shadow_confirmation_card() -> None
     assert "Side: LONG" in text
     assert "Quantity: 0.08" in text
     assert "Notional: 4008 quote" in text  # 0.08 * 50100, the adverse edge of the entry zone
-    assert "Estimated loss at SL: 48 quote" in text  # 0.08 * (50100 - 49500)
+    assert "Estimated loss at SL (incl. costs): 48 quote" in text  # the risk stage's figure
     assert "Mark price: 50050" in text
     assert "Entry (adverse edge): 50100" in text
     assert "Stop loss: 49500" in text
@@ -235,7 +244,13 @@ async def test_approve_edits_the_alert_into_a_shadow_confirmation_card() -> None
     assert format_time_pair(T_PRESS + timedelta(seconds=60)) in text
     # The text is exactly the composer's output (D-12, D-35).
     assert text == render_confirm_card(
-        h.signal, h.plan, mode=Mode.SHADOW, mark_price=MARK, now_utc=T_PRESS, ttl_seconds=60
+        h.signal,
+        h.plan,
+        mode=Mode.SHADOW,
+        mark_price=MARK,
+        now_utc=T_PRESS,
+        ttl_seconds=60,
+        sized=SIZED,
     )
     assert [data for _, data in keyboard_buttons(edit.reply_markup)] == [
         f"CNF:{short_id}",
@@ -250,6 +265,58 @@ async def test_approve_edits_the_alert_into_a_shadow_confirmation_card() -> None
     assert payload(issued[0])["delivery"] == "edit"
     approved = [a for a in h.stores.approvals.values() if a.status == ApprovalResult.APPROVED]
     assert len(approved) == 1
+
+
+def test_the_card_shows_the_risk_stage_figures_not_the_planner_quantity() -> None:
+    signal = make_shadow_signal(1)
+    plan = make_shadow_plan(signal)
+    sized = ReservationBasis(sized_realized_risk=Decimal("31.25"), planned_quantity=Decimal("0.05"))
+
+    text = render_confirm_card(
+        signal, plan, mode=Mode.SHADOW, mark_price=MARK, now_utc=T_PRESS, sized=sized
+    )
+
+    assert plan.quantity_after_rounding == Decimal("0.08"), "the planner quantity differs"
+    assert "Quantity: 0.05" in text
+    assert "Notional: 2505 quote" in text  # 0.05 x 50100
+    assert "Estimated loss at SL (incl. costs): 31.25 quote" in text
+    assert "0.08" not in text
+
+
+def test_a_card_without_a_sizing_basis_says_unavailable_and_never_the_planner_figure() -> None:
+    signal = make_shadow_signal(1)
+    plan = make_shadow_plan(signal)
+
+    text = render_confirm_card(
+        signal, plan, mode=Mode.SHADOW, mark_price=MARK, now_utc=T_PRESS, sized=None
+    )
+
+    assert "Quantity: unavailable" in text
+    assert "Notional: unavailable" in text
+    assert "Estimated loss at SL (incl. costs): unavailable" in text
+    assert "0.08" not in text and "4008" not in text
+
+
+def test_the_card_composer_requires_the_sizing_basis() -> None:
+    signal = make_shadow_signal(1)
+    plan = make_shadow_plan(signal)
+    composer: Callable[..., str] = render_confirm_card
+
+    with pytest.raises(TypeError):
+        composer(signal, plan, mode=Mode.SHADOW, mark_price=MARK, now_utc=T_PRESS)
+
+
+async def test_a_sizing_port_that_raises_gives_an_unavailable_card_and_blocks_nothing() -> None:
+    def broken(signal: Any, plan: TradePlan) -> ReservationBasis | None:
+        raise RuntimeError("no plan context")
+
+    h = Harness(sizing=broken)
+
+    await h.approve()
+
+    text = h.bot.edited[0].text
+    assert "Quantity: unavailable" in text
+    assert "Estimated loss at SL (incl. costs): unavailable" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -329,6 +396,7 @@ async def test_the_card_is_never_stamped_before_the_approval_it_follows(
         mark_price=MARK,
         now_utc=entry.issued_at_utc,
         ttl_seconds=60,
+        sized=SIZED,
     )
     assert body["confirm_requested_at_utc"] == entry.issued_at_utc.isoformat()
     sim = records[1]

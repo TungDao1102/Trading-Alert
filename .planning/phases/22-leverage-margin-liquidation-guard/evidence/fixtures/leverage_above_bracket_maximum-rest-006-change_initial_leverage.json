@@ -1,0 +1,17 @@
+{
+  "case_id": "leverage_above_bracket_maximum",
+  "index": 6,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "REJECTED_DEFINITIVE",
+      "code": -4028,
+      "http_class": "BAD_REQUEST",
+      "message": "Leverage 126 is not valid",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "change_initial_leverage",
+    "summary": {}
+  }
+}

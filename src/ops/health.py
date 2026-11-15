@@ -8,9 +8,10 @@ orders. Each probe is a pure function of caller-supplied inputs plus
 injected `now_utc` (never the wall clock) that returns a frozen
 `HealthCheckResult` and journals exactly one `HEALTH_CHECK` JournalEvent.
 `run_health_checks` aggregates the probe results: any FAIL blocks
-enablement (fail-closed per D-04 precedent).
+enablement (fail-closed per D-04 precedent). A DEGRADED result is decided per runtime
+mode (plan 24-22, DECISIONS D056): see `run_health_checks`.
 
-The module is dependency-free: stdlib + `src/domain/journal.py` only.
+The module is dependency-free: stdlib + `src/domain/journal.py` and `src/domain/enums.py` only.
 No Binance SDK, no python-telegram-bot, no SQLAlchemy, no Pydantic, no
 Polars. The Telegram delivery probe consumes a narrow Protocol-typed
 notify surface (mirrors `src/adapters/telegram_notify.py:TelegramBot`
@@ -20,12 +21,14 @@ structurally) so this module never imports PTB directly.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Protocol
 
+from src.domain.enums import RejectionReason
 from src.domain.journal import JournalEvent, content_hash_event_id
 
 # --------------------------------------------------------------------------- #
@@ -37,6 +40,18 @@ STATUS_FAIL: str = "FAIL"
 STATUS_DEGRADED: str = "DEGRADED"
 
 _STATUSES: frozenset[str] = frozenset({STATUS_PASS, STATUS_FAIL, STATUS_DEGRADED})
+
+
+class HealthRuntimeMode(StrEnum):
+    """The runtime mode a verdict is judged for (D056). There is no default and no TESTNET.
+
+    The values equal those of `src.adapters.binance_client.Environment` (a `StrEnum` as well), so
+    a caller may pass its `Environment` member; this module does not import the adapter layer.
+    """
+
+    DEMO = "DEMO"
+    LIVE = "LIVE"
+
 
 # --------------------------------------------------------------------------- #
 # Canonical check-name vocabulary — one per SECURITY_AND_OPERATIONS section 4
@@ -155,16 +170,35 @@ class HealthVerdict:
     A PASS verdict is structurally complete (09-REVIEW WR-08): it must
     carry exactly one result per `ALL_CHECK_NAMES` entry and no FAIL —
     so a hand-built or partial "OK" verdict cannot unlock enablement.
+
+    D056 (plan 24-22): `mode` is the runtime mode the verdict was judged for (None only for the
+    legacy call without a mode, which keeps the old rule that DEGRADED passes) and
+    `demo_degraded_allowed` records that the explicit DEMO flag was given. An "OK" verdict that
+    holds a DEGRADED result must be a legacy verdict or a DEMO verdict with the flag; a LIVE
+    verdict with a DEGRADED result is never "OK", and the flag is only valid in DEMO.
     """
 
     is_no_trade: bool
     reason_code: str
     results: tuple[HealthCheckResult, ...]
+    mode: HealthRuntimeMode | None = None
+    demo_degraded_allowed: bool = False
+
+    @property
+    def degraded_names(self) -> tuple[str, ...]:
+        """The check names that reported DEGRADED, in result order."""
+        return tuple(r.check_name for r in self.results if r.status == STATUS_DEGRADED)
 
     def __post_init__(self) -> None:
+        if self.mode is not None and not isinstance(self.mode, HealthRuntimeMode):
+            raise ValueError("HealthVerdict: mode must be a HealthRuntimeMode or None")
+        if not isinstance(self.demo_degraded_allowed, bool):
+            raise TypeError("HealthVerdict: demo_degraded_allowed must be a bool")
+        if self.demo_degraded_allowed and self.mode is not HealthRuntimeMode.DEMO:
+            raise ValueError("HealthVerdict: demo_degraded_allowed is only valid in DEMO mode")
         if not isinstance(self.reason_code, str) or self.reason_code == "":
             raise ValueError("reason_code must be a non-empty string")
-        if self.is_no_trade and self.reason_code != "HEALTH_CHECK_FAILED":
+        if self.is_no_trade and self.reason_code != RejectionReason.HEALTH_CHECK_FAILED.value:
             raise ValueError(
                 "HealthVerdict: is_no_trade=True requires reason_code='HEALTH_CHECK_FAILED'"
             )
@@ -174,6 +208,15 @@ class HealthVerdict:
             raise ValueError(
                 "HealthVerdict: a PASS verdict requires exactly one non-FAIL "
                 "result per ALL_CHECK_NAMES entry"
+            )
+        if (
+            not self.is_no_trade
+            and self.degraded_names
+            and not _degraded_is_allowed(self.mode, self.demo_degraded_allowed)
+        ):
+            raise ValueError(
+                "HealthVerdict: an OK verdict cannot hold a DEGRADED result in this mode "
+                f"(mode={self.mode}, demo_degraded_allowed={self.demo_degraded_allowed})"
             )
 
 
@@ -192,6 +235,13 @@ def _is_complete_passing_set(results: Sequence[HealthCheckResult]) -> bool:
     )
 
 
+def _degraded_is_allowed(mode: HealthRuntimeMode | None, demo_degraded_allowed: bool) -> bool:
+    """D056: DEGRADED passes only for the legacy no-mode call or in DEMO with the explicit flag."""
+    if mode is None:
+        return True
+    return mode is HealthRuntimeMode.DEMO and demo_degraded_allowed
+
+
 def _require_utc_aware(value: datetime, field_name: str) -> None:
     if value.tzinfo is None:
         raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
@@ -199,30 +249,29 @@ def _require_utc_aware(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be UTC, got offset {value.utcoffset()}")
 
 
-def _build_payload_json(check_name: str, status: str, detail: str) -> str:
+def _build_payload_json(
+    check_name: str, status: str, detail: str, extra: Mapping[str, str | bool] | None = None
+) -> str:
     """Compact JSON serialisation for HEALTH_CHECK journal payloads.
 
-    Only `check_name`, `status`, and `detail` are ever written — no
+    Only `check_name`, `status`, and `detail` are written by the probes — no
     caller is permitted to route secret material through `detail`
     (T-9-15 mitigation: the log-scan test asserts zero secret
-    substrings across every emitted payload).
+    substrings across every emitted payload). The live producer (plan 24-22) adds the mode and
+    the diagnostic fields (Python version, application revision) through `extra`; without
+    `extra` the bytes are those of the Phase 9 probes.
     """
-    return json.dumps(
-        {"check": check_name, "status": status, "detail": detail},
-        separators=(",", ":"),
-    )
+    document: dict[str, str | bool] = {"check": check_name, "status": status, "detail": detail}
+    if extra:
+        for key, value in extra.items():
+            if key in document:
+                raise ValueError(f"health payload: extra key {key!r} collides with a base key")
+            document[key] = value
+    return json.dumps(document, separators=(",", ":"))
 
 
-def _record_health_check_event(
-    *,
-    journal: JournalLike,
-    check_name: str,
-    status: str,
-    detail: str,
-    now_utc: datetime,
-) -> None:
-    payload_json = _build_payload_json(check_name, status, detail)
-    event = JournalEvent(
+def _health_check_event(check_name: str, now_utc: datetime, payload_json: str) -> JournalEvent:
+    return JournalEvent(
         # 09-REVIEW WR-09: content-hash id — two different results of the
         # same probe at the same injected `now_utc` never collide.
         journal_event_id=content_hash_event_id(
@@ -239,7 +288,31 @@ def _record_health_check_event(
         correlation_id="execution_health",
         payload_json=payload_json,
     )
-    journal.record(event)
+
+
+def health_check_event(
+    result: HealthCheckResult, *, extra: Mapping[str, str | bool] | None = None
+) -> JournalEvent:
+    """The `HEALTH_CHECK` journal event of one probe result (plan 24-22, D-31).
+
+    Without `extra` this is exactly the event the probe itself journals. With `extra` (strings
+    and booleans only, e.g. `mode`, `python_version`, `app_revision`) the same event carries the
+    extra keys after the base ones and gets its own content-hash id.
+    """
+    payload_json = _build_payload_json(result.check_name, result.status, result.detail, extra)
+    return _health_check_event(result.check_name, result.observed_at_utc, payload_json)
+
+
+def _record_health_check_event(
+    *,
+    journal: JournalLike,
+    check_name: str,
+    status: str,
+    detail: str,
+    now_utc: datetime,
+) -> None:
+    payload_json = _build_payload_json(check_name, status, detail)
+    journal.record(_health_check_event(check_name, now_utc, payload_json))
 
 
 def _build_result(
@@ -400,9 +473,22 @@ def check_rest_error_rate(
     `total_count == 0` (no requests observed in the window) is treated
     as PASS — there is no evidence of errors, and blocking on an empty
     window would be a false positive, not a fail-closed posture.
+
+    `error_count > total_count` is an impossible observation (more errors
+    than requests, so the counters are broken or mixed windows): it is a
+    FAIL result, never a pass and never a rate above 1 (G2-035, IN-07).
+    Negative counts keep raising ValueError (caller programming error).
     """
     if error_count < 0 or total_count < 0:
         raise ValueError("check_rest_error_rate: counts must be >= 0")
+    if error_count > total_count:
+        return _build_result(
+            journal=journal,
+            check_name=CHECK_REST_ERROR_RATE,
+            status=STATUS_FAIL,
+            detail="REST error count exceeds request count; counters are inconsistent",
+            now_utc=now_utc,
+        )
     if total_count == 0:
         return _build_result(
             journal=journal,
@@ -513,7 +599,7 @@ async def check_telegram_delivery(
             detail=f"send_message raised {type(exc).__name__}",
             now_utc=now_utc,
         )
-    if response is None:
+    if response is None or response is False:
         return _build_result(
             journal=journal,
             check_name=CHECK_TELEGRAM_DELIVERY,
@@ -526,6 +612,55 @@ async def check_telegram_delivery(
         check_name=CHECK_TELEGRAM_DELIVERY,
         status=STATUS_PASS,
         detail="probe delivered",
+        now_utc=now_utc,
+    )
+
+
+def check_telegram_delivery_observed(
+    *,
+    last_delivery_ok: bool | None,
+    now_utc: datetime,
+    journal: JournalLike,
+) -> HealthCheckResult:
+    """FAIL when no Telegram delivery was observed yet, or the latest one failed (plan 24-22).
+
+    `check_telegram_delivery` sends a message and would message the owner on every health tick.
+    The live process instead reports the outcome of its latest real send (alert drain, startup
+    probe): None means none was observed, which fails closed.
+    """
+    if last_delivery_ok is None:
+        status, detail = STATUS_FAIL, "no telegram delivery observed"
+    elif last_delivery_ok:
+        status, detail = STATUS_PASS, "latest telegram delivery succeeded"
+    else:
+        status, detail = STATUS_FAIL, "latest telegram delivery failed"
+    return _build_result(
+        journal=journal,
+        check_name=CHECK_TELEGRAM_DELIVERY,
+        status=status,
+        detail=detail,
+        now_utc=now_utc,
+    )
+
+
+def check_not_applicable(
+    *,
+    check_name: str,
+    detail: str,
+    now_utc: datetime,
+    journal: JournalLike,
+) -> HealthCheckResult:
+    """A DEGRADED result for a check that does not describe this process (plan 24-22, D056).
+
+    The live process has no candle feed, so `last_closed_candle_time` is reported DEGRADED, not
+    PASS (it is not true) and not FAIL (nothing is wrong). Whether DEGRADED may pass is the
+    mode's decision in `run_health_checks`.
+    """
+    return _build_result(
+        journal=journal,
+        check_name=check_name,
+        status=STATUS_DEGRADED,
+        detail=detail,
         now_utc=now_utc,
     )
 
@@ -589,29 +724,69 @@ def check_orphaned_orders(
 # --------------------------------------------------------------------------- #
 
 
-def run_health_checks(*, results: Sequence[HealthCheckResult]) -> HealthVerdict:
+def run_health_checks(
+    *,
+    results: Sequence[HealthCheckResult],
+    mode: HealthRuntimeMode | str | None = None,
+    demo_degraded_allowed: bool = False,
+) -> HealthVerdict:
     """Aggregate probe results: any FAIL or gap blocks enablement (fail-closed).
+
+    The DEGRADED rows (D056, plan 24-22; a DEGRADED result means a check that does not describe
+    the process or cannot be fully judged, and nothing may quietly treat it as healthy):
+
+    ========  ==============================  ==========================================
+    mode      `demo_degraded_allowed`         a DEGRADED result
+    ========  ==============================  ==========================================
+    LIVE      must be False (else ValueError)  the verdict is not OK: it cannot enable any
+                                              order-capable capability
+    DEMO      False                           the verdict is not OK
+    DEMO      True (explicit flag)            the verdict may be OK; the flag is stored on
+                                              the verdict so it is journaled with the state
+    None      must be False (else ValueError)  LEGACY call without a mode (only
+                                              `scripts/demo_rehearsal.py`, until plan 24-29):
+                                              the old rule, DEGRADED passes. The verdict carries
+                                              no mode, so the live process refuses to enable
+                                              from it, and every `src` caller passes a mode.
+    ========  ==============================  ==========================================
 
     Args:
         results: The probe results to aggregate. Order is preserved for
             audit-trail readability.
+        mode: The runtime mode (`HealthRuntimeMode`, or an `Environment` member of the same
+            value). There is no TESTNET row: any other value raises ValueError.
+        demo_degraded_allowed: The explicit DEMO flag. It can never be set in LIVE.
 
     Returns:
         A `HealthVerdict` with `is_no_trade=True` and
         `reason_code="HEALTH_CHECK_FAILED"` when any result reports
         `STATUS_FAIL`, OR when the set is not exactly one result per
         `ALL_CHECK_NAMES` entry (a missing or duplicated probe means the
-        health state was not fully evaluated — 09-REVIEW WR-08);
+        health state was not fully evaluated — 09-REVIEW WR-08), OR when a result is
+        DEGRADED and the mode row above does not allow it;
         otherwise `is_no_trade=False` and `reason_code="OK"`.
-        `STATUS_DEGRADED` does not block (unchanged policy).
+
+    Raises:
+        ValueError: empty `results`, a mode that is not DEMO or LIVE, or the flag set outside DEMO.
+        TypeError: `demo_degraded_allowed` is not a bool.
     """
     if len(results) == 0:
         raise ValueError("run_health_checks: results must be non-empty")
-    passing = _is_complete_passing_set(results)
+    if not isinstance(demo_degraded_allowed, bool):
+        raise TypeError("run_health_checks: demo_degraded_allowed must be a bool")
+    resolved: HealthRuntimeMode | None = None if mode is None else HealthRuntimeMode(mode)
+    if demo_degraded_allowed and resolved is not HealthRuntimeMode.DEMO:
+        raise ValueError("run_health_checks: demo_degraded_allowed can only be set in DEMO mode")
+    has_degraded = any(r.status == STATUS_DEGRADED for r in results)
+    passing = _is_complete_passing_set(results) and (
+        not has_degraded or _degraded_is_allowed(resolved, demo_degraded_allowed)
+    )
     return HealthVerdict(
         is_no_trade=not passing,
-        reason_code="OK" if passing else "HEALTH_CHECK_FAILED",
+        reason_code="OK" if passing else RejectionReason.HEALTH_CHECK_FAILED.value,
         results=tuple(results),
+        mode=resolved,
+        demo_degraded_allowed=demo_degraded_allowed,
     )
 
 
@@ -631,9 +806,13 @@ __all__ = [
     "STATUS_FAIL",
     "STATUS_DEGRADED",
     "HealthCheckResult",
+    "HealthRuntimeMode",
     "HealthVerdict",
     "JournalLike",
     "NotifierLike",
+    "check_not_applicable",
+    "check_telegram_delivery_observed",
+    "health_check_event",
     "check_market_feed_freshness",
     "check_last_closed_candle_time",
     "check_ws_connection_state",

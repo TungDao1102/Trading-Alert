@@ -24,24 +24,36 @@ from binance_common.errors import (
     TooManyRequestsError,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    AccountInformationV3Response,
     AccountTradeListResponseInner,
     CancelAlgoOrderResponse,
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    ChangeInitialLeverageResponse,
+    ChangeMarginTypeResponse,
+    CheckServerTimeResponse,
     CurrentAllAlgoOpenOrdersResponseInner,
     CurrentAllOpenOrdersResponseInner,
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
     FuturesAccountBalanceV3Response,
+    FuturesAccountConfigurationResponse,
+    GetIncomeHistoryResponse,
+    MarkPriceResponse,
+    MarkPriceResponse1,
     NewAlgoOrderResponse,
     NewOrderResponse,
+    NotionalAndLeverageBracketsResponse,
+    OrderBookResponse,
     PositionInformationV3ResponseInner,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
+    SymbolConfigurationResponse,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+    ChangeMarginTypeMarginTypeEnum,
     NewAlgoOrderAlgoTypeEnum,
     NewAlgoOrderClosePositionEnum,
     NewAlgoOrderReduceOnlyEnum,
@@ -895,6 +907,13 @@ _READ_AND_MUTATING_CALLS = [
     lambda a: a.cancel_algo_order(client_algo_id=TEST_ONLY_CLIENT_ALGO_ID),
     lambda a: a.cancel_all_open_orders(symbol=TEST_ONLY_SYMBOL),
     lambda a: a.cancel_all_algo_open_orders(symbol=TEST_ONLY_SYMBOL),
+    lambda a: _gtd(a),  # quick task 261021-sj0
+    lambda a: a.stale_timestamp_read(  # quick task 261023-sj2
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    ),
+    # Phase 22 plan 22-05: the two symbol-configuration changes are refused after a ban too
+    lambda a: a.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type="ISOLATED"),
+    lambda a: a.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=5),
 ]
 
 
@@ -1030,7 +1049,8 @@ def test_module_has_no_retry_construct() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in {"to_thread", "sleep"}
     ]
-    assert attributes == ["to_thread"]
+    # `_call` (every ordinary request) and the one stale-clock call of quick task 261023-sj2.
+    assert attributes == ["to_thread", "to_thread"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1234,6 +1254,7 @@ async def test_user_trades_give_the_trade_id_key_space_as_text() -> None:
         "row_0_commission_asset": "USDT",
         "row_0_maker": "false",
         "row_0_time_ms": str(TEST_ONLY_UPDATE_MS),
+        "row_0_side": "BUY",  # quick task 261021-sj0: the trade summary gained its side
     }
 
 
@@ -1454,6 +1475,22 @@ _READ_CALLS = [
     lambda a: a.account_balance(),
     lambda a: a.mark_price(symbol=TEST_ONLY_SYMBOL),
     lambda a: a.symbol_filters(symbol=TEST_ONLY_SYMBOL),
+    # quick task 261021-sj0: the capture reads
+    lambda a: a.account_information(),
+    lambda a: a.account_balance_all(),
+    lambda a: a.account_config(),
+    lambda a: a.symbol_config(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.leverage_brackets(symbol=TEST_ONLY_SYMBOL),
+    lambda a: a.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=TEST_ONLY_UPDATE_MS),
+    lambda a: a.query_algo_order_by_algo_id(algo_id=1000000001),
+    lambda a: a.live_mark_price(symbol=TEST_ONLY_SYMBOL),
+    # quick task 261022-sj1
+    lambda a: a.server_time(),
+    lambda a: a.order_book(symbol=TEST_ONLY_SYMBOL),
+    # quick task 261023-sj2
+    lambda a: a.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    ),
 ]
 
 
@@ -1492,6 +1529,469 @@ async def test_a_public_refusal_raced_by_another_holder_becomes_probe_banned() -
 
     assert caught.value.reason == IP_BAN_418
     assert rest.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261021-sj0: the capture operations (flattened account reads, income history,
+# the algo query by id, the GTD limit and the live mark price).
+# --------------------------------------------------------------------------- #
+
+_RECV = TEST_ONLY_RECV_WINDOW_MS
+
+
+async def test_account_information_flattens_every_present_field() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "account_information_v3",
+        AccountInformationV3Response.from_dict(
+            {
+                "totalWalletBalance": "5000.12345678",
+                "availableBalance": "4800.00000000",
+                "totalCrossUnPnl": None,
+                "assets": [
+                    {"asset": "USDT", "walletBalance": "5000.12345678", "marginBalance": "5001"},
+                    {"asset": "BNB", "walletBalance": "0.00000000"},
+                ],
+                "positions": [{"symbol": "BTCUSDT", "positionSide": "BOTH", "leverage": "20"}],
+                "unlisted": "kept-as-additional-property",
+            }
+        ),
+    )
+
+    observation = await adapter.account_information()
+
+    assert rest.calls == [("account_information_v3", {"recv_window": _RECV})]
+    assert observation.ok is True and observation.operation == "account_information"
+    assert dict(observation.summary) == {
+        "totalWalletBalance": "5000.12345678",
+        "availableBalance": "4800.00000000",
+        "assets.0.asset": "USDT",
+        "assets.0.walletBalance": "5000.12345678",
+        "assets.0.marginBalance": "5001",
+        "assets.1.asset": "BNB",
+        "assets.1.walletBalance": "0.00000000",
+        "positions.0.symbol": "BTCUSDT",
+        "positions.0.positionSide": "BOTH",
+        "positions.0.leverage": "20",
+        "unlisted": "kept-as-additional-property",
+    }  # None dropped, zero balance kept, no truncated key
+
+
+async def test_account_balance_all_keeps_every_asset_and_every_field() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "futures_account_balance_v3",
+        FuturesAccountBalanceV3Response.from_dict(
+            [
+                {"asset": "USDT", "balance": "5000", "availableBalance": "4800", "updateTime": 7},
+                {"asset": "BNB", "balance": "0.00000000", "crossUnPnl": "0"},
+            ]
+        ),
+    )
+
+    observation = await adapter.account_balance_all()
+
+    assert rest.calls == [("futures_account_balance_v3", {"recv_window": _RECV})]
+    assert observation.operation == "account_balance_all"
+    assert dict(observation.summary) == {
+        "0.asset": "USDT",
+        "0.balance": "5000",
+        "0.availableBalance": "4800",
+        "0.updateTime": "7",
+        "1.asset": "BNB",
+        "1.balance": "0.00000000",
+        "1.crossUnPnl": "0",
+    }
+
+
+async def test_account_config_gives_the_wire_names_with_booleans_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "futures_account_configuration",
+        FuturesAccountConfigurationResponse.from_dict(
+            {"feeTier": 0, "canTrade": True, "dualSidePosition": False, "multiAssetsMargin": False}
+        ),
+    )
+
+    observation = await adapter.account_config()
+
+    assert rest.calls == [("futures_account_configuration", {"recv_window": _RECV})]
+    assert observation.operation == "account_config"
+    assert dict(observation.summary) == {
+        "feeTier": "0",
+        "canTrade": "true",
+        "dualSidePosition": "false",
+        "multiAssetsMargin": "false",
+    }
+
+
+async def test_symbol_config_sends_the_symbol_and_flattens_the_rows() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "symbol_configuration",
+        SymbolConfigurationResponse.from_dict(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "marginType": "CROSSED",
+                    "isAutoAddMargin": False,
+                    "leverage": 20,
+                }
+            ]
+        ),
+    )
+
+    observation = await adapter.symbol_config(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        ("symbol_configuration", {"symbol": TEST_ONLY_SYMBOL, "recv_window": _RECV})
+    ]
+    assert observation.operation == "symbol_config"
+    assert dict(observation.summary) == {
+        "0.symbol": "BTCUSDT",
+        "0.marginType": "CROSSED",
+        "0.isAutoAddMargin": "false",
+        "0.leverage": "20",
+    }
+
+
+async def test_leverage_brackets_unwrap_the_one_of_wrapper() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "notional_and_leverage_brackets",
+        NotionalAndLeverageBracketsResponse.from_dict(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "brackets": [
+                        {"bracket": 1, "initialLeverage": 125, "notionalCap": 50000},
+                        {"bracket": 2, "initialLeverage": 100},
+                    ],
+                }
+            ]
+        ),
+    )
+
+    observation = await adapter.leverage_brackets(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [
+        ("notional_and_leverage_brackets", {"symbol": TEST_ONLY_SYMBOL, "recv_window": _RECV})
+    ]
+    assert observation.operation == "leverage_brackets"
+    assert dict(observation.summary) == {
+        "0.symbol": "BTCUSDT",
+        "0.brackets.0.bracket": "1",
+        "0.brackets.0.initialLeverage": "125",
+        "0.brackets.0.notionalCap": "50000",
+        "0.brackets.1.bracket": "2",
+        "0.brackets.1.initialLeverage": "100",
+    }
+
+
+async def test_a_single_symbol_bracket_answer_flattens_too() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "notional_and_leverage_brackets",
+        NotionalAndLeverageBracketsResponse.from_dict(
+            {"symbol": "BTCUSDT", "brackets": [{"bracket": 1, "initialLeverage": 125}]}
+        ),
+    )
+
+    observation = await adapter.leverage_brackets(symbol=TEST_ONLY_SYMBOL)
+
+    assert dict(observation.summary) == {
+        "symbol": "BTCUSDT",
+        "brackets.0.bracket": "1",
+        "brackets.0.initialLeverage": "125",
+    }
+
+
+async def test_the_flat_summary_scrubs_caps_and_truncates() -> None:
+    register_runtime_secret(TEST_ONLY_SECRET)
+    adapter, rest, _ = _adapter()
+    long_text = "x" * (ERROR_MESSAGE_MAX_CHARS + 50)
+    rest.script(
+        "futures_account_configuration",
+        FuturesAccountConfigurationResponse.from_dict(
+            {"feeTier": 0, "note": f"has {TEST_ONLY_SECRET} inside", "long": long_text}
+        ),
+    )
+    observation = await adapter.account_config()
+    assert TEST_ONLY_SECRET not in observation.summary["note"]
+    assert REDACTED in observation.summary["note"]
+    assert observation.summary["long"] == "x" * ERROR_MESSAGE_MAX_CHARS
+
+    many = [{"asset": f"A{index}"} for index in range(binance_probe.FLAT_SUMMARY_MAX_KEYS + 25)]
+    rest.script("futures_account_balance_v3", FuturesAccountBalanceV3Response.from_dict(many))
+    big = await adapter.account_balance_all()
+    assert big.summary["truncated"] == "true"
+    assert len(big.summary) == binance_probe.FLAT_SUMMARY_MAX_KEYS + 1
+    assert "0.asset" in big.summary and f"{len(many) - 1}.asset" not in big.summary
+
+
+async def test_the_flat_summary_of_an_empty_answer_is_empty() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("futures_account_balance_v3", [])
+    observation = await adapter.account_balance_all()
+    assert observation.ok is True and dict(observation.summary) == {}
+
+
+@pytest.mark.parametrize(
+    ("name", "sdk", "call"),
+    [
+        ("account_information", "account_information_v3", lambda a: a.account_information()),
+        ("account_balance_all", "futures_account_balance_v3", lambda a: a.account_balance_all()),
+        ("account_config", "futures_account_configuration", lambda a: a.account_config()),
+        (
+            "symbol_config",
+            "symbol_configuration",
+            lambda a: a.symbol_config(symbol=TEST_ONLY_SYMBOL),
+        ),
+        (
+            "leverage_brackets",
+            "notional_and_leverage_brackets",
+            lambda a: a.leverage_brackets(symbol=TEST_ONLY_SYMBOL),
+        ),
+    ],
+)
+async def test_the_flat_reads_record_an_exchange_error_as_data(
+    name: str, sdk: str, call: Any
+) -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(sdk, BadRequestError(status_code=-2015, error_message="Invalid API-key."))
+    observation = await call(adapter)
+    assert observation.ok is False and observation.operation == name
+    assert observation.error is not None and observation.error.code == -2015
+
+
+async def test_income_history_sends_symbol_and_start_time_only() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "get_income_history",
+        [
+            GetIncomeHistoryResponse(
+                symbol="BTCUSDT",
+                income_type="COMMISSION",
+                income="-0.02400000",
+                asset="USDT",
+                info=f"8389765492 {TEST_ONLY_SECRET}",
+                time=TEST_ONLY_UPDATE_MS,
+                tran_id=9001,
+                trade_id="4411",
+            ),
+            GetIncomeHistoryResponse(
+                symbol="BTCUSDT",
+                income_type="REALIZED_PNL",
+                income="0.50000000",
+                asset="USDT",
+                time=TEST_ONLY_UPDATE_MS + 1,
+                tran_id=9002,
+                trade_id="4411",
+            ),
+        ],
+    )
+    register_runtime_secret(TEST_ONLY_SECRET)
+
+    observation = await adapter.income_history(
+        symbol=TEST_ONLY_SYMBOL, start_time_ms=TEST_ONLY_UPDATE_MS
+    )
+
+    assert rest.calls == [
+        (
+            "get_income_history",
+            {"symbol": TEST_ONLY_SYMBOL, "start_time": TEST_ONLY_UPDATE_MS, "recv_window": _RECV},
+        )
+    ]
+    assert observation.operation == "income_history"
+    summary = dict(observation.summary)
+    assert TEST_ONLY_SECRET not in summary["row_0_info"]
+    summary.pop("row_0_info")
+    assert summary == {
+        "count": "2",
+        "row_0_symbol": "BTCUSDT",
+        "row_0_income_type": "COMMISSION",
+        "row_0_income": "-0.02400000",
+        "row_0_asset": "USDT",
+        "row_0_time_ms": str(TEST_ONLY_UPDATE_MS),
+        "row_0_tran_id": "9001",
+        "row_0_trade_id": "4411",
+        "row_1_symbol": "BTCUSDT",
+        "row_1_income_type": "REALIZED_PNL",
+        "row_1_income": "0.50000000",
+        "row_1_asset": "USDT",
+        "row_1_time_ms": str(TEST_ONLY_UPDATE_MS + 1),
+        "row_1_tran_id": "9002",
+        "row_1_trade_id": "4411",
+    }
+
+
+@pytest.mark.parametrize("bad", [True, 0, -5])
+async def test_income_history_refuses_a_bad_start_time(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=bad)
+    with pytest.raises(TypeError):
+        await adapter.income_history(symbol=TEST_ONLY_SYMBOL, start_time_ms=1.5)  # type: ignore[arg-type]
+    assert rest.calls == []
+
+
+async def test_query_algo_order_by_algo_id_sends_the_int_id() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "query_algo_order",
+        QueryAlgoOrderResponse(
+            algo_id=1000000001, client_algo_id=TEST_ONLY_CLIENT_ALGO_ID, algo_status="NEW"
+        ),
+    )
+
+    observation = await adapter.query_algo_order_by_algo_id(algo_id=1000000001)
+
+    assert rest.calls == [("query_algo_order", {"algo_id": 1000000001, "recv_window": _RECV})]
+    assert observation.operation == "query_algo_order_by_algo_id"
+    assert dict(observation.summary) == {
+        "algo_id": "1000000001",
+        "client_algo_id": TEST_ONLY_CLIENT_ALGO_ID,
+        "algo_status": "NEW",
+    }
+
+
+@pytest.mark.parametrize("bad", [True, False, 0, -1, "1000000001", 1.0])
+async def test_query_algo_order_by_algo_id_refuses_a_bool_or_a_non_positive_id(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.query_algo_order_by_algo_id(algo_id=bad)
+    assert rest.calls == []
+
+
+async def test_new_gtd_limit_order_sends_gtd_and_the_int_good_till_date() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "new_order",
+        NewOrderResponse(
+            order_id=1,
+            client_order_id=TEST_ONLY_CLIENT_ORDER_ID,
+            status="NEW",
+            time_in_force="GTD",
+            good_till_date=TEST_ONLY_UPDATE_MS + 660_000,
+        ),
+    )
+
+    observation = await adapter.new_gtd_limit_order(
+        symbol=TEST_ONLY_SYMBOL,
+        side="BUY",
+        quantity=Decimal("0.0008"),
+        price=Decimal("50000.10"),
+        client_order_id=TEST_ONLY_CLIENT_ORDER_ID,
+        position_side="BOTH",
+        good_till_date_ms=TEST_ONLY_UPDATE_MS + 660_000,
+    )
+
+    assert rest.calls == [
+        (
+            "new_order",
+            {
+                "symbol": TEST_ONLY_SYMBOL,
+                "side": NewOrderSideEnum.BUY,
+                "type": NewOrderTypeEnum.LIMIT,
+                "position_side": "BOTH",
+                "time_in_force": NewOrderTimeInForceEnum.GTD,
+                "quantity": "0.0008",
+                "price": "50000.10",
+                "new_client_order_id": TEST_ONLY_CLIENT_ORDER_ID,
+                "good_till_date": TEST_ONLY_UPDATE_MS + 660_000,
+                "recv_window": _RECV,
+            },
+        )
+    ]
+    assert "reduce_only" not in rest.calls[0][1]
+    assert isinstance(rest.calls[0][1]["good_till_date"], int)
+    assert observation.operation == "new_gtd_limit_order"
+    assert observation.summary["good_till_date"] == str(TEST_ONLY_UPDATE_MS + 660_000)
+    assert observation.summary["time_in_force"] == "GTD"
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "1791360660000", None])
+async def test_new_gtd_limit_order_refuses_a_non_int_good_till_date(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(TypeError):
+        await _gtd(adapter, good_till_date_ms=bad)
+    assert rest.calls == []
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+async def test_new_gtd_limit_order_refuses_a_non_positive_good_till_date(bad: int) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(ValueError):
+        await _gtd(adapter, good_till_date_ms=bad)
+    assert rest.calls == []
+
+
+async def test_new_gtd_limit_order_keeps_the_money_and_enum_rules() -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises(TypeError):
+        await _gtd(adapter, quantity=0.0008)
+    with pytest.raises(ValueError):
+        await _gtd(adapter, price=Decimal(0))
+    with pytest.raises(ValueError):
+        await _gtd(adapter, side="HOLD")
+    assert rest.calls == []
+
+
+async def _gtd(adapter: BinanceProbeAdapter, **overrides: Any) -> ProbeObservation:
+    arguments: dict[str, Any] = {
+        "symbol": TEST_ONLY_SYMBOL,
+        "side": "BUY",
+        "quantity": Decimal("0.0008"),
+        "price": Decimal("50000.10"),
+        "client_order_id": TEST_ONLY_CLIENT_ORDER_ID,
+        "position_side": "BOTH",
+        "good_till_date_ms": TEST_ONLY_UPDATE_MS + 660_000,
+    }
+    arguments.update(overrides)
+    return await adapter.new_gtd_limit_order(**arguments)
+
+
+async def test_a_gtd_placement_timeout_is_recorded_once_and_never_retried() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("new_order", NetworkError("FAKE: connection reset"))
+    observation = await _gtd(adapter)
+    assert observation.ok is False
+    assert rest.names() == ["new_order"]
+
+
+async def test_live_mark_price_is_the_premium_index_mark_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "mark_price",
+        MarkPriceResponse(
+            actual_instance=MarkPriceResponse1(
+                symbol=TEST_ONLY_SYMBOL, mark_price="83748.12345678", time=TEST_ONLY_UPDATE_MS
+            )
+        ),
+    )
+
+    observation = await adapter.live_mark_price(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [("mark_price", {"symbol": TEST_ONLY_SYMBOL})]  # public: no recvWindow
+    assert observation.ok is True and observation.operation == "live_mark_price"
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "mark_price": "83748.12345678",
+        "exchange_time_utc": "2026-10-07T08:00:00+00:00",
+    }
+
+
+async def test_live_mark_price_records_an_unreadable_answer_as_data() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "mark_price",
+        MarkPriceResponse(
+            actual_instance=MarkPriceResponse1(symbol="ETHUSDT", mark_price="1", time=1)
+        ),
+    )
+    observation = await adapter.live_mark_price(symbol=TEST_ONLY_SYMBOL)
+    assert observation.ok is False
+    assert observation.error is not None and observation.error.message == "ValueError"
 
 
 # --------------------------------------------------------------------------- #
@@ -1554,6 +2054,24 @@ def test_every_public_coroutine_returns_observations_only() -> None:
         "account_balance",
         "mark_price",
         "symbol_filters",
+        # quick task 261021-sj0
+        "account_information",
+        "account_balance_all",
+        "account_config",
+        "symbol_config",
+        "leverage_brackets",
+        "income_history",
+        "query_algo_order_by_algo_id",
+        "new_gtd_limit_order",
+        "live_mark_price",
+        # quick task 261022-sj1
+        "server_time",
+        "order_book",
+        # quick task 261023-sj2
+        "stale_timestamp_read",
+        # Phase 22 plan 22-05
+        "change_margin_type",
+        "change_initial_leverage",
     }
     assert {name: text for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {}
 
@@ -1568,3 +2086,315 @@ def test_the_return_walk_catches_a_raw_sdk_return(tmp_path: Path) -> None:
     )
     returns = _public_coroutine_returns(seeded)
     assert {name for name, text in returns.items() if text not in _ALLOWED_RETURNS} == {"leak"}
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261022-sj1: the server time and the depth read.
+# --------------------------------------------------------------------------- #
+
+
+async def test_server_time_is_the_exchange_clock_as_milliseconds_and_utc_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("check_server_time", CheckServerTimeResponse(server_time=1791360123456))
+
+    observation = await adapter.server_time()
+
+    assert rest.calls == [("check_server_time", {})]  # public: no recvWindow
+    assert observation.ok is True and observation.operation == "server_time"
+    assert dict(observation.summary) == {
+        "server_time_ms": "1791360123456",
+        "server_time_utc": "2026-10-07T08:02:03.456000+00:00",
+    }
+
+
+async def test_server_time_keeps_every_millisecond_digit() -> None:
+    adapter, rest, _ = _adapter()
+    for ms in (1791360123001, 1791360123999, 1791360123123):
+        rest.script("check_server_time", CheckServerTimeResponse(server_time=ms))
+        observation = await adapter.server_time()
+        assert observation.summary["server_time_ms"] == str(ms)
+
+
+async def test_server_time_records_an_unreadable_answer_as_data() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("check_server_time", CheckServerTimeResponse(server_time=None))
+    observation = await adapter.server_time()
+    assert observation.ok is False
+    assert observation.error is not None and observation.error.message == "ValueError"
+
+
+async def test_order_book_summarises_the_levels_as_text() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "order_book",
+        OrderBookResponse(
+            last_update_id=7,
+            E=1791360123456,
+            T=1791360123450,
+            bids=[["83900.10", "1.500"], ["83900.00", "2"]],
+            asks=[["83900.20", "0.250"], ["83900.30", "2"], ["83900.40", "10"]],
+        ),
+    )
+
+    observation = await adapter.order_book(symbol=TEST_ONLY_SYMBOL)
+
+    assert rest.calls == [("order_book", {"symbol": TEST_ONLY_SYMBOL, "limit": 20})]
+    assert observation.ok is True and observation.operation == "order_book"
+    assert dict(observation.summary) == {
+        "symbol": TEST_ONLY_SYMBOL,
+        "last_update_id": "7",
+        "bid_count": "2",
+        "ask_count": "3",
+        "bid_0_price": "83900.10",
+        "bid_0_quantity": "1.500",
+        "bid_1_price": "83900.00",
+        "bid_1_quantity": "2",
+        "ask_0_price": "83900.20",
+        "ask_0_quantity": "0.250",
+        "ask_1_price": "83900.30",
+        "ask_1_quantity": "2",
+        "ask_2_price": "83900.40",
+        "ask_2_quantity": "10",
+    }
+
+
+async def test_order_book_records_a_malformed_answer_as_data() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "order_book",
+        OrderBookResponse(last_update_id=7, E=1, T=1, bids=[["1", "1"]], asks=[["x", "1"]]),
+    )
+    observation = await adapter.order_book(symbol=TEST_ONLY_SYMBOL)
+    assert observation.ok is False
+    assert observation.error is not None and observation.error.message == "ValueError"
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261023-sj2: the stale-timestamp read (the -1021 answer).
+# --------------------------------------------------------------------------- #
+
+
+class _ClockAskingRest(FakeProbeRest):
+    """A fake whose `current_all_open_orders` asks the SDK clock like `send_request` does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock_values: list[int] = []
+
+    def current_all_open_orders(self, **kwargs: Any) -> Any:
+        import binance_common.utils as sdk_utils
+
+        self.clock_values.append(sdk_utils.get_timestamp())
+        return super().current_all_open_orders(**kwargs)
+
+
+async def test_the_stale_read_sends_the_clock_minus_the_given_milliseconds() -> None:
+    import binance_common.utils as sdk_utils
+
+    original = sdk_utils.get_timestamp
+    rest = _ClockAskingRest()
+    adapter, _, _ = _adapter(rest)
+    rest.script("current_all_open_orders", [])
+    before = original()
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    after = original()
+    assert observation.ok is True and observation.operation == "stale_timestamp_read"
+    (sent,) = rest.clock_values
+    assert before - 10_000 <= sent <= after - 10_000
+    assert observation.summary["timestamp_sent_ms"] == str(sent)
+    assert observation.summary["timestamp_behind_ms"] == "10000"
+    assert observation.summary["recv_window_ms"] == "5000"
+    assert observation.summary["clock_calls"] == "1"
+    assert observation.summary["count"] == "0"
+    assert rest.calls == [
+        ("current_all_open_orders", {"symbol": TEST_ONLY_SYMBOL, "recv_window": 5000})
+    ]
+    assert sdk_utils.get_timestamp is original  # the SDK clock is back
+
+
+async def test_the_stale_read_records_the_exchange_error_with_the_clock_facts() -> None:
+    rest = _ClockAskingRest()
+    adapter, _, _ = _adapter(rest)
+    rest.script(
+        "current_all_open_orders",
+        BadRequestError(
+            status_code=-1021,
+            error_message="Timestamp for this request is outside of the recvWindow.",
+        ),
+    )
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    assert observation.ok is False
+    assert observation.error is not None
+    assert observation.error.code == -1021
+    assert observation.error.http_class == "BAD_REQUEST"
+    assert "recvWindow" in observation.error.message
+    assert observation.summary["clock_calls"] == "1"
+    assert observation.summary["timestamp_behind_ms"] == "10000"
+
+
+async def test_a_read_that_never_asks_the_sdk_clock_says_so() -> None:
+    adapter, rest, _ = _adapter()  # the plain fake never asks the clock
+    rest.script("current_all_open_orders", [])
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    assert observation.summary["clock_calls"] == "0"
+    assert "timestamp_sent_ms" not in observation.summary
+
+
+async def test_the_sdk_clock_is_restored_after_an_exception_and_other_threads_see_real_time() -> (
+    None
+):
+    import binance_common.utils as sdk_utils
+
+    original = sdk_utils.get_timestamp
+    seen_in_other_thread: list[int] = []
+
+    class _Rest(_ClockAskingRest):
+        def current_all_open_orders(self, **kwargs: Any) -> Any:
+            worker = threading.Thread(
+                target=lambda: seen_in_other_thread.append(sdk_utils.get_timestamp())
+            )
+            worker.start()
+            worker.join()
+            raise NetworkError(error_message="boom")
+
+    rest = _Rest()
+    adapter, _, _ = _adapter(rest)
+    start = original()
+    observation = await adapter.stale_timestamp_read(
+        symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=60_000
+    )
+    assert observation.ok is False
+    assert sdk_utils.get_timestamp is original
+    (other,) = seen_in_other_thread
+    assert other >= start  # another thread is never made stale
+
+
+@pytest.mark.parametrize(
+    ("window", "behind"),
+    [(0, 10), (-1, 10), (5000, 0), (5000, -3), (True, 10), (5000, True), (5000.0, 10), (5000, 1.5)],
+)
+async def test_the_stale_read_refuses_a_window_or_offset_that_is_not_a_positive_int(
+    window: Any, behind: Any
+) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.stale_timestamp_read(
+            symbol=TEST_ONLY_SYMBOL, recv_window_ms=window, timestamp_behind_ms=behind
+        )
+    assert rest.calls == []
+
+
+async def test_the_stale_read_is_refused_after_a_ban_without_an_sdk_call() -> None:
+    adapter, rest, gate = _adapter()
+    rest.script(
+        "current_all_open_orders", TooManyRequestsError(error_message="slow", retry_after=3)
+    )
+    await adapter.open_orders(symbol=TEST_ONLY_SYMBOL)
+    assert gate.restriction() is not None
+    with pytest.raises(ProbeBanned):
+        await adapter.stale_timestamp_read(
+            symbol=TEST_ONLY_SYMBOL, recv_window_ms=5000, timestamp_behind_ms=10_000
+        )
+    assert len(rest.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-05: change_margin_type and change_initial_leverage (mutating, sent once).
+# --------------------------------------------------------------------------- #
+
+
+async def test_change_margin_type_sends_the_enum_member_once_and_records_code_and_msg() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script("change_margin_type", ChangeMarginTypeResponse(code=200, msg="success"))
+
+    observation = await adapter.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type="ISOLATED")
+
+    assert rest.calls == [
+        (
+            "change_margin_type",
+            {
+                "symbol": TEST_ONLY_SYMBOL,
+                "margin_type": ChangeMarginTypeMarginTypeEnum.ISOLATED,
+                "recv_window": _RECV,
+            },
+        )
+    ]
+    assert observation.operation == "change_margin_type"
+    assert observation.ok is True and observation.error is None
+    assert dict(observation.summary) == {"code": "200", "msg": "success"}
+
+
+@pytest.mark.parametrize("bad", ["isolated", "CROSS", "", "ISOLATED ", 1, None, True])
+async def test_change_margin_type_refuses_any_other_value_before_an_sdk_call(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type=bad)
+    assert rest.calls == []
+
+
+async def test_change_margin_type_records_an_exchange_error_as_data_and_never_retries() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "change_margin_type",
+        BadRequestError(status_code=-4046, error_message="No need to change margin type."),
+    )
+
+    observation = await adapter.change_margin_type(symbol=TEST_ONLY_SYMBOL, margin_type="ISOLATED")
+
+    assert len(rest.calls) == 1  # sent once
+    assert observation.ok is False and observation.error is not None
+    assert observation.error.code == -4046
+    assert observation.error.http_class == "BAD_REQUEST"
+    assert adapter.banned is False
+
+
+async def test_change_initial_leverage_sends_an_int_once_and_records_the_answer() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "change_initial_leverage",
+        ChangeInitialLeverageResponse(symbol="BTCUSDT", leverage=5, max_notional_value="5000000"),
+    )
+
+    observation = await adapter.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=5)
+
+    assert rest.calls == [
+        (
+            "change_initial_leverage",
+            {"symbol": TEST_ONLY_SYMBOL, "leverage": 5, "recv_window": _RECV},
+        )
+    ]
+    assert type(rest.calls[0][1]["leverage"]) is int
+    assert observation.operation == "change_initial_leverage"
+    assert dict(observation.summary) == {
+        "symbol": "BTCUSDT",
+        "leverage": "5",
+        "maxNotionalValue": "5000000",
+    }
+
+
+@pytest.mark.parametrize("bad", [0, -1, -20, True, False, 5.0, "5", None])
+async def test_change_initial_leverage_refuses_a_non_positive_or_non_int_leverage(bad: Any) -> None:
+    adapter, rest, _ = _adapter()
+    with pytest.raises((TypeError, ValueError)):
+        await adapter.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=bad)
+    assert rest.calls == []
+
+
+async def test_change_initial_leverage_records_an_exchange_error_and_never_retries() -> None:
+    adapter, rest, _ = _adapter()
+    rest.script(
+        "change_initial_leverage",
+        ServerError(status_code=503, error_message="busy"),
+    )
+
+    observation = await adapter.change_initial_leverage(symbol=TEST_ONLY_SYMBOL, leverage=5)
+
+    assert len(rest.calls) == 1
+    assert observation.ok is False and observation.error is not None
+    assert observation.error.category == "STATUS_UNKNOWN"  # a change is never re-sent

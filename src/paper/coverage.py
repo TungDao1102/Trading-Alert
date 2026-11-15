@@ -23,8 +23,10 @@ clock reads, no float (the package is float-scanned by `tests/test_domain_no_flo
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -801,6 +803,160 @@ class FreezeLine:
         return None if self.run_metadata is None else self.run_metadata.get("run_id")
 
 
+# --------------------------------------------------------------------------- #
+# Host witness ticks (quick task 261114-12e; 16-DEC-HOST-TICK): a second tick source.
+# --------------------------------------------------------------------------- #
+
+HOST_SOURCE = "host"
+# `<slot>-<tick id>.jsonl` under `<witness prefix>/<epoch_id>/`: the slot is UTC to the minute,
+# the tick id is 32 lowercase hex characters.
+_HOST_PATH = re.compile(r"(\d{8}T\d{4}Z)-([0-9a-f]{32})\.jsonl")
+_HOST_GITHUB_KEYS = ("run_id", "run_attempt", "event_name")
+
+
+@dataclass(frozen=True)
+class HostTick:
+    """One witness object of the host tick source, as the exporter read it.
+
+    `witnessed_at_utc` is the S3 provider's server time of the object (`rclone lsjson
+    --use-server-modtime`). It is the only time that decides lateness: the time written in the
+    line is host-controlled and can only narrow the result. `data` is the object's bytes (None
+    when they are not available or not UTF-8); `size` is the byte count the listing reported.
+    """
+
+    path: str
+    witnessed_at_utc: datetime
+    size: int
+    data: bytes | None
+
+    def __post_init__(self) -> None:
+        _require_utc("witnessed_at_utc", self.witnessed_at_utc)
+        if isinstance(self.size, bool) or not isinstance(self.size, int) or self.size < 0:
+            raise ValueError(f"size must be a non-negative integer, got {self.size!r}")
+
+
+class HostTickVerdict(StrEnum):
+    """What a witnessed host tick amounts to; the first failing check wins (Design order)."""
+
+    UNREADABLE = "UNREADABLE"
+    NON_CLEAN = "NON_CLEAN"
+    WRONG_SOURCE = "WRONG_SOURCE"
+    SCHEDULE_MISMATCH = "SCHEDULE_MISMATCH"
+    WRONG_EPOCH_OR_HASH = "WRONG_EPOCH_OR_HASH"
+    OUT_OF_SLOT = "OUT_OF_SLOT"
+    DUPLICATE = "DUPLICATE"
+    LATE_BEYOND_GRACE = "LATE_BEYOND_GRACE"
+    SATISFIED = "SATISFIED"
+
+
+@dataclass(frozen=True)
+class HostTickResult:
+    """The verdict for one judged host tick; `slot_utc` is the slot of its witness time."""
+
+    path: str
+    slot_utc: datetime
+    witnessed_at_utc: datetime
+    verdict: HostTickVerdict
+
+
+def parse_host_line(data: bytes | None) -> dict[str, object] | None:
+    """The one JSON object of a host witness object, or None when the bytes are not that.
+
+    Readable means: UTF-8, exactly one line, ending in its only newline, and that line is one JSON
+    object. Anything else (no bytes, two lines, no trailing newline, not JSON, not an object) is
+    None, so an unreadable object is never evidence.
+    """
+    if data is None:
+        return None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text.endswith("\n") or text.count("\n") != 1:
+        return None
+    try:
+        parsed = json.loads(text[:-1])
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): value for key, value in parsed.items()}
+
+
+def _slot_stamp(slot: datetime) -> str:
+    return slot.astimezone(UTC).strftime("%Y%m%dT%H%MZ")
+
+
+def _host_read(tick: HostTick) -> tuple[re.Match[str], dict[str, object]] | None:
+    """The path match and the line of a readable witness object (Design check 1), else None."""
+    match = _HOST_PATH.fullmatch(tick.path)
+    if match is None or tick.data is None or len(tick.data) != tick.size:
+        return None
+    parsed = parse_host_line(tick.data)
+    return None if parsed is None else (match, parsed)
+
+
+def _host_duplicates(host_ticks: Sequence[HostTick]) -> frozenset[str]:
+    """Tick ids and SHA-256 values that appear in more than one host tick of the input."""
+    ids = Counter(m.group(2) for t in host_ticks if (m := _HOST_PATH.fullmatch(t.path)))
+    digests = Counter(hashlib.sha256(t.data).hexdigest() for t in host_ticks if t.data is not None)
+    return frozenset(key for counts in (ids, digests) for key, count in counts.items() if count > 1)
+
+
+def _host_verdict(
+    tick: HostTick,
+    *,
+    witness_slot: datetime,
+    cron: str,
+    pinned_epoch_id: str,
+    pinned_hash: str,
+    grace: timedelta,
+    duplicates: frozenset[str] = frozenset(),
+) -> HostTickVerdict:
+    """The nine Design checks for one host tick; the first failing check wins."""
+    read = _host_read(tick)
+    if read is None or tick.data is None:
+        return HostTickVerdict.UNREADABLE
+    match, parsed = read
+    outcome = parsed.get("outcome")
+    if outcome in ("REGISTRY_DIFF", "SKIPPED"):
+        return HostTickVerdict.NON_CLEAN
+    if outcome != "clean":
+        return HostTickVerdict.UNREADABLE
+    meta = parsed.get("run_metadata")
+    if (
+        not isinstance(meta, dict)
+        or not all(isinstance(k, str) and isinstance(v, str) for k, v in meta.items())
+        or meta.get("source") != HOST_SOURCE
+        or any(key in meta for key in _HOST_GITHUB_KEYS)
+        or meta.get("tick_id") != match.group(2)
+    ):
+        return HostTickVerdict.WRONG_SOURCE
+    if meta.get("schedule") != cron:
+        return HostTickVerdict.SCHEDULE_MISMATCH
+    if (
+        parsed.get("epoch_id") != pinned_epoch_id
+        or parsed.get("pinned_hash") != pinned_hash
+        or parsed.get("current_hash") != pinned_hash
+    ):
+        return HostTickVerdict.WRONG_EPOCH_OR_HASH
+    try:
+        checked = _payload_time(parsed, "checked_at_utc")
+    except ValueError:
+        checked = None
+    if (
+        match.group(1) != _slot_stamp(witness_slot)
+        or checked is None
+        or not witness_slot <= checked <= tick.witnessed_at_utc
+    ):
+        return HostTickVerdict.OUT_OF_SLOT
+    if match.group(2) in duplicates or hashlib.sha256(tick.data).hexdigest() in duplicates:
+        return HostTickVerdict.DUPLICATE
+    if tick.witnessed_at_utc - witness_slot > grace:
+        return HostTickVerdict.LATE_BEYOND_GRACE
+    return HostTickVerdict.SATISFIED
+
+
 def _normalise_line(line: DiffLogEntry | FreezeSkippedEntry | FreezeLine) -> FreezeLine:
     if isinstance(line, FreezeLine):
         return line
@@ -916,6 +1072,7 @@ class FreezeBreak:
     at_utc: datetime
     outcome: str
     run_id: str | None
+    host_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -934,6 +1091,7 @@ class FreezeSlotResult:
     slot_utc: datetime
     status: str  # "SATISFIED", "EVIDENCE_GAP" or "BROKEN_BY_LINE"
     run_id: str | None
+    host_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -975,6 +1133,7 @@ class FreezeEvidenceReport:
     auxiliary: AuxiliaryEvidence
     qualifying_from_pin: bool
     statement: str
+    host_results: tuple[HostTickResult, ...] = ()
 
 
 _SATISFIED = "SATISFIED"
@@ -989,6 +1148,10 @@ def _line_verdict(line: FreezeLine, cron: str) -> str:
     if line.outcome != "clean":
         return EvidenceGapReason.INVALID_LINE.value
     meta = line.run_metadata or {}
+    if "source" in meta or "tick_id" in meta:
+        # Host evidence enters only through witness objects (16-DEC-HOST-TICK): a GitHub-path
+        # line that carries a host field is never a tick of its slot.
+        return EvidenceGapReason.INVALID_LINE.value
     if meta.get("event_name") != "schedule":
         return EvidenceGapReason.INVALID_LINE.value
     if meta.get("schedule") != cron:
@@ -1018,6 +1181,28 @@ def _run_verdict(
     return EvidenceGapReason.INVALID_LINE.value
 
 
+def _host_breaks(
+    host_ticks: Sequence[HostTick], pin_utc: datetime, window_end_utc: datetime
+) -> list[FreezeBreak]:
+    """Host ticks witnessed in (pin, window end] whose bytes are not a readable CLEAN line.
+
+    An unreadable object or an outcome other than "clean" ends continuity, at the witness time.
+    A line that is readable and CLEAN but otherwise unfit (wrong source, late) is a gap of its
+    slot, not a break.
+    """
+    found: list[FreezeBreak] = []
+    for tick in host_ticks:
+        if not pin_utc < tick.witnessed_at_utc <= window_end_utc:
+            continue
+        read = _host_read(tick)
+        outcome = None if read is None else read[1].get("outcome")
+        if outcome == "clean":
+            continue
+        shown = outcome if outcome in ("REGISTRY_DIFF", "SKIPPED") else "INVALID"
+        found.append(FreezeBreak(tick.witnessed_at_utc, str(shown), None, tick.path))
+    return found
+
+
 def freeze_evidence_report(
     *,
     pin_utc: datetime,
@@ -1027,8 +1212,16 @@ def freeze_evidence_report(
     runs: Sequence[GithubRun],
     grace_seconds: int,
     detected_at_utc: datetime,
+    host_ticks: Sequence[HostTick] = (),
+    pinned_epoch_id: str | None = None,
+    pinned_hash: str | None = None,
 ) -> FreezeEvidenceReport:
     """Reconcile the expected slot grid with the freeze-check lines and the exported run list.
+
+    Host witness ticks (16-DEC-HOST-TICK) are a second source: a slot is also satisfied by a
+    witnessed host tick (`_host_verdict`), judged by the provider-stamped time of its witness
+    object and by the pin's epoch id and hash (both required when any host tick is given).
+    With no host ticks the result is exactly the GitHub-only result.
 
     A slot is satisfied only by a CLEAN line of a schedule-event run assigned to it (the run is
     assigned to the latest slot not after its `created_at`, so a run serves exactly one slot),
@@ -1050,9 +1243,38 @@ def freeze_evidence_report(
             f"grace_seconds {grace_seconds} is not below the slot interval "
             f"({SLOT_INTERVAL_SECONDS} s): one run could stand for two slots (REV-02, REV-18)"
         )
+    if host_ticks and pinned_epoch_id is None:
+        raise ValueError("pinned_epoch_id is required when host_ticks are given")
+    if host_ticks and pinned_hash is None:
+        raise ValueError("pinned_hash is required when host_ticks are given")
     grace = timedelta(seconds=grace_seconds)
     minute = _cron_minute(cron)
     slot_set = set(slots)
+
+    host_results: list[HostTickResult] = []
+    duplicates = _host_duplicates(host_ticks)
+    if host_ticks and pinned_epoch_id is not None and pinned_hash is not None:
+        for tick in sorted(host_ticks, key=lambda t: (t.witnessed_at_utc, t.path)):
+            if tick.witnessed_at_utc <= pin_utc:
+                continue
+            witness_slot = _latest_slot_not_after(tick.witnessed_at_utc, minute)
+            if witness_slot not in slot_set:
+                continue
+            verdict = _host_verdict(
+                tick,
+                witness_slot=witness_slot,
+                cron=cron,
+                pinned_epoch_id=pinned_epoch_id,
+                pinned_hash=pinned_hash,
+                grace=grace,
+                duplicates=duplicates,
+            )
+            host_results.append(
+                HostTickResult(tick.path, witness_slot, tick.witnessed_at_utc, verdict)
+            )
+    host_by_slot: dict[datetime, list[HostTickResult]] = {}
+    for host_result in host_results:
+        host_by_slot.setdefault(host_result.slot_utc, []).append(host_result)
 
     normalised = [_normalise_line(line) for line in lines]
     dated = [n for n in normalised if n.checked_at_utc is not None]
@@ -1079,12 +1301,21 @@ def freeze_evidence_report(
             (run, _run_verdict(run, slot, cron, grace, lines_by_run.get(run.run_id, [])))
             for run in slot_runs
         ]
+        slot_hosts = host_by_slot.get(slot, [])
         satisfied = next((run for run, verdict in verdicts if verdict == _SATISFIED), None)
+        host_satisfied = next(
+            (h for h in slot_hosts if h.verdict is HostTickVerdict.SATISFIED), None
+        )
+        host_broken = next((h for h in slot_hosts if h.verdict is HostTickVerdict.NON_CLEAN), None)
         if satisfied is not None:
             results.append(FreezeSlotResult(slot, _SATISFIED, satisfied.run_id))
+        elif host_satisfied is not None:
+            results.append(FreezeSlotResult(slot, _SATISFIED, None, host_satisfied.path))
         elif any(verdict == _BROKEN for _, verdict in verdicts):
             broken = next(run for run, verdict in verdicts if verdict == _BROKEN)
             results.append(FreezeSlotResult(slot, _BROKEN, broken.run_id))
+        elif host_broken is not None:
+            results.append(FreezeSlotResult(slot, _BROKEN, None, host_broken.path))
         else:
             reason = EvidenceGapReason.NO_RUN_FOUND
             run_id: str | None = None
@@ -1096,15 +1327,16 @@ def freeze_evidence_report(
             gaps.append(EvidenceGap(slot, cron, reason, detected_at_utc, run_id))
             results.append(FreezeSlotResult(slot, _GAP, run_id))
 
+    github_breaks = (
+        FreezeBreak(n.checked_at_utc, n.outcome, n.run_id)
+        for n in dated
+        if n.checked_at_utc is not None
+        and n.outcome != "clean"
+        and pin_utc < n.checked_at_utc <= window_end_utc
+    )
     breaks = sorted(
-        (
-            FreezeBreak(n.checked_at_utc, n.outcome, n.run_id)
-            for n in dated
-            if n.checked_at_utc is not None
-            and n.outcome != "clean"
-            and pin_utc < n.checked_at_utc <= window_end_utc
-        ),
-        key=lambda b: (b.at_utc, b.outcome, b.run_id or ""),
+        (*github_breaks, *_host_breaks(host_ticks, pin_utc, window_end_utc)),
+        key=lambda b: (b.at_utc, b.outcome, b.run_id or "", b.host_path or ""),
     )
 
     segments = _segments(pin_utc, slots, {r.slot_utc: r.status for r in results}, breaks)
@@ -1124,7 +1356,22 @@ def freeze_evidence_report(
         unplaced_line_count=unplaced,
         auxiliary=auxiliary,
         qualifying_from_pin=qualifying,
-        statement=_freeze_statement(slots, gaps, breaks, unplaced, auxiliary),
+        statement=_freeze_statement(
+            slots,
+            gaps,
+            breaks,
+            unplaced,
+            auxiliary,
+            host=(
+                (
+                    len(host_results),
+                    sum(1 for r in host_results if r.verdict is HostTickVerdict.SATISFIED),
+                )
+                if host_ticks
+                else None
+            ),
+        ),
+        host_results=tuple(host_results),
     )
 
 
@@ -1186,6 +1433,25 @@ def _freeze_statement(
     breaks: Sequence[FreezeBreak],
     unplaced: int,
     auxiliary: AuxiliaryEvidence,
+    host: tuple[int, int] | None = None,
+) -> str:
+    """The statement; `host` is (judged, satisfied) when host ticks were given, else None."""
+    text = _base_statement(slots, gaps, breaks, unplaced, auxiliary, host is not None)
+    if host is None:
+        return text
+    return (
+        f"{text} Host witness ticks (16-DEC-HOST-TICK): {host[0]} judged, {host[1]} satisfied a "
+        "slot; a host tick counts only through the provider-stamped time of its witness object."
+    )
+
+
+def _base_statement(
+    slots: Sequence[datetime],
+    gaps: Sequence[EvidenceGap],
+    breaks: Sequence[FreezeBreak],
+    unplaced: int,
+    auxiliary: AuxiliaryEvidence,
+    with_host: bool,
 ) -> str:
     base = (
         "Freeze integrity evidence only (registry immutability from the epoch pin); "
@@ -1217,9 +1483,12 @@ def _freeze_statement(
     if not slots:
         empty = "No scheduled slot lies between the pin and the window end: not qualifying."
         return f"{base} {empty}{note}"
+    source = "a CLEAN line of a schedule run" + (
+        " or of a witnessed host tick" if with_host else ""
+    )
     return (
-        f"{base} Every expected scheduled slot from the pin to the window end is satisfied by a "
-        f"CLEAN line of a schedule run.{note}"
+        f"{base} Every expected scheduled slot from the pin to the window end is satisfied by "
+        f"{source}.{note}"
     )
 
 

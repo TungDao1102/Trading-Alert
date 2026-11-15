@@ -148,7 +148,8 @@ async def test_wr04_stop_lost_position_unreadable_throughout_escalates_from_stop
     assert _view(rig).state is ProtectionState.CLOSE_FAILED
     assert rig.coordinator.blocks_new_entries() is True
     assert rig.fake.calls_to("place_market_close") == []
-    assert rig.safe_mode.entered_reasons[0] == "CLOSE_REQUIRED"
+    # WR-C8: the close goes first, so the closer's own failure may enter SAFE_MODE before it.
+    assert "CLOSE_REQUIRED" in rig.safe_mode.entered_reasons
     assert _close_required_alerts(rig) == ["B4_STOP_LOST_UNRESOLVED"]
 
     # Later steps keep reconciling: still no guessed close, still blocking, the coordinator's

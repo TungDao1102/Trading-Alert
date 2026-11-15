@@ -168,6 +168,7 @@ status
 consumption_status     UNCONSUMED / CONSUMED
 consumed_at_utc        NULL
 approved_quantity      NULL
+money_json             NULL
 ```
 
 Repeated callback delivery must resolve to the existing approval/result rather than create a new approval or order.
@@ -175,6 +176,12 @@ Repeated callback delivery must resolve to the existing approval/result rather t
 Phase 17 (D051) added the two consumption columns. `consumption_status` is an explicit NOT NULL value (default `UNCONSUMED`), never inferred from the nullable `consumed_at_utc`; a CHECK (`ck_approvals_consumption_coherent`) ties them together (`CONSUMED` requires `consumed_at_utc` and `status = APPROVED`, `UNCONSUMED` requires no timestamp). An approval is consumed only immediately before the entry order is placed, in the same transaction that inserts the ENTRY row of `execution_intents` (section 2.14); a NO_TRADE decided before placement leaves the approval unconsumed and retryable until the plan expires. Uniqueness is enforced by the database: `approval_token_hash` is unique (`uq_approvals_token_hash`), and at most one decided approval can exist per trade plan (partial unique index `uq_approvals_one_decided_per_plan` where `status <> 'PENDING'`), so several PENDING rows may coexist but a second decision cannot land. A decision is a conditional `UPDATE ... WHERE status = 'PENDING'`; a lost race returns the stored approval.
 
 Phase 19 review-fix batch 4 (D078, 19-REVIEW WR-01) added `approved_quantity` (NUMERIC(38,18), Alembic revision `0006_approval_quantity`) with the CHECK `ck_approvals_approved_quantity` (NULL or above zero). It is the quantity of the plan the approval request was issued for (`trade_plans.quantity_after_rounding`, the figure the APPROVE message and the SHADOW confirmation card show, D078 item (6)), written once with the PENDING row and never changed by a decision. The plan hash does not cover it (D051); live binding requires the plan's quantity to equal it and refuses a NULL, which marks a row written before revision 0006 (`APPROVED_QUANTITY_MISSING`). The consume transaction re-reads it under `FOR UPDATE` (D078 (6)): a NULL, a value unequal to the bound quantity or one below the quantity to place rolls the consume back (`APPROVED_QUANTITY_NOT_CONFIRMED`).
+
+Phase 23 (plan 23-04, D-03, D-13) added the `money_json` column and fixed the `actor_id` rule. `money_json` is TEXT, the canonical JSON of the money at stake (schema `money-at-stake/1`: side, quantity, entry and stop prices, notional, leverage, initial margin, the loss at the stop, the take-profit legs, the equity and its source), written once with the PENDING rows by the approval-request issuer, identical on the APPROVE and the SKIP row, part of the insert identity (the same request again is a no-op, a different text is a `RowConflict`) and never changed by a decision. NULL means not recorded: the renderers refuse such a row. Alembic revision `0013_approval_money` (down revision `0012_reservation_margin`) adds the column and the CHECK `ck_approvals_money_json` (NULL, or text that starts with `{` and ends with `}`); no backfill; the downgrade drops the CHECK and the column and keeps every row. The plan hash does not cover it (D051 (c)). `actor_id` is the Telegram user id, as text, of the press that decided the approval; the restart expiry writes `RUNTIME_RESTART`; a row decided before Phase 23 holds an empty string. The decision `UPDATE` writes `actor_id` together with `result`, `status` and `acted_at_utc`, so a replay or a lost race keeps the first actor.
+
+Phase 23 (plan 23-08, D-16, DECISIONS D088, the owner's answer O-2 (a) of 2026-10-26) changed the one-decided-per-plan rule (G4-042). Alembic revision `0014_decided_excl_expired` (down revision `0013_approval_money`) recreates `uq_approvals_one_decided_per_plan` with the predicate `status NOT IN ('PENDING','EXPIRED')`: at most one APPROVED or SKIPPED approval per trade plan, any number of EXPIRED approvals. Both PENDING siblings (APPROVE and SKIP_USER) of an undecided plan can therefore be expired at restart. An EXPIRED decision on a plan that already has an APPROVED or SKIPPED approval is refused by the store (`ApprovalAlreadyDecided`) before the reservation hook runs, so a decided plan's sibling is never expired and its risk reservation is never released by it. The downgrade raises when any plan has more than one non-PENDING approval. The predicate `status <> 'PENDING'` quoted in the Phase 17 paragraph above is the one before revision 0014.
+
+Phase 24 (plan 24-08, DECISIONS D105, the owner's answer to 24-01 Q8) records the MODE an approval was issued under without a new column: when a PENDING row is newly inserted by a mode-scoped store (`PgShadowStores(db, confirm_mode=SHADOW|DEMO|LIVE)`), the same transaction writes one `journal_events` row `APPROVAL_MODE_RECORDED` (entity type `ApprovalMode`, correlation id `approval-mode:<approval_id>`, payload the canonical JSON `{"mode":"<MODE>"}`, `occurred_at_utc` = the approval's `requested_at_utc`). A replay of the same PENDING insert writes no marker. `list_approved_approvals` of a scoped store returns only the APPROVED approvals whose marker payload equals its own mode; a marker payload the code did not write is listed by no scoped store (fail closed), and an approval with no marker (written before Phase 24) is a legacy SHADOW row that no DEMO or LIVE store lists. `confirm_mode=None` is the unscoped store and lists every APPROVED approval.
 
 ### 2.6 `trades`
 
@@ -231,11 +238,14 @@ local_status
 submitted_at_utc
 updated_at_utc
 canceled_at_utc        NULL
+exchange_event_time_utc NULL
 ```
 
 `client_order_id`, `exchange_order_id`, and conditional/algo identifiers must be independently stored because Binance may use different identifiers for normal and algo orders.
 
 Phase 17 (D051): `client_order_id` and `algo_client_id` are each unique where not NULL (partial unique indexes `uq_orders_client_order_id` and `uq_orders_algo_client_id`). `quantity` is `>= 0` (a `closePosition` stop-loss leg has no quantity and is stored as 0), `price` and `stop_price` are NULL or `> 0`, and `local_status` is limited to the `OrderStatus` values by a named CHECK. `order_role` is a free string and has no CHECK.
+
+Phase 24 (plan 24-07, D-10, DECISIONS D100, the owner's answer to 24-01 Q3) added the nullable column `exchange_event_time_utc` (TIMESTAMPTZ, the Binance event time `E` of the last applied update) in Alembic revision `0015_order_event_time` (down revision `0014_decided_excl_expired`); no new table, no backfill, outside the domain entity and the content-hash identity. The store applies `update_order_exchange_state(..., exchange_event_time_utc=)` only when the event time is not older than the stored one: an older time is reported as stale (`StateUpdate.stale`) and changes nothing, an equal time applies (Binance can send several updates with the same `E`), identical state at an equal time is an idempotent no-op that does not rewrite `updated_at_utc`, and a call without an event time never clears a stored one. The rule is enforced under the row lock (`FOR UPDATE`) and again in the WHERE of the conditional UPDATE. The downgrade refuses once any event time is stored.
 
 ### 2.8 `fills`
 
@@ -282,11 +292,14 @@ opened_at_utc
 updated_at_utc
 closed_at_utc NULL
 status
+snapshot_event_time_utc NULL
 ```
 
 The exchange remains authoritative for the live position state.
 
 `positions.quantity` is a signed amount (negative for a short in one-way mode, as `positionAmt` is on Binance), so it has NO sign CHECK; a `>= 0` CHECK would reject a legal short (Phase 17, D051).
+
+Phase 24 (plan 24-07, DECISIONS D100) added the nullable column `snapshot_event_time_utc` (TIMESTAMPTZ) in the same revision `0015_order_event_time`, and the store method `update_position_snapshot` (G4-043), which writes a position snapshot from the user-data stream under the same monotonic rule as orders (an older snapshot is stale and changes nothing) and always returns `StateUpdate[Position]`.
 
 ### 2.10 `journal_events`
 
@@ -419,6 +432,7 @@ exchange_status        NULL
 outcome_recorded       BOOLEAN NOT NULL DEFAULT false
 outcome_is_no_trade    NULL
 outcome_reason_code    NULL
+resolution_reason_code NULL: RECONCILED_ABSENT / NEVER_SENT (Phase 20, revision 0007)
 intended_at_utc
 sent_at_utc            NULL
 resolved_at_utc        NULL
@@ -427,7 +441,8 @@ updated_at_utc
 
 - Keys and constraints: primary key `pk_execution_intents (approval_id, role)`; `uq_execution_intents_plan_role (trade_plan_id, role)` so a second approval of the same plan cannot take another entry; partial unique indexes on `client_order_id` and `algo_client_id` where not NULL; foreign keys `ON DELETE RESTRICT` to `approvals` and `trade_plans`; named CHECKs for the role set, the status set (`ExecutionIntentStatus`, GLOSSARY section 12.1), the client id by role (an ENTRY row has `client_order_id` and no algo id, every other role the reverse), quantity and price (`NULL` or `> 0`) and the outcome columns (`outcome_recorded` is true exactly when the reason code and flag are set, and only for ENTRY).
 - Status: `ACKED` and `REJECTED` are terminal (trigger `trg_execution_intents_terminal_status`); every other status change goes through `src/domain/transitions.py` (kind `EXECUTION_INTENT`) after a `FOR UPDATE` read. The ENTRY row also stores the persisted `ExecutionOutcome` (`outcome_is_no_trade`, `outcome_reason_code`), so a replay returns the stored result with zero adapter calls; an ENTRY row without a recorded outcome replays as `RECONCILIATION_REQUIRED`.
-- Writers: `PgExecutionStateStore` (`consume_and_record_entry_intent`, `mark_sent`, `record_result`, `record_protective_intent`, `finalize_entry_outcome`). Readers: `execute_approved_plan` (replay), restart recovery (`list_unresolved_intents`, `resolve_unresolved_intents`, Phase 17 code, wired in Phase 20 and 24), reconciliation (Phase 20) and the Telegram message (Phase 23 and 24, through `PgExecutionStateStore.get_entry`).
+- Reconciliation reason (Phase 20, plan 20-03, Alembic revision `0007_intent_resolution_reason`): `resolution_reason_code` is nullable `VARCHAR(32)` with the named CHECK `ck_execution_intents_resolution_reason` (`NULL`, or `intent_status = 'REJECTED'` and the code is `RECONCILED_ABSENT` or `NEVER_SENT`). `RECONCILED_ABSENT` is `UNKNOWN` to `REJECTED` after the Phase 20 reconciliation protocol (plan 20-10) concluded that the exchange shows no such order; `NEVER_SENT` is `INTENDED` to `REJECTED`, nothing was sent because `mark_sent` commits before `place_entry`. It is written only by `finalize_reconciled_resolution` (which also writes `exchange_status` and `exchange_order_id` as NULL and sets `resolved_at_utc`), never by `record_result`; `exchange_status` keeps Binance's status only. A row closed by `record_result(REJECTED)` therefore has a NULL reason, so a definitive Binance rejection and a reconciled absence cannot be confused. The `outcome_*` columns cannot carry this reason: the manager already finalizes them on the ambiguous-entry path and they are written once. There is no backfill.
+- Writers: `PgExecutionStateStore` (`consume_and_record_entry_intent`, `mark_sent`, `record_result`, `record_protective_intent`, `finalize_reconciled_resolution`, `finalize_entry_outcome`). Readers: `execute_approved_plan` (replay), restart recovery (`list_unresolved_intents`, `resolve_unresolved_intents`, Phase 17 code, wired in Phase 20 and 24), reconciliation (Phase 20) and the Telegram message (Phase 23 and 24, through `PgExecutionStateStore.get_entry`).
 
 ### 2.15 `plan_constraint_snapshots`
 
@@ -468,6 +483,140 @@ recorded_at_utc
 - Each row is written in the same transaction as its `SYSTEM_STATE_CHANGED` journal event (`journal_event_id`), so the audit trail and the current state cannot diverge. "Latest per key" is a query (`PgSystemStateStore.latest`), not a view. Constraints: unique `(state_key, state_version)`, key set CHECK, `state_version >= 1`, foreign key `ON DELETE RESTRICT`; append-only trigger.
 - The controllers rebuild themselves from the latest document (`SafeModeController.rehydrate`, `LiveEnablementController.rehydrate`); malformed state raises instead of defaulting. Nothing writes these rows or reads them at startup yet: the SAFE_MODE wiring is Phase 20 and the enablement and kill-gate wiring is Phase 24.
 
+### 2.17 `pending_protective_actions`
+
+The durable INTENT of a protective action that the REST gate refused (Phase 20, plan 20-14, D-19, owner decision Q4 of 2026-10-20). When an HTTP 418 ban, an HTTP 429 pause or a gate that is not restored refuses a protective stop, an entry-remainder cancel or an emergency close, nothing reaches Binance. Before this table the refusal was only a journal row and the coordinator's in-memory retry, so a restart forgot it. A row here is the explicit record that the action was NOT sent. It is **intent only, never a payload**: there is no column for a trigger price, a quantity or a side, so an old request can never be replayed from it. When sending is allowed again the coordinator's ordinary step reads the current exchange state first and then decides from the plan. The table does not protect the position while the exchange forbids sending, and nothing in it claims that a position always has a stop under every rate-limit condition (the plan stays in its blocking state).
+
+```text
+pending_id             PK, content hash of plan_hash + kind + opening time (one id per episode)
+plan_hash              VARCHAR(64)
+trade_plan_id          VARCHAR(128)
+approval_id            VARCHAR(128)
+symbol                 VARCHAR(32)
+pending_kind           STOP_NOT_SENT / PROTECTION_ENTRY_CANCEL_NOT_SENT / CLOSE_NOT_SENT
+state                  PENDING / RESOLVED / SUPERSEDED
+gate_reason            VARCHAR(64), fixed project text (IP_BAN_418, RATE_LIMIT_PAUSE_429, GATE_NOT_RESTORED, ...)
+first_blocked_at_utc   TIMESTAMPTZ
+last_blocked_at_utc    TIMESTAMPTZ, >= first_blocked_at_utc
+block_count            INTEGER >= 1 (how many steps the gate refused the same action)
+retry_after_until_utc  NULL, TIMESTAMPTZ (the gate's own end, when it knew one)
+resolved_at_utc        NULL while PENDING, set when RESOLVED or SUPERSEDED
+resolution_note        NULL while PENDING, fixed project text when closed
+```
+
+- Alembic revision `0008_pending_protective_actions` (down revision `0007_intent_resolution_reason`). Named constraints: `pk_pending_protective_actions`, `ck_pending_protective_actions_kind`, `ck_pending_protective_actions_state`, `ck_pending_protective_actions_block_count`, `ck_pending_protective_actions_time_order`, `ck_pending_protective_actions_resolution` (open means no resolution time and no note, closed means both). The partial unique index `uq_pending_protective_actions_open` on `(plan_hash, pending_kind) WHERE state = 'PENDING'` allows at most one open row per plan and kind; a refusal of the same action bumps that row, and a block after a resolution opens a new row. There are no foreign keys: the table is an intent log keyed by the plan hash.
+- States: `PENDING` is open. `RESOLVED` means the action got through or became moot because the exchange state settled (the stop was read ACTIVE by its deterministic id, the entry cancel was accepted or the entry is terminal, the close was sent after the gate opened or the position is flat). `SUPERSEDED` means policy now requires a close (`CLOSE_REQUIRED`, `CLOSE_FAILED` or `FLAT`), so a queued stop is never sent (note `CLOSE_REQUIRED_BY_POLICY`). `max_unprotected_ms` running out during the wait moves the plan to `CLOSE_REQUIRED` through the existing deadline.
+- Writers: the protection coordinator (`src/execution/protection.py`: stop and entry-cancel refusals, resolution and supersede) and the emergency closer (`src/execution/emergency_close.py`: `CLOSE_NOT_SENT`), both through `PgPendingActionStore` (`src/persistence/pending_actions.py`). The intent is first written to the local spill (D-16) and then recorded; a store failure enters SAFE_MODE `DB_FAILURE` once and never blocks the protective step. Readers: the coordinator's `blocks_new_entries()` (true while any row is `PENDING`, and true when the store cannot be read), the startup load of open rows (plan 20-19) and the queue order once the gate opens (plan 20-21, D-20). A 418 or 429 pause is never bypassed: the refusal is recorded, not worked around (D-18).
+
+### 2.18 `validated_lot_filters`
+
+The last validated exchangeInfo lot filters of each symbol (Phase 20, plan 20-18, D-21, owner decision Q3 of 2026-10-20, option b). The emergency close sizes its reduce-only MARKET parts from the symbol's lot filters. When exchangeInfo cannot be read at that moment (a timeout or a 5xx), the closer MAY use the stored filters, flagged stale with their fetch time. A new entry NEVER may. One row per symbol, replaced by a newer successful read; every value is a filter the exchange returned and `LotFilters` validated, so the table holds no default and no invented number.
+
+```text
+symbol                   PK, VARCHAR(32)
+price_tick_size          NUMERIC(38,18), > 0
+lot_min_quantity         NUMERIC(38,18), > 0, <= lot_max_quantity
+lot_max_quantity         NUMERIC(38,18), > 0
+lot_step_size            NUMERIC(38,18), > 0
+market_lot_min_quantity  NUMERIC(38,18), > 0, <= market_lot_max_quantity
+market_lot_max_quantity  NUMERIC(38,18), > 0
+market_lot_step_size     NUMERIC(38,18), > 0
+min_notional             NUMERIC(38,18), > 0
+fetched_at_utc           TIMESTAMPTZ, when the exchange last answered with these values
+updated_at_utc           TIMESTAMPTZ, when the row was written, >= fetched_at_utc
+```
+
+- Alembic revision `0009_validated_lot_filters` (down revision `0008_pending_protective_actions`). Named constraints: `pk_validated_lot_filters`, `ck_validated_lot_filters_symbol`, one `ck_validated_lot_filters_<column>_positive` per value column, `ck_validated_lot_filters_lot_range`, `ck_validated_lot_filters_market_lot_range`, `ck_validated_lot_filters_time_order`. No foreign keys; no backfill.
+- Single writer: `LotFilterSource` (`src/execution/lot_filter_source.py`) through `PgLotFilterStore` (`src/persistence/lot_filters.py`), on a successful live read and on the periodic refresh (`reconcile.lot_filter_refresh_interval_ms`; the reconcile tick that calls `refresh_if_due` is plan 20-21). `upsert` keeps the newest fetch: an older `fetched_at_utc` never replaces a newer row.
+- Use: only the emergency close reads a stored row, through `LotFilterSource.for_emergency_close` (called from `src/execution/emergency_close.py` and nowhere else; an AST test pins it). The row is returned with `filters_stale = true` and its fetch time, and the closer journals both on its `EMERGENCY_CLOSE` rows. `for_entry` reads the exchange live and never returns a stored row. With no live read, no stored row and no complete plan snapshot nothing is guessed: the close fails closed as `LOT_FILTERS_UNAVAILABLE`.
+- Tier 2: when no row exists, the persisted `plan_constraint_snapshots` row of the plan (section 2.15) is used, flagged stale, only when its maximum quantity and all three MARKET_LOT_SIZE values are present. It is never "the last validated filters".
+- The close quantity is floored onto the filters (never rounded up to reach the minimum quantity). A close rejected with a lot-filter code is not resent with the same quantity; the next attempt takes a new attempt number and reads live filters again when it can. Binance accepting a close sized on stale filters is `[NOT_TESTED]` (best effort, Q3).
+
+### 2.19 `daily_risk_days`
+
+The persisted risk state of one UTC day (Phase 21, plan 21-09, D-07, D-14, F-963). A restart inside the UTC day must neither reset the day nor move its day-start equity base, and a DAILY_STOP latch must survive it. `system_state_events` cannot hold this: it accepts only str, bool and None values and a fixed key list, and the base is a Decimal. One row per UTC day.
+
+```text
+utc_day                 PK, DATE (the UTC calendar day)
+equity_at_day_start     NUMERIC(38,18), > 0 (the threshold base for the whole day, written once)
+base_observed_at_utc    TIMESTAMPTZ (when the base was read)
+stop_latched_at_utc     NULL, TIMESTAMPTZ (DAILY_STOP latch, set once, never cleared or moved)
+warning_alerted_at_utc  NULL, TIMESTAMPTZ (WARNING alert mark, set once, never cleared or moved)
+created_at_utc          TIMESTAMPTZ, database clock at the insert (default now())
+```
+
+- Alembic revision `0010_daily_risk_state` (down revision `0009_validated_lot_filters`). Named constraints: `pk_daily_risk_days`, `ck_daily_risk_days_equity_positive`. No foreign keys; no backfill.
+- Writer: `PgDayRiskStore` (`src/persistence/day_risk.py`). `open_day` inserts the day if absent and returns the STORED row, so a second open (another process, a restart, a retry) never moves the base. `latch_stop` and `mark_warning_alerted` update their column only `WHERE ... IS NULL`; there is no update path for the base. Readers: the day-risk service (plan 21-13) and the approval transaction, which locks the row with `PgDayRiskStore.lock_day` (`SELECT ... FOR UPDATE`, plan 21-12).
+- No delete path and no retention rule: retention is owner-open O-1 and no number is invented. An unreachable database raises `StoreUnavailable`; there is no retry loop in the store.
+
+### 2.20 `daily_loss_components`
+
+The signed daily-loss components Binance reported, one row per `(utc_day, kind, source, source_key)` (Phase 21, plan 21-09, D-07). They are the input of the D033 day loss fold (`src/risk/daily_loss.py::fold_daily_loss`). The same fill or funding row seen on the stream and on REST is two rows (two sources); the fold counts it once at the most adverse amount.
+
+```text
+utc_day          PK part, DATE
+kind             PK part, FILL_PNL / FILL_COMMISSION / FUNDING
+source           PK part, USER_DATA_EVENT / REST_USER_TRADES / REST_INCOME
+source_key       PK part, VARCHAR(128), non-empty ("<symbol>:<order id>:<trade id>" for fills, "<symbol>:<tranId>" for funding)
+amount           NUMERIC(38,18), signed, not NaN (the commission component is stored negated)
+asset            VARCHAR(16), non-empty
+event_time_utc   TIMESTAMPTZ, the exchange event time
+recorded_at_utc  TIMESTAMPTZ, database clock at the insert (default now())
+```
+
+- Alembic revision `0010_daily_risk_state`. Named constraints: `pk_daily_loss_components`, `ck_daily_loss_components_kind`, `ck_daily_loss_components_source`, `ck_daily_loss_components_amount_not_nan`, `ck_daily_loss_components_source_key`, `ck_daily_loss_components_asset`; index `ix_daily_loss_components_utc_day`. No foreign keys: a component may be recorded before the day row is opened.
+- Writer: `PgDayRiskStore.add_components` (one transaction per call). A repeated key is a no-op; a stored key with another amount or asset raises `RowConflict` (the message names the key, never the amount) and nothing of that call is stored. Readers: the day-risk service (plan 21-13) through `list_components`.
+- `amount` semantics: on Demo, `realizedPnl` excludes commission, so the commission is its own component; this is demo-observed, not mainnet, and live R stays INCOMPLETE until Phase 24 verifies it. Demo returned no FUNDING income rows (demo-observed, not mainnet), so the funding component has not been seen from the real exchange yet.
+- No delete path and no retention rule: retention is owner-open O-1 and no number is invented.
+
+### 2.21 `risk_reservations`
+
+The durable risk reservation of each trade plan (Phase 21, plan 21-12, D-16, D-17, F-407). The portfolio caps (max open positions, aggregate open risk, cluster cap) must count every plan that holds risk, not only the filled positions, and two concurrent approvals must not both pass. One row per plan holds the plan's reservation for its whole life. The reserved amount is the sized `realized_risk` (the risk after rounding), never the risk budget.
+
+```text
+trade_plan_id      PK, VARCHAR(128), FK trade_plans RESTRICT
+approval_id        NULL, VARCHAR(128), FK approvals RESTRICT (set when the row becomes RESERVED)
+plan_hash          VARCHAR(64) (the hash of the plan the risk was sized for)
+symbol             VARCHAR(32)
+position_side      VARCHAR(8), LONG / SHORT
+quantity           NUMERIC(38,18), > 0
+realized_risk      NUMERIC(38,18), > 0
+status             VARCHAR(16), REQUESTED / RESERVED / PLACED / OPEN / RELEASED
+release_reason     NULL, VARCHAR(32), one of the nine release reasons, set only with RELEASED
+requested_at_utc   TIMESTAMPTZ
+reserved_at_utc    NULL, TIMESTAMPTZ
+placed_at_utc      NULL, TIMESTAMPTZ
+opened_at_utc      NULL, TIMESTAMPTZ
+released_at_utc    NULL, TIMESTAMPTZ, set only with RELEASED
+updated_at_utc     TIMESTAMPTZ (the time of the last transition)
+required_margin    NULL, NUMERIC(38,18), > 0 (Phase 22, plan 22-08)
+margin_entry_price NULL, NUMERIC(38,18), > 0 (Phase 22, plan 22-08)
+margin_leverage    NULL, INTEGER, >= 1 (Phase 22, plan 22-08)
+```
+
+- `required_margin`: the initial margin the plan needs, `quantity x margin_entry_price / margin_leverage`, written at plan issue through `register_request`. `margin_entry_price` and `margin_leverage` are the price and the leverage it was computed at. The three are all NULL or all set. NULL means UNKNOWN (never zero): a row written before migration 0012 has no backfill, and the margin check fails closed on it (NO_TRADE).
+
+- Alembic revision `0011_risk_reservations` (down revision `0010_daily_risk_state`). Named constraints: `pk_risk_reservations`, `fk_risk_reservations_trade_plan_id`, `fk_risk_reservations_approval_id`, `ck_risk_reservations_status`, `ck_risk_reservations_side`, `ck_risk_reservations_quantity_positive`, `ck_risk_reservations_risk_positive`, `ck_risk_reservations_release_reason`, `ck_risk_reservations_released_coherent` (`status = 'RELEASED'` exactly when a reason and a release time are stored), `ck_risk_reservations_approval_coherent` (an approval id while RESERVED, PLACED or OPEN); index `ix_risk_reservations_status`. No backfill.
+- Alembic revision `0012_reservation_margin` (down revision `0011_risk_reservations`; Phase 22, plan 22-08, D-14). Adds the three nullable columns above and two named CHECKs: `ck_risk_reservations_margin_coherent` (the three columns are all NULL or all NOT NULL) and `ck_risk_reservations_margin_positive` (NULL, or margin and price above zero and leverage at least 1). No backfill. The downgrade drops the two CHECKs and the three columns; every row stays and only a stored margin is lost.
+- Margin claims: `PgRiskReservationStore.list_margin_claims` returns one claim per RESERVED or PLACED row (REQUESTED, OPEN and RELEASED rows are never claims), sorted by (`symbol`, `position_side`, `trade_plan_id`) and rebuilt from the table on every call; `required_margin` is None for a row without a stored margin. The authoritative sum of the other plans' claims is taken at placement with a fresh exchange reading (amendment A2), because the exchange reading cannot be taken inside the synchronous approval transaction; `reserve_in` and the approval transaction are unchanged. `register_request` includes the margin trio in the identity comparison: the same plan with another margin, or with a margin on a stored legacy row, raises `RowConflict`.
+- Lifecycle: `REQUESTED` (issued, not counted) -> `RESERVED` (approved, counted) -> `PLACED` (entry consumed and sent, counted) -> `OPEN` (filled, counted) -> `RELEASED` (terminal, not counted). The caps count RESERVED, PLACED and OPEN rows.
+- Release table (`RELEASE_SOURCE_STATUSES` in `src/risk/reservations.py`, enforced by `PgRiskReservationStore.release`). A permitted source status becomes RELEASED with the reason and time; an already RELEASED row is a no-op that keeps the FIRST stored reason (two terminal signals can race); any other source status and an absent plan raise `RowConflict`. A PLACED or OPEN row is never released by a plan-status or refusal reason, because the entry may still fill or the position is live; only the exchange outcome releases it.
+
+| Reason | Terminal plan state | Permitted source statuses |
+|---|---|---|
+| `APPROVAL_SKIPPED` | approval SKIPPED (SKIP / CANCEL of a PENDING approval) | REQUESTED |
+| `APPROVAL_EXPIRED` | approval EXPIRED | REQUESTED |
+| `PLAN_EXPIRED` | plan EXPIRED, or an unplaced plan past its expiry | REQUESTED, RESERVED |
+| `PLAN_INVALIDATED` | plan INVALIDATED | REQUESTED, RESERVED |
+| `PLAN_SUPERSEDED` | plan SUPERSEDED | REQUESTED, RESERVED |
+| `PLACEMENT_REFUSED` | a final pre-placement refusal of an approved plan | RESERVED |
+| `ENTRY_REJECTED` | entry intent REJECTED (RESERVED when the POST was never acknowledged, PLACED otherwise) | RESERVED, PLACED |
+| `ENTRY_ENDED_NO_FILL` | resting entry ended with no fill (cancelled, expired, DAILY_STOP) | PLACED |
+| `POSITION_CLOSED` | filled position is flat again | OPEN |
+
+- Writers: `PgRiskReservationStore.register_request` at plan issue (Phase 24 issuer; a repeat with the same identity is a no-op, another identity raises `RowConflict`); `reserve_in` inside the approval transaction (plan 21-15), which locks today's `daily_risk_days` row `FOR UPDATE`, reads the counted rows, judges the stored `realized_risk` with the shared `check_portfolio` (`reservation_verdict`) and turns REQUESTED into RESERVED or raises `ReservationRefused` and changes nothing; the Phase 24 callers of `mark_placed`, `mark_open` and `release`, with the status-to-reason mappings of plan 21-11 (`src/execution/live_risk_inputs.py`). `mark_placed` (RESERVED -> PLACED) and `mark_open` (PLACED -> OPEN) are no-ops on repeat and `RowConflict` otherwise, so a RELEASED row can never be counted again.
+- Readers: `list_counted` for the caps (ordered by symbol, position side, plan id) and `get`. One row per plan; no in-memory copy, so a restart rebuilds the counted view from the table; no delete path.
+
 ## 3. Canonical state machines
 
 Canonical states are defined in `GLOSSARY.md`. The legal transitions between them are `GLOSSARY.md` section 11 (six tables: Signal, TradePlan, Order, Position, Approval, ExecutionIntent) and are implemented once in `src/domain/transitions.py`; the Phase 17 persistence status values (`ExecutionIntentStatus`, approval `consumption_status`, `live_inputs_status`, `SystemStateKey`) are `GLOSSARY.md` section 12. The section 11 tables are an auto-mode default awaiting user confirmation (D051).
@@ -479,6 +628,8 @@ SignalStatus       ≠ OrderStatus ≠ PositionStatus ≠ ApprovalAction
 ```
 
 A signal reaching `APPROVED` must never imply that an order was accepted by Binance. Signal-level approval and plan-level approval are separate: `SignalStatus.APPROVED` records user approval observed on the signal instance, `TradePlanStatus.APPROVED` authorizes execution handoff, and order placement reads the plan status. (D028)
+
+Phase 24 applies these transitions on the DEMO approval path (`apply_d028_chain`, `src/live/approval_sender.py`, DECISIONS D101 and D105), inside the approval decision transaction, after the risk-reservation hook: APPROVED moves the Signal to `APPROVED` and then the TradePlan to `APPROVED`; SKIPPED moves the Signal to `SKIPPED_USER` (`SKIPPED_BUSY` for a `SKIP_BUSY` action) and leaves the TradePlan as it is, because GLOSSARY section 11.2 names no plan state for a skip; EXPIRED moves the Signal and the TradePlan to `EXPIRED`. An illegal move raises `IllegalTransition` and rolls the whole approval transaction back. A smoke Signal is persisted `DETECTED` and moves to `NOTIFIED` only after a successful send, because `DETECTED -> APPROVED` is illegal (GLOSSARY 11.1). The owner script `scripts/demo_clear.py` closes a stale DEMO plan through the same table (`APPROVED -> EXPIRED`, one journal row `DEMO_STALE_PLAN_CLEARED`), never by editing a row.
 
 ## 4. Relationships
 

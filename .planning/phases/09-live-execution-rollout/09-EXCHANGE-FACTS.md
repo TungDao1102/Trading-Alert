@@ -48,7 +48,7 @@
 
 **Code impact:** None made here, and none required: the allow-list is fail-closed. The value list is documented, but the docs never label a status "active" or "terminal". They do imply TRIGGERING and TRIGGERED are in-flight, non-terminal states, because FINISHED is described as the end state after TRIGGERED. Whether a protective in TRIGGERING or TRIGGERED should count as "exists and active" is a design decision for the orchestrator, not a documented fact. If it is decided yes, `_ACTIVE_ALGO_STATUSES` is the constant to change.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED in part 2026-10-22 (`.planning/phases/19-execution-plan-binding-price-check/evidence/demo-probe-EVIDENCE-20261022T120704Z.json`, case `triggered_close_position_bracket`, client algo id dprobe-tbs-20261022T120704Z-12, child order id 28645789207): the stream carried the stop as NEW, TRIGGERING, TRIGGERED, FINISHED and, for a TP1 (client algo id dprobe-tp1-20261022T120704Z-15), REST answered ABSENT and then FINISHED; the smoke of 2026-11-06 (`.planning/phases/24-live-runtime-composition-demo/evidence/09-DEMO-REHEARSAL-EVIDENCE-smoke-20261106T160307Z.json`, entry order id 28668586471, client algo ids xa-cda74315b3b878e4e2f54f5ce37281dSL, xa-cda74315b3b878e4e2f54f5ce37281dT1, xa-cda74315b3b878e4e2f54f5ce37281dT2) confirmed the stop by REST as NEW and polled EXPIRED and CANCELED after the close. Which of TRIGGERING and TRIGGERED count as active stays an undocumented design decision; demo-observed, not mainnet.
 
 ### Fact 3: reduceOnly on CONDITIONAL algo orders
 
@@ -64,7 +64,7 @@
 
 **Code impact:** None. Scope of this verdict: it covers which parameter combinations are valid. The page does not describe trigger-time behaviour of a reduce-only conditional leg, so that remains for the Demo cross-check. One conflicting line was seen on the Error Code page: "-4138 REDUCE_ONLY_MUST_BE_TRUE  Reduce only must be true with closePosition equals true". That text predates the Algo Service migration and contradicts the New Algo Order page, which governs the algo endpoint; if Demo rejects a closePosition leg for this reason, `place_algo_protective` is where it would show.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED 2026-10-22 (`.planning/phases/19-execution-plan-binding-price-check/evidence/demo-probe-EVIDENCE-20261022T120704Z.json`, case `tp1_quantity_from_fill`, client algo id dprobe-tp1-20261022T120704Z-15, child order id 28645790346): an explicit-quantity reduce-only TAKE_PROFIT_MARKET of 0.0004 BTC was accepted as NEW, triggered and filled, and on 2026-10-16 (`.planning/phases/18-user-data-stream-error-taxonomy/evidence/demo-probe-EVIDENCE-20261016T142134Z.json`, case `rejected_protective_variants`) reduceOnly sent together with closePosition was refused with -1106 "Parameter 'reduceonly' sent when not required."; the -4138 text was not seen; demo-observed, not mainnet.
 
 ### Fact 4: MIN_NOTIONAL on reduce-only or close legs
 
@@ -80,7 +80,7 @@
 
 **Code impact:** None made here. The only statement is in the generic error-code text, not on the New Algo Order page, and it does not say whether the Algo Service applies the same exemption to a conditional reduce-only leg; closePosition legs are not mentioned at all. The TP1 gate is therefore stricter than the docs require for a reduce-only leg, which is the safe direction. Do not relax it until the Demo cross-check observes a below-minimum-notional reduce-only algo order being accepted. The place that would change is `quantize_protective_qty` (gate 2, the `notional < constraint_snapshot.min_notional` check) and the `NOTIONAL_REJECT` path in `src/execution/placement.py`.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED 2026-10-16 (`.planning/phases/18-user-data-stream-error-taxonomy/evidence/demo-probe-EVIDENCE-20261016T142134Z.json`, case `below_min_notional_reduce_only_leg`, client algo id dprobe-bml-20261016T142134Z-20): a reduce-only STOP_MARKET of 0.0001 BTC (notional 7.890670 against min_notional 50) was accepted as NEW, a TP1 of 32.7 USDT also triggered and filled on 2026-10-22 (`.planning/phases/19-execution-plan-binding-price-check/evidence/demo-probe-EVIDENCE-20261022T120704Z.json`, client algo id dprobe-tp1-20261022T120704Z-15, child order id 28645790346), and a non-reduce-only entry below the minimum was refused with -4164 on 2026-10-23 (`.planning/phases/19-execution-plan-binding-price-check/evidence/demo-probe-EVIDENCE-20261023T140731Z.json`, client id dprobe-mnl-20261023T140731Z-3); so Demo exempts reduce-only legs as the error text says, demo-observed, not mainnet, and the TP1 gate stays as it is.
 
 ### Fact 5: MAX_NUM_ALGO_ORDERS semantics and the literal 200
 
@@ -96,7 +96,7 @@
 
 **Code impact:** None made here. The literal 200 corresponds to a documented limit, but the limit is 200 conditional orders across all symbols, not per symbol, and the exchangeInfo filter no longer exists. Consequences for the orchestrator: the "KNOWN GAP" comment in `src/execution/gates.py` (which says per symbol and says the limit should come from exchangeInfo) is out of date, and `open_algo_count` must be the account-wide algo count, which is what the runner passes. The Common Definition page conflicts with the change log (it still describes a per-symbol filter, example limit 100); the dated change-log entry is treated as governing, matching the earlier note in docs/SOURCES.md. Making the limit dynamic is impossible from exchangeInfo; keeping a documented constant is the correct reading.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** NOT YET OBSERVED (Phase 25 campaign: no scenario or probe case places 200 conditional orders, so the account-wide limit stays documentation only; recorded as row DVM-35, label DOCS, in `docs/operations/DEMO_VS_MAINNET.md`)
 
 ### Fact 6: closePosition=true STOP_MARKET with no open position
 
@@ -130,7 +130,7 @@
 
 **Code impact:** None. The base URL is confirmed in substance (the docs call the environment "testnet" and give the Demo host), which matches the SDK constant the runner uses. The verdict is UNCONFIRMED because the page says only "Most of the endpoints" work there and lists neither the supported nor the unsupported ones, so algo endpoint support on Demo is not documented. The rehearsal itself is the test: an algo placement rejected on Demo for being unsupported would show in the evidence file as a failure with the exception type name.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED 2026-11-06 (`.planning/phases/24-live-runtime-composition-demo/evidence/09-DEMO-REHEARSAL-EVIDENCE-smoke-20261106T160307Z.json`, `base_url` https://demo-fapi.binance.com, entry order id 28668586471, client algo ids xa-cda74315b3b878e4e2f54f5ce37281dSL, xa-cda74315b3b878e4e2f54f5ce37281dT1, xa-cda74315b3b878e4e2f54f5ce37281dT2): the algo endpoints work on Demo, the stop was placed and confirmed as NEW and both take-profit legs were placed, and on 2026-10-22 the open-algo-order list returned listed legs (`.planning/phases/19-execution-plan-binding-price-check/evidence/demo-probe-EVIDENCE-20261022T120704Z.json`, case `close_position_stop_with_position`, algo id 1000000251915712, client algo id dprobe-cps-20261022T120704Z-2); demo-observed, not mainnet.
 
 ### Addendum B: PERCENT_PRICE filter semantics for LIMIT orders
 
@@ -146,7 +146,7 @@
 
 **Code impact:** None. Note for the runner design: for a BUY the documented bound is an upper one only, so a far BUY LIMIT below the mark is not constrained by `multiplierDown` on this page; pricing it inside the band on both sides (as planned) is safe either way. The fill scenario's BUY LIMIT above the mark must stay at or below `markPrice * multiplierUp`. The multipliers are read from exchangeInfo at run time, never hard-coded.
 
-**Demo cross-check:** NOT YET OBSERVED
+**Demo cross-check:** OBSERVED in part 2026-10-16 (`.planning/phases/18-user-data-stream-error-taxonomy/evidence/demo-probe-EVIDENCE-20261016T142134Z.json`, case `id_reuse_after_filled`, client id dprobe-rfl-20261016T142134Z-8): a BUY LIMIT above the cap was refused with -4016 "Limit price can't be higher than 86305.10", and in the rerun (`.planning/phases/18-user-data-stream-error-taxonomy/evidence/demo-probe-EVIDENCE-20261016T173612Z.json`, client id dprobe-rfl-20261016T173612Z-8, order id 28636771570) a BUY LIMIT at 83366.80 above the mark was accepted and filled; the multiplierUp behind the cap was not recorded, so the formula is not confirmed numerically; demo-observed, not mainnet.
 
 ## Summary of verdicts
 

@@ -275,7 +275,9 @@ def _corpus() -> str:
 
 @cache
 def _known_variable_names() -> frozenset[str]:
-    texts = [_read(ENV_EXAMPLE), _read(COMPOSE), _read(DOCKERFILE)]
+    # plans 24-30 and 24-36 (D-29): the live, paper and backup names live in their own templates
+    per_service = [_read(p) for p in sorted(REPO_ROOT.glob(".env.*.example"))]
+    texts = [_read(ENV_EXAMPLE), *per_service, _read(COMPOSE), _read(DOCKERFILE)]
     texts.extend(_read(p) for p in _deploy_scripts())
     return frozenset(re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", "\n".join(texts)))
 

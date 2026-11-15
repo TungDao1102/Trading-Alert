@@ -1,0 +1,30 @@
+{
+  "case_id": "stop_rejected_after_acceptance",
+  "index": 2,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "query_order",
+    "summary": {
+      "avg_price": "81850.900000",
+      "client_order_id": "dprobe-sre-20261023T141029Z-3",
+      "close_position": "false",
+      "executed_qty": "0.0007",
+      "good_till_date": "0",
+      "order_id": "28647907025",
+      "orig_qty": "0.0007",
+      "orig_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "83914.20",
+      "reduce_only": "false",
+      "side": "BUY",
+      "status": "FILLED",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "LIMIT",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

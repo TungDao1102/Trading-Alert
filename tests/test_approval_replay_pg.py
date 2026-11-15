@@ -63,6 +63,7 @@ from src.persistence.uow import OperationalDatabase
 
 from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
 from tests.support.intent_store_fakes import AlwaysWinsIntentStore
+from tests.support.press_identity import OWNER_PRESS
 from tests.test_execution_manager import (
     _build_approval,
     _build_approved_plan,
@@ -219,6 +220,7 @@ def dispatch(
         save_atomic=save_atomic or proc.approvals.save_atomic,
         now_utc=now_utc,
         binding_context=binding_context(),
+        **OWNER_PRESS,
     )
 
 

@@ -1,0 +1,76 @@
+# Owner probe limits for the eight Demo cases of quick task 261023-sj2 (sections 16 to 23 of
+# .planning/DEMO-EVIDENCE-PLAN.md). Follows 19-probe-limits.toml and 19-probe-limits-retest.toml.
+#
+# STATUS: PROPOSED BY THE ASSISTANT, NOT APPROVED. The owner reads every value, changes what they
+# want and records the approval in a decision note of their own. Nothing here is a trading
+# parameter: every number only bounds how much the Demo probe may send or how long it waits (D-17).
+#
+# A separate file on purpose: the two earlier files are referenced by hash in evidence files already
+# written, so they are not edited. Only the eight sj2 cases are on; every older case is off.
+#
+# Run (owner only), see the plan for the exact commands:
+#   dry run first (no --execute), then each case with --only <id> --execute.
+#   Suggested order: timestamp_outside_recv_window, income_history_read, non_reduce_only_below_min_notional,
+#   insufficient_margin_order, reduce_only_market_on_flat, reduce_only_market_larger_than_position,
+#   stop_rejected_after_acceptance, trigger_cancel_race.
+#   Run income_history_read AFTER the order cases of the same session so its window contains trades.
+
+[order]
+# From Phase 18 / 19-probe-limits.toml (owner-approved values).
+symbol = "BTCUSDT"
+quantity = "0.0008"
+max_notional_quote = "100"
+far_price_fraction = "0.96"
+# Needed because stop_reject_after_accept and trigger_cancel_race are on. Same as the earlier
+# session (0.9999 = about 0.01 percent below the live mark). (same as 19-probe-limits.toml)
+near_trigger_fraction = "0.9999"
+# Needed because trigger_cancel_race is on; at most 5. (same as 19-probe-limits.toml)
+race_repeats = 2
+# Needed because insufficient_margin is on. THIS IS THE ONE ORDER NOT HELD TO max_notional_quote
+# OR TO quantity. It must be a whole quantity on the step grid (BTCUSDT step 0.001), large enough
+# that its margin exceeds the available balance, and inside the exchange LOT_SIZE range.
+# Basis for the proposal (recorded Demo account of 2026-10-22, demo-observed, not mainnet):
+#   availableBalance 4999.09 USDT, BTCUSDT price about 81750, far price = 0.96 * mark = about 78500.
+#   10 BTC at the far price is about 785000 USDT notional; its initial margin is about 6280 USDT
+#   even at 125x leverage, so above the balance at any leverage the account can have.
+# The case records availableBalance, leverage and the implied margin just before the order, so you
+# can see afterwards whether it was large enough. If the exchange answers a different code than
+# -2019 (for example a position or bracket limit), that code is the answer; do not retry it.
+# (proposed)
+insufficient_margin_quantity = "10"
+
+[waits]
+# The longest one case waits for an event (a trigger, a fill). Same as 19-probe-limits.toml.
+case_timeout_seconds = 90
+cleanup_timeout_seconds = 60
+
+[optional_cases]
+# Phase 18 optional cases, left off as before.
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
+# Cases of 261021-sj0 and 261022-sj1: off in this file (already captured on 2026-10-22).
+account_capture = false
+algo_query_timing = false
+close_position_with_position = false
+stop_trigger_after_fill = false
+stop_absent_same_id = false
+manual_close_open_legs = false
+commission_realized_pnl = false
+triggered_bracket = false
+tp1_from_fill = false
+exchange_info_read = false
+gtd_min_lifetime = false
+partial_fill_attempt = false
+cancel_fill_race = false
+stream_loss = false
+gtd_expiry = false
+# Cases of 261023-sj2: all on.
+reduce_only_flat = true           # section 16, A4: reduce-only MARKET with no position
+reduce_only_oversize = true       # section 17, A8: reduce-only MARKET larger than the position
+min_notional_entry = true         # section 18, -4164
+insufficient_margin = true        # section 19, -2019 (own quantity, see [order])
+stop_reject_after_accept = true   # section 20, P5: best effort
+trigger_cancel_race = true        # section 21, P7: best effort, not deterministic
+recv_window_error = true          # section 22, -1021: read only, no order
+income_history = true             # section 23, Phase 21 income types: read only, no order

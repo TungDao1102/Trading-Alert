@@ -1,0 +1,28 @@
+{
+  "case_id": "trigger_cancel_race",
+  "index": 13,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "query_algo_order",
+    "summary": {
+      "actual_order_id": "",
+      "algo_id": "1000000253704664",
+      "algo_status": "NEW",
+      "algo_type": "CONDITIONAL",
+      "client_algo_id": "dprobe-tc2-20261023T140731Z-8",
+      "close_position": "true",
+      "order_type": "STOP_MARKET",
+      "position_side": "BOTH",
+      "price": "0.00",
+      "quantity": "0.0000",
+      "reduce_only": "true",
+      "side": "SELL",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTE_GTC",
+      "trigger_price": "81862.00",
+      "working_type": "MARK_PRICE"
+    }
+  }
+}

@@ -531,7 +531,11 @@ def test_build_reject_record_is_deterministic_and_has_no_trade_fields() -> None:
 
 
 def test_the_rejection_vocabulary_is_unchanged_and_excludes_the_conflict_label() -> None:
-    assert len(list(RejectionReason)) == 20
+    # Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005): 20 -> 21 members.
+    # Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED (G3-005): 21 -> 23 members.
+    assert len(list(RejectionReason)) == 23, (
+        "G3-005 (D-35): Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED, 23 members"
+    )
     assert "CONFLICT_WITH_OPEN_POSITION" not in {r.value for r in RejectionReason}
 
 

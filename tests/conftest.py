@@ -26,6 +26,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +74,30 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     reachable, detail = infra_helpers.docker_daemon_reachable()
     if not reachable:
         infra_helpers.infra_skip(f"docker daemon not reachable: {detail}")
+
+
+DEMO_RUN_ENV = "TRADING_DEMO_RUN"
+DEMO_SKIP_REASON = (
+    "demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent"
+)
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip every ``demo``-marked item unless the owner selected it on purpose (25-01, D-03).
+
+    CI and AGENTS.md run ``-m "not docker"``, which does not exclude ``demo``; without this hook
+    the Binance Demo scenarios would run there and try signed calls (OPS-02). A demo item runs only
+    when ``-m`` names ``demo`` (not ``not demo``) AND ``TRADING_DEMO_RUN=1``. A plain skip, never
+    the docker helper: that one FAILS under ``TRADING_CI_STRICT=1``.
+    """
+    expr = (config.getoption("markexpr") or "").replace(" ", "")
+    selected = "demo" in expr and "notdemo" not in expr
+    if selected and os.environ.get(DEMO_RUN_ENV) == "1":
+        return
+    skip = pytest.mark.skip(reason=DEMO_SKIP_REASON)
+    for item in items:
+        if item.get_closest_marker("demo") is not None:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

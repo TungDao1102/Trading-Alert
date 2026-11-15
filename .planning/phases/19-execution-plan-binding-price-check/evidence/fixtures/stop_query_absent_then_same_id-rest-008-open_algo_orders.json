@@ -1,0 +1,28 @@
+{
+  "case_id": "stop_query_absent_then_same_id",
+  "index": 8,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_algo_orders",
+    "summary": {
+      "count": "1",
+      "row_0_algo_id": "1000000251911823",
+      "row_0_algo_status": "NEW",
+      "row_0_algo_type": "CONDITIONAL",
+      "row_0_client_algo_id": "dprobe-sas-20261022T120055Z-7",
+      "row_0_close_position": "true",
+      "row_0_order_type": "STOP_MARKET",
+      "row_0_position_side": "BOTH",
+      "row_0_price": "0.0",
+      "row_0_quantity": "0.0",
+      "row_0_reduce_only": "true",
+      "row_0_side": "SELL",
+      "row_0_symbol": "BTCUSDT",
+      "row_0_time_in_force": "GTE_GTC",
+      "row_0_trigger_price": "78470.6",
+      "row_0_working_type": "MARK_PRICE"
+    }
+  }
+}

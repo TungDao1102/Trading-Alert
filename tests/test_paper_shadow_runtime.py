@@ -15,6 +15,7 @@ rehearsal (plan 16-40).
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -29,10 +30,11 @@ from src.adapters.telegram_callbacks import DispatchResult, on_callback
 from src.backtest.costs import build_cost_model
 from src.core.types import Candle
 from src.domain.approval import Approval
-from src.domain.enums import DailyState
+from src.domain.enums import ApprovalResult, DailyState
 from src.domain.registry import load_parameter_set
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.ops.store_executor import WRITER_THREAD_PREFIX
 from src.paper.loop import BarOutcome
 from src.paper.pipeline import PipelineResult
 from src.paper.shadow import SHADOW_LABEL, Mode
@@ -51,7 +53,9 @@ from telegram import error as tg_error
 
 from tests.backtest_case_helpers import DEFAULT_COST_MODEL
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
+    STRANGER_USER_ID,
     T0,
     USER_ID,
     FakeBot,
@@ -264,8 +268,10 @@ def make_outcome(
     stage: str = "risk_passed",
     symbol: str = SYMBOL,
     realized_risk: str = "48",
+    quantity: str = "0.08",
 ) -> BarOutcome:
-    """A bar outcome: the SHADOW fixture signal and plan of `n`, sized 0.08 for a risk of 48."""
+    """A bar outcome: the SHADOW fixture signal and plan of `n`; the risk stage sized `quantity`
+    (default 0.08, the planner quantity of the fixture plan) for a risk of `realized_risk`."""
     signal = make_shadow_signal(n, symbol=symbol, source_candle_close_utc=SIGNAL_CLOSE)
     plan = make_shadow_plan(signal, plan_hash=str(n) * 64)
     candle = Candle(
@@ -288,9 +294,9 @@ def make_outcome(
         )
     sized = SizedResult(
         is_no_trade=False,
-        quantity=Decimal("0.08"),
-        quantity_before_rounding=Decimal("0.08"),
-        quantity_after_rounding=Decimal("0.08"),
+        quantity=Decimal(quantity),
+        quantity_before_rounding=Decimal(quantity),
+        quantity_after_rounding=Decimal(quantity),
         quantization_decision="ACCEPTED",
         realized_risk=Decimal(realized_risk),
     )
@@ -322,7 +328,9 @@ class Rig:
         confirm_ttl_seconds: int = 60,
         application_factory: Callable[[dict[str, Any]], Any] | None = None,
         constraints_for: Callable[[str, datetime], ConstraintSnapshot] | None = None,
+        authorized_user_ids: frozenset[int] = AUTHORIZED_USER_IDS,
     ) -> None:
+        self.authorized_user_ids = authorized_user_ids
         self.now = now
         self.constraints_for = (
             constraints_for if constraints_for is not None else lambda symbol, at: CONSTRAINTS
@@ -344,6 +352,7 @@ class Rig:
             stores=self.stores,
             bot=self.bot,
             chat_id=CHAT_ID,
+            authorized_user_ids=self.authorized_user_ids,
             clock=lambda: self.now,
             ledger=self.ledger,
             public=self.public,
@@ -429,6 +438,10 @@ def exposures(rig: Rig) -> list[tuple[str, str, Decimal]]:
 # --------------------------------------------------------------------------- #
 
 
+def _lines_with(text: str, prefix: str) -> list[str]:
+    return [line for line in text.split("\n") if line.startswith(prefix)]
+
+
 async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulated_position() -> (
     None
 ):
@@ -440,6 +453,9 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     alert = rig.bot.sent[0].text
     assert SHADOW_LABEL in alert
     assert "Mode: SHADOW" in alert
+    # D108: the default sizing equals the planner quantity, so the alert shows it and the loss.
+    assert "Quantity: 0.08" in alert
+    assert "Estimated loss at SL (incl. costs): 48 quote" in alert
     assert [label for label, _ in rig.buttons()] == ["APPROVE", "SKIP"]
     short = rig.buttons()[0][1].removeprefix("APR:")
     assert rig.buttons()[1][1] == f"SKP:{short}"
@@ -449,6 +465,10 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     assert len(rig.bot.edited) == 1
     card = rig.bot.edited[0]
     assert "Confirm this SHADOW plan? No real order will be placed." in card.text
+    assert _lines_with(card.text, "Quantity: ") == _lines_with(alert, "Quantity: ")
+    assert _lines_with(card.text, "Estimated loss at SL") == _lines_with(
+        alert, "Estimated loss at SL"
+    )
     assert [data for _, data in keyboard_buttons(card.reply_markup)] == [
         f"CNF:{short}",
         f"CXL:{short}",
@@ -481,6 +501,62 @@ async def test_a_risk_passed_plan_goes_alert_approve_card_confirm_and_a_simulate
     assert payload(opened)["fill_quantity"] == "0.080"
     assert rig.coordinator.open_positions()[0].filled is True
     assert exposures(rig) == [(SYMBOL, "LONG", Decimal("48"))], "one exposure, never counted twice"
+
+
+async def test_d108_the_alert_and_the_card_show_the_same_risk_stage_figures() -> None:
+    """D108 (owner decision 2026-11-13, option A): one message, one quantity.
+
+    The alert reads the same `verdict.sized` as the card, so both show 0.05 and the loss 31.25,
+    and the alert's `Exposure:` is that same 0.05 x the adverse entry. The approval rows keep the
+    planner quantity 0.08 (D078).
+    """
+    rig = Rig()
+    await rig.alert(make_outcome(quantity="0.05", realized_risk="31.25"))
+    alert = rig.bot.sent[0].text
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    assert _lines_with(alert, "Quantity: ") == ["Quantity: 0.05"]
+    assert _lines_with(alert, "Estimated loss at SL (incl. costs): ") == [
+        "Estimated loss at SL (incl. costs): 31.25 quote"
+    ]
+    assert "Quantity: 0.08" not in alert
+    (exposure_line,) = _lines_with(alert, "Exposure: ")
+    exposure = Decimal(exposure_line.removeprefix("Exposure: ").removesuffix(" quote"))
+    assert exposure == Decimal("0.05") * Decimal("50100")
+    assert rig.stores.approvals
+    for row in rig.stores.approvals.values():
+        assert row.approved_quantity == Decimal("0.08")
+
+    await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
+    card = rig.bot.edited[0].text
+    assert _lines_with(card, "Quantity: ") == _lines_with(alert, "Quantity: ")
+    assert _lines_with(card, "Estimated loss at SL (incl. costs): ") == _lines_with(
+        alert, "Estimated loss at SL (incl. costs): "
+    )
+
+
+async def test_the_confirm_card_shows_what_the_ledger_reserves() -> None:
+    """16-DEC-EQUITY-BASE: the card shows the risk-stage figures, not the planner quantity."""
+    rig = Rig()
+    await rig.alert(make_outcome(quantity="0.05", realized_risk="31.25"))
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
+    card = rig.bot.edited[0].text
+    assert "Quantity: 0.05" in card
+    assert "Notional: 2505 quote" in card  # 0.05 x 50100, the adverse edge of the entry zone
+    assert "Estimated loss at SL (incl. costs): 31.25 quote" in card
+    assert "Quantity: 0.08" not in card
+
+    await rig.tap(f"CNF:{short}", "q-cnf", at=T_CONFIRM)
+    (confirmed,) = rig.journal(EVENT_SHADOW_CONFIRMED)
+    reservation = payload(confirmed)["reservation"]
+    assert reservation["planned_quantity"] == "0.05"
+    assert reservation["sized_realized_risk"] == "31.25"
+    assert exposures(rig) == [(SYMBOL, "LONG", Decimal("31.25"))]
+    # The approval rows keep the planner quantity (owner choice, 16-DEC-EQUITY-BASE).
+    approved = [a for a in rig.stores.approvals.values() if a.status == ApprovalResult.APPROVED]
+    assert [a.approved_quantity for a in approved] == [Decimal("0.08")]
 
 
 # --------------------------------------------------------------------------- #
@@ -593,7 +669,7 @@ async def _session_confirm_expiry(rig: Rig) -> None:
     short = rig.buttons()[0][1].removeprefix("APR:")
     await rig.tap(f"APR:{short}", "q-apr", at=T_APPROVE)
     await rig.tap(f"CNF:{short}", "q-cnf-late", at=T_APPROVE + timedelta(seconds=61))
-    rig.coordinator.expire_due()
+    await rig.coordinator.expire_due()
 
 
 async def _session_approval_expired(rig: Rig) -> None:
@@ -871,7 +947,13 @@ def test_the_running_loop_hands_a_risk_passed_outcome_to_the_shadow_chain(live: 
         script,
         pipeline=pipeline,
         risk_inputs=None,
-        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+        shadow=ShadowWiring(
+            stores=stores,
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=bot,
+            sleep=RecordingSleep(),
+        ),
     )
 
     assert code == 0
@@ -892,7 +974,12 @@ def test_the_start_is_not_refused_when_the_shadow_chain_binds_the_risk_inputs(
         pipeline=SpyPipeline([]),
         risk_inputs=None,
         context_factory=None,
-        shadow=ShadowWiring(stores=RuntimeStores(), chat_id=CHAT_ID, bot=FakeBot()),
+        shadow=ShadowWiring(
+            stores=RuntimeStores(),
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=FakeBot(),
+        ),
     )
     assert code == 0
     assert live.records(RuntimeEventType.RUNTIME_START)
@@ -983,6 +1070,132 @@ async def test_a_poll_with_no_position_reads_no_minutes() -> None:
     await rig.coordinator.poll_once()
     assert "klines" not in rig.public.calls
     assert rig.public.calls.count("mark_klines") == 1, "only the best-effort mark of the alert"
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-05 (D-25, P16R-03): the confirm sweep leaves the event loop.
+# --------------------------------------------------------------------------- #
+
+TEST_ONLY_WAIT_SECONDS = 5.0
+
+
+def _spy_expire_due(rig: Rig, threads: list[str], gate: threading.Event | None = None) -> None:
+    """Replace the confirm book's `expire_due` by a spy that records its thread, then delegates."""
+    real = rig.coordinator.confirm_book.expire_due
+
+    def spy(now_utc: datetime) -> list[str]:
+        threads.append(threading.current_thread().name)
+        if gate is not None:
+            assert gate.wait(TEST_ONLY_WAIT_SECONDS), "the test never released the sweep"
+        return real(now_utc)
+
+    rig.coordinator.confirm_book.expire_due = spy  # type: ignore[method-assign]
+
+
+async def test_the_confirm_sweep_of_a_poll_runs_on_the_store_writer_thread() -> None:
+    rig = Rig()
+    threads: list[str] = []
+    _spy_expire_due(rig, threads)
+    rig.now = after_minutes(1)
+    await rig.coordinator.poll_once()
+    await rig.coordinator.poll_once()
+    assert len(threads) == 2
+    assert all(name.startswith(WRITER_THREAD_PREFIX) for name in threads), threads
+    assert threading.current_thread().name not in threads
+    await rig.coordinator.stop()
+
+
+async def test_the_public_expire_due_also_runs_on_the_store_writer_thread() -> None:
+    rig = Rig()
+    threads: list[str] = []
+    _spy_expire_due(rig, threads)
+    assert await rig.coordinator.expire_due() == []
+    assert len(threads) == 1 and threads[0].startswith(WRITER_THREAD_PREFIX)
+    await rig.coordinator.stop()
+
+
+async def test_a_slow_confirm_sweep_does_not_block_the_event_loop() -> None:
+    rig = Rig()
+    started = threading.Event()
+    release = threading.Event()
+    threads: list[str] = []
+
+    real = rig.coordinator.confirm_book.expire_due
+
+    def blocking(now_utc: datetime) -> list[str]:
+        threads.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(TEST_ONLY_WAIT_SECONDS), "the test never released the sweep"
+        return real(now_utc)
+
+    rig.coordinator.confirm_book.expire_due = blocking  # type: ignore[method-assign]
+    rig.now = after_minutes(1)
+    poll = asyncio.create_task(rig.coordinator.poll_once())
+    assert await asyncio.to_thread(started.wait, TEST_ONLY_WAIT_SECONDS)
+    ticks = 0
+    for _ in range(5):  # the loop keeps turning while the sweep is stuck in the worker
+        await asyncio.sleep(0)
+        ticks += 1
+    assert ticks == 5 and not poll.done()
+    release.set()
+    await asyncio.wait_for(poll, timeout=TEST_ONLY_WAIT_SECONDS)
+    assert threads[0].startswith(WRITER_THREAD_PREFIX)
+    await rig.coordinator.stop()
+
+
+async def test_a_confirm_that_times_out_is_still_expired_and_journaled_by_the_off_loop_sweep() -> (
+    None
+):
+    rig = Rig()
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+    await rig.tap(f"APR:{short}", "q-apr-sweep", at=T_APPROVE)
+    rig.now = T_APPROVE + timedelta(seconds=61)  # past the 60 s confirm TTL, never pressed
+    await rig.coordinator.poll_once()
+    assert len(rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)) == 1
+    await rig.coordinator.poll_once()
+    assert len(rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)) == 1, "a second sweep writes nothing"
+    await rig.coordinator.stop()
+
+
+async def test_stop_closes_the_store_executor_and_a_later_poll_skips_the_sweep() -> None:
+    rig = Rig()
+    threads: list[str] = []
+    _spy_expire_due(rig, threads)
+    await rig.coordinator.stop()
+    await rig.coordinator.stop()  # idempotent, also without an application
+    rig.now = after_minutes(1)
+    await rig.coordinator.poll_once()  # the runtime may poll once more while it shuts down
+    assert threads == []
+    with pytest.raises(RuntimeError, match="closed"):
+        await rig.coordinator.expire_due()
+
+
+async def test_stop_waits_for_a_sweep_that_is_in_flight() -> None:
+    rig = Rig()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    real = rig.coordinator.confirm_book.expire_due
+
+    def blocking(now_utc: datetime) -> list[str]:
+        started.set()
+        assert release.wait(TEST_ONLY_WAIT_SECONDS)
+        try:
+            return real(now_utc)
+        finally:
+            finished.set()
+
+    rig.coordinator.confirm_book.expire_due = blocking  # type: ignore[method-assign]
+    rig.now = after_minutes(1)
+    poll = asyncio.create_task(rig.coordinator.poll_once())
+    assert await asyncio.to_thread(started.wait, TEST_ONLY_WAIT_SECONDS)
+    stopper = asyncio.create_task(rig.coordinator.stop())
+    await asyncio.sleep(0)
+    assert not stopper.done(), "stop() must wait for the write that is in flight"
+    release.set()
+    await asyncio.wait_for(asyncio.gather(poll, stopper), timeout=TEST_ONLY_WAIT_SECONDS)
+    assert finished.is_set()
 
 
 async def test_the_next_bars_context_sees_the_open_position_and_the_booked_daily_loss() -> None:
@@ -1359,6 +1572,7 @@ def lifecycle_wiring(trace: list[str]) -> tuple[ShadowWiring, FakeApplication]:
     wiring = ShadowWiring(
         stores=RuntimeStores(),
         chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
         bot=bot,
         sleep=RecordingSleep(),
         application_factory=lambda kwargs: application,
@@ -1471,9 +1685,9 @@ async def test_a_restart_expires_pending_approvals_and_confirms_before_polling_b
     expired_ids = {
         a.approval_id for a in rig.stores.approvals.values() if a.status.value == "EXPIRED"
     }
-    # The database allows one decided approval per plan: one row is EXPIRED, its sibling stays
-    # PENDING with a token nobody holds any more (undecidable).
-    assert len(pending_ids & expired_ids) == 1
+    # EXPIRED rows are outside the one-decided-per-plan index (G4-042, 0014): both rows of the
+    # undecided plan are EXPIRED and neither keeps a token nobody holds.
+    assert pending_ids == expired_ids
     (confirm_expired,) = rig.journal(EVENT_SHADOW_CONFIRM_EXPIRED)
     assert payload(confirm_expired)["reason"] == "RUNTIME_RESTART"
     assert rig.journal(EVENT_SHADOW_CONFIRMED) == []
@@ -1588,7 +1802,7 @@ async def test_every_signal_of_a_session_gets_its_attribution_from_the_journal()
     await rig.tap(f"CNF:{shorts[1]}", "q-cnf-1", at=T_CONFIRM)
     await rig.tap(f"CXL:{shorts[3]}", "q-cxl-3", at=T_CONFIRM)
     await rig.tap(f"CNF:{shorts[4]}", "q-cnf-4", at=T_APPROVE + timedelta(seconds=61))
-    rig.coordinator.expire_due()
+    await rig.coordinator.expire_due()
 
     early = rig.coordinator.records_for(*pair(outcomes[7]))
     assert kinds(early) == [("system", "")], (
@@ -1676,7 +1890,11 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
         )
     with pytest.raises(ConfigNotRatified, match="DATABASE_URL"):
         runtime._shadow_from_env(
-            {"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_AUTHORIZED_CHAT_ID": "4242"}
+            {
+                "TELEGRAM_BOT_TOKEN": token,
+                "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+                "TELEGRAM_AUTHORIZED_USER_IDS": "777001",
+            }
         )
 
     seen: list[str] = []
@@ -1691,11 +1909,13 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
         {
             "TELEGRAM_BOT_TOKEN": token,
             "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+            "TELEGRAM_AUTHORIZED_USER_IDS": "777001, 777002",
             "DATABASE_URL_SYNC": "postgresql://u:p@h/db",
         }
     )
     assert wiring is not None
     assert wiring.chat_id == 4242 and wiring.stores is stores
+    assert wiring.authorized_user_ids == frozenset({777001, 777002})
     assert seen == ["postgresql://u:p@h/db"]
     assert wiring.application_factory is not None
 
@@ -1708,6 +1928,56 @@ def test_the_production_shadow_wiring_needs_the_telegram_chat_and_the_database(
     monkeypatch.setattr("src.adapters.telegram_callbacks.build_application", fake_build_application)
     assert wiring.application_factory({"authorized_chat_id": 4242, "clock": None}) == "application"
     assert captured == {"token": token, "authorized_chat_id": 4242, "clock": None}
+
+
+def test_a_configured_telegram_without_a_usable_user_allow_list_refuses_the_start() -> None:
+    """Phase 23 (D-02): token and chat set, user ids missing or unparsable -> not ratified."""
+    from src.paper import runtime
+    from src.paper.runtime_config import ConfigNotRatified
+
+    base = {
+        "TELEGRAM_BOT_TOKEN": "123456:test-token-value",
+        "TELEGRAM_AUTHORIZED_CHAT_ID": "4242",
+        "DATABASE_URL_SYNC": "postgresql://u:p@h/db",
+    }
+    for missing in (
+        {},
+        {"TELEGRAM_AUTHORIZED_USER_IDS": ""},
+        {"TELEGRAM_AUTHORIZED_USER_IDS": " "},
+    ):
+        with pytest.raises(ConfigNotRatified) as missing_info:
+            runtime._shadow_from_env({**base, **missing})
+        assert missing_info.value.problems == ["TELEGRAM_AUTHORIZED_USER_IDS (missing)"]
+    for bad in ("abc", "777001,", "0", "-5", "777001,777001"):
+        with pytest.raises(ConfigNotRatified) as bad_info:
+            runtime._shadow_from_env({**base, "TELEGRAM_AUTHORIZED_USER_IDS": bad})
+        assert bad_info.value.problems == [
+            "TELEGRAM_AUTHORIZED_USER_IDS (must be comma-separated positive integers)"
+        ]
+        assert bad not in str(bad_info.value), "no input text in the message"
+    # With Telegram unconfigured the start stays SKIPPED, whatever the allow-list says.
+    assert runtime._shadow_from_env({"TELEGRAM_AUTHORIZED_USER_IDS": "abc"}) is None
+
+
+def test_the_coordinator_requires_a_non_empty_integer_allow_list() -> None:
+    parameter = inspect.signature(ShadowCoordinator).parameters["authorized_user_ids"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+    for bad in (frozenset(), frozenset({True}), {USER_ID}):
+        with pytest.raises(ValueError):
+            Rig(authorized_user_ids=bad)  # type: ignore[arg-type]
+    assert Rig().coordinator.callback_kwargs()["authorized_user_ids"] == AUTHORIZED_USER_IDS
+
+
+async def test_a_press_by_a_user_outside_the_allow_list_changes_no_approval() -> None:
+    rig = Rig()
+    await rig.alert()
+    short = rig.buttons()[0][1].removeprefix("APR:")
+
+    result = await rig.tap(f"APR:{short}", "q-stranger", at=T_APPROVE, user=STRANGER_USER_ID)
+
+    assert result.ok is False and result.reason_code == "USER_NOT_AUTHORIZED"
+    assert all(a.status == ApprovalResult.PENDING for a in rig.stores.approvals.values())
 
 
 def test_the_postgresql_stores_implement_every_member_of_the_chain_port() -> None:
@@ -1808,7 +2078,13 @@ def _crash_before_the_shadow_write(rig: Live, stores: FailingAlertStores, bot: F
         script,
         pipeline=pipeline,
         risk_inputs=None,
-        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+        shadow=ShadowWiring(
+            stores=stores,
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=bot,
+            sleep=RecordingSleep(),
+        ),
     )
     assert code == 7
     [heartbeat] = rig.records(RuntimeEventType.PAPER_BAR_PROCESSED)
@@ -1827,7 +2103,13 @@ def _restart(rig: Live, stores: FailingAlertStores, bot: FakeBot) -> int:
         script,
         pipeline=SpyPipeline([]),
         risk_inputs=None,
-        shadow=ShadowWiring(stores=stores, chat_id=CHAT_ID, bot=bot, sleep=RecordingSleep()),
+        shadow=ShadowWiring(
+            stores=stores,
+            chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
+            bot=bot,
+            sleep=RecordingSleep(),
+        ),
     )
 
 

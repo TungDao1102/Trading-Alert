@@ -30,6 +30,8 @@ Actions:
 8. Only then consider resuming.
 ```
 
+SAFE_MODE is left only by the operator exit with its readiness rows (section 21.1), never by a restart, a timer or a recovered feed.
+
 ## 3. Position without confirmed stop
 
 ```text
@@ -37,14 +39,26 @@ SAFE_MODE
 → alert immediately
 → query Binance authoritative position
 → query protective/algo orders
-→ if stop is absent or canceled, automatically re-place it at the original plan SL after risk validation (never wider)
+→ if the stop was never confirmed ACTIVE and REST proves it absent, the system places it again under the same client id at the original plan SL (never wider), at most once per coordinator step and only until `max_unprotected_ms`; if the stop was confirmed ACTIVE and is later lost, it is never re-placed: the position is closed with a reduce-only order (D077)
 → if the SL is rejected or not acknowledged, close the position with a reduce-only order, then send a HIGH alert
 → manual intervention is optional, not required
 ```
 
-The automatic ladder is per D034: the operator works full-time and cannot be assumed to react within minutes.
+The automatic ladder is per D034 and D077: the operator works full-time and cannot be assumed to react within minutes. The operator's control for a confirmed-then-lost stop is the close (`operator_close_position`, `EXECUTION_SPEC.md` section 11); there is no operator re-placement of that stop.
 
-**Implementation status:** the ladder above is the target behaviour (D034) and is built in Phase 20 (EXEC-06, OPS-05). Until then the system does not re-place a stop-loss or close the position by itself: on an entry without a protective stop it enters SAFE_MODE and alerts, and the operator must place the stop-loss or close the position manually on the exchange. Do not wait for an automatic action.
+**Implementation status:** the ladder above (D034, narrowed by D077) is built in Phase 20 and composed into the live process in Phase 24 (`python -m src.live.runtime`, section 22; the coordinator places the stop after a fill is seen, `/close SYMBOL` is the operator's close, section 21.1a). It is tested with fakes and was observed once on Binance Demo: the smoke rehearsal of 2026-11-06 (21 steps, section 22.6) saw an entry fill, a REST-confirmed stop and the TP legs. What no run has shown: the ladder's timeouts firing on a real exchange, an emergency close, and anything on a host (the owner VPS session of plan 24-33 has not happened) `[NOT_TESTED]`. Live placement stays disabled (`LIVE_ORDERS_DISABLED`). Until the owner has run the system on the host, treat the ladder as unproven there: on an entry without a protective stop, place the stop-loss or close the position manually on the exchange. Do not wait for an automatic action.
+
+**Take profits not in place (`TP_UNAVAILABLE`, D113).** The stop is confirmed and kept, the take profits are not in place, and SAFE_MODE `ENTRY_WITHOUT_PROTECTIVE` blocks new entries until the operator exit (section 21.1). The reason in the alert header is a reason code: `ENTRY_WITHOUT_PROTECTIVE` (the take profit step refused: the stop could not be read as ACTIVE, a snapshot or sizing refusal, or a take profit leg that was not confirmed), `PLAN_SYMBOL_MISMATCH` (the entry, its snapshot and the live filters disagree) or `POSITION_SIDE_MISMATCH` (the exchange position side contradicts the plan side). Before D113 the header showed `INVALID_REASON`, because the free detail cannot pass the alert sanitiser. The detail (for example `STOP_LOSS: not found`) is only in the journal; read it with this read-only query:
+
+```sql
+SELECT occurred_at_utc, entity_id, payload_json
+FROM journal_events
+WHERE event_type = 'PROTECTION_TP_UNAVAILABLE'
+ORDER BY occurred_at_utc DESC
+LIMIT 5;
+```
+
+The take profit step reads the stop by its id up to 4 times (one read and 3 rereads, 0.5 s apart) before it holds, because Binance Demo has answered a query by client id late (D113); a stop that is still not ACTIVE after the last read holds as before. What the operator does is as the alert wording says: check the stop on the exchange, then decide whether to place take profits or to close by hand.
 
 Never assume a locally stored order ID means the exchange order exists.
 
@@ -112,7 +126,7 @@ Phase 17 (D051): a replayed or redelivered APPROVE returns the stored approval a
 Trigger when:
 
 ```text
-now - last_expected_closed_candle > configured freshness threshold
+now - last_expected_closed_candle > freshness threshold (a NOT_CONFIGURED key, see below)
 ```
 
 Action:
@@ -124,6 +138,8 @@ NO NEW ENTRY ORDERS
 → validate candle continuity
 → resume only after health check
 ```
+
+The freshness thresholds of the live execution path are not defaults in code: `stale_feed.max_mark_price_age_ms` (60000 ms, D089), `stale_feed.max_user_data_silence_ms` (420000 ms, D091) and the reconcile cadence `reconcile.tick_interval_ms` (15000 ms, D089) are keys of `config/execution/execution-limits-v1.toml`. While any required key is `NOT_CONFIGURED` the live path refuses; do not invent a value. Since Phase 20 the reconcile tick enters SAFE_MODE `STALE_FEED` when the mark price of a tracked symbol or the user-data stream is stale; the live process runs that tick (section 22), tested with fakes and seen clean on the Demo smoke run of 2026-11-06 (`reconcile_clean`); a stale feed itself was not provoked on Demo `[NOT_TESTED]`. The scheduled tick skips itself while a placement is outstanding and for one tick after it (D097), so a healthy placement is not compared half-written. A feed time ahead of the clock by more than the ratified `[drift]` skew of `config/binance/binance-limits-v1.toml` counts as stale, not fresh. A persisted REST gate deadline later than its record time plus the largest policy wait is not trusted: the gate starts as `GATE_STATE_UNKNOWN` and the operator clears it (section 21.3).
 
 ## 8. WebSocket disconnect
 
@@ -195,15 +211,15 @@ Retention is 7/4/6: the newest snapshot of each of the last 7 UTC days, 4 ISO we
 
 How to run it: `deploy/backup-real-s3-gate.sh [--dry-run]` prints the plan (the throwaway prefix and every claim) from `python -m src.ops.backup real-s3-gate` in the compose `ops` image and makes no remote call; `deploy/backup-real-s3-gate.sh --execute [--evidence-dir DIR]` runs it and copies the output into `DIR/d064-real-s3-gate-<UTC>.txt` (default `DIR` is `$HOME/trading-evidence`, outside the checkout), also when a claim fails; `--dry-run` with either form prints the docker command only. `COMPOSE_PROJECT_NAME` and `TRADING_ENV_FILE` select the project and env file, so `COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup-real-s3-gate.sh --execute` gates the soak bucket. The remote is the one of the `BACKUP_*` names, built by the same mapping as the backup (`rclone_env`), so it gates whatever backend that mapping produces; with `BACKUP_REMOTE=none` it refuses (exit 2). Every object it writes lives under a new prefix `d064-gate-<UTC>-<12 hex>` directly below the configured bucket (a name rclone's default crypt name encoding never produces, so it cannot collide with the backup's own objects); the run refuses (exit 2, nothing written) unless that prefix lists empty, gives each scenario its own crypt root and sentinel below it, and purges the whole prefix in every exit path (Ctrl-C and SIGTERM included); a failed purge is itself a FAIL that names the prefix to remove by hand. With bucket versioning or object lock on (11.1 step 4) the purged objects stay as noncurrent versions until the provider's retention removes them; they are a few MiB of ciphertext. The evidence lists one `CLAIM <id>: PASS` or `FAIL` line per claim and ends with `RESULT: PASS` or `RESULT: FAIL`; it names the provider and region, never the bucket (shown as `<bucket>`) or a key. Claims: new paths upload and the snapshot completes; an unchanged file is skipped by the manifest SHA-256 comparison; a published path changed locally (same size, other size) is refused with nothing uploaded; a new path next to published ones uploads alone; the newest snapshot pulls back and verifies; an object left by an interrupted push is adopted when identical and refused when different; `cryptcheck` detects a remote object changed through the crypt layer, a ciphertext object overwritten at the provider, and a deleted object; a check failure right after the upload leaves the snapshot incomplete; a manifest that fails its own check is removed; a multipart object (12 MiB, `--multipart-mib`, uploaded with the S3 upload cutoff and chunk size forced to 5 MiB) uploads and verifies, passes unchanged, and is detected when changed; the prefix is purged. Exit 0 means every claim passed, 1 a claim failed or the run was interrupted, 2 a usage or configuration error. Re-run it after any change of provider, rclone version or image. Not shown by the script: that an object really was stored in parts (the script forces the part size, it does not read the provider's ETag), and the cost figures of the double above on the real provider.
 
-**Key custody.** Losing the crypt passphrase makes every backup unrecoverable: with a wrong key the bucket looks empty or garbled, and the tool refuses to continue rather than treat it as an empty store. Keep the raw passphrase (and the salt, `BACKUP_CRYPT_PASSWORD2`) off the VPS, in a password manager plus a second offline copy. The values in `.env` are `rclone obscure` output, which is reversible and is not encryption.
+**Key custody.** Losing the crypt passphrase makes every backup unrecoverable: with a wrong key the bucket looks empty or garbled, and the tool refuses to continue rather than treat it as an empty store. Keep the raw passphrase (and the salt, `BACKUP_CRYPT_PASSWORD2`) off the VPS, in a password manager plus a second offline copy. The values in `.env.backup` are `rclone obscure` output, which is reversible and is not encryption.
 
-**Local-only mode (no off-host copy, 261020-bkp).** By default a missing `BACKUP_S3_*` variable stops every backup command (fail closed); that does not change. An operator who has no remote yet can opt in explicitly with `BACKUP_REMOTE=none` in the env file the backup container reads (`.env`, or the file named by `TRADING_ENV_FILE`; `BACKUP_REMOTE` empty or `s3` is the default remote, any other value refuses). Then `deploy/backup.sh` (and the timers of 11.3, unchanged) makes and verifies the local bundle in `data/backup/bundle`, and `deploy/backup-drill.sh` copies that verified bundle into its `drill-<UTC timestamp>` directory, verifies it again and restores it into the scratch database exactly as in 11.6; neither contacts any remote, and both exit 0 on success. Every such run prints a multi-line warning on stderr whose first line is `OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host`, and the machine-readable line `OFFSITE_COPY=skipped` on stdout (the journal of the unit keeps both); a run against the remote prints `OFFSITE_COPY=verified` instead. `deploy/backup.sh --init-remote` refuses in this mode (exit 2, nothing to initialise), as do `push`, `pull` (so `deploy/restore.sh`) and `retain`. A local-only backup is not an encrypted copy outside the host, so it does not meet the minimum of this section, and it never satisfies the soak pin (20.5). A later backend that is not S3-compatible would be a new value of `BACKUP_REMOTE` and its own mapper; none exists yet.
+**Local-only mode (no off-host copy, 261020-bkp).** By default a missing `BACKUP_S3_*` variable stops every backup command (fail closed); that does not change. An operator who has no remote yet can opt in explicitly with `BACKUP_REMOTE=none` in the backup env file the backup container reads (`.env.backup`, or the file named by `TRADING_BACKUP_ENV_FILE`, which defaults to `TRADING_ENV_FILE` when only that is set; `BACKUP_REMOTE` empty or `s3` is the default remote, any other value refuses). Then `deploy/backup.sh` (and the timers of 11.3, unchanged) makes and verifies the local bundle in `data/backup/bundle`, and `deploy/backup-drill.sh` copies that verified bundle into its `drill-<UTC timestamp>` directory, verifies it again and restores it into the scratch database exactly as in 11.6; neither contacts any remote, and both exit 0 on success. Every such run prints a multi-line warning on stderr whose first line is `OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host`, and the machine-readable line `OFFSITE_COPY=skipped` on stdout (the journal of the unit keeps both); a run against the remote prints `OFFSITE_COPY=verified` instead. `deploy/backup.sh --init-remote` refuses in this mode (exit 2, nothing to initialise), as do `push`, `pull` (so `deploy/restore.sh`) and `retain`. A local-only backup is not an encrypted copy outside the host, so it does not meet the minimum of this section, and it never satisfies the soak pin (20.5). A later backend that is not S3-compatible would be a new value of `BACKUP_REMOTE` and its own mapper; none exists yet.
 
 ### 11.1 Configure the remote
 
 1. Create a bucket (new and empty) and an access key limited to it at your provider.
 2. Choose a long passphrase and a second one (the salt). On your workstation, never on the VPS, turn each into its obscured form with `rclone obscure` (read it from stdin, `rclone obscure -`, so it stays out of shell history). rclone rejects a raw passphrase.
-3. Put these into the off-host secrets file that bootstrap installs as `.env` (or edit `/opt/trading/.env`, mode 0600, as the `trading` user): `BACKUP_S3_PROVIDER` (`AWS`, `Wasabi` or `Other`), `BACKUP_S3_ENDPOINT` (needed for `Other`, for example a Backblaze B2 S3 endpoint), `BACKUP_S3_REGION`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY`, `BACKUP_CRYPT_PASSWORD` and `BACKUP_CRYPT_PASSWORD2` (the two obscured values). A missing variable stops the command and names the variable, never its value.
+3. Put these into the backup env file `/opt/trading/.env.backup` (template `.env.backup.example`, mode 0600, owned by the `trading` user; compose hands it to the `backup` and `ops` services only, plan 24-36), not into `.env`: `BACKUP_S3_PROVIDER` (`AWS`, `Wasabi` or `Other`), `BACKUP_S3_ENDPOINT` (needed for `Other`, for example a Backblaze B2 S3 endpoint), `BACKUP_S3_REGION`, `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY`, `BACKUP_CRYPT_PASSWORD` and `BACKUP_CRYPT_PASSWORD2` (the two obscured values). A missing variable stops the command and names the variable, never its value.
 4. Enable provider-side protection as an operator control: bucket versioning or object lock with a retention period, so a stolen access key cannot erase history. The scripts never delete anything outside `snapshots/<id>` but cannot stop a compromised key from doing so.
 
 ### 11.2 Initialise the remote (once, on an empty bucket)
@@ -214,7 +230,7 @@ How to run it: `deploy/backup-real-s3-gate.sh [--dry-run]` prints the plan (the 
 
 `sudo deploy/backup.sh --install-timer [--dry-run]` writes `trading-backup.service` (oneshot, `User=trading`, requires docker, two-hour limit) and `trading-backup.timer` (`OnCalendar=*-*-* 03:15:00 UTC`, `Persistent=true` so a missed run happens after downtime, `RandomizedDelaySec=5m`) under `/etc/systemd/system`, substitutes this checkout's directory, runs `systemctl daemon-reload` only when a unit changed and enables the timer. It must run as root and refuses a checkout path that the units cannot carry: the path may hold only letters, digits and `. _ / + = , ~ -` (no whitespace, no `%`, which systemd reads as a specifier, and no `&`), the rule of `--soak-env-file` below. Check with `systemctl list-timers trading-backup.timer`, `systemctl status trading-backup` and `journalctl -u trading-backup`.
 
-`sudo deploy/backup.sh --install-soak-timer --soak-env-file <path> [--dry-run]` (plan 16-55) installs the soak project's pair, `trading-soak-backup.service` and `trading-soak-backup.timer`, the same way: same schedule, `COMPOSE_PROJECT_NAME=trading-soak`, and `TRADING_ENV_FILE` set to the absolute soak env file path. It refuses a soak env file whose `BACKUP_S3_BUCKET` is empty or equals the bucket of the trading env file (`TRADING_BACKUP_ENV_FILE`, default this checkout's `.env`). It compares the values and prints names only. Both files are read the way Compose reads them (plan 16-65): comment lines skipped, an optional `export ` prefix, the last assignment wins, surrounding quotes and an unquoted ` # comment` removed; a value it cannot determine without Compose (a `$` interpolation, a backslash, an unterminated quote, or a bare `BACKUP_S3_BUCKET` line without `=`, whose value Compose takes from the process environment) refuses the install, so write the bucket as a plain `BACKUP_S3_BUCKET=name` line. The `--soak-env-file` path may hold only letters, digits and `. _ / + = , ~ -` (no `%`, which systemd reads as a specifier, and no `&`), as for `deploy/heartbeat.sh`. Each project backs up into its own bucket, because the remote layout has no project component (20.5). The existing `trading-backup` pair is not touched.
+`sudo deploy/backup.sh --install-soak-timer --soak-env-file <path> [--dry-run]` (plan 16-55) installs the soak project's pair, `trading-soak-backup.service` and `trading-soak-backup.timer`, the same way: same schedule, `COMPOSE_PROJECT_NAME=trading-soak`, and `TRADING_ENV_FILE` and `TRADING_BACKUP_ENV_FILE` both set to the absolute soak env file path. It refuses a soak env file whose `BACKUP_S3_BUCKET` is empty or equals the bucket of the trading backup env file (`TRADING_BACKUP_ENV_FILE`, default this checkout's `.env.backup`). It compares the values and prints names only. Both files are read the way Compose reads them (plan 16-65): comment lines skipped, an optional `export ` prefix, the last assignment wins, surrounding quotes and an unquoted ` # comment` removed; a value it cannot determine without Compose (a `$` interpolation, a backslash, an unterminated quote, or a bare `BACKUP_S3_BUCKET` line without `=`, whose value Compose takes from the process environment) refuses the install, so write the bucket as a plain `BACKUP_S3_BUCKET=name` line. The `--soak-env-file` path may hold only letters, digits and `. _ / + = , ~ -` (no `%`, which systemd reads as a specifier, and no `&`), as for `deploy/heartbeat.sh`. Each project backs up into its own bucket, because the remote layout has no project component (20.5). The existing `trading-backup` pair is not touched.
 
 ### 11.4 Run a backup now
 
@@ -222,7 +238,7 @@ How to run it: `deploy/backup-real-s3-gate.sh [--dry-run]` prints the plan (the 
 
 ### 11.5 Restore onto an empty host
 
-Prerequisites: the host is bootstrapped (section 13), `.env` holds the same `BACKUP_*` values (the obscured passwords are derived from the raw passphrase you kept off the VPS), and the checkout is at the version you want.
+Prerequisites: the host is bootstrapped (section 13), `.env.backup` holds the same `BACKUP_*` values (the obscured passwords are derived from the raw passphrase you kept off the VPS), and the checkout is at the version you want.
 
 `deploy/restore.sh [--snapshot ID] [--force] [--no-start] [--dry-run]`: starts only PostgreSQL; pulls the newest verified snapshot (or `--snapshot 20260930T031500Z`) into a fresh `data/backup/restore-<UTC timestamp>`; runs the refusing restore (bundle sha256 and set verification, then the empty-target checks, `pg_restore`, a never-overwriting Parquet copy into `data/raw`, `alembic upgrade head`, which upgrades a dump taken before Phase 17 through migration 0004); then starts the whole stack unless `--no-start`. It refuses a tampered bundle, a non-empty database or Parquet target unless `--force`, and aborts on any file that already exists with different content even under `--force` (raw files are immutable). Use `--no-start` to inspect the restored data before the collector runs. A failing step stops the script with that step's exit code.
 
@@ -277,11 +293,13 @@ sudo deploy/heartbeat.sh --install-timer --interval-seconds <N>
 
 `<N>` is the ping interval the user records in 16-DEC-O-12, in seconds, and it must suit the check's period; the monitor's documentation also asks that one check is not pinged too often (`docs/SOURCES.md`). `--install-timer` refuses to run without `--interval-seconds`, so no default exists. The check's period and its grace are set in the monitor's dashboard only, never in the repository. Add `--dry-run` to either command to see what would be written. `--install-timer` writes `trading-heartbeat.service` (oneshot, `User=trading`, `LoadCredential`) and `trading-heartbeat.timer` (`OnBootSec` and `OnUnitActiveSec` both set to the interval) under `/etc/systemd/system`, runs `systemctl daemon-reload` only when a unit changed, enables the timer, and restarts it when a unit changed so a new interval takes effect. It must run as root, refuses a checkout path with whitespace, and refuses to install while the URL file does not exist (run `--set-url` first). Check with `systemctl list-timers trading-heartbeat.timer`, `systemctl status trading-heartbeat` and `journalctl -u trading-heartbeat`. There is no catch-up: the timer is not persistent and has no random delay, so no ping is sent after downtime for the time the host was down, because a catch-up ping would hide the very outage the monitor exists to report.
 
+**Live runtime heartbeat (plan 24-24).** The live process has its own external check and its own URL file, never the collector's or the paper's. Store the URL with `sudo deploy/heartbeat.sh --target live --set-url` (URL on stdin) and install the timer with `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60`. Check with `systemctl list-timers trading-live-heartbeat.timer`, `systemctl status trading-live-heartbeat` and `journalctl -u trading-live-heartbeat`. A run pings only while `python -m src.live.runtime --liveness` passes.
+
 **Fail ping.** `--fail-ping` (or `HEARTBEAT_FAIL_PING=1`, which `--install-timer --fail-ping` writes into the service) makes a failed probe send one fail ping. It is optional because a fail ping alerts at once and bypasses the grace period, which is the user's value; without it, the silence after a failed probe is already an alert once the period plus the grace have passed.
 
 **Fail-open.** The sender never stops or restarts the collector, and a failed ping changes only the exit code: the only `docker` subcommand the script runs is `exec` of the read-only probe, and the two units carry no dependency on, restart of or failure link to any other unit. Open Interest minutes lost to a collector stop are permanent (15.4); this sender cannot cause one.
 
-**Scope.** Without `--target` (or with `--target collector`) this sender probes the collector only, exactly as above. The separate paper heartbeat of the soak project is the same script with `--target paper`: its own check, its own URL file and credential, its own units, and an install that names the soak env file with `--soak-env-file`; it is described in 20.9 (plan 16-56). Probes for the live processes, and the external monitor's coverage of every long-running process, belong to Phase 24; nothing here changes the paper service's container healthcheck. "Heartbeat" here means the external ping. It is unrelated to the paper runtime's per-bar heartbeat records (coverage evidence of the Phase 16 runtime).
+**Scope.** Without `--target` (or with `--target collector`) this sender probes the collector only, exactly as above. The separate paper heartbeat of the soak project is the same script with `--target paper`: its own check, its own URL file and credential, its own units, and an install that names the soak env file with `--soak-env-file`; it is described in 20.9 (plan 16-56). The live runtime has the same script with `--target live` (Phase 24, plan 24-24, DECISIONS D106; section 22.5): its own check, URL file and units. The external monitor's coverage of every long-running process is therefore one check per process, collector, paper and live; nothing here changes the paper service's container healthcheck. "Heartbeat" here means the external ping. It is unrelated to the paper runtime's per-bar heartbeat records (coverage evidence of the Phase 16 runtime).
 
 ## 12. Manual close
 
@@ -336,13 +354,13 @@ Optional operator choices that bootstrap does not make: install `unattended-upgr
 3. Backup crypt passphrase stored off the VPS; losing it makes every backup unrecoverable (section 11).
 4. Second SSH session tested before closing the first, including `sudo -v` there.
 5. Provider disk encryption enabled or confirmed.
-6. `BACKUP_*` variables set in `/opt/trading/.env` and `deploy/backup.sh --init-remote` run as `trading` (section 11). Root SSH login is disabled; `trading` is in the `sudo` group and sudo asks for its password (no passwordless sudo rule). Set that password with `passwd trading` in the root session (the lock-out guard requires it) and run `sudo -v` in a SECOND SSH session as `trading` BEFORE closing the root session. Then install the timer with `sudo /opt/trading/deploy/backup.sh --install-timer` (it does not read `.env`) and use `sudo` for every later apt, ufw or systemctl change.
+6. `BACKUP_*` variables set in `/opt/trading/.env.backup` and `deploy/backup.sh --init-remote` run as `trading` (section 11). Root SSH login is disabled; `trading` is in the `sudo` group and sudo asks for its password (no passwordless sudo rule). Set that password with `passwd trading` in the root session (the lock-out guard requires it) and run `sudo -v` in a SECOND SSH session as `trading` BEFORE closing the root session. Then install the timer with `sudo /opt/trading/deploy/backup.sh --install-timer` (it does not read `.env`) and use `sudo` for every later apt, ufw or systemctl change.
 7. Docker group kept to this one account; only `127.0.0.1` ports published.
 8. Delete the copied secrets file from the host once `.env` is verified.
 
 ### 13.6 First start
 
-Bootstrap does not start the stack. As the `trading` user in `/opt/trading`: validate with `docker compose config -q` (never plain `docker compose config` with real secrets: it prints the resolved environment), build both images with `docker compose --profile ops build`, then `docker compose up -d`. The one-shot `db-upgrade` service runs `alembic upgrade head`; the `collector` starts after it completes successfully, and its container health check allows a six-minute start period. `docker compose ps` shows the state. To run a second stack from one checkout (tests, a rehearsal), `TRADING_ENV_FILE` selects which env file compose reads (default `.env`) and `COMPOSE_PROJECT_NAME` the project; the deploy scripts honour both. The `paper` and `live` services are placeholders (Phases 16 and 24): enabling their profiles starts nothing useful yet.
+Bootstrap does not start the stack. As the `trading` user in `/opt/trading`: validate with `docker compose config -q` (never plain `docker compose config` with real secrets: it prints the resolved environment), build both images with `docker compose --profile ops build`, then `docker compose up -d`. The one-shot `db-upgrade` service runs `alembic upgrade head`; the `collector` starts after it completes successfully, and its container health check allows a six-minute start period. `docker compose ps` shows the state. To run a second stack from one checkout (tests, a rehearsal), `TRADING_ENV_FILE` selects which env file compose reads (default `.env`) and `COMPOSE_PROJECT_NAME` the project; the deploy scripts honour both. The `live` service does not read that shared file: it reads its own file, `.env.live` in the checkout (template `.env.live.example`, mode 0600, gitignored), or the file named by `TRADING_LIVE_ENV_FILE`; the file is optional for every other compose command. The Binance credential names, the live Telegram bot names and `LIVE_RUNTIME_MODE` go only in that file, never in `.env`, so the collector, `db-upgrade` and `paper` services never receive a `BINANCE_` name (plan 24-30; the closed per-service variable lists are in `tests/test_live_compose_env_split.py`). The SHADOW Telegram names (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_AUTHORIZED_CHAT_ID`, `TELEGRAM_AUTHORIZED_USER_IDS`) go only in `.env.paper` (template `.env.paper.example`), or the file named by `TRADING_PAPER_ENV_FILE`, which only the `paper` and `paper-pin` services read on top of `.env`; the `BACKUP_*` names and `OFF_HOST_BACKUP_TARGET` go only in `.env.backup` (template `.env.backup.example`), or the file named by `TRADING_BACKUP_ENV_FILE`, which only the `backup` and `ops` services (profile `ops`) and `deploy/backup.sh` read on top of `.env`. Both files are optional for every other compose command, mode 0600 and gitignored, so the always-on collector holds no Telegram token, no backup secret and no Binance key (plan 24-36, D-29, WR-06). When `TRADING_ENV_FILE` selects another project's env file (the soak, a rehearsal, the cutover and drill tests), the deploy scripts use that one file for all three unless these variables are set, and `deploy/compose-soak.sh` and `deploy/compose-rehearsal.sh` always do, so those projects never read the checkout's own `.env.paper` or `.env.backup`; the cost in the soak is that every soak service holds every name of the soak file. The `paper` service is the Phase 16 paper runtime; the `live` service (profile `live`) is the Phase 24 live runtime, described in 21.1c: it is started by hand and its restart policy is off.
 
 ## 14. Update and rollback
 
@@ -354,7 +372,7 @@ Commit or discard local changes (a dirty working tree is refused), make sure the
 
 ### 14.2 Update
 
-`deploy/update.sh --ref REF [--skip-backup] [--dry-run]` records the current commit and the IDs of both images in `.deploy/last-good.env` (mode 0600, gitignored, parsed and never sourced), runs `deploy/backup.sh` (a failing backup stops the update; `--skip-backup` skips it and is a risk you take on), tags both images `:rollback`, fetches tags, checks out REF detached, runs `docker compose --profile ops build` and `docker compose up -d`. A ref starting with a dash is refused. `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` and `IMAGE_TAG` are honoured from the environment.
+`deploy/update.sh --ref REF [--skip-backup] [--force-live] [--dry-run]` records the current commit and the IDs of both images in `.deploy/last-good.env` (mode 0600, gitignored, parsed and never sourced), runs `deploy/backup.sh` (a failing backup stops the update; `--skip-backup` skips it and is a risk you take on), tags both images `:rollback`, fetches tags, checks out REF detached, runs `docker compose --profile ops build` and `docker compose up -d`. A ref starting with a dash is refused. `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` and `IMAGE_TAG` are honoured from the environment. Both `--ref` and `--rollback` refuse to run while the `live` compose service is running, and when the probe cannot tell (fail closed), because a resting entry can fill unprotected while the process restarts: stop it first as section 22.5 describes. `--force-live` accepts that window and only warns; `--dry-run` prints the check (`docker compose --profile live ps --status running --services`) and skips it.
 
 ### 14.3 Roll back
 
@@ -665,7 +683,7 @@ deploy/compose-soak.sh logs paper
 deploy/compose-soak.sh stop paper
 ```
 
-The environment file for the soak is made from `deploy/soak.env.example`: names only, no trade-capable name (`BINANCE_` anything makes the runtime refuse to start, D-13).
+The environment file for the soak is made from `deploy/soak.env.example`: names only, no trade-capable name (`BINANCE_` anything makes the runtime refuse to start, D-13). It is the soak's only operator file: `deploy/compose-soak.sh` (and the `trading-soak-backup` unit) point `TRADING_PAPER_ENV_FILE` and `TRADING_BACKUP_ENV_FILE` at it too (plan 24-36), so the soak never reads the checkout's `.env.paper` or `.env.backup`.
 
 **Restart policy.** The `paper` service restarts with `unless-stopped`, by the owner's decision `decisions/16-DEC-RESTART-POLICY.md` (16-55 Q1 = A). The earlier `on-failure` was dropped because it does not restart a container after a Docker daemon restart (Docker documentation, `docs/SOURCES.md`), and a host reboot or a daemon restart must not leave the runtime down: `unless-stopped` brings the container back after a host reboot, a daemon restart and a crash, and keeps it down only after a requested stop (`deploy/compose-soak.sh stop paper`, 20.2). It restarts every exit that no stop preceded, a runtime-initiated exit 0 included, so no path of the service command relies on exit 0 to stay down: the command always carries `--hold-on-refusal` and never `--pin-epoch`.
 
@@ -732,7 +750,7 @@ TRADING_ENV_FILE=/home/trading/rehearsal.env deploy/compose-rehearsal.sh stop
 
 Before the long soak starts, the host has a verified backup chain: a backup run now (11.4) that completes, then the restore drill (11.6) that passes. A backup is not valid until a drill passes. The drill restores into a scratch target, the scratch database that the drill creates and drops, and never into the soak database: a restore into the soak database would replace the evidence it is supposed to protect. The first real backup waits for the D064 real-S3 gate (section 11, "Real-S3 gate"; 19.4 item 6; run on the soak host with `COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup-real-s3-gate.sh --execute`, which must end with `RESULT: PASS`), and the first verified pull to the development machine (19.5) is part of the same readiness. Run the drill again after any change of provider, key or image (11.6).
 
-**The soak database has its own backup unit and its own bucket (plan 16-55, review B2-WR-07).** `trading-backup` (11.4) sets no project, so it dumps project `trading`, not `trading-soak_pgdata` where the soak evidence lives. The soak project therefore gets its own unit pair, `trading-soak-backup.service` and `trading-soak-backup.timer`, with the schedule of `trading-backup.timer`; the existing pair stays as it is. The remote layout has no project component (`src/ops/backup_remote.py`: `snapshots/<id>/` and `parquet/`), so two projects in one bucket would form one snapshot series and retention would delete one project's daily dump. The soak env file therefore names its own bucket: its `BACKUP_S3_BUCKET` must differ from the bucket of `trading-backup` (the checkout's `.env`), with its own crypt passwords and its own sentinel. The soak bucket is created by the owner before plan 16-43 (an owner action). `--install-soak-timer` refuses an empty `BACKUP_S3_BUCKET` or the trading bucket and prints names only. On the soak host, as the `trading` user for the first two commands and with `sudo` for the install:
+**The soak database has its own backup unit and its own bucket (plan 16-55, review B2-WR-07).** `trading-backup` (11.4) sets no project, so it dumps project `trading`, not `trading-soak_pgdata` where the soak evidence lives. The soak project therefore gets its own unit pair, `trading-soak-backup.service` and `trading-soak-backup.timer`, with the schedule of `trading-backup.timer`; the existing pair stays as it is. The remote layout has no project component (`src/ops/backup_remote.py`: `snapshots/<id>/` and `parquet/`), so two projects in one bucket would form one snapshot series and retention would delete one project's daily dump. The soak env file therefore names its own bucket: its `BACKUP_S3_BUCKET` must differ from the bucket of `trading-backup` (the checkout's `.env.backup`), with its own crypt passwords and its own sentinel. The soak bucket is created by the owner before plan 16-43 (an owner action). `--install-soak-timer` refuses an empty `BACKUP_S3_BUCKET` or the trading bucket and prints names only. On the soak host, as the `trading` user for the first two commands and with `sudo` for the install:
 
 ```text
 COMPOSE_PROJECT_NAME=trading-soak TRADING_ENV_FILE=/path/to/soak.env deploy/backup.sh --init-remote --dry-run
@@ -769,19 +787,19 @@ The paper-start allowlist is a source constant (O-04, plan 16-42), so the image 
 
 ### 20.7 Exporting trial evidence
 
-This is the procedure for getting the evidence of one epoch off the soak host and into the place the user chose, and for reading the hourly freeze ticks back from GitHub (plan 16-47; D-22, L-01, REV-02, REV-08, REV-18). It applies five decision records and invents no value: `decisions/16-DEC-O-01.md` (where evidence is kept), `decisions/16-DEC-Q-F.md` (how the hourly check gets its pin), `decisions/16-DEC-Q-Q.md` (the cron minute), `decisions/16-DEC-EVIDENCE-KEYS.md` (the object keys of the hourly and final bundles, plan 16-59) and `decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md` (how the freeze log is assembled from the run artifacts, plan 16-59).
+This is the procedure for getting the evidence of one epoch off the soak host and into the place the user chose, and for reading the hourly freeze ticks back from GitHub (plan 16-47; D-22, L-01, REV-02, REV-08, REV-18). It applies seven decision records and invents no value: `decisions/16-DEC-O-01.md` (where evidence is kept), `decisions/16-DEC-Q-F.md` (how the hourly check gets its pin), `decisions/16-DEC-Q-Q.md` (the cron minute of the first trial, minute 34), `decisions/16-DEC-Q-Q-2.md` (the cron minute since 2026-11-13, minute 17), `decisions/16-DEC-EVIDENCE-KEYS.md` (the object keys of the hourly and final bundles, plan 16-59) `decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md` (how the freeze log is assembled from the run artifacts, plan 16-59) and `decisions/16-DEC-HOST-TICK.md` (the second tick source, a host timer with an S3 witness, 20.10).
 
 **What the records say.**
 
 - **Where (O-01, option a).** An S3 evidence prefix outside the backup crypt remote, with its own remote and its own credential. Versioning is enabled; there is no Object Lock and no retention. Object Lock can be added later but never removed, so it is the user's later decision, not part of this procedure.
 - **Reader.** The recorded reader is project owner only (the user). GitHub never reads this store: the pin reaches GitHub through a commit (below), so no credential for the evidence store is ever placed on GitHub.
 - **Crypt layer.** The evidence is written outside the backup crypt remote, on a plain S3 remote with no crypt layer, so it is not ciphertext to a holder of the evidence remote's credential and no crypt passphrase is needed to read it. It is also not covered by the encryption of the backup chain (11); what protects it is the bucket policy the user sets in plan 16-49, not this procedure. The two records are compatible because the workflow reads the pin from a commit and never from the store.
-- **Write timing and loss window.** `exporter-schedule`, hourly: the operator runs the export and publish steps below every hour, and nothing on the host writes evidence by itself. The loss window is what was recorded on the host since the last successful publish: at most the last hour while the hourly runs succeed, longer for every skipped or failed run, and everything not yet published if the host disk is lost. The database backups of 11 are a separate copy with their own window; this store is not a backup of the database.
+- **Write timing and loss window.** `exporter-schedule`, hourly: the operator runs the export and publish steps below every hour, and nothing on the host writes evidence by itself. Since D109 (owner decision `16-DEC-HOST-TICK`) the only exception to "nothing on the host writes evidence by itself" is the one create-only witness object per host freeze tick of 20.10. The loss window is what was recorded on the host since the last successful publish: at most the last hour while the hourly runs succeed, longer for every skipped or failed run, and everything not yet published if the host disk is lost. The database backups of 11 are a separate copy with their own window; this store is not a backup of the database.
 - **Object keys (`decisions/16-DEC-EVIDENCE-KEYS.md`, Q1 = A).** Every hourly bundle and the final bundle is published under its own key `<epoch-id>/<as-of>-<sha12>/<file>`: `<as-of>` is the manifest `as_of_utc` as `YYYYMMDDTHHMMSSZ` and `<sha12>` the first 12 hex characters of the SHA-256 of the manifest bytes, so the key comes from the manifest and from nothing typed. The key is create-only: publishing the very same bundle again finds identical bytes, uploads nothing and succeeds (identical bytes are a success), while different bytes at an existing key are an error (exit 4) and nothing is ever replaced. The bucket keeps versioning, with no retention and no Object Lock; O-01 is unchanged. The second hourly publish of an epoch therefore no longer collides with the first, and the final bundle can always be published.
 - **Freeze log (`decisions/16-DEC-FREEZE-LOG-ASSEMBLY.md`, Q2 = B).** The diff log is not read from one run only. Step 1 downloads every available run artifact and the exporter merges the freeze lines of all of them into one derived `registry_diff.jsonl`, deduplicated by run identity `(run_id, run_attempt)`, ordered by time, with the manifest `freeze_log` listing each input artifact with its sha256 and the run ids it carried. The derived file is not a byte copy of one artifact: every original artifact is kept unchanged in the bundle as `freeze_artifact_<16 hex>.jsonl`. Identical lines of one run identity collapse; two different lines of one identity stop the export (exit 4). A line without run metadata is deduplicated by its exact bytes.
 - **One run at a time, and what is still missing.** The workflow has a `concurrency` group `paper-freeze-check` with `cancel-in-progress: false` and `queue: max` (the owner's amendment of 2026-10-16), so two runs never restore the same cache state and the line of one is not lost by an overlap. GitHub documents (https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs, read 2026-10-16, not verified live, `docs/SOURCES.md`) that a group keeps at most one running run; with the default `queue: single` a newly queued run replaces the pending one; `queue: max` allows up to 100 pending runs and is invalid together with `cancel-in-progress: true`. With `queue: max` up to 100 runs may wait and an additional run is cancelled; with fewer pending a tick is not lost. The residual risk is a cancelled, dropped or delayed run, and the rule for it does not depend on the queue: a tick without a usable line is never inferred clean. The expected slots and the run list make it an EVIDENCE_GAP, `missing_ticks.jsonl` records it with its slot, its run id and the run's conclusion (for example `cancelled`), and any cancelled or skipped tick breaks the qualifying window (REV-02). The first live run on GitHub shows that the `queue` key is accepted; no test can.
 - **Pin source (Q-F, `commit-pinned-state`).** After each pin the user commits `evidence/paper/pinned_epoch.json` to `master`. The workflow step "Use the committed pinned epoch" copies that file to the path the freeze CLI reads before every check, with no secret and with the read-only token it already had. With no committed file there is no pin and a cached copy is removed. A new pin needs a new commit; until then a rollover is seen again at every tick. The Actions cache keeps only the diff log between ticks and is never a source of truth (L-01): caches unused for 7 days are removed.
-- **Cron (Q-Q).** The workflow runs `34 * * * *`, the user's own choice; the reconciler's slot grid is HH:34. A scheduled workflow change takes effect only on `master` (G15), so plan 16-43 checks `origin/master` before the pin. A minute off the top of the hour is a mitigation of unproven effect on delayed or dropped scheduled runs (G15, REV-18): a missing tick is still an EVIDENCE_GAP, never filled and never counted as clean.
+- **Cron (Q-Q).** The workflow runs `17 * * * *`, the owner's choice of 2026-11-13 (`decisions/16-DEC-Q-Q-2.md`); the reconciler's slot grid is HH:17. The first trial (epoch ce6c0bbf) ran at minute 34 (`decisions/16-DEC-Q-Q.md`). The evaluator and the exporter read the cron from the workflow file, so a bundle of an epoch that ran under minute 34 is evaluated or re-exported with `--workflow` set to a copy of the workflow at that epoch's commit (`git show <commit>:.github/workflows/paper_freeze_check.yml > <file>`); otherwise every slot of it is a SCHEDULE_MISMATCH gap. A scheduled workflow change takes effect only on `master` (G15), so the operator checks `origin/master` for minute 17 before the next pin. A minute off the top of the hour is a mitigation of unproven effect on delayed or dropped scheduled runs (G15, REV-18): a missing tick is still an EVIDENCE_GAP, never filled and never counted as clean.
 
 **Evidence remote configuration (fixed names).** The destination and the credentials of the evidence store come only from these environment names, which mirror the `BACKUP_S3_*` pattern of `src/ops/backup_remote.py` with an `EVIDENCE_` prefix and are not the BACKUP_ names: `EVIDENCE_S3_PROVIDER` (AWS, Wasabi or Other), `EVIDENCE_S3_ENDPOINT` (needed only for Other), `EVIDENCE_S3_REGION`, `EVIDENCE_S3_BUCKET`, `EVIDENCE_S3_PREFIX` (required, never empty), `EVIDENCE_S3_ACCESS_KEY_ID` and `EVIDENCE_S3_SECRET_ACCESS_KEY`. A change of provider changes these values only. They map to the rclone remote `EVIDENCES3` (plain S3, no crypt layer, never `BACKUPS3` or `BACKUPS3CRYPT`) in the rclone child process only, so a credential is never in argv and never printed. Use a credential of its own, scoped to this bucket and prefix: the exporter refuses to run when it equals the backup credential. Make the file from `deploy/evidence.env.example` (names only), keep it outside the checkout at mode 0600, and load it only into the shell that runs the export (`set -a; . /path/to/evidence.env; set +a`). It is not added to the shared `soak.env` file, because the paper container shares that file and must not hold this credential; the paper runtime reads none of these names and still refuses any `BINANCE_` name. A missing or empty name, an empty or unsafe prefix, or a credential shared with the backup chain exits 2 before anything is exported or uploaded, and the message lists variable names only.
 
@@ -803,6 +821,8 @@ python scripts/export_soak_evidence.py --source pg --epoch <epoch-id> --pinned <
 `--diff-log` is given once per downloaded artifact (a shell loop that builds the arguments is fine); the order does not matter and an artifact given twice counts once. The bundle is one epoch, written to a new directory (an existing one is never overwritten) with `manifest.json` last. A secret-looking value anywhere in it stops the export (exit 3) and removes the partial bundle.
 
 `--as-of` is the UTC instant the freeze ticks are judged as of (default: now, and never later than the window end plus the ratified `freeze_tick_grace_seconds`). Only a slot whose slot time plus that grace is at or before it is judged, so an hourly export records a gap only for a tick that has already happened (never for a slot in the future), and the manifest records `as_of_utc`. An `--as-of` before the epoch pin, after the window end plus the grace, or later than the current time (plan 16-65; nothing is written or published) is refused (exit 2). A bundle exported before the window end plus the grace is **partial**: it loads and it is published, but `scripts/evaluate_trial_soak.py` refuses to judge it (exit 2, one line); the final bundle is the first one whose as-of is at or after the window end plus the grace.
+
+**Host witness (20.10).** Once the host timer of 20.10 is installed for an epoch, every export of that epoch adds `--host-witness` with `EVIDENCE_S3_WITNESS_PREFIX` loaded, so the witnessed host ticks join the GitHub ticks in the bundle (`soak-evidence-bundle/2`); an export without it judges the GitHub ticks only. The fenced commands above stay as they are; 20.10 shows the same command with the flag.
 
 **3. Publish and verify.** With the evidence names loaded, either add the flag `--publish` (it takes no value) to the command above, or publish an exported bundle on its own:
 
@@ -907,3 +927,345 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 ```
 
 **Fail-open.** The sender never stops, restarts or touches the paper runtime: the only `docker` subcommand it runs is `exec` of the read-only liveness probe, and the paper units carry no dependency, restart or failure link to any other unit. Live delivery to the monitor, the systemd credential and the timer firing are operator verification on the soak host before plan 16-43.
+
+### 20.10 Host freeze tick and its S3 witness
+
+The soak host runs a second, independent freeze tick beside the GitHub one, by the owner's decision `decisions/16-DEC-HOST-TICK.md` (option s3-witness, 2026-11-14), recorded as D109 in `docs/DECISIONS.md`, which amends O-01 with a least-privilege host credential. Seven of the nine gaps of the first trial came from GitHub lateness and drops, and minute 17 is unproven (G15), so a slot can now also be satisfied by a witnessed host tick. This is quick task 261114-12e: the evidence side (plan A) and the host side (plan B, `deploy/freeze-witness.sh` and the units `trading-soak-freeze-witness.service` and `trading-soak-freeze-witness.timer`).
+
+**What it is.** At the minute of the freeze workflow cron the timer starts the unit. One run takes the image of the running `paper` container, copies the pinned epoch out of the container to a scratch directory, and runs the same freeze CLI, `python -m src.paper.freeze --check --from-allowlist`, in that image: `docker run --rm --network none --read-only`, only the scratch directory mounted and only `PAPER_TICK_SOURCE`, `PAPER_TICK_ID` and `PAPER_EVENT_SCHEDULE` in its environment. It then uploads the exact line the CLI appended, create-only (`If-None-Match: *`, the payload SHA-256 signed), as `<witness prefix>/<epoch_id>/<YYYYMMDDTHHMMZ>-<tick id>.jsonl`. The timer has `Persistent=false` and no randomised delay: there is no catch-up, no retry and no re-send, because a late object is a late tick. The lateness of a tick is decided only by the S3 server time of its object, never by a time the host writes; the grace of `freeze_tick_grace_seconds` (1800), the slot grid, the thresholds, the criteria and D065 item 4 are unchanged, and a line without a witness object is not evidence.
+
+**Prerequisite.** An image built and recorded by 20.6 from a commit that contains plan A of quick task 261114-12e (the freeze CLI that reads `PAPER_TICK_SOURCE` and `PAPER_TICK_ID`). With an older image the unit exits 5 and uploads nothing. This change does not touch the running soak image. Install the timer before the next pin, so that both sources cover the trial from its pin.
+
+**Credential (owner-run).** Create a dedicated user or key for this purpose only: it can create objects under one witness prefix and do nothing else. The witness prefix is a sibling of `EVIDENCE_S3_PREFIX` (not equal to it, inside it or containing it) in the same bucket. AWS example, placeholders only; check it with the provider's policy simulator, no agent has run it. The identity policy of `<witness-user>`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<evidence-bucket>/<witness-prefix>/*"
+    }
+  ]
+}
+```
+
+The bucket policy, with three Deny statements for that principal: everything except `s3:PutObject`; everything outside the witness prefix; and `s3:PutObject` without the create-only condition (`s3:if-none-match`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WitnessOnlyPutObject",
+      "Effect": "Deny",
+      "Principal": {"AWS": "arn:aws:iam::<account-id>:user/<witness-user>"},
+      "NotAction": "s3:PutObject",
+      "Resource": ["arn:aws:s3:::<evidence-bucket>", "arn:aws:s3:::<evidence-bucket>/*"]
+    },
+    {
+      "Sid": "WitnessOnlyItsPrefix",
+      "Effect": "Deny",
+      "Principal": {"AWS": "arn:aws:iam::<account-id>:user/<witness-user>"},
+      "Action": "s3:*",
+      "NotResource": "arn:aws:s3:::<evidence-bucket>/<witness-prefix>/*"
+    },
+    {
+      "Sid": "WitnessCreateOnly",
+      "Effect": "Deny",
+      "Principal": {"AWS": "arn:aws:iam::<account-id>:user/<witness-user>"},
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<evidence-bucket>/<witness-prefix>/*",
+      "Condition": {"Null": {"s3:if-none-match": "true"}}
+    }
+  ]
+}
+```
+
+The export credential of 20.7 is a different one: it gets `s3:ListBucket` limited to the witness prefix and `s3:GetObject` on it (besides its rights on the bundle prefix), and it must never be the witness credential. For another provider use its equivalent. Where a provider cannot refuse an overwrite, bucket versioning (O-01) keeps the first version, and an overwrite can only make a tick later, never earlier.
+
+**Store and install (owner-run, on the soak host).** The credential is five `key=value` lines, each key once and no other line, by name only here: `bucket_url` (an https bucket URL, virtual-hosted or path style with the bucket as its one path segment), `region`, `witness_prefix` (the same value as `EVIDENCE_S3_WITNESS_PREFIX` of the exporter), `access_key_id` and `secret_access_key`. The script reads them from standard input without echo and stores them in the root-only file `/etc/trading/freeze-witness.conf` (mode 0600); systemd hands the unit a private copy as the credential `freeze-witness` (`LoadCredential`). The credential is never an argument, never in the soak env file, a container, the repository or a log, and the script refuses to run under xtrace.
+
+```text
+sudo deploy/freeze-witness.sh --set-credential
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env
+systemctl list-timers trading-soak-freeze-witness.timer
+```
+
+The install reads the minute of the one hourly cron of `.github/workflows/paper_freeze_check.yml` and writes it into the timer as `OnCalendar=*-*-* *:MM:00 UTC`; if the workflow minute changes, run the install again. `--dry-run` shows what would be written without changing anything. Exit codes of one tick: 0 uploaded (clean or SKIPPED), 1 the tick could not run (no paper container, no pin, no line), 2 usage, an invalid schedule or xtrace, 3 uploaded REGISTRY_DIFF, 4 the credential is missing or invalid, 5 the line does not carry the host identity (an older image), 6 the upload was refused or failed.
+
+**Verify with one manual tick (owner-run; agents cannot, as there is no network and no credential).** Start the unit once and read its journal, then export once with the witness and an `--as-of` after the tick:
+
+```text
+sudo systemctl start trading-soak-freeze-witness.service
+journalctl -u trading-soak-freeze-witness
+```
+
+```text
+python scripts/export_soak_evidence.py --source pg --epoch <epoch-id> --pinned <pinned-epoch-file> --diff-log <download-dir>/<run-id>/registry_diff.jsonl --github-runs <github-runs-file> --config <runtime-config> --window-start <window-start-utc> --window-end <window-end-utc> --as-of <as-of-utc> --host-witness --out <new-bundle-dir>
+```
+
+Use every placeholder and the repeated `--diff-log` of 20.7. The exporter prints `host witness: N object(s) read`, and the bundle's `host_witness_listing.json` lists the object with its server ModTime. Last, with the witness credential and the provider's own tool, confirm that a list, a read, a delete and a second PUT to the same key are refused (403 or 412).
+
+**How the exporter reads it.** With `--host-witness` and `EVIDENCE_S3_WITNESS_PREFIX` loaded (a name beside the other `EVIDENCE_` names of `deploy/evidence.env.example`, no value in the repository) the exporter runs `rclone lsjson --use-server-modtime` on `<witness prefix>/<epoch id>/` (the server time of the provider, never client metadata) and `rclone cat` per object, then lists again to detect a change; the bundle becomes `soak-evidence-bundle/2` with `host_witness_listing.json` and `host_ticks.jsonl`. The evaluator judges each witnessed tick by its server time against its slot and the grace of 1800.
+
+**When the remote is down.** At tick time the unit exits 6: that host tick does not count and is never re-sent (a later upload would be a late tick), and the GitHub tick may still cover the slot. At export time the export exits 2 and writes nothing; repeat it later. Never drop `--host-witness` to get a bundle for an epoch that has a host timer.
+
+**What it never does.** It never stops, restarts, execs into or writes the paper runtime, never writes the runtime's own pin (the CLI works on a copy), never passes the credential to a container, and has no dependency, restart or failure link to any other unit. A failed tick only fails its oneshot.
+
+**Not shown by any test.** The real upload, the bucket policy and its Deny conditions, the delivery of the systemd credential, the firing of the timer and the permissions of the scratch directory inside the container are owner-run checks on the soak host and the real bucket. `tests/test_deploy_freeze_witness.py` runs the script against stubs of `docker`, `curl`, `systemctl` and `date` with a fake credential, and `tests/test_soak_runbook.py` holds this section to the exporter flags and to placeholders only. The first tick on the real host shows the shape of the container run and of the S3 answer.
+
+## 21. Reconcile loop, SAFE_MODE exit and recovery (Phase 20)
+
+Status: everything in this section is built and tested with fakes (a Binance-semantics fake exchange, in-memory and local PostgreSQL stores). The live composition exists since Phase 24 (sections 21.1a, 21.1b and 22). The Demo smoke rehearsal of 2026-11-06 observed 21 steps on Binance Demo (section 22.6); nothing was observed on a host, the longer Demo campaign and the soak runs are Phases 25 and 26, and the rehearsal on a real stack is not done. Reading this section is not a statement that live execution is safe or ready; the execution model is decided by D079 (2026-10-22) and live placement stays disabled.
+
+### 21.1 Leaving SAFE_MODE (operator exit)
+
+SAFE_MODE is never left by a restart, a timer, a recovered feed, a closed intent or a flag flip. The only way out is `SafeModeController.exit_safe_mode`, an explicit, fail-closed, operator-attributed call. Since Phase 24 the live process has one entry point for it, the Telegram commands `/safemode_exit` and `/confirm <token>` (section 21.1a); the restore drill calls it too. The `operator_id` the commands pass is `tg:<Telegram user id>` of the allow-listed user who confirmed, so it is audit metadata backed by the chat and user allow-list of the live bot (section 21.1a), not a password.
+
+The exit succeeds only when every readiness row holds in one call; every refusal found is returned and journaled as `SAFE_MODE_EXIT_REFUSED` (codes only) and the state does not change:
+
+1. the operator id is a non-blank text;
+2. the local intent source (the durable intents and the replayed protection journal) was read; a source that raises or is incomplete blocks the exit, and a local intent with no usable list of active plans refuses `LOCAL_SOURCE_UNREADABLE`;
+3. positions, open orders and algo orders were read from Binance during this call (a failed read refuses `BINANCE_READ_FAILED`);
+4. the compare on those fresh reads agrees, and no SAFE_MODE entry landed while the reads were awaited (`COMPARE_NOT_CLEAN`); the compare is given the local active plans like the reconcile loop, so a standing symbol-ownership conflict (two active plans on one symbol) refuses `SYMBOL_OWNERSHIP_CONFLICT`;
+5. all readiness counts are read and zero: no unresolved execution intent, no plan in UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, no PENDING protective action, and the coordinator's restore after a restart is complete (`RESTORE_NOT_COMPLETE`; a readiness value that is missing or not a boolean refuses `READINESS_UNREADABLE`);
+6. the REST gate has no restriction (`GATE_NOT_OPEN`) and its recovery status is `RESTORED_DURABLE` (`RESTORED_BARRIER` is accepted too but reserved; option a1 does not produce it) (`GATE_NOT_RESTORED`; the in-memory, not-restored, unknown-state and persistence-failed statuses all refuse);
+7. the user-data stream state is exactly `LIVE` (`STREAM_NOT_LIVE`).
+
+An unfilled resting entry (GTD LIMIT still `NEW` on the exchange, no position on its symbol) does not block the exit and raises no divergence; a position or an entry that vanished from the exchange does (`COMPARE_NOT_CLEAN`).
+
+On success the order is: journal `SAFE_MODE_EXIT` with the operator id first, persist the exit state second, flip memory last. If the journal row was written and the state save then failed, the journal says EXIT while the durable state still says SAFE_MODE and a retry journals a second EXIT row: read the system-state row as the truth. An open gate means only "no restriction currently known"; it never replaces the fresh Binance reads of row 3.
+
+### 21.1a Operator commands on the live bot (`/safemode_exit`, `/confirm`)
+
+The live process (`python -m src.live.runtime`, Phase 24) registers these commands on its OWN Telegram bot (one `getUpdates` consumer per token; the paper/SHADOW bot has none). Every command is checked by the same two gates as an approval press: the message must come from the authorized chat (`TELEGRAM_LIVE_AUTHORIZED_CHAT_ID` of the live service), then from a private chat with a user id in `TELEGRAM_AUTHORIZED_USER_IDS`. Anything else changes nothing, is journaled with the user id, the chat id and a fixed reason code (never the message text) and is answered with the single word `Rejected`.
+
+| Command | Effect |
+|---|---|
+| `/status` | read only: mode, SAFE_MODE and its reason, entry enablement, REST gate, user-data stream, protections |
+| `/disable_entries` | disables new entries at once (risk reducing, no confirmation); idempotent |
+| `/safemode_exit` | step 1 of 2: replies with a one-time token; nothing changes yet |
+| `/close SYMBOL` | step 1 of 2: replies with a one-time token; the position is closed only after the confirmation, through the coordinator's own close flow |
+| `/confirm <token>` | step 2 of 2 for either command above |
+| `/demo_signal [far\|fill]` | DEMO only, section 21.1b |
+
+How a SAFE_MODE exit goes:
+
+1. Look at the cause first (`/status`, the journal, the Binance UI). The exit is refused unless every readiness row of section 21.1 holds, so there is nothing to gain by trying early, but the refusal rows are also the checklist.
+2. Send `/safemode_exit`. The bot answers with a token. The token is bound to the user who asked, is single use and valid for `CONFIRM_TTL_SECONDS_DEFAULT` seconds (60). Only its SHA-256 is kept, in memory: a restart of the process forgets it, which is the safe direction. Asking again replaces the earlier token.
+3. Send `/confirm <token>` from the SAME user within the window. The exit runs in the process through `SafeModeController.exit_safe_mode`, so all seven rows decide. On success the bot says so and the journal holds `SAFE_MODE_EXIT` with `tg:<user id>`; on refusal it lists the controller's own codes (`COMPARE_NOT_CLEAN`, `GATE_NOT_OPEN`, `STREAM_NOT_LIVE`, ...) and SAFE_MODE stays.
+4. An unknown, expired, already used or other-user token answers `Not confirmed` and changes nothing. `/confirm` does nothing by itself: it only completes a pending `/safemode_exit` or `/close`.
+
+If the bot does not answer (stream down, process held, bot token conflict), the commands are unavailable: the process still holds new entries in SAFE_MODE, and the exit then needs a restart after the cause is fixed (a restart never leaves SAFE_MODE by itself, section 21.1). Clearing a REST gate restriction stays an ssh command (section 21.3); `/safemode_exit` refuses `GATE_NOT_OPEN` while one is in force.
+
+The start order is, after the recovery below, STREAM, then one RECONCILE tick, then the bot, the scheduler, HEALTH and ENABLE (DECISIONS D094): the user-data stream is up before the first tick, so a clean start, including a restart with an open position, is enabled by the start sequence itself and needs no `/safemode_exit`. SAFE_MODE after a start means something real: read its reason in the journal. A placement records the verified plan constraint snapshot before the entry is sent, which is what lets a restart rebuild a live plan; a reservation is released by the `reservation_release_sweep` task when its plan expired unplaced, when its CONFIRM was refused for a final reason, when its entry was rejected, or when its position closed or its entry ended with no fill (DECISIONS D095); an entry that may still fill stays counted.
+
+After a restart the coordinator is rebuilt from the intent rows, the persisted plans and the journal, and no new entry opens until that restore is complete. The rows it reads are the ENTRY intents in SENT, UNKNOWN and ACKED for plans that have not ended (a `PROTECTION_TRANSITION` into `FLAT` or `ENTRY_ENDED_NO_FILL` ends a plan; no age limit, DECISIONS D093). A row that cannot be rebuilt: section 21.6.
+
+### 21.1b Injecting a Demo smoke signal (DEMO only)
+
+`/demo_signal [far|fill]` is the owner-triggered way to put one Demo smoke request into the RUNNING live process (there is no other: no file to drop, no network port). It exists only when the process runs in DEMO; a LIVE or TESTNET process does not register it and `check_wiring` refuses a start that does. It reads the current Demo exchange filters, mark price, commission rate and account equity through the signed adapter, derives one request sized from that account equity (`far` rests below the mark and is not meant to fill, `fill` sits just above it; the default is `far`), and queues it. The signal-source task then sends the normal approval card, and the placement still needs your APPROVE and CONFIRM presses. One request may wait at a time (`ALREADY_QUEUED` otherwise). The reply and the journal row carry only a fixed code (`QUEUED`, `ALREADY_QUEUED`, `BAD_USAGE`, `FILTERS_UNAVAILABLE`, `EQUITY_UNAVAILABLE`, `DERIVATION_FAILED`). The command has not been run against Binance Demo: that run is owner-only (`--execute` rules apply to the smoke scripts, not to this command, but the Demo evidence is Phases 25 and 26).
+
+### 21.1c The live service under Compose (plan 24-35)
+
+The `live` service of `docker-compose.yml` runs `python -m src.live.runtime --hold-on-refusal` in the same image as the collector (`trading-alert:${IMAGE_TAG}`), which carries `config/execution` and `config/binance` and its build commit (OPS-04); nothing is mounted from the host. It is in profile `live`, so `docker compose up -d` never starts it. It reads only `.env.live` (see 11.1 step 2 and `.env.live.example`), waits for `db-upgrade` to complete, publishes no port, and keeps its state (the REST gate state file, the spill directory, the liveness stamp and the held marker, all under `logs/live`) in its own named volume `livestate`, mounted at `/app/logs`, so recreating the container keeps them.
+
+Start and inspect it as the `trading` user in `/opt/trading`:
+
+```
+docker compose --profile live up -d live
+docker compose --profile live ps live
+docker compose --profile live logs --tail 50 live
+docker compose --profile live exec -T live /app/.venv/bin/python -m src.live.runtime --healthcheck
+```
+
+`--healthcheck` prints one JSON object (mode, Python version, application revision, held, the refusal code, the age of the liveness stamp, the latest task results) and exits 0 only while the process is live; the compose healthcheck runs it every 60 s with the paper service's timing. A start the process refuses (no `LIVE_RUNTIME_MODE`, a credential of the other mode, a `NOT_CONFIGURED` limit, a closed gate) is held, not exited: the container stays up and unhealthy, writes the held marker, and the reason is in the log (names and codes only, never a value). Stop the container (`docker compose --profile live stop live`), correct the cause in `.env.live` or the limits, and start it again. The external check is `deploy/heartbeat.sh --target live` (it runs `--liveness` in this container).
+
+**Restart policy.** The service has `restart: "no"` and stays so until the owner has seen the first clean Demo run (owner answer Q15 of plan 24-01). With `no`, a host reboot or a daemon restart leaves the live process down, which is the safe default while nothing has been observed. To enable the restart after that run, change the one line in `docker-compose.yml` to `restart: unless-stopped`, commit it and apply it with `docker compose --profile live up -d live`. It is safe to do then because no start path exits 0 or crash-loops on a refusal (the hold above), a requested `stop` keeps the container down, and a crash restarts it into the same start sequence as a first start. Do not enable it earlier, and do not publish a port or add a credential to the compose file.
+
+### 21.2 Spill directory and replay
+
+When the journal is down, records that must not be lost (operator audit rows, pending protective-action intents, the closer's pre-send attempt) are written to a local spill directory by `src/ops/spill.py`: one canonical JSON file per journal event id, written atomically. At start `run_startup_recovery` reads the spill once and replays it into the journal: an identical stored event is `already_present`; a conflicting or corrupt file is kept and enters SAFE_MODE `RESTORE_INCONSISTENT`; a failed journal write enters `DB_FAILURE` and keeps the file. Do not edit or delete spill files by hand. The spill is supplementary evidence of what this process did, never a substitute for Binance truth, and a missing or empty spill proves nothing. In the live process the spill directory is `spill/` under the state directory (`logs/live`, option `--state-dir`), which the compose service keeps in its own named volume `livestate`; the first install writes a sentinel file `.spill-initialized` there, and a later start that finds an initialized gate state but no sentinel treats the volume as re-created empty: the `SPILL_SENTINEL` step enters SAFE_MODE `RESTORE_INCONSISTENT` (entries blocked, monitoring continues; section 22.3). The coordinator does not spill its own `PROTECTION_TRANSITION` rows when the journal is down; that limit is recorded in `20-DEFERRED.md` of Phase 20.
+
+### 21.3 REST gate restart recovery (owner decision O-C, option a1 with commands)
+
+The REST gate keeps its 418 ban and 429 pause deadlines in a state file (`src/ops/rest_gate_state.py`) and restores them at start. The first-install bootstrap call `FileGateStateStore.initialize(...)` runs once, from the live process itself: `python -m src.live.runtime --initialize-gate-state --operator-id ID` (only when no state file exists; section 22.3). The state file lives in the state directory, `logs/live` by default. Accepted consequence of option a1: if the initialized state file is missing, corrupt or cannot be read at start, the gate is in an unknown state and blocks every REST call, including emergency reduce-only closes, protective actions and reconciliation reads, until it is cleared (the assumed ban wait is 3 days, 259200 s); every restart before that keeps the block, and there is no bypass for any order category. The alert hook `REST_GATE_RECOVERY_REQUIRED` (and `REST_GATE_BAN_ENTERED`) reaches the journal-first alert sink in the live process since Phase 24 (plan 24-13 hook, composed in 24-27).
+
+Two operator commands exist (run on the host, over ssh):
+
+```text
+python -m src.ops.rest_gate_cli status --path STATE_FILE
+python -m src.ops.rest_gate_cli clear  --path STATE_FILE --operator-id ID --reason TEXT [--force]
+```
+
+`status` is read-only: it prints whether the file exists, parses and is initialized, the recorded ban and pause deadlines and the recovery status a restart would report. A recorded deadline cannot tell a real Binance ban from the assumed wait: check once by hand before clearing. `clear` needs an operator id and a reason, keeps the old file aside, writes a fresh initialized record with no deadline and takes effect at the NEXT restart; a deadline still in the future is refused unless `--force` is given. Stop the trading process first, because a running process can write its in-memory deadlines back over the cleared file. The operator id is audit metadata, not authentication. Every `clear` that goes ahead first appends one fsynced JSON line (operator id, reason, forced flag, the overridden deadlines, the previous state, the time) to `STATE_FILE.clear-audit.jsonl` and a closing `cleared` or `failed` line after; if the first line cannot be written, nothing is changed (exit 4). A refused clear writes nothing.
+
+### 21.4 Orders and closes made by hand
+
+An order placed by hand in the Binance UI is an exchange order with no local intent: the reconcile tick reports it as a `FOREIGN_ORDER` divergence, enters SAFE_MODE (fail closed) and alerts. The system never cancels it and never guesses an owner. Look at it on the exchange, cancel it by hand if it is unwanted, and leave SAFE_MODE through section 21.1. A position closed by hand leaves protective legs behind or not (what Binance does with a `closePosition` leg when the position closes outside the system is `[NOT_TESTED]`, G4-035); the sweeper cancels an orphan only after two zero position reads (section 12), and a leg whose cancel cannot be proven keeps SAFE_MODE and is looked at again.
+
+Known limit, observed on the Demo smoke run and deferred by the owner on 2026-11-07 (`24-NOTES.md` item 7): when the owner closes a position by hand (`/close SYMBOL`, plan state CLOSE_REQUIRED) while its TP1 order still rests on the exchange, reconcile sees an exchange order with a project client id and no open local intent, reports `UNTRACKED_SYSTEM_ORDER` and enters SAFE_MODE. The system fails closed and nothing is at risk; the cost is a false alert and a `/safemode_exit` (section 21.1a). A candidate rule (TP legs of the same plan may rest in CLOSE_REQUIRED and CLOSE_FAILED) changes Phase 20 semantics, needs its own DECISIONS row and is not adopted. The normal path (a stop or take-profit that fills by itself) is not affected.
+
+### 21.5 Drills
+
+The eight drills in `src/ops/drills.py` (sections 3, 4, 5, 7, 9, 10 and 12, and the restore path) are fake-exchange rehearsals: they run the Phase 20 components against fakes and never touch Binance or Telegram. A passing drill shows that the code path behaves as designed with the fakes, not that a real host or exchange behaves that way. The rehearsal on a real stack is Phases 25 and 26 and is not done.
+
+### 21.6 Partial restore after a restart (D110)
+
+Status: built and tested with fakes (the Binance-semantics fake exchange) by quick tasks 261114-kxu and 261114-mp1, DECISIONS D110. Not observed on Binance Demo or on a host: a real cancel answer and the real position read after a restart, for a plan that could not be restored, are owner-run checks that have not been made.
+
+**What the restore does.** At the RECOVERY step the coordinator is rebuilt from the ENTRY rows of section 21.1a, each row on its own. A fault of one row skips that row: no persisted plan or constraint snapshot for it (`RestoreSourceMissing`), or a value the rebuild refuses (`ValueError`, `TypeError`, `LookupError` or `ArithmeticError`). The log line `live.restore.entry_unrestorable` carries only `trade_plan_id`, `approval_id` and the fault class, never the row text. The healthy plans are restored and stay supervised, and the step `COORDINATOR_RESTORED` fails with SAFE_MODE `RESTORE_INCONSISTENT`. A fault of the store itself (any other exception class) restores nothing, enters SAFE_MODE `DB_FAILURE` with the restore incomplete, and sends no cancel; there fix the database or its connection first, then restart.
+
+**What the process does next.** RECOVERY is not a hold step, so its failure degrades the start instead of holding it: the process is admitted, in SAFE_MODE, with RECOVERY among its degraded steps. The stream, the reconcile tick, the bot and the scheduler start, so monitoring continues. HEALTH and ENABLE are skipped, so that start never enables entries (entries start disabled at every start, section 22.2). `--hold-on-refusal` does not apply, because a degraded start is admitted. After a partial restore the coordinator's restore counts as complete, so the reconcile loop runs its ticks; leaving SAFE_MODE stays the operator's, through section 21.1.
+
+**The one cancel.** With SAFE_MODE already on, the start sends ONE logical cancel for the resting entry of each unrestorable plan, one per distinct plan hash. It cancels by the deterministic client order id of that entry (the plan hash and the symbol come from the intent row, which exists even when the persisted plan does not), through `expire_pending_entry` with the existing trigger `protection_handoff_failed`, and queries that order once afterwards. The audit row is a journal `ENTRY_EXPIRY` row that carries that trigger. This code never places an order, never closes a position and never sends a second logical cancel. ONE cancel means one logical cancel per plan, not one request on the wire: the adapter's `cancel_normal_order` keeps its existing bounded retry (`_cancel_retrying` in `src/adapters/binance_usdm.py`), used only when the result of a request is unknown (STATUS_UNKNOWN: a 5xx, a 408, a network error, -1006 or -1007), at most `_RECONCILER_CANCEL_MAX_ATTEMPTS` = 3 attempts within `_RECONCILER_CANCEL_MAX_DELAY_SECONDS` = 30 seconds, with a random exponential wait (`_RECONCILER_CANCEL_WAIT_MULTIPLIER_SECONDS` = 1, at most `_RECONCILER_CANCEL_WAIT_MAX_SECONDS` = 10 seconds). Every attempt is the same request by the same client order id, so it is idempotent. An order that is already absent (ORDER_ABSENT, -2011 or -2013) counts as success; a 429, a 418 or a definitive rejection is never retried. A row whose plan hash equals the hash of a rebuilt plan is never cancelled, because the same client order id would hit the order of the supervised plan; it is refused and alerted instead.
+
+| Alert (severity) | Reason | When |
+|---|---|---|
+| PROTECTION_HANDOFF_FAILED (CRITICAL) | `UNRESTORED_CANCEL_UNVERIFIED` | the query after the cancel says the entry is still open, or its state is unknown |
+| PROTECTION_HANDOFF_FAILED (CRITICAL) | `UNRESTORED_CANCEL_FAILED` | the cancel request raised |
+| PROTECTION_HANDOFF_FAILED (CRITICAL) | `UNRESTORED_CANCEL_REFUSED` | refused before any call (a symbol outside the live-5 universe, or a malformed plan hash), or the plan hash is shared with a rebuilt plan |
+| DIVERGENCE (HIGH) | `UNRESTORED_PLAN_POSITION` | the one position read of the symbol shows a non-zero amount, or an amount that is not a Decimal |
+| DIVERGENCE (HIGH) | `UNRESTORED_POSITION_UNKNOWN` | the position read failed, or the symbol is outside the live-5 universe and nothing was read |
+
+A cancelled entry, an entry that left the book by itself and an entry that filled raise no cancel alert; a fill shows up through the position read. A failing alert sink, or a failure of the whole cancel step, is logged by class name and never stops the start.
+
+**What stays the operator's.** The unrestorable plan has no stop placed by the coordinator, and its order ids are unknown to the stream router, so a fill of it is not protected by the system. The system never closes that position and does not decide whose it is. Operator steps:
+
+1. Read the journal and the log: the `LIVE_STARTUP_STEP` row of RECOVERY (section 22.2), the `live.restore.entry_unrestorable` line (which row, which fault class), the `ENTRY_EXPIRY` rows with the trigger `protection_handoff_failed`, and the alerts of the table.
+2. Check the named symbol by hand on Binance: its position and its open orders. A position there has no stop from the system: protect or close it by hand if it needs it (an order made by hand is a foreign order to the reconcile, section 21.4). An entry that still rests after an `UNRESTORED_CANCEL_*` alert: cancel it by hand.
+3. Fix the database row the log names (by `trade_plan_id` and `approval_id`): `RestoreSourceMissing` means its persisted plan or constraint snapshot is missing; the other classes mean a value the rebuild refuses. The repository has no tool for this: it is a manual correction in the database. Until it is fixed, every start repeats the partial restore, because the cancel does not rewrite the intent row and the restore reads the same rows (section 21.1a), and every such start sends its own one logical cancel.
+4. Restart the process (commands in section 21.1c; read section 22.5 on what a stop leaves resting).
+5. Leave SAFE_MODE only through section 21.1 (`/safemode_exit` and `/confirm`, section 21.1a); its readiness rows decide.
+
+A literal single wire request is deliberately not required: not retrying a cancel whose result is unknown could leave the resting entry alive, and the same bounded retry serves the other cancel paths (the GTD expiry cancel `cancel_expired_entries_once` and the coordinator through `cancel_normal_order`, the reconcile sweeper through `cancel_algo_order`), so changing the adapter would change them too and would need its own decision (DECISIONS D110 item 6).
+
+## 22. Live process (Phase 24)
+
+Status: built and tested with fakes and with local PostgreSQL. It was observed on Binance Demo by the owner-run smoke rehearsals of 2026-11-06 and 2026-11-15 (each reached 21 of 21 steps, section 22.6). Not observed: any run on a host (the owner VPS session, plan 24-33), the heartbeat, the compose service on a host, and everything Phases 25 and 26 are for. Live placement is disabled (`LIVE_ORDERS_DISABLED`, `src/execution/enablement.py`). The decisions are DECISIONS D098 to D107; this section says how to run what they decided. Reading it is not a statement that live execution is safe or ready.
+
+### 22.1 What the process is
+
+One process, `python -m src.live.runtime`, one asyncio loop (D098): Telegram bot runner (its own bot, D103), user-data stream, protection stepper, reconcile task, sweeper, health task, clock-drift re-measure, risk-input refresh and the reservation release sweep. Every store call on the loop goes through `src/ops/store_executor.py` (D099). It never imports the paper runtime. The mode is explicit: `LIVE_RUNTIME_MODE` must be exactly `DEMO` or `LIVE`; a credential of the other mode, a `NOT_CONFIGURED` limit, or the SHADOW bot variable `TELEGRAM_BOT_TOKEN` in its environment refuses the start.
+
+| Verb | Use |
+|---|---|
+| `python -m src.live.runtime` | run the process; `--hold-on-refusal` stays up, unhealthy, with a held marker instead of exiting (the compose command uses it) |
+| `--healthcheck` | one JSON object (mode, Python version, application revision, held, liveness age, task results); exit 0 only while live; opens no network or database client |
+| `--liveness` | heartbeat probe: `live` and exit 0 only with no held marker and a liveness stamp younger than `stale_feed.max_mark_price_age_ms` |
+| `--initialize-gate-state --operator-id ID` | first install only, section 22.3 |
+| `--state-dir PATH` | the state directory (default `logs/live`) |
+
+### 22.2 Start sequence
+
+Each step is journaled as `LIVE_STARTUP_STEP` (name, outcome, a code; never a value). The order, after D094 (owner, 2026-11-01), is: CONFIG, GATE, ALEMBIC, SAFE_MODE, ENABLEMENT, SNAPSHOTS, SPILL_SENTINEL, CLOCK_DRIFT, EXCHANGE_INFO, RECOVERY, STREAM, RECONCILE, CONFIRM_EXPIRY, ALERT_REQUEUE, BOT, SCHEDULER, HEALTH, ENABLE. A failure in CONFIG, GATE, ALEMBIC, SAFE_MODE or ENABLEMENT holds the process (nothing starts); a failure elsewhere continues in SAFE_MODE with entries blocked and monitoring running. ENABLE runs in DEMO only, after a passing health verdict (D102); entries start disabled at every start. SAFE_MODE is never left by a restart (section 21.1). A `live.health.not_ok failing=['telegram_delivery']` warning at start is expected: that item reads FAIL until the first real Telegram send. A RECOVERY step that restores only part of the plans: section 21.6.
+
+CLOCK_DRIFT passes when the measurement WORKS, not when the host is inside its limits. `place_entry` then refuses (`ENTRY_REFUSED_BEFORE_SEND`, journaled with the guard's reason) while the drift guard says OUT_OF_LIMITS.
+
+**Host clock.** The host clock must be synchronised by NTP (chrony on the Linux host, section 13; w32time on the Windows development machine). The drift guard (`[drift]` of `config/binance/binance-limits-v1.toml`) blocks new entries when the host is more than 500 ms ahead of Binance or more than 1000 ms behind, counting the measurement uncertainty; it re-measures every 60 s and a measurement older than 300 s is stale. A Windows machine whose w32time is unsynchronised ("Local CMOS Clock") ran about 550 ms ahead during the Demo runs and every placement was refused until `w32tm /config` pointed it at an NTP server and the clock was stepped. The rehearsal pre-flight (section 22.6) stops before any card when the guard blocks.
+
+### 22.3 First install: gate state and spill sentinel
+
+On the first install, and only then, start the process once with `--initialize-gate-state --operator-id ID`. It creates the REST gate state file in the state directory, only when none exists (a corrupt file counts as existing and is never re-initialized silently), and the same start writes the sentinel `spill/.spill-initialized`. A later start without the flag and without the state file is "unknown", not a fresh install: the gate blocks every REST call until the owner clears it (section 21.3). A later start that finds an initialized gate state but no sentinel treats the spill volume as re-created empty and enters SAFE_MODE `RESTORE_INCONSISTENT`. State (gate file, spill directory, liveness stamp, held marker) lives under `logs/live`, which the compose service keeps in its own named volume `livestate` (section 21.1c).
+
+### 22.4 Environment and compose
+
+The live service reads only its own env file, `.env.live` (template `.env.live.example`, mode 0600, gitignored) or the file named by `TRADING_LIVE_ENV_FILE`: `LIVE_RUNTIME_MODE`, the `BINANCE_DEMO_*` or `BINANCE_LIVE_*` credentials (never both), `TELEGRAM_LIVE_BOT_TOKEN`, `TELEGRAM_LIVE_AUTHORIZED_CHAT_ID`, `TELEGRAM_AUTHORIZED_USER_IDS` and the database values (D107 item 1; section 13.6). The SHADOW names stay in `.env.paper`. Limits come from `config/execution` and `config/binance`, which are baked into the image (D106), so a changed limit is a rebuilt and re-pinned image. The compose service, its start and inspect commands and its restart policy are in section 21.1c: `restart: "no"` until the owner has seen the first clean Demo run (owner answer Q15 of plan 24-01). That run now exists (section 22.6); the owner has not switched the policy.
+
+### 22.5 Operator commands and the heartbeat
+
+The commands on the live bot (`/status`, `/disable_entries`, `/safemode_exit`, `/close SYMBOL`, `/confirm <token>`, and in DEMO `/demo_signal`) and the SAFE_MODE exit are in sections 21.1 and 21.1a; their authentication is the authorized private chat plus the user-id allow-list, and the `/confirm` token lives 60 s (D104). The external heartbeat is `deploy/heartbeat.sh --target live` (own URL file, own units, probe `--liveness` inside the container; URLs go in by stdin only), one healthchecks.io check per process (D106). Neither the heartbeat nor its units have been run on a host.
+
+**Stopping the live process (review WR-04, `24-DEFERRED.md` R-22).** Protection is fill-driven (D079): the stop is placed only after the process sees a fill, and `shutdown_in_order` stops the protection step and the stream before the process exits. The process does not cancel resting entries on stop, so a GTD LIMIT entry that is still resting can fill while the process is down or restarting and stay without a stop until the next start protects it. Until cancel-on-stop is built (Phase 25), stop it like this: (1) send `/disable_entries` on the live bot, which blocks new entries only and cancels nothing; (2) send `/status` and wait until the line `protections: 0 open of N tracked` shows, that is until every resting entry has filled and been protected or has expired (confirm on the first Demo run that a resting entry counts as open there); (3) only then run `docker compose --profile live stop live` or `deploy/update.sh`. `deploy/update.sh` refuses to run while the `live` service is running (override only with `--force-live`, which accepts the window). After the restart, read `/status` before sending new signals.
+
+### 22.6 Demo rehearsal (owner-run)
+
+The Demo rehearsal is `scripts/demo_rehearsal.py`, run by the owner only. Without `--execute` it runs the same sequence against a fake exchange and sends nothing. With `--execute` it uses the live process's own environment (`LIVE_RUNTIME_MODE=DEMO`, the Demo credentials and the live Telegram names; never the SHADOW names), needs an interactive terminal and the exactly typed phrase `DEMO SMOKE BTCUSDT`, and sends real requests to `demo-fapi.binance.com`. Procedure:
+
+1. Close every position and order on the Binance Demo account, and check that the host clock is synchronised (section 22.2).
+2. Run `scripts/demo_clear.py` (from the repo root; on Windows `$env:PYTHONPATH = "."; uv run python scripts/demo_clear.py`). It needs `LIVE_RUNTIME_MODE=DEMO` and `DATABASE_URL`, asks for the phrase `DEMO IS FLAT`, refuses while an execution intent is unresolved, closes every plan behind an open DEMO approval through the DOMN-04 transition APPROVED to EXPIRED (one journal row `DEMO_STALE_PLAN_CLEARED` each) and exits a persisted SAFE_MODE with the operator id `owner-demo-clear`. Without it a plan whose CONFIRM was refused or never pressed stays APPROVED until its expiry (about 26 minutes for a smoke plan) and blocks every new card of the symbol. The risk reservation of a closed plan is released by the live process's own sweep at its next start, not by the script.
+3. Run `uv run python -m scripts.demo_rehearsal --execute` and type the phrase. Every owner instruction is printed as `OPERATOR: ...` and sent to the live Telegram bot as `REHEARSAL: ...`, so the terminal need not be watched. Within about six minutes: APPROVE then CONFIRM the first card; after the restart the script performs, tap APPROVE and CONFIRM on the first card again (replays that must place nothing); APPROVE and CONFIRM the drill card (SAFE_MODE is entered on purpose and the CONFIRM must be refused with nothing placed); send `/safemode_exit` and send back the `/confirm <token>` line within 60 s. Then leave it: the last step waits for the drill plan's natural expiry (about 26 minutes) to show that the sweep released the refused drill's reservation. Do not interrupt it.
+4. The run ends with an `evidence:` line naming `09-DEMO-REHEARSAL-EVIDENCE-smoke-<UTC>.json` in the phase evidence directory; a failure prints `STOPPED at step <name>` and the file records outcome `FAILED`. Then check that the Binance Demo account is flat.
+
+A refused CONFIRM (SAFE_MODE, clock drift, `RECONCILIATION_REQUIRED`) leaves the plan APPROVED until its expiry (DECISIONS D051 item i). Nothing is re-sent: a DEMO placement is never re-sent, one `place_entry` POST per approval; an ambiguous result is probed once by client order id, and not found or a probe error is UNKNOWN with SAFE_MODE (D079, D080).
+
+Observed on Demo (smoke rehearsal of 2026-11-06, `09-DEMO-REHEARSAL-EVIDENCE-smoke-20261106T160307Z.json`, outcome COMPLETE, 21 of 21 steps PASSED, committed): start sequence admitted, entries enabled by the start sequence, the signal and the approval card, APPROVE and CONFIRM, a GTD LIMIT entry fill seen on the user-data stream, a REST-confirmed stop and the TP legs, a clean reconcile, a restart that rebuilt the plan, replayed presses that placed nothing, the operator close, the reservation released on close, a flat account, and the SAFE_MODE drill with its reservation released. Not observed there: the heartbeat, the compose service and the image revision stamp on a host; `/status`, `/disable_entries` and `/close` as typed commands; a stale-feed SAFE_MODE; an emergency close; the P3, P7 and A2 items that wait for Phases 25 and 26 (`19-OWNER-GAPS.md`). `LIVE_NET_PNL_SEMANTICS_VERIFIED` stays False (D086): the Demo fill is evidence only.
+
+The owner-run smokes of 2026-11-15 gave two results. The first run (`09-DEMO-REHEARSAL-EVIDENCE-smoke-20261115T083259Z.json`, outcome FAILED, not committed) confirmed the stop by REST at 08:33:34.51Z, then 0.5 s later its take profit step read the stop by client id as not found and held `TP_UNAVAILABLE` (`failure_detail` `STOP_LOSS: not found`, alert reason shown as `INVALID_REASON`) although the Demo UI showed the reduce-only closePosition STOP_MARKET created at 08:33:34Z, and the run stopped at `restart_enable` on the resulting SAFE_MODE. D113 then added the bounded stop reread and the reason code in the alert. A second smoke (`09-DEMO-REHEARSAL-EVIDENCE-smoke-20261115T104211Z.json`, not committed) reached outcome COMPLETE, 21 of 21 steps. The cause of the first failure is not proven (Binance Demo lag on queries by client id is the leading explanation), and it is not proven that the D113 fix is why the second run passed. From the `LIVE_TASK_DURATION` rows of the second run, the longest `protection_step` run was 886 ms (about a dozen runs; section 22.8, D114).
+
+After a failed run (owner-run, as the owner did on 2026-11-15): close the position and the orders by hand on the Demo account. Start the rehearsal once so the process sweeps the stale plan; it stops at step `demo_enable` because SAFE_MODE is raised by an `UNSYNCED_ALGO` divergence (a local protective order with no matching exchange order, `src/reconcile/compare.py`; every divergence kind enters SAFE_MODE with the kind name as the reason, `src/reconcile/classify.py`; this is the case of a close made by hand, section 21.4). Then run `scripts/demo_clear.py` (step 2 above). Then run the rehearsal again, without `--initialize-gate-state` once the gate state exists (with it the start is refused with `GATE_STATE_EXISTS`, section 22.3).
+
+### 22.7 Open items (owner)
+
+- No re-issued CONFIRM card after a restart (`24-28-SUMMARY.md` finding 1). After a restart the old confirm card is expired (`RUNTIME_RESTART`) and answers `NO_CONFIRM_CONTEXT`; a plan already APPROVED gets no new card, and a new request for the same plan is refused. The owner waits for the plan to expire and for a new signal. Safe (no duplicate order), inconvenient. Recommendation: accept for V1; build a re-issue path only if it hurts in use. Decision pending.
+- A manual close while TP1 still rests ends in a false `UNTRACKED_SYSTEM_ORDER` SAFE_MODE (section 21.4). Deferred by the owner on 2026-11-07; decide after Phase 24.
+- Which later phase owns strategy-driven DEMO signals (D101) is not named.
+- The `restart: "no"` policy of the live service is the owner's switch (section 22.4).
+- Review items of 2026-11-07 deferred to Phase 25, each with a row in `24-DEFERRED.md` and an entry in the ROADMAP Phase 25 inherited items: R-21 margin reservations never advance (`mark_placed` and `mark_open` have no caller; needs a DECISIONS row on when `mark_placed` is stamped), R-22 cancel-on-stop (the stop procedure in 22.5 is the interim), R-23 sync store calls on the event loop in the operator commands and start-time rehydration, R-24 pool-timeout error not wrapped as `StoreUnavailable`, R-25 health tick journal volume (about 63,000 rows a day).
+- Stuck first install (R-26): if a host ever has the REST gate state file but no `spill/.spill-initialized` in the `livestate` volume, the start enters SAFE_MODE `RESTORE_INCONSISTENT` and `--initialize-gate-state` refuses (`GATE_STATE_EXISTS`); create the sentinel file by hand. New installs cannot reach this state since commit cc9a9df8.
+- The value of `scheduler.protection_stall_after_ms` is 60000 ms since D114 (owner answer 2026-11-15): the stall watchdog is on and `TASK_STALLED` can fire. The value is an inference, not a measured maximum; tuning it after more Demo runs is the owner's (section 22.8).
+- The value of `scheduler.duration_summary_interval_ms` is the owner's: it ships `NOT_CONFIGURED`, so only the new-maximum duration rows (`LIVE_TASK_DURATION`) are written and no window row exists until it is set (section 22.8, D112).
+
+### 22.8 TASK_STALLED and the protection stall bound (D111)
+
+Status: built and tested with fakes by quick tasks 261114-kxu (the watchdog), 261114-mp1 (the alert and the key) and 261115-kra (the per-run duration record), DECISIONS D111 and D112. Since D114 the shipped limits set the stall bound to 60000 ms, so the watchdog is on; the duration window stays unset. The duration record was observed on the owner-run Demo smoke of 2026-11-15. No stall and no `TASK_STALLED` have been observed, and no run with the bound set has been observed yet. Nothing was observed on a host.
+
+**Meaning.** The scheduler runs the protection task `protection_step`. When that task has a stall bound, a watchdog starts beside each run; if the run is still going after the bound, it logs one error line naming the task and the bound in seconds and records one stall event for that run. `LiveWiring._record_task` journals it as a `LIVE_TASK_EVENT` row (correlation `live_scheduler`, entity `protection_step`, payload `task`, `kind` and `error_class`) and then raises the HIGH alert `TASK_STALLED`, whose header subject is the task name and whose reason is `STALL_BOUND_EXCEEDED`; the alert is raised also when the journal write failed. Only the protection task has a bound.
+
+**Observe only.** The run is never cancelled, cut short, stopped or restarted by the watchdog or the alert. Nothing is cancelled and nothing is re-sent.
+
+**The key.** `scheduler.protection_stall_after_ms` in section `[scheduler]` of `config/execution/execution-limits-v1.toml` is set to 60000 with the provenance `DECISION` by D114 (owner answer 2026-11-15). It stays alert-only: unlike a required key (section 22.1), unset it never refuses the start, and while it is unset the watchdog is off, no stall row is written and no `TASK_STALLED` is raised. A change of the value needs its own DECISIONS row and the provenance `DECISION`. An integer value needs a provenance of STRUCTURAL, COST_GUARD, DECISION or EXPERIMENT; PLACEHOLDER refuses to load. To fire before the unprotected deadline the value must stay below `protection.max_unprotected_ms`. Limits are baked into the image (section 22.4, D106), so a set value is a rebuilt and re-pinned image.
+
+**Measured figures (2026-11-15).** The owner-run Demo smoke of 2026-11-15 (`09-DEMO-REHEARSAL-EVIDENCE-smoke-20261115T104211Z.json`, outcome COMPLETE, 21 of 21 steps) gave a longest `protection_step` run of 886 ms in about a dozen `LIVE_TASK_DURATION` runs, with no rate limit and no ban in it (read-only query of those journal rows on 2026-11-15). The longest legitimate path is a cancel that meets the adapter's bounded STATUS_UNKNOWN retry (3 attempts, 30 s delay ceiling, `src/adapters/binance_usdm.py:160-163`) plus the 1.5 s stop reread of D113. The bound must stay far below `protection.max_unprotected_ms` (180000 ms). 60000 ms is an inference from these facts, not a measured maximum, and may be tuned after more Demo runs.
+
+**How to react.** Check the process log and the exchange position and its stop now. Close or protect the position by hand if it needs it. Restart the process if the task does not finish (a restart never leaves SAFE_MODE, section 21.1; a stop leaves resting entries, section 22.5). Repeated stalls inside `alerts.dedupe_window_ms` are suppressed in Telegram and journaled as `ALERT_SUPPRESSED`, while every stall keeps its `LIVE_TASK_EVENT` row.
+
+**The duration record (D112).** Every run of every scheduler task that ends, successful or failed, is timed in whole milliseconds with the process clock (`datetime.now(UTC)`, the wall clock, so a clock step can distort one sample; a negative difference counts as 0). The scheduler writes at most one `LIVE_TASK_DURATION` row per run (correlation `live_scheduler`, entity the task name): at each new maximum of the process (the first run of each task is one) and, only when `scheduler.duration_summary_interval_ms` is set, once per window. The payload keys are `task`, `runs`, `total_ms`, `max_ms`, `window_max_ms`, `new_max` and `window_end`: `runs`, `total_ms` and `max_ms` count since the process started and restart at zero after a restart, `window_max_ms` is the longest run since the current window started, and the two booleans say what triggered the row. Unset (the shipped state) only the new-maximum rows are written: about ln(n) + 0.58 rows per task over n runs, so about 9 rows on the first day and about 13 over 30 days for a task on the 15 s tick. It is observe only and never an alert: it is not in the alert contract, a failing journal write is logged by exception class name and the scheduler goes on, and the task itself is never changed or cancelled. A run that never ends is not in it (the stall watchdog covers that once its bound is set), a run cancelled at shutdown is not counted and no row is written at stop.
+
+**Measuring a bound (owner; no value is chosen here).** The longest observed run of each task is in the journal. Read-only query 1, the stall rows (empty while the key is unset):
+
+```sql
+SELECT occurred_at_utc, payload_json
+FROM journal_events
+WHERE correlation_id = 'live_scheduler'
+  AND entity_id = 'protection_step'
+  AND event_type = 'LIVE_TASK_EVENT'
+  AND payload_json LIKE '%"kind":"stall"%'
+ORDER BY occurred_at_utc;
+```
+
+Read-only query 2, the longest observed run and the number of duration rows per task (`max_ms` counts since each process start, so the maximum over the rows is the maximum over every process in the journal):
+
+```sql
+SELECT entity_id AS task,
+       MAX((payload_json::jsonb ->> 'max_ms')::bigint) AS longest_run_ms,
+       COUNT(*) AS duration_rows
+FROM journal_events
+WHERE correlation_id = 'live_scheduler'
+  AND event_type = 'LIVE_TASK_DURATION'
+GROUP BY entity_id
+ORDER BY entity_id;
+```
+
+Read-only query 3, the history of the protection task (a filter on `occurred_at_utc` may be added to look at one Demo session):
+
+```sql
+SELECT occurred_at_utc, payload_json
+FROM journal_events
+WHERE correlation_id = 'live_scheduler'
+  AND entity_id = 'protection_step'
+  AND event_type = 'LIVE_TASK_DURATION'
+ORDER BY occurred_at_utc;
+```
+
+The procedure, owner-run on Demo only and never by an agent:
+
+1. Run Demo sessions that exercise the protection step (fills, stop placement, restarts, take-profit attach) with the shipped image. No limits edit is needed: the new-maximum rows are written while the window key is unset.
+2. Read the `protection_step` row of query 2: `longest_run_ms` is the longest observed run of that task. Query 3 shows when each new maximum was set.
+3. The rule: the bound is the longest observed run of `protection_step` times a margin the owner chooses, and it must stay below `protection.max_unprotected_ms` (180000 ms in `config/execution/execution-limits-v1.toml`, D089), or the alert cannot fire before the unprotected deadline. If the longest run times the margin is not below 180000 ms, do not set it and treat the slow protection run as the finding.
+4. To change it, add a new DECISIONS row and keep the provenance `DECISION` in `[provenance.scheduler]`, then rebuild and re-pin the image (section 22.4, D106).
+
+The stall bound is set by D114 (60000 ms); no number is proposed here for the window.

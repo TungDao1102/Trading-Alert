@@ -507,6 +507,7 @@ def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
 
     from tests.support import execution_limits as test_limits
     from tests.support.limits import TEST_ONLY_AHEAD_LIMIT_MS, TEST_ONLY_BEHIND_LIMIT_MS
+    from tests.support.margin_guard_stub import StubMarginGuard
 
     live = case_input["live"]
     values: dict[str, Any] = {
@@ -524,6 +525,9 @@ def _build_live_context(case_input: dict[str, Any], **overrides: Any) -> Any:
             live["tp1_quantity_fraction"], "tp1_quantity_fraction"
         ),
         "clock": lambda: _post_read_instant(case_input),
+        # Phase 22 (plan 22-15): the guard is a REQUIRED field; the default stub passes.
+        "margin_guard": StubMarginGuard(),
+        "snapshot_recorder": lambda snapshot: None,  # plan 24-37: required, TEST_ONLY no-op
     }
     values.update(overrides)
     return LivePlacementContext(**values)
@@ -1027,14 +1031,14 @@ def _status_unknown() -> BaseException:
     return ServerError(error_message="status unknown", status_code=503)
 
 
-def _probe(found: bool) -> Any:
+def _probe(found: bool, status: str = "NEW") -> Any:
     from src.adapters.binance_usdm import OrderProbe
 
     return OrderProbe(
         client_order_id=_load_expected()["entry_client_order_id"],
         found=found,
         order_id="12345" if found else None,
-        status="NEW" if found else None,
+        status=status if found else None,
         update_time_utc=None,
     )
 
@@ -1336,6 +1340,32 @@ async def test_refusal_before_send_is_no_trade_without_probe_retry_or_safe_mode(
     assert entry.intent_status == ExecutionIntentStatus.REJECTED
     assert entry.outcome is not None
     assert entry.outcome.reason_code == "ENTRY_REFUSED_BEFORE_SEND"
+
+
+@pytest.mark.parametrize(("label", "refusal"), _refusals(), ids=[r[0] for r in _refusals()])
+async def test_refusal_before_send_is_journaled_with_its_class_and_fixed_message(
+    label: str, refusal: BaseException
+) -> None:
+    """The outcome carries only ENTRY_REFUSED_BEFORE_SEND; the journal says which refusal it was
+    (first Demo rehearsal: the REST gate and the drift guard could not be told apart)."""
+    case_input = _load_input()
+    adapter = FakeExecutionAdapter()
+    adapter.entry_exceptions.append(refusal)
+    journal = FakeJournal()
+
+    await _run_plan(
+        adapter,
+        journal=journal,
+        intent_store=InMemoryExecutionIntentStore(),
+        live_context=_build_live_context(case_input, protection_registry=StubProtectionRegistry()),
+    )
+
+    rows = [e for e in journal.events if e.event_type == "ENTRY_REFUSED_BEFORE_SEND"]
+    assert len(rows) == 1, label
+    payload = json.loads(rows[0].payload_json)
+    reason = getattr(refusal, "reason", None)
+    name = type(refusal).__name__
+    assert payload["refusal"] == (name if reason is None else f"{name}: {reason}"), label
 
 
 @pytest.mark.parametrize("code", [-1106, -4016, -4024])
@@ -1789,6 +1819,8 @@ async def test_a_failed_hand_off_cancels_the_entry_and_requires_reconciliation()
     case_input = _load_input()
     registry = StubProtectionRegistry(register_exception=RuntimeError("registry down"))
     adapter = FakeExecutionAdapter()
+    # Plan 20-11 (D-17): the cancel is verified by a query; a healthy exchange shows CANCELED.
+    adapter._query_response = _probe(found=True, status="CANCELED")  # type: ignore[attr-defined]
     safe_mode_controller = RecordingSafeModeController()
     journal = FakeJournal()
     store = InMemoryExecutionIntentStore()
@@ -1898,6 +1930,26 @@ async def test_disabled_live_orders_block_placement() -> None:
     assert outcome.is_no_trade is True
     assert outcome.reason_code == "DISABLED"
     assert adapter.calls == []
+
+
+async def test_the_enablement_guard_receives_the_bound_plan_hash_not_the_plan_id() -> None:
+    """G2-035 (D-35), 09-REVIEW IN-06: the guard argument named plan_hash is the plan hash."""
+    from src.execution.enablement import EnablementVerdict
+
+    seen: list[str] = []
+
+    class _RecordingEnablement:
+        def guard_placement(self, *, plan_hash: str) -> EnablementVerdict:
+            seen.append(plan_hash)
+            return EnablementVerdict(is_no_trade=True, reason_code="DISABLED")
+
+    case = _load_input()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(adapter, case_input=case, enablement=_RecordingEnablement())
+    assert outcome.reason_code == "DISABLED"
+    assert len(seen) == 1
+    assert len(seen[0]) == 64 and set(seen[0]) <= set("0123456789abcdef")
+    assert seen[0] != _build_approval(case).trade_plan_id
 
 
 async def test_safe_mode_blocks_new_entries_even_when_enabled() -> None:
@@ -2667,7 +2719,11 @@ async def test_store_down_and_a_failed_hand_off_still_cancels_the_entry() -> Non
     )
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert safe_mode.entered_reasons == ["DB_FAILURE", "PROTECTION_HANDOFF_FAILED"]
-    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+    # The cancel is the last order action; plan 20-11 (D-17) adds the verifying query after it.
+    assert [c["method"] for c in adapter.calls][-2:] == [
+        "cancel_normal_order",
+        "query_order_by_client",
+    ]
 
 
 class _StoreDownJournal:
@@ -2770,7 +2826,11 @@ async def test_cr01_failing_journal_at_a_failed_hand_off_still_cancels_the_entry
     assert (outcome.is_no_trade, outcome.reason_code) == (True, "RECONCILIATION_REQUIRED")
     assert controller.in_safe_mode is True
     assert journal.attempts >= 1
-    assert [c["method"] for c in adapter.calls][-1] == "cancel_normal_order"
+    # The cancel is the last order action; plan 20-11 (D-17) adds the verifying query after it.
+    assert [c["method"] for c in adapter.calls][-2:] == [
+        "cancel_normal_order",
+        "query_order_by_client",
+    ]
 
 
 async def test_a_simulated_crash_propagates_unchanged() -> None:
@@ -2895,9 +2955,19 @@ def test_live_context_validates_every_field() -> None:
         "gtd_clock_margin",
         "tp1_quantity_fraction",
         "clock",
+        "margin_guard",
+        "alert_sink",
+        # Plan 24-37 (F3, D095): a deliberate addition to the pinned field set.
+        "snapshot_recorder",
     }
-    # Every field is required: building without one raises TypeError.
+    # Every field is required except the optional alert sink (plan 20-22): building without one
+    # raises TypeError. Phase 22 (plan 22-15) adds the required margin_guard: no None default
+    # that would skip the checks (CR-07).
+    assert fields["alert_sink"] is None
     for name in fields:
+        if name == "alert_sink":
+            LivePlacementContext(**{k: v for k, v in fields.items() if k != name})
+            continue
         partial = {k: v for k, v in fields.items() if k != name}
         with pytest.raises(TypeError):
             LivePlacementContext(**partial)
@@ -2910,6 +2980,9 @@ def test_live_context_validates_every_field() -> None:
         "gtd_clock_margin": 0.5,
         "tp1_quantity_fraction": 0.5,
         "clock": object(),
+        "margin_guard": object(),
+        "snapshot_recorder": object(),
+        "alert_sink": object(),
     }
     for name, bad in bad_values.items():
         with pytest.raises(TypeError):
@@ -2940,16 +3013,20 @@ def test_live_context_module_is_pure() -> None:
             imported.add(node.module)
         elif isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
-    # `collections.abc` (stdlib) types the injected clock (19-REVIEW CR-01).
+    # `collections.abc` (stdlib) types the injected clock (19-REVIEW CR-01); `typing` types the
+    # optional alert sink (plan 20-22).
     assert imported <= {
         "__future__",
         "collections.abc",
         "dataclasses",
         "datetime",
         "decimal",
+        "typing",
         "src.domain.signal",
         "src.execution.constraint_snapshot",
         "src.execution.execution_limits",
+        # Phase 22 (plan 22-15): the type of the required margin_guard field.
+        "src.execution.margin_guard",
         "src.execution.protection",
     }
 
@@ -3259,7 +3336,10 @@ async def test_the_committed_not_configured_limits_file_refuses_every_live_place
     from src.execution.execution_limits import load_execution_limits
 
     path = Path(__file__).parents[1] / "config" / "execution" / "execution-limits-v1.toml"
-    limits = load_execution_limits(path)
+    import dataclasses as _dc
+
+    # D091 completed the committed file; clear key 14 to keep exercising the refusal.
+    limits = _dc.replace(load_execution_limits(path), stale_feed_max_user_data_silence_ms=None)
     assert limits.unset_keys() != ()
     adapter = FakeExecutionAdapter()
     outcome = await _run_plan(
@@ -3561,8 +3641,9 @@ async def test_mark_age_a_fresh_mark_stamped_after_now_utc_places() -> None:
 
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
-    # The clock was read once, after the three gate 5e reads (the mark read among them).
-    assert calls_seen_by_clock == [len(PRE_PLACEMENT_READS)]
+    # The clock was read after the gate 5e reads (the mark read among them) and, since 22-REVIEW
+    # WR-02, once more after the position mode and the guard (gate 5f4), never before the reads.
+    assert calls_seen_by_clock == [len(PRE_PLACEMENT_READS), len(PRE_PLACEMENT_READS) + 1]
     assert _reads_only(adapter)[: len(PRE_PLACEMENT_READS)] == PRE_PLACEMENT_READS
 
 
@@ -3689,7 +3770,7 @@ async def test_last_age_is_measured_at_the_post_read_clock_with_its_own_bound() 
     )
 
 
-async def test_the_clock_is_read_once_after_both_price_reads() -> None:
+async def test_the_clock_is_read_after_both_price_reads_and_again_after_the_guard() -> None:
     case_input = _load_input()
     now = _parse_utc(case_input["now_utc"])
     adapter = FakeExecutionAdapter()
@@ -3707,7 +3788,8 @@ async def test_the_clock_is_read_once_after_both_price_reads() -> None:
     )
     outcome = await _run_plan(adapter, live_context=_build_live_context(case_input, clock=clock))
     assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
-    assert calls_seen_by_clock == [PRE_PLACEMENT_READS]
+    # The second reading is gate 5f4 (22-REVIEW WR-02): after the position mode, before the consume.
+    assert calls_seen_by_clock == [PRE_PLACEMENT_READS, [*PRE_PLACEMENT_READS, "get_position_mode"]]
 
 
 async def test_risk04_a_position_on_the_symbol_is_refused() -> None:
@@ -4134,3 +4216,765 @@ async def test_pure_refusals_run_before_the_first_read() -> None:
         outcome = await _run_plan(adapter, case_input=case_input, **kwargs)
         assert outcome.is_no_trade is True
         assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 (plan 22-15): gate 5f2, the margin guard (D-05, D-15, amendments A7, A8).
+# --------------------------------------------------------------------------- #
+
+
+class _EventAdapter(FakeExecutionAdapter):
+    """The fake adapter that also appends the two calls the guard is ordered between."""
+
+    def __init__(self, log: list[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._log = log
+
+    async def get_position_mode(self) -> Any:
+        self._log.append("get_position_mode")
+        return await super().get_position_mode()
+
+    async def place_entry(self, **kwargs: Any) -> Any:
+        self._log.append("place_entry")
+        return await super().place_entry(**kwargs)
+
+
+def _filled_plan_snapshot(case_input: dict[str, Any]) -> Any:
+    """The plan snapshot that also carries the seven filter values (margin side still unknown)."""
+    return _build_plan_snapshot(
+        case_input,
+        max_quantity=Decimal("1000"),
+        market_lot_min_quantity=Decimal("0.001"),
+        market_lot_max_quantity=Decimal("120"),
+        market_lot_step_size=Decimal("0.001"),
+        percent_price_multiplier_up=Decimal("1.0500"),
+        percent_price_multiplier_down=Decimal("0.9500"),
+        percent_price_multiplier_decimals=4,
+    )
+
+
+async def test_gate_5f2_orders_the_position_mode_the_guard_and_the_placement() -> None:
+    """A7: the guard runs after the position mode (5f) and before the entry is sent, and it is
+    called once with exactly what is placed (T-22-55)."""
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    log: list[str] = []
+    guard = StubMarginGuard(event_log=log)
+    adapter = _EventAdapter(log)
+    registry = StubProtectionRegistry()
+    outcome = await _run_plan(
+        adapter,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=guard
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert log == ["get_position_mode", "guard.evaluate", "place_entry"]
+    assert guard.calls == 1
+
+    request = guard.requests[0]
+    entry_kwargs = next(c for c in adapter.calls if c["method"] == "place_entry")["kwargs"]
+    assert request.symbol == case_input["symbol"]
+    assert request.side == case_input["candidate_position_side"]
+    assert request.quantity == entry_kwargs["quantity"] == Decimal("2.415")
+    assert request.limit_price == entry_kwargs["price"]
+    assert request.limit_price == _coerce_decimal(
+        case_input["expected_limit_price"], "expected_limit_price"
+    )
+    assert request.stop_price == registry.entries[0].sl_trigger_price
+    assert request.mark_price == adapter.mark_reading.mark_price
+    rates = _build_cost_rates(case_input)
+    assert request.fee_rate_entry == rates.fee_rate_entry
+    assert request.fee_rate_exit == rates.fee_rate_exit
+    assert request.trade_plan_id == case_input["trade_plan_id"]
+    assert request.symbol_is_flat is True
+    # The guard is the only addition: the adapter sequence is the unchanged golden one.
+    assert [c["method"] for c in adapter.calls] == _load_expected()["method_sequence"]
+
+
+async def test_a_pass_hands_the_registry_the_snapshot_the_exchange_verified() -> None:
+    """A8, D-05: margin type, leverage and equity come from the verdict, in memory only."""
+    import dataclasses
+
+    from src.execution.constraint_snapshot import snapshot_is_valid_for_live
+
+    from tests.support.margin_guard_stub import (
+        VERIFIED_EQUITY,
+        VERIFIED_LEVERAGE,
+        VERIFIED_MARGIN_TYPE,
+        StubMarginGuard,
+    )
+
+    case_input = _load_input()
+    base = _filled_plan_snapshot(case_input)
+    assert (base.margin_type, base.leverage, base.equity_used) == (None, None, None)
+    registry = StubProtectionRegistry()
+    context = _build_live_context(
+        case_input,
+        plan_constraint_snapshot=base,
+        protection_registry=registry,
+        margin_guard=StubMarginGuard(),
+    )
+    outcome = await _run_plan(FakeExecutionAdapter(), live_context=context)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+    handed = registry.entries[0].plan_constraint_snapshot
+    assert (handed.margin_type, handed.leverage, handed.equity_used) == (
+        VERIFIED_MARGIN_TYPE,
+        VERIFIED_LEVERAGE,
+        VERIFIED_EQUITY,
+    )
+    assert handed == dataclasses.replace(
+        base,
+        margin_type=VERIFIED_MARGIN_TYPE,
+        leverage=VERIFIED_LEVERAGE,
+        equity_used=VERIFIED_EQUITY,
+    )
+    # The context's own (write-once evidence) snapshot is not touched.
+    assert context.plan_constraint_snapshot is base
+    assert (base.margin_type, base.leverage, base.equity_used) == (None, None, None)
+    ttl = timedelta(seconds=int(case_input["ttl_seconds"]))
+    now = _parse_utc(case_input["now_utc"])
+    assert snapshot_is_valid_for_live(handed, now_utc=now, ttl=ttl) is True
+    assert snapshot_is_valid_for_live(base, now_utc=now, ttl=ttl) is False
+
+
+async def test_a_guard_refusal_returns_its_code_and_consumes_nothing() -> None:
+    """A7, T-22-54: a refusal leaves no ENTRY row, sends nothing and the same approval places
+    later with a passing guard."""
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    registry = StubProtectionRegistry()
+    guard = StubMarginGuard(verdict=refusing_verdict("INSUFFICIENT_MARGIN"))
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=guard
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "INSUFFICIENT_MARGIN")
+    assert guard.calls == 1
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+    assert registry.entries == []
+
+    placed = await _run_plan(
+        FakeExecutionAdapter(),
+        intent_store=store,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=StubMarginGuard()
+        ),
+    )
+    assert (placed.is_no_trade, placed.reason_code) == (False, "OK")
+    assert store.get_entry(approval_id=case_input["approval_id"]) is not None
+    assert len(registry.entries) == 1
+
+
+async def test_gate_5f3_refuses_a_sizing_equity_above_the_live_equity_the_guard_read() -> None:
+    """Phase 21 review WR-03: the quantity was sized from the caller's AccountState (the golden
+    fixture: equity 1000.00, quantity 2.415, within the approved quantity). A live equity read by
+    the guard in the same call that is lower than that figure is NO_TRADE and consumes nothing."""
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    sizing_equity = _build_risk_kwargs(case_input)["account_state"].equity
+    assert sizing_equity == Decimal("1000.00")
+    store = InMemoryExecutionIntentStore()
+    registry = StubProtectionRegistry()
+    guard = StubMarginGuard(verdict=passing_verdict(equity_used=Decimal("999.99999999")))
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=guard
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNCERTAIN_ACCOUNT_STATE")
+    assert guard.calls == 1  # the live equity comes from the guard's own fresh read
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+    assert registry.entries == []
+
+
+@pytest.mark.parametrize("live_equity", ["1000.00", "1000.00000001", "4999.09343961"])
+async def test_gate_5f3_passes_a_sizing_equity_equal_to_or_below_the_live_equity(
+    live_equity: str,
+) -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    guard = StubMarginGuard(verdict=passing_verdict(equity_used=Decimal(live_equity)))
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(case_input, margin_guard=guard),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+
+
+async def test_a_plain_string_refusal_code_passes_through_unchanged() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    guard = StubMarginGuard(verdict=refusing_verdict("LIQUIDATION_TOO_CLOSE"))
+    outcome = await _run_plan(
+        FakeExecutionAdapter(), live_context=_build_live_context(_load_input(), margin_guard=guard)
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "LIQUIDATION_TOO_CLOSE")
+
+
+async def test_a_raising_guard_fails_closed_without_leaking_its_text() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    adapter = FakeExecutionAdapter()
+    guard = StubMarginGuard(exception=RuntimeError("secret-account-detail 4999.09"))
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(case_input, margin_guard=guard),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNCERTAIN_ACCOUNT_STATE")
+    assert "secret-account-detail" not in repr(outcome)
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_a_request_that_cannot_be_built_fails_closed_before_the_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.execution import manager
+
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    def _unbuildable(**_: Any) -> Any:
+        raise ValueError("mark_price must be positive")
+
+    monkeypatch.setattr(manager, "MarginGuardRequest", _unbuildable)
+    case_input = _load_input()
+    store = InMemoryExecutionIntentStore()
+    guard = StubMarginGuard()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        intent_store=store,
+        live_context=_build_live_context(case_input, margin_guard=guard),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "UNCERTAIN_ACCOUNT_STATE")
+    assert guard.calls == 0
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None
+
+
+async def test_the_guard_is_never_reached_when_an_earlier_gate_refuses() -> None:
+    """T-22-53: with live placement disabled, a limit unset, SAFE_MODE on, a Hedge account, an
+    unreadable mode or a position on the symbol, the guard (which can POST an account
+    configuration) is not called, nothing is consumed and no entry is sent."""
+    from src.execution.enablement import LiveEnablementController
+    from src.risk.types import OpenPosition
+
+    from tests.support import execution_limits as test_limits
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    open_position_risk = _build_risk_kwargs(case_input)
+    open_position_risk["open_positions"] = [
+        OpenPosition(
+            symbol="BTCUSDT",
+            position_side="LONG",
+            open_risk=Decimal("1.00"),
+            daily_pnl_contribution=Decimal("0"),
+        )
+    ]
+    scenarios: list[tuple[str, FakeExecutionAdapter, dict[str, Any], dict[str, Any], str]] = [
+        (
+            "live orders disabled",
+            FakeExecutionAdapter(),
+            {},
+            {"enablement": LiveEnablementController(journal=FakeJournal())},
+            "DISABLED",
+        ),
+        (
+            "a limit not configured",
+            FakeExecutionAdapter(),
+            {
+                "execution_limits": test_limits.test_only_execution_limits(
+                    max_mark_price_age_ms=None
+                )
+            },
+            {},
+            "LIMITS_NOT_CONFIGURED",
+        ),
+        (
+            "SAFE_MODE",
+            FakeExecutionAdapter(),
+            {},
+            {"safe_mode_controller": RecordingSafeModeController(in_safe_mode=True)},
+            "RECONCILIATION_REQUIRED",
+        ),
+        (
+            "Hedge account",
+            FakeExecutionAdapter(position_mode="HEDGE"),
+            {},
+            {},
+            "HEDGE_MODE_UNSUPPORTED",
+        ),
+        (
+            "unreadable position mode",
+            FakeExecutionAdapter(position_mode="UNKNOWN"),
+            {},
+            {},
+            "UNCERTAIN_ACCOUNT_STATE",
+        ),
+        (
+            "position on the symbol",
+            FakeExecutionAdapter(),
+            {},
+            {"risk_kwargs": open_position_risk},
+            "SYMBOL_HAS_POSITION",
+        ),
+    ]
+    for label, adapter, context_overrides, run_overrides, reason in scenarios:
+        guard = StubMarginGuard()
+        store = InMemoryExecutionIntentStore()
+        live = _build_live_context(case_input, margin_guard=guard, **context_overrides)
+        outcome = await _run_plan(adapter, intent_store=store, live_context=live, **run_overrides)
+        assert (outcome.is_no_trade, outcome.reason_code) == (True, reason), label
+        assert guard.calls == 0, label
+        assert "place_entry" not in _reads_only(adapter), label
+        assert store.get_entry(approval_id=case_input["approval_id"]) is None, label
+
+
+def test_live_context_margin_guard_needs_a_callable_evaluate() -> None:
+    import dataclasses
+
+    from src.execution.live_context import LivePlacementContext
+
+    context = _build_live_context(_load_input())
+    fields = {f.name: getattr(context, f.name) for f in dataclasses.fields(context)}
+
+    class _NotCallable:
+        evaluate = 1
+
+    with pytest.raises(TypeError):
+        LivePlacementContext(**{**fields, "margin_guard": None})
+    with pytest.raises(TypeError):
+        LivePlacementContext(**{**fields, "margin_guard": _NotCallable()})
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 (plan 22-15, Task 2): the DIVERGENCE alert and the MARGIN_CONFIG_CHANGED evidence
+# (amendment A9, Pitfall 9). Both are best effort and never change the outcome.
+# --------------------------------------------------------------------------- #
+
+
+class _DivergenceSink:
+    """`JournalFirstAlertSink.alert(...)` call shape; records each call, can be told to raise."""
+
+    def __init__(self, *, exception: BaseException | None = None) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.exception = exception
+
+    def alert(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+        if self.exception is not None:
+            raise self.exception
+
+
+class _RaisingJournal:
+    """A journal whose `record` always fails (the same database that just failed)."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def record(self, event: Any) -> None:
+        self.attempts += 1
+        raise RuntimeError("journal down 4999.09")
+
+
+def _unverified_verdict() -> Any:
+    from tests.support.margin_guard_stub import refusing_verdict
+
+    return refusing_verdict(
+        "MARGIN_CONFIG_UNVERIFIED",
+        alert_reason="MARGIN_CONFIG_UNVERIFIED",
+        config_changed=True,
+        previous_margin_type="CROSSED",
+        previous_leverage=20,
+    )
+
+
+async def test_an_unverified_configuration_sends_one_divergence_alert_with_a_fixed_code() -> None:
+    from src.ops.alerts import ALERT_EVENTS, OperationalAlert
+
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    sink = _DivergenceSink()
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(
+            case_input,
+            margin_guard=StubMarginGuard(verdict=_unverified_verdict()),
+            alert_sink=sink,
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    assert len(sink.calls) == 1
+    call = sink.calls[0]
+    plan_hash = _plan_hash_of(case_input)
+    assert call == {
+        "event": "DIVERGENCE",
+        "subject": plan_hash,
+        "reason": "MARGIN_CONFIG_UNVERIFIED",
+        "now_utc": _parse_utc(case_input["now_utc"]),
+        "plan_hash": plan_hash,
+        "symbol": case_input["symbol"],
+    }
+    # No amount reaches the sink, and the event is one the OPS-05 matrix already holds.
+    assert not any(isinstance(v, Decimal | float | int) for v in call.values())
+    assert "DIVERGENCE" in ALERT_EVENTS
+    OperationalAlert.create(
+        event=call["event"],
+        subject=call["subject"],
+        reason=call["reason"],
+        occurred_at_utc=call["now_utc"],
+        plan_hash=call["plan_hash"],
+        symbol=call["symbol"],
+    )
+
+
+async def test_no_alert_without_an_alert_reason_without_a_sink_or_with_a_failing_sink() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    case_input = _load_input()
+    # An ordinary refusal carries no alert reason: nothing is sent, on a refusal or on a pass.
+    for verdict in (refusing_verdict("INSUFFICIENT_MARGIN"), None):
+        sink = _DivergenceSink()
+        await _run_plan(
+            FakeExecutionAdapter(),
+            live_context=_build_live_context(
+                case_input, margin_guard=StubMarginGuard(verdict=verdict), alert_sink=sink
+            ),
+        )
+        assert sink.calls == []
+    # No sink: the verdict stands.
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(
+            case_input, margin_guard=StubMarginGuard(verdict=_unverified_verdict())
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    # A sink that raises never changes the outcome.
+    failing = _DivergenceSink(exception=RuntimeError("sink down"))
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        live_context=_build_live_context(
+            case_input,
+            margin_guard=StubMarginGuard(verdict=_unverified_verdict()),
+            alert_sink=failing,
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    assert len(failing.calls) == 1
+
+
+def _margin_events(journal: FakeJournal) -> list[Any]:
+    return [e for e in journal.events if e.event_type == "MARGIN_CONFIG_CHANGED"]
+
+
+async def test_a_configuration_post_is_journaled_on_a_pass_with_the_previous_and_verified() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    journal = FakeJournal()
+    verdict = passing_verdict(
+        config_changed=True, previous_margin_type="CROSSED", previous_leverage=20
+    )
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        journal=journal,
+        live_context=_build_live_context(case_input, margin_guard=StubMarginGuard(verdict=verdict)),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    (event,) = _margin_events(journal)
+    assert event.entity_type == "TradePlan"
+    assert event.entity_id == _plan_hash_of(case_input)
+    assert event.trade_plan_id == case_input["trade_plan_id"]
+    assert event.occurred_at_utc == _parse_utc(case_input["now_utc"])
+    assert json.loads(event.payload_json) == {
+        "previous_leverage": 20,
+        "previous_margin_type": "CROSSED",
+        "symbol": case_input["symbol"],
+        "trade_plan_id": case_input["trade_plan_id"],
+        "verified_leverage": 5,
+        "verified_margin_type": "ISOLATED",
+    }
+    # Configuration only: the verified equity is not in the evidence.
+    assert "4999" not in event.payload_json
+
+
+async def test_a_configuration_post_is_journaled_even_when_the_plan_is_refused() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    journal = FakeJournal()
+    outcome = await _run_plan(
+        FakeExecutionAdapter(),
+        journal=journal,
+        live_context=_build_live_context(
+            case_input, margin_guard=StubMarginGuard(verdict=_unverified_verdict())
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+    (event,) = _margin_events(journal)
+    payload = json.loads(event.payload_json)
+    assert (payload["previous_margin_type"], payload["previous_leverage"]) == ("CROSSED", 20)
+    assert (payload["verified_margin_type"], payload["verified_leverage"]) == (None, None)
+
+
+async def test_no_configuration_event_when_no_post_was_sent() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, refusing_verdict
+
+    journal = FakeJournal()
+    for verdict in (None, refusing_verdict("INSUFFICIENT_MARGIN")):
+        await _run_plan(
+            FakeExecutionAdapter(),
+            journal=journal,
+            live_context=_build_live_context(
+                _load_input(), margin_guard=StubMarginGuard(verdict=verdict)
+            ),
+        )
+    assert _margin_events(journal) == []
+
+
+async def test_a_failing_journal_never_changes_the_outcome_or_the_placement() -> None:
+    from tests.support.margin_guard_stub import StubMarginGuard, passing_verdict
+
+    case_input = _load_input()
+    changed = passing_verdict(
+        config_changed=True, previous_margin_type="CROSSED", previous_leverage=20
+    )
+    journal = _RaisingJournal()
+    registry = StubProtectionRegistry()
+    adapter = FakeExecutionAdapter()
+    outcome = await _run_plan(
+        adapter,
+        journal=journal,
+        live_context=_build_live_context(
+            case_input, protection_registry=registry, margin_guard=StubMarginGuard(verdict=changed)
+        ),
+    )
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert journal.attempts == 1
+    assert "place_entry" in _reads_only(adapter)
+    assert len(registry.entries) == 1
+
+    refused = await _run_plan(
+        FakeExecutionAdapter(),
+        journal=_RaisingJournal(),
+        live_context=_build_live_context(
+            case_input, margin_guard=StubMarginGuard(verdict=_unverified_verdict())
+        ),
+    )
+    assert (refused.is_no_trade, refused.reason_code) == (True, "MARGIN_CONFIG_UNVERIFIED")
+
+
+# --- 22-REVIEW WR-02: the guard takes time, the clock-dependent gates are judged again ---------
+
+
+class _ClockShiftingGuard:
+    """A passing guard whose REST calls take time: the shared clock moves while it runs."""
+
+    def __init__(self, clock_value: dict[str, datetime], shift: timedelta) -> None:
+        from tests.support.margin_guard_stub import StubMarginGuard
+
+        self._inner = StubMarginGuard()
+        self._clock_value = clock_value
+        self._shift = shift
+
+    @property
+    def calls(self) -> int:
+        return self._inner.calls
+
+    async def evaluate(self, request: Any) -> Any:
+        verdict = await self._inner.evaluate(request)
+        self._clock_value["now"] += self._shift
+        return verdict
+
+
+def _shifting_context(case_input: dict[str, Any], shift: timedelta) -> tuple[Any, Any]:
+    clock_value = {"now": _post_read_instant(case_input)}
+    guard = _ClockShiftingGuard(clock_value, shift)
+    context = _build_live_context(case_input, margin_guard=guard, clock=lambda: clock_value["now"])
+    return context, guard
+
+
+async def test_a_mark_price_that_ages_during_the_guard_is_refused_before_the_consume() -> None:
+    case_input = _load_input()
+    max_age_ms = _build_live_context(case_input).execution_limits.max_mark_price_age_ms
+    assert max_age_ms is not None
+    context, guard = _shifting_context(case_input, timedelta(milliseconds=max_age_ms + 1))
+    store = InMemoryExecutionIntentStore()
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, live_context=context, intent_store=store)
+
+    assert guard.calls == 1
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "MARK_PRICE_UNAVAILABLE")
+    assert "place_entry" not in _reads_only(adapter)
+    assert store.get_entry(approval_id=case_input["approval_id"]) is None  # nothing consumed
+
+
+async def test_the_remaining_validity_is_measured_after_the_guard() -> None:
+    case_input = _load_input()
+    minimum = _build_live_context(case_input).execution_limits.min_remaining_validity_seconds
+    assert minimum is not None
+    start = _post_read_instant(case_input)
+    remaining = _parse_utc(case_input["expiry_utc"]) - start
+    assert remaining.total_seconds() > minimum  # valid before the guard: gate 5e passes
+    # The guard's latency leaves one second less than the owner's minimum.
+    shift = remaining - timedelta(seconds=minimum - 1)
+    context, guard = _shifting_context(case_input, shift)
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, live_context=context)
+
+    assert guard.calls == 1
+    assert (outcome.is_no_trade, outcome.reason_code) == (True, "VALIDITY_TOO_SHORT")
+    assert "place_entry" not in _reads_only(adapter)
+
+
+async def test_a_guard_that_takes_no_time_still_places_with_the_recheck_in_place() -> None:
+    case_input = _load_input()
+    context, guard = _shifting_context(case_input, timedelta(0))
+    adapter = FakeExecutionAdapter()
+
+    outcome = await _run_plan(adapter, live_context=context)
+
+    assert guard.calls == 1
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert "place_entry" in _reads_only(adapter)
+
+
+# --- 22-REVIEW WR-02: one placement per symbol at a time in this process ------------------------
+
+
+class _GatedGuard:
+    """A passing guard that waits for a release, so a placement stays in flight."""
+
+    def __init__(self) -> None:
+        import asyncio
+
+        from tests.support.margin_guard_stub import StubMarginGuard
+
+        self._inner = StubMarginGuard()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def evaluate(self, request: Any) -> Any:
+        self.calls += 1
+        self.entered.set()
+        await self.release.wait()
+        return await self._inner.evaluate(request)
+
+
+async def test_a_second_approval_of_the_symbol_is_refused_while_the_first_is_in_flight() -> None:
+    import asyncio
+    import dataclasses
+
+    from src.execution import manager as manager_module
+
+    case_input = _load_input()
+    guard = _GatedGuard()
+    adapter = FakeExecutionAdapter()
+    first = asyncio.create_task(
+        _run_plan(adapter, live_context=_build_live_context(case_input, margin_guard=guard))
+    )
+    await asyncio.wait_for(guard.entered.wait(), timeout=5)
+    assert len(manager_module._PLACEMENTS_IN_FLIGHT) == 1  # type: ignore[attr-defined]
+
+    other = dataclasses.replace(_build_approval(case_input), approval_id="APPROVAL-OTHER")
+    second = await _run_plan(
+        adapter,
+        approval=other,
+        live_context=_build_live_context(case_input, margin_guard=_GatedGuard()),
+    )
+
+    assert (second.is_no_trade, second.reason_code) == (True, "SYMBOL_HAS_OPEN_ORDER")
+    assert guard.calls == 1  # the second approval never reached the guard or the exchange
+    guard.release.set()
+    outcome = await asyncio.wait_for(first, timeout=5)
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
+
+
+async def test_a_replay_of_the_same_approval_is_not_refused_by_the_symbol_slot() -> None:
+    import asyncio
+
+    from src.execution import manager as manager_module
+
+    case_input = _load_input()
+    guard = _GatedGuard()
+    adapter = FakeExecutionAdapter()
+    store = InMemoryExecutionIntentStore()
+    context = _build_live_context(case_input, margin_guard=guard)
+    first = asyncio.create_task(_run_plan(adapter, live_context=context, intent_store=store))
+    await asyncio.wait_for(guard.entered.wait(), timeout=5)
+    second = asyncio.create_task(_run_plan(adapter, live_context=context, intent_store=store))
+    for _ in range(50):
+        if guard.calls == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert guard.calls == 2  # the replay went through to the guard: the slot did not refuse it
+    guard.release.set()
+    outcomes = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+    assert all(o.reason_code != "SYMBOL_HAS_OPEN_ORDER" for o in outcomes)
+    assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
+
+
+async def test_the_symbol_slot_is_freed_when_the_placement_raises() -> None:
+    from src.execution import manager as manager_module
+
+    from tests.support.margin_guard_stub import StubMarginGuard
+
+    case_input = _load_input()
+    guard = StubMarginGuard(exception=KeyboardInterrupt())
+    adapter = FakeExecutionAdapter()
+    with pytest.raises(KeyboardInterrupt):
+        await _run_plan(adapter, live_context=_build_live_context(case_input, margin_guard=guard))
+    assert manager_module._PLACEMENTS_IN_FLIGHT == {}  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# Nyquist addition (Phase 22 gap 5): the flatness input of the margin guard (gate 5e).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("positions", "orders", "expected"),
+    [
+        (None, frozenset(), False),
+        (frozenset(), None, False),
+        (None, None, False),
+        (frozenset({"BTCUSDT"}), frozenset(), False),
+        (frozenset(), frozenset({"BTCUSDT"}), False),
+        (frozenset({"BTCUSDT"}), frozenset({"BTCUSDT"}), False),
+        (frozenset({"ETHUSDT"}), frozenset({"SOLUSDT"}), True),
+        (frozenset(), frozenset(), True),
+    ],
+)
+def test_a_symbol_is_flat_only_when_both_reads_are_usable_and_it_is_in_neither(
+    positions: frozenset[str] | None, orders: frozenset[str] | None, expected: bool
+) -> None:
+    from src.execution.manager import _symbol_is_flat
+
+    assert _symbol_is_flat("BTCUSDT", positions, orders) is expected

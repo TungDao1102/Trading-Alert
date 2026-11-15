@@ -1,0 +1,69 @@
+# Owner probe limits for the six Phase 22 cases (SJ3_CASES, DEMO-EVIDENCE-PLAN sections 24 to 29).
+#
+# STATUS: PROPOSED BY THE ASSISTANT, NOT APPROVED. The owner reads every value, changes what they
+# want and records the approval in a decision note of their own. Nothing here is a trading
+# parameter: every number only bounds how much the Demo probe may send (D-17).
+#
+# Basis of the numbers (all demo-observed, not mainnet; BTC was about 81845 on 2026-10-23):
+#   quantity 0.0014, max_notional_quote 150: the same pair as 19-probe-limits-sj2-retest.toml. The
+#     full quantity is about 114.6 USDT, above the Demo minimum notional of 50 and under the cap.
+#   far_price_fraction 0.96: a resting BUY LIMIT 4% under the market, so it cannot fill.
+#   config_target_leverage 5: the leverage cap of D035 (PROPOSED; this is the owner item O-1 of
+#     Phase 22, the value is yours). It is the leverage that section 24 asks the exchange for.
+#   insufficient_margin_quantity "1": 1 BTC at about 78600 (far price) needs about 15700 USDT of
+#     margin at x5, more than the roughly 5000 USDT of available balance the Demo account showed
+#     on 2026-10-23. The case records the figures, so you can see whether it was large enough. If
+#     the account balance has grown, raise it. It is NOT held to the notional cap (section 27).
+#
+# Section 24 CHANGES the Demo account (BTCUSDT from x20 CROSSED to ISOLATED x5) and does not restore
+# it; the previous values are in the evidence. Sections 25 and 26 change it only if the exchange
+# accepts a request it is expected to refuse.
+
+[order]
+symbol = "BTCUSDT"
+quantity = "0.0014"
+max_notional_quote = "150"
+far_price_fraction = "0.96"
+insufficient_margin_quantity = "1"
+config_target_leverage = 5
+
+[waits]
+case_timeout_seconds = 90
+cleanup_timeout_seconds = 60
+
+[optional_cases]
+# Phase 18 optional cases, left off as before.
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
+# Cases of 261021-sj0, 261022-sj1 and 261023-sj2: off here (already captured).
+account_capture = false
+algo_query_timing = false
+close_position_with_position = false
+stop_trigger_after_fill = false
+stop_absent_same_id = false
+manual_close_open_legs = false
+commission_realized_pnl = false
+triggered_bracket = false
+tp1_from_fill = false
+exchange_info_read = false
+gtd_min_lifetime = false
+partial_fill_attempt = false
+cancel_fill_race = false
+stream_loss = false
+gtd_expiry = false
+reduce_only_flat = false
+reduce_only_oversize = false
+min_notional_entry = false
+insufficient_margin = false
+stop_reject_after_accept = false
+trigger_cancel_race = false
+recv_window_error = false
+income_history = false
+# The six Phase 22 cases: all on in the file; the commands below pick them with --only.
+symbol_config_change = true
+margin_type_resting_order = true
+leverage_above_max = true
+margin_insufficient_target = true
+available_balance_resting = true
+isolated_liquidation = true

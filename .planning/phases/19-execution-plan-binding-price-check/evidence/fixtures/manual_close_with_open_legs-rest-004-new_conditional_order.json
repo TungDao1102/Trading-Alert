@@ -1,0 +1,27 @@
+{
+  "case_id": "manual_close_with_open_legs",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "new_conditional_order",
+    "summary": {
+      "algo_id": "1000000251915738",
+      "algo_status": "NEW",
+      "algo_type": "CONDITIONAL",
+      "client_algo_id": "dprobe-mct-20261022T120704Z-7",
+      "close_position": "true",
+      "order_type": "TAKE_PROFIT_MARKET",
+      "position_side": "BOTH",
+      "price": "0.00",
+      "quantity": "0.0000",
+      "reduce_only": "true",
+      "side": "SELL",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTE_GTC",
+      "trigger_price": "85069.00",
+      "working_type": "MARK_PRICE"
+    }
+  }
+}

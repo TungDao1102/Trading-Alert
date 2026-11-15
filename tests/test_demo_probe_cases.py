@@ -20,6 +20,7 @@ import pytest
 from scripts import demo_probe as dp
 from src.adapters.binance_probe import ProbeBanned
 from src.adapters.binance_ratelimit_gate import IP_BAN_418
+from src.ops import operator_evidence as oe
 
 from tests.probe_fakes import (
     TEST_ONLY_CASE_TIMEOUT_SECONDS,
@@ -53,9 +54,76 @@ EXPECTED_ORDER = (
     "explicit_time_in_force_variant",
     "stream_gap_during_case",
     "market_lot_size_out_of_range",
+    # quick task 261021-sj0: the ten owner opt-in evidence-capture cases
+    "account_read_only_capture",
+    "algo_query_timing_after_new",
+    "close_position_stop_with_position",
+    "stop_would_trigger_after_fill",
+    "stop_query_absent_then_same_id",
+    "manual_close_with_open_legs",
+    "commission_vs_realized_pnl",
+    "triggered_close_position_bracket",
+    "tp1_quantity_from_fill",
+    # quick task 261022-sj1: five more owner opt-in cases, before the long GTD case
+    "exchange_info_read_for_close",
+    "gtd_min_lifetime_boundary",
+    "partial_fill_attempt",
+    "entry_cancel_fill_race",
+    "stream_loss_during_case",
+    # quick task 261023-sj2: eight more owner opt-in cases, before the long GTD case
+    "reduce_only_market_on_flat",
+    "reduce_only_market_larger_than_position",
+    "non_reduce_only_below_min_notional",
+    "insufficient_margin_order",
+    "stop_rejected_after_acceptance",
+    "trigger_cancel_race",
+    "timestamp_outside_recv_window",
+    "income_history_read",
+    # Phase 22 plan 22-05: the first owner-run symbol-configuration case, before the long GTD case
+    "symbol_config_change_to_isolated",
+    # Phase 22 plan 22-09: the five other owner-run SJ3 cases, in the plan's order
+    "margin_type_change_with_resting_order",
+    "leverage_above_bracket_maximum",
+    "margin_insufficient_at_target_leverage",
+    "available_balance_with_resting_order",
+    "isolated_position_liquidation_price",
+    "gtd_entry_expiry_status",
 )
 READ_ONLY = EXPECTED_ORDER[:4]
-ALL_OPTIONAL = ("explicit_time_in_force", "stream_gap", "market_lot_size_out_of_range")
+ALL_OPTIONAL = (
+    "explicit_time_in_force",
+    "stream_gap",
+    "market_lot_size_out_of_range",
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "exchange_info_read",
+    "gtd_min_lifetime",
+    "partial_fill_attempt",
+    "cancel_fill_race",
+    "stream_loss",
+    "reduce_only_flat",
+    "reduce_only_oversize",
+    "min_notional_entry",
+    "insufficient_margin",
+    "stop_reject_after_accept",
+    "trigger_cancel_race",
+    "recv_window_error",
+    "income_history",
+    "symbol_config_change",  # Phase 22 plan 22-05
+    "margin_type_resting_order",  # Phase 22 plan 22-09
+    "leverage_above_max",
+    "margin_insufficient_target",
+    "available_balance_resting",
+    "isolated_liquidation",
+    "gtd_expiry",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +198,19 @@ def test_case_order_is_the_d16_order_of_risk() -> None:
     assert tuple(dp.OPTIONAL_CASES) == ALL_OPTIONAL
     assert tuple(dp.OPTIONAL_CASES.values()) == EXPECTED_ORDER[16:]
     assert dp.READ_ONLY_CASES == READ_ONLY
+    assert tuple(dp.OPTIONAL_CASES) == oe.OPTIONAL_CASE_KEYS + oe.EVIDENCE_CASE_KEYS
+    # the sj0 ten keep their relative order; the sj1 five sit before the last (long) one
+    assert dp.CAPTURE_CASES == tuple(c for c in EXPECTED_ORDER[19:] if c in dp.CAPTURE_CASES)
+    assert dp.SJ1_CASES == EXPECTED_ORDER[28:33]
+    assert dp.SJ2_CASES == EXPECTED_ORDER[33:41]
+    # Phase 22 plan 22-05: the SJ3 group follows the SJ2 group; gtd_entry_expiry_status stays last
+    assert dp.SJ3_CASES == EXPECTED_ORDER[41:47]
+    assert EXPECTED_ORDER[41] == "symbol_config_change_to_isolated"
+    assert EXPECTED_ORDER.index("symbol_config_change_to_isolated") == (
+        EXPECTED_ORDER.index("income_history_read") + 1
+    )
+    assert EXPECTED_ORDER[-1] == "gtd_entry_expiry_status"
+    assert EXPECTED_ORDER[-2] == "isolated_position_liquidation_price"
 
 
 def test_this_plan_registers_the_four_read_only_handlers() -> None:
@@ -1853,6 +1934,9 @@ def _function_nodes(tree: ast.Module) -> dict[str, ast.AST]:
     return found
 
 
+GTD_HANDLER = "_gtd_entry_expiry_status"
+
+
 def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> None:
     tree = ast.parse(Path(dp.__file__).read_text(encoding="utf-8"))
     functions = _function_nodes(tree)
@@ -1875,8 +1959,14 @@ def test_no_handler_sleeps_and_every_case_wait_is_the_owners_case_timeout() -> N
         assert rig.endswith("rig"), (name, rig)
         if name == "cleanup_symbol":
             assert timeout == "timeout_seconds"
+        elif name == GTD_HANDLER:
+            # quick task 261021-sj0: the one handler that waits the owner GTD expiry wait
+            assert timeout.endswith("gtd_expiry_wait_seconds"), (name, timeout)
         else:
             assert timeout.endswith("case_timeout_seconds"), (name, timeout)
+    assert {name for name, _, timeout in waits if timeout.endswith("gtd_expiry_wait_seconds")} == {
+        GTD_HANDLER
+    }
     for handler in dp.CASE_HANDLERS.values():
         source = inspect.getsource(handler)
         assert "asyncio.sleep" not in source and "time.sleep" not in source

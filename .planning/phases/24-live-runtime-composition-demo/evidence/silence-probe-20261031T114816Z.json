@@ -1,0 +1,31 @@
+{
+  "connection_events": [
+    {
+      "name": "open",
+      "t_ms": 2598
+    },
+    {
+      "name": "close",
+      "t_ms": 2701266
+    }
+  ],
+  "counts": {
+    "event": 0,
+    "ping": 15,
+    "pong": 0
+  },
+  "environment": "DEMO",
+  "failure": null,
+  "keepalive_ok": 1,
+  "kind": "user_data_silence_probe",
+  "listen_key_errors": [],
+  "max_gap_ms": {
+    "event": null,
+    "ping": 180374,
+    "pong": null
+  },
+  "max_gap_ms_combined": 180374,
+  "minutes_requested": 45,
+  "run_ms": 2701263,
+  "started_utc": "2026-10-31T11:48:16.953945+00:00"
+}

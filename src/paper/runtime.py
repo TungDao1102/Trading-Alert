@@ -136,6 +136,7 @@ from src.paper.runtime_config import (
     RuntimeConfig,
     load_runtime_config,
     load_runtime_config_with_provenance,
+    parse_authorized_user_ids,
     read_env,
     refuse_trade_capable_env,
 )
@@ -154,7 +155,7 @@ from src.paper.shadow_runtime import (
     ShadowWiring,
     build_coordinator,
 )
-from src.paper.supervisor import PaperSupervisor
+from src.paper.supervisor import WS_DIAGNOSTICS_SILENCE, PaperSupervisor
 from src.paper.vocabulary import (
     GapReason,
     GapRecord,
@@ -499,7 +500,9 @@ def _pg_shadow_stores(url: str) -> Any:
     from src.persistence.shadow_stores import PgShadowStores
     from src.persistence.uow import OperationalDatabase
 
-    return PgShadowStores(OperationalDatabase(make_sync_engine(url)))
+    # Mode-scoped (plan 24-08): this process sweeps SHADOW approvals only, so a DEMO process on
+    # the same database never sees them and this one never sees a DEMO approval.
+    return PgShadowStores(OperationalDatabase(make_sync_engine(url)), confirm_mode="SHADOW")
 
 
 def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
@@ -517,6 +520,17 @@ def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
         chat_id = int(chat)
     except ValueError:
         raise ConfigNotRatified(["TELEGRAM_AUTHORIZED_CHAT_ID (must be an integer)"]) from None
+    # Phase 23 (D-02): with Telegram configured the user allow-list is required, never allow-all.
+    # The messages name the variable only, never a value.
+    user_ids_text = values.get("TELEGRAM_AUTHORIZED_USER_IDS")
+    if not user_ids_text or not user_ids_text.strip():
+        raise ConfigNotRatified(["TELEGRAM_AUTHORIZED_USER_IDS (missing)"])
+    try:
+        authorized_user_ids = parse_authorized_user_ids(user_ids_text)
+    except ValueError:
+        raise ConfigNotRatified(
+            ["TELEGRAM_AUTHORIZED_USER_IDS (must be comma-separated positive integers)"]
+        ) from None
     url = values.get("DATABASE_URL_SYNC") or values.get("DATABASE_URL")
     if not url:
         raise ConfigNotRatified(["DATABASE_URL_SYNC or DATABASE_URL"])
@@ -527,7 +541,10 @@ def _shadow_from_env(values: Mapping[str, str]) -> ShadowWiring | None:
         return build_application(token=token, **callback_kwargs)
 
     return ShadowWiring(
-        stores=_pg_shadow_stores(url), chat_id=chat_id, application_factory=application_factory
+        stores=_pg_shadow_stores(url),
+        chat_id=chat_id,
+        authorized_user_ids=authorized_user_ids,
+        application_factory=application_factory,
     )
 
 
@@ -892,7 +909,8 @@ class _LiveLoop:
         probe never reports a process live before its feed spoke. A silence longer than the bound
         starts the supervisor's bounded drop recovery once per episode; a frame arriving after
         the silence began ends the episode; when the bound expires again with no frame since the
-        silence began, the process fails closed.
+        silence began, the process fails closed. On entry into the recovery one adapter snapshot
+        of the silent connections is logged, before the rebuild replaces them.
         """
         bound = self._context.config.health.feed_silence_timeout_seconds
         wake = timedelta(seconds=bound) / 2
@@ -915,6 +933,7 @@ class _LiveLoop:
                         "paper runtime: market stream silent, entering the bounded recovery",
                         silent_seconds=int(now - reference),
                     )
+                    self._supervisor.log_ws_diagnostics(WS_DIAGNOSTICS_SILENCE)
                     self._start_silence_recovery()
             elif last is not None and last > silent_since:
                 log.info("paper runtime: market stream resumed after the recovery")
@@ -1267,7 +1286,11 @@ async def run_admitted(context: RuntimeContext, wiring: LoopWiring | None = None
         )
 
     def build_supervisor(owner: _LiveLoop) -> PaperSupervisor:
-        adapter = PaperWsAdapter(ws_client=live.ws_client, client_factory=live.ws_client_factory)
+        adapter = PaperWsAdapter(
+            ws_client=live.ws_client,
+            client_factory=live.ws_client_factory,
+            feed_clock=owner.feed_clock,
+        )
         sinks = owner.sinks()
         return PaperSupervisor(
             ws_adapter=adapter,

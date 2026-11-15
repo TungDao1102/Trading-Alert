@@ -1,0 +1,17 @@
+{
+  "case_id": "margin_type_change_with_resting_order",
+  "index": 6,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "REJECTED_DEFINITIVE",
+      "code": -4047,
+      "http_class": "BAD_REQUEST",
+      "message": "Margin type cannot be changed if there exists open orders.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "change_margin_type",
+    "summary": {}
+  }
+}

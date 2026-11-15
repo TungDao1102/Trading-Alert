@@ -46,11 +46,13 @@ name: Paper Freeze Check
 
 on:
   schedule:
-    # Hourly at minute 34: the user's recorded choice (decisions/16-DEC-Q-Q.md,
-    # plan 16-47). A minute off the top of the hour is a mitigation of unproven
-    # effect on delayed or dropped scheduled runs (G15, REV-18); a missing tick
-    # is still an EVIDENCE_GAP.
-    - cron: "34 * * * *"
+    # Hourly at minute 17: the owner's choice of 2026-11-13
+    # (decisions/16-DEC-Q-Q-2.md). It replaced minute 34 (decisions/16-DEC-Q-Q.md,
+    # plan 16-47) after the first trial had GitHub-late and missing ticks at that
+    # minute. A minute off the top of the hour is a mitigation of unproven effect
+    # on delayed or dropped scheduled runs (G15, REV-18); a missing tick is still
+    # an EVIDENCE_GAP.
+    - cron: "17 * * * *"
   workflow_dispatch: {}
 
 # Least privilege (review WR-08): a read-only GITHUB_TOKEN, regardless of the repository default,

@@ -26,8 +26,17 @@ COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 
 HEALTH_PROBE = ["/app/.venv/bin/python", "-m", "src.data.collector", "--healthcheck"]
 PAPER_PROBE = ["CMD", "/app/.venv/bin/python", "-m", "src.paper.runtime", "--healthcheck"]
+LIVE_PROBE = ["CMD", "/app/.venv/bin/python", "-m", "src.live.runtime", "--healthcheck"]
 BASE_VARS = ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT")
-_SCRUBBED_ENV_PREFIXES = ("POSTGRES_", "COMPOSE_", "TRADING_ENV_FILE", "IMAGE_TAG", "DATABASE_URL")
+_SCRUBBED_ENV_PREFIXES = (
+    "POSTGRES_",
+    "COMPOSE_",
+    "TRADING_ENV_FILE",
+    "TRADING_LIVE_ENV_FILE",
+    "TRADING_APP_REVISION",
+    "IMAGE_TAG",
+    "DATABASE_URL",
+)
 
 
 def _require_compose() -> None:
@@ -165,17 +174,17 @@ def test_all_volume_mounts_are_named_volumes_never_binds(tmp_path: Path) -> None
         for mount in svc.get("volumes", []):
             assert mount["type"] == "volume", mount.get("target")
             seen.add(mount["source"])
-    assert seen <= {"pgdata", "rawdata", "backupdata", "logs"}
+    assert seen <= {"pgdata", "rawdata", "backupdata", "logs", "livestate"}
     assert {"pgdata", "rawdata", "logs"} <= seen
 
 
-def test_declared_volumes_are_only_the_four_named_volumes(tmp_path: Path) -> None:
+def test_declared_volumes_are_only_the_five_named_volumes(tmp_path: Path) -> None:
     # `config` drops volumes no enabled service uses, so the default stack shows three and
     # the ops profile (backup, ops) brings in backupdata.
     declared = set(compose_config(tmp_path)["volumes"])
     assert declared == {"pgdata", "rawdata", "logs"}
     all_declared = set(compose_config(tmp_path, profiles=("paper", "live", "ops"))["volumes"])
-    assert all_declared == {"pgdata", "rawdata", "backupdata", "logs"}
+    assert all_declared == {"pgdata", "rawdata", "backupdata", "logs", "livestate"}
 
 
 def test_collector_healthcheck_is_the_exec_form_venv_probe(tmp_path: Path) -> None:
@@ -219,6 +228,28 @@ def test_images_are_pinned_by_digest_or_local_tag(tmp_path: Path) -> None:
     assert services["db-upgrade"]["build"]["target"] == "runtime"
 
 
+REVISION_STAMP = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_building_services_pass_the_revision_as_a_build_argument(tmp_path: Path) -> None:
+    """OPS-04, D-31, Q13: the stamp reaches the Dockerfile ARG from the environment."""
+    config = compose_config(
+        tmp_path, profiles=("ops",), overrides={"TRADING_APP_REVISION": REVISION_STAMP}
+    )
+    services = _services(config)
+    builders = [name for name, svc in services.items() if "build" in svc]
+    assert sorted(builders) == ["backup", "db-upgrade"]
+    for name in builders:
+        assert services[name]["build"]["args"] == {"TRADING_APP_REVISION": REVISION_STAMP}
+
+
+def test_the_revision_build_argument_is_empty_when_unset(tmp_path: Path) -> None:
+    services = _services(compose_config(tmp_path, profiles=("ops",)))
+    for name in ("db-upgrade", "backup"):
+        value = services[name]["build"]["args"]["TRADING_APP_REVISION"]
+        assert value in ("", None), name
+
+
 def test_missing_postgres_credentials_fail_config(tmp_path: Path) -> None:
     _require_compose()
     project = _write_project(tmp_path, overrides={"POSTGRES_PASSWORD": ""})
@@ -247,17 +278,63 @@ def test_profiles_add_exactly_their_services(
     assert set(services) == DEFAULT | extra
 
 
-@pytest.mark.parametrize(("service", "phase"), [("live", "Phase 24")])
-def test_placeholders_fail_fast_naming_the_owning_phase(
-    tmp_path: Path, service: str, phase: str
-) -> None:
-    svc = _services(compose_config(tmp_path, profiles=(service,)))[service]
-    assert svc["restart"] == "no"
-    assert svc["healthcheck"] == {"disable": True}
-    command = svc["command"]
-    assert command[0] == "/app/.venv/bin/python"
-    assert any("SystemExit" in part and phase in part for part in command)
-    assert "src.data.collector" not in " ".join(command)
+def test_live_service_is_the_real_runtime_with_its_probe(tmp_path: Path) -> None:
+    """Plan 24-35 (R-9, D-01, D-03, O-2): the placeholder is gone; the service runs
+    `src.live.runtime --hold-on-refusal`, probes itself with `--healthcheck`, waits for the schema
+    migration, keeps its state in its own named volume, publishes no port and keeps restart off."""
+    all_services = _services(compose_config(tmp_path, profiles=("paper", "live", "ops")))
+    live = all_services["live"]
+    assert live["profiles"] == ["live"]
+    assert live["command"] == [
+        "/app/.venv/bin/python",
+        "-m",
+        "src.live.runtime",
+        "--hold-on-refusal",
+    ]
+    # O-2 / 24-01 Q15: no restart policy until the owner has seen the first clean Demo run.
+    assert live["restart"] == "no"
+    assert live["image"] == "trading-alert:dev"
+    assert live["depends_on"]["db-upgrade"]["condition"] == "service_completed_successfully"
+    assert "ports" not in live
+    health = live["healthcheck"]
+    assert health["test"] == LIVE_PROBE
+    paper_health = all_services["paper"]["healthcheck"]
+    for key in ("interval", "timeout", "start_period", "retries"):
+        assert health[key] == paper_health[key], key
+    mounts = {m["target"]: m for m in live["volumes"]}
+    assert set(mounts) == {"/app/logs"}
+    assert mounts["/app/logs"]["type"] == "volume"
+    assert mounts["/app/logs"]["source"] == "livestate"
+    assert mounts["/app/logs"].get("read_only") is not True
+    # The env file is the live file only (plan 24-30; `config` resolves it into `environment`, so
+    # the file text is the evidence). No secret is written into the compose file itself.
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    block = text[text.index("\n  live:\n") : text.index("\n  # Scheduled backup")]
+    assert "${TRADING_LIVE_ENV_FILE:-.env.live}" in block
+    assert "TRADING_ENV_FILE" not in block
+    # The state volume is used by the live service alone.
+    users = [
+        name
+        for name, svc in all_services.items()
+        if any(m["source"] == "livestate" for m in svc.get("volumes", []))
+    ]
+    assert users == ["live"]
+
+
+def test_live_restart_policy_is_off_in_the_file_and_the_switch_is_documented() -> None:
+    """O-2: the switch and its condition are written next to the service (no `unless-stopped`)."""
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    start = text.index("  # Live runtime (Phase 24")
+    stop = text.index("\n  # Scheduled backup", start)
+    block = text[start:stop]
+    comment_free = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert 'restart: "no"' in comment_free
+    assert "unless-stopped" not in comment_free
+    prose = " ".join(block.replace("#", " ").split())
+    assert "first clean Demo run" in prose
+    assert "restart: unless-stopped" in prose  # the documented switch, inside a comment
 
 
 def test_backup_service_runs_the_scheduled_cli_from_the_ops_image(tmp_path: Path) -> None:
@@ -321,6 +398,21 @@ def test_every_service_has_its_own_healthcheck_decision(tmp_path: Path) -> None:
         assert "healthcheck" in svc, f"{name} must state a healthcheck decision explicitly"
     # The paper service is no longer a placeholder: it carries the runtime's own probe (16-32).
     assert services["paper"]["healthcheck"]["test"] == PAPER_PROBE
+    # The live service is no longer a placeholder either: it carries its own probe (24-35).
+    assert services["live"]["healthcheck"]["test"] == LIVE_PROBE
+
+
+def test_live_service_reads_its_own_optional_env_file_and_not_the_shared_one(
+    tmp_path: Path,
+) -> None:
+    """Plan 24-30 (D-29): the `live` service lists `.env.live` only; its environment holds the
+    database values and nothing from the shared `.env` (the temp `.env` here holds POSTGRES_*)."""
+    live = _services(compose_config(tmp_path, profiles=("live",)))["live"]
+    assert set(live["environment"]) == {"DATABASE_URL", "POSTGRES_HOST"}
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert "${TRADING_LIVE_ENV_FILE:-.env.live}" in text
+    # every other app service keeps the shared file only
+    assert text.count("env_file: ${TRADING_ENV_FILE:-.env}") == 1  # the x-app anchor
 
 
 def test_profile_services_need_no_backup_or_live_variables(tmp_path: Path) -> None:

@@ -1,0 +1,17 @@
+{
+  "case_id": "reduce_only_market_on_flat",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "REJECTED_DEFINITIVE",
+      "code": -2022,
+      "http_class": "BAD_REQUEST",
+      "message": "ReduceOnly Order is rejected.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "new_market_order",
+    "summary": {}
+  }
+}

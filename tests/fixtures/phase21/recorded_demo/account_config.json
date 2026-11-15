@@ -1,0 +1,10 @@
+{
+  "canDeposit": true,
+  "canTrade": true,
+  "canWithdraw": true,
+  "dualSidePosition": false,
+  "feeTier": 0,
+  "multiAssetsMargin": false,
+  "tradeGroupId": -1,
+  "updateTime": 1791260302519
+}

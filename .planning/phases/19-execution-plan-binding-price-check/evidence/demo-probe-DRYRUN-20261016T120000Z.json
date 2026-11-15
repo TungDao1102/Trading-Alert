@@ -1,0 +1,1343 @@
+{
+  "acceptance": {
+    "account_state": {
+      "proof_class": "FAKE",
+      "reason": "account state recorded before and after",
+      "result": "PASS"
+    },
+    "below_min_notional_reduce_only_leg": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "cancel_algo_order_not_found": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "cancel_order_not_found": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "cleanup": {
+      "proof_class": "FAKE",
+      "reason": "zero open orders, zero open algo orders, flat position",
+      "result": "PASS"
+    },
+    "closeposition_stop_flat": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "duplicate_client_algo_id": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "entry_never_fills_protective_orphan": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "evidence": {
+      "proof_class": "FAKE",
+      "reason": "the evidence passes check_probe_evidence",
+      "result": "PASS"
+    },
+    "full_fill_protective_quantity": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "get_algo_order_not_found": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "get_order_not_found": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_algo": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_normal": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "id_reuse_after_filled": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "label_and_d055": {
+      "proof_class": "FAKE",
+      "reason": "labelled demo-observed, not mainnet; D055 stays OPEN",
+      "result": "PASS"
+    },
+    "overall": {
+      "proof_class": "FAKE",
+      "reason": "failing: ['below_min_notional_reduce_only_leg', 'cancel_algo_order_not_found', 'cancel_order_not_found', 'closeposition_stop_flat', 'duplicate_client_algo_id', 'entry_never_fills_protective_orphan', 'full_fill_protective_quantity', 'get_algo_order_not_found', 'get_order_not_found', 'id_reuse_after_canceled_algo', 'id_reuse_after_canceled_normal', 'id_reuse_after_filled', 'partial_fill', 'preplaced_stop_reduce_only_flat', 'proof_class', 'rejected_protective_variants', 'triggered_market_exit_lifecycle']",
+      "result": "FAIL"
+    },
+    "partial_fill": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "preplaced_stop_reduce_only_flat": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "proof_class": {
+      "proof_class": "FAKE",
+      "reason": "FAKE evidence never passes",
+      "result": "FAIL"
+    },
+    "rejected_protective_variants": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    },
+    "triggered_market_exit_lifecycle": {
+      "proof_class": "FAKE",
+      "reason": "NOT_REHEARSED (dry run: nothing was sent)",
+      "result": "FAIL"
+    }
+  },
+  "account_after": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "1",
+        "row_0_asset": "USDT",
+        "row_0_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "account_before": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "1",
+        "row_0_asset": "USDT",
+        "row_0_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "ban": null,
+  "case_order": [
+    "get_order_not_found",
+    "get_algo_order_not_found",
+    "cancel_order_not_found",
+    "cancel_algo_order_not_found",
+    "duplicate_client_algo_id",
+    "id_reuse_after_canceled_normal",
+    "id_reuse_after_canceled_algo",
+    "id_reuse_after_filled",
+    "preplaced_stop_reduce_only_flat",
+    "closeposition_stop_flat",
+    "entry_never_fills_protective_orphan",
+    "full_fill_protective_quantity",
+    "partial_fill",
+    "rejected_protective_variants",
+    "below_min_notional_reduce_only_leg",
+    "triggered_market_exit_lifecycle"
+  ],
+  "cases": [
+    {
+      "case_id": "get_order_not_found",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "probed_client_id": "dprobe-gonf-20261016T120000Z-1"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [
+        {
+          "kwargs": {
+            "client_order_id": "dprobe-gonf-20261016T120000Z-1",
+            "symbol": "BTCUSDT"
+          },
+          "mutating": false,
+          "operation": "query_order"
+        }
+      ],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "get_algo_order_not_found",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "probed_client_id": "dprobe-ganf-20261016T120000Z-2"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [
+        {
+          "kwargs": {
+            "client_algo_id": "dprobe-ganf-20261016T120000Z-2"
+          },
+          "mutating": false,
+          "operation": "query_algo_order"
+        }
+      ],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "cancel_order_not_found",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "probed_client_id": "dprobe-conf-20261016T120000Z-3"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [
+        {
+          "kwargs": {
+            "client_order_id": "dprobe-conf-20261016T120000Z-3",
+            "symbol": "BTCUSDT"
+          },
+          "mutating": true,
+          "operation": "cancel_order"
+        }
+      ],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "cancel_algo_order_not_found",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "probed_client_id": "dprobe-canf-20261016T120000Z-4"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [
+        {
+          "kwargs": {
+            "client_algo_id": "dprobe-canf-20261016T120000Z-4"
+          },
+          "mutating": true,
+          "operation": "cancel_algo_order"
+        }
+      ],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "duplicate_client_algo_id",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "id_reuse_after_canceled_normal",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "id_reuse_after_canceled_algo",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "id_reuse_after_filled",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "preplaced_stop_reduce_only_flat",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "closeposition_stop_flat",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "client_algo_id": "dprobe-cpf-20261016T120000Z-5",
+        "close_position_accepted": "true",
+        "close_position_leg": "accepted",
+        "close_position_status": "accepted",
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [
+        {
+          "kwargs": {
+            "client_algo_id": "dprobe-cpf-20261016T120000Z-5",
+            "close_position": true,
+            "order_type": "STOP_MARKET",
+            "position_side": "BOTH",
+            "price": null,
+            "quantity": null,
+            "reduce_only": null,
+            "side": "SELL",
+            "symbol": "BTCUSDT",
+            "time_in_force": null,
+            "trigger_price": "57600.00",
+            "working_type": "MARK_PRICE"
+          },
+          "mutating": true,
+          "operation": "new_conditional_order"
+        },
+        {
+          "kwargs": {
+            "client_algo_id": "dprobe-cpf-20261016T120000Z-5"
+          },
+          "mutating": false,
+          "operation": "query_algo_order"
+        }
+      ],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "entry_never_fills_protective_orphan",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {},
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "full_fill_protective_quantity",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {},
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "partial_fill",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "derived_from": "id_reuse_after_filled,full_fill_protective_quantity"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "rejected_protective_variants",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "mark_price": "60000.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "below_min_notional_reduce_only_leg",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "leg_notional": "57.60000",
+        "mark_price": "60000.00",
+        "min_notional": "100",
+        "smallest_quantity": "0.001",
+        "trigger_price": "57600.00"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "case_id": "triggered_market_exit_lifecycle",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "dry_run": "true"
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "filter_market_lot_max_quantity": "120",
+        "filter_market_lot_min_quantity": "0.001",
+        "filter_market_lot_step_size": "0.001",
+        "filter_max_quantity": "1000",
+        "filter_min_quantity": "0.001",
+        "filter_step_size": "0.001",
+        "mark_price": "60000.00",
+        "market_lot_size_question": "NOT_OBSERVED at the approved size: the optional case market_lot_size_out_of_range is not enabled"
+      },
+      "finished_utc": "2026-10-16T12:00:00+00:00",
+      "frames": {
+        "events": [],
+        "reason": "dry run: no user-data stream runs",
+        "status": "NOT_OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [],
+      "planned_requests": [],
+      "reason": "dry run: nothing was sent",
+      "started_utc": "2026-10-16T12:00:00+00:00",
+      "status": "NOT_REHEARSED"
+    }
+  ],
+  "cleanup": {
+    "final": {
+      "actions": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_open_orders",
+          "summary": {
+            "dry_run": "true"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_algo_open_orders",
+          "summary": {
+            "dry_run": "true"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "positions",
+          "summary": {
+            "count": "0"
+          }
+        }
+      ],
+      "notes": [],
+      "remaining": {
+        "open_algo_orders": 0,
+        "open_orders": 0,
+        "positions": [],
+        "readable": true
+      },
+      "status": "FLAT",
+      "waited_seconds": 0
+    }
+  },
+  "d055": {
+    "parameters": "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "statement": "D055 stays OPEN: this tool records facts and stops",
+    "status": "OPEN: the probe records facts and stops; D055 is decided by the user, never by this tool"
+  },
+  "environment": "DEMO",
+  "failures": [],
+  "finished_utc": "2026-10-16T12:00:00+00:00",
+  "fixtures": [],
+  "label": "demo-observed, not mainnet (FAKE dry run: nothing was sent and nothing was observed)",
+  "live_port_calls": 0,
+  "market": {
+    "mark_price": {
+      "error": null,
+      "ok": true,
+      "operation": "mark_price",
+      "summary": {
+        "close": "60000.00",
+        "count": "1",
+        "interval": "1m",
+        "symbol": "BTCUSDT"
+      }
+    },
+    "status": "READ",
+    "symbol_filters": {
+      "error": null,
+      "ok": true,
+      "operation": "symbol_filters",
+      "summary": {
+        "found": "true",
+        "market_lot_max_quantity": "120",
+        "market_lot_min_quantity": "0.001",
+        "market_lot_step_size": "0.001",
+        "max_quantity": "1000",
+        "min_notional": "100",
+        "min_quantity": "0.001",
+        "percent_price_multiplier_decimals": "4",
+        "percent_price_multiplier_down": "0.9500",
+        "percent_price_multiplier_up": "1.0500",
+        "status": "TRADING",
+        "step_size": "0.001",
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10"
+      }
+    }
+  },
+  "mode": "dry-run",
+  "notes": [
+    "D055 stays OPEN: this tool records facts and stops",
+    "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "The account's listenKey is a singleton: no other process may run on the same account during the probe (research P7)."
+  ],
+  "outcome": "FAILED",
+  "proof_class": "FAKE",
+  "schema": "demo-probe-evidence/schema-1",
+  "sdk_version": "17.4.0",
+  "settings": {
+    "case_timeout_seconds": 30,
+    "cleanup_timeout_seconds": 60,
+    "far_price_fraction": "0.96",
+    "limits_file": "binance-limits-v1.toml",
+    "limits_file_sha256": "9f522adcd35d56fa5dddbf79b42ab1f8c1d3f770bda7527caaf2cb28f8c43383",
+    "market_lot_probe_quantity": null,
+    "max_notional_quote": "100",
+    "only": null,
+    "optional_cases": {
+      "explicit_time_in_force": false,
+      "market_lot_size_out_of_range": false,
+      "stream_gap": false
+    },
+    "probe_limits_file": "18-probe-limits.toml",
+    "probe_limits_file_sha256": "5be5ebb809794549cee3747e782f7dcbe17404cf2872b65c61b4dac00b0cc1d7",
+    "quantity": "0.0008"
+  },
+  "started_utc": "2026-10-16T12:00:00+00:00",
+  "stream": {
+    "reason": "dry run: no user-data stream runs",
+    "status": "NOT_RUN"
+  },
+  "symbol": "BTCUSDT"
+}

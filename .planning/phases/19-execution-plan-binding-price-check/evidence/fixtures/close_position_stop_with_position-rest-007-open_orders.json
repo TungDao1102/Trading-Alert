@@ -1,0 +1,13 @@
+{
+  "case_id": "close_position_stop_with_position",
+  "index": 7,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

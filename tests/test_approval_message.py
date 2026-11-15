@@ -21,11 +21,18 @@ The tests cover:
 
 from __future__ import annotations
 
+import ast
+import importlib.util
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
+
+from tests.support.press_identity import OWNER_PRESS
 
 # --------------------------------------------------------------------------- #
 # Helpers.
@@ -87,7 +94,8 @@ def test_format_approve_renders_all_12_aprv01_fields() -> None:
     assert "101.50" in text and "103.00" in text  # 6. TP(s)
     assert "2.0" in text  # 7. R:R
     assert "0.005" in text  # 8. risk percentage
-    assert "2026-09-19T13:00:00+00:00" in text  # 9. expiry
+    # 9. expiry: local +07 with UTC in brackets since Phase 23 (D-14, O-3), no ISO text.
+    assert "Expiry: 2026-09-19 20:00:00 +07 (2026-09-19 13:00:00 UTC)" in text
     assert "CANDLE_CLOSE < 99.50" in text  # 10. invalidation
     assert "50.00" in text  # 11. current exposure
     assert "SETUP_DETECTED" in text  # 12. reason codes
@@ -597,6 +605,7 @@ def test_dispatch_callback_chat_gate_runs_before_state_lookup() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        **OWNER_PRESS,
     )
 
     assert result.ok is False
@@ -656,6 +665,7 @@ def test_dispatch_callback_journal_first_receipt_before_resolve() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        **OWNER_PRESS,
     )
 
     # The journal receipt ran BEFORE the short-id lookup.
@@ -710,6 +720,7 @@ def test_dispatch_callback_simulate_recorded_does_not_advance_state() -> None:
         lookup_by_short_id=_lookup_short,
         lookup_by_token_hash=_lookup_token,
         save_atomic=_save,
+        **OWNER_PRESS,
     )
 
     # The receipt and the RESOLVED outcome were journaled, but no
@@ -803,6 +814,7 @@ def test_dispatch_callback_atomic_write_passes_mapping_to_save() -> None:
             "parameter_set_hash": parameter_set_hash,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is True
@@ -901,6 +913,7 @@ def test_dispatch_callback_replay_returns_existing_approval() -> None:
             "parameter_set_hash": "1" * 64,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     # Replay returns the existing approval without a new save.
@@ -984,6 +997,7 @@ def test_dispatch_callback_skip_on_approve_plan_invalidates() -> None:
             "parameter_set_hash": "1" * 64,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is False
@@ -1072,6 +1086,7 @@ def test_dispatch_callback_binding_gate_failure_returns_reason_code() -> None:
             "parameter_set_hash": "1" * 64,
             "expiry_utc": datetime(2026, 9, 19, 14, 0, tzinfo=UTC),
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is False
@@ -1096,8 +1111,15 @@ def test_telegram_callbacks_adapter_is_the_only_ptb_application_importer() -> No
         if "telegram.ext" in text or "from telegram.ext" in text:
             importers.append(py_file)
     importers.sort()
-    assert importers == [src_dir / "adapters" / "telegram_callbacks.py"], (
-        f"only src/adapters/telegram_callbacks.py may import telegram.ext; found: {importers}"
+    # Phase 24 (plans 24-17, 24-27): the live process builds its own Application with a lazy
+    # `telegram.ext` import in these two composition modules; every other module stays barred.
+    allowed = [
+        src_dir / "adapters" / "telegram_callbacks.py",
+        src_dir / "live" / "runtime.py",
+        src_dir / "live" / "telegram_runner.py",
+    ]
+    assert importers == sorted(allowed), (
+        f"only {allowed} may import telegram.ext; found: {importers}"
     )
 
 
@@ -1167,3 +1189,283 @@ def test_r3b_format_approve_is_byte_stable() -> None:
     from src.adapters.telegram_notify import format_approve
 
     assert format_approve(**_make_payload()) == format_approve(**_make_payload())
+
+
+# --------------------------------------------------------------------------- #
+# Phase 23, plan 23-09 (D-13, D-14, F-015): the money block and UTC times.
+# The expected texts are the generated goldens (scripts/gen_phase23_fixtures.py), never typed.
+# --------------------------------------------------------------------------- #
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MESSAGES = _REPO_ROOT / "tests" / "fixtures" / "phase23" / "messages"
+
+
+def _generator() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "gen_phase23_fixtures_messages", _REPO_ROOT / "scripts" / "gen_phase23_fixtures.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _golden(name: str) -> str:
+    return (_MESSAGES / name).read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+
+
+def _request_kwargs() -> dict[str, Any]:
+    """The fixture request fields with the money parsed back from its stored JSON text."""
+    from src.risk.money_at_stake import parse_money_json
+
+    generator = _generator()
+    fields: dict[str, Any] = generator.approve_fields()
+    return {**fields, "money": parse_money_json(generator.fixture_money_json())}
+
+
+def test_request_demo_equals_the_generated_golden() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    text = format_approval_request(mode_label="DEMO", **_request_kwargs())
+
+    assert text + "\n" == _golden("approve_request_demo.txt")
+
+
+def test_request_live_equals_the_generated_golden() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    text = format_approval_request(mode_label="LIVE", **_request_kwargs())
+
+    assert text + "\n" == _golden("approve_request_live.txt")
+    assert "Mode: LIVE\n" in text
+
+
+def test_request_lines_follow_the_d13_order_with_utc_times() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    lines = format_approval_request(mode_label="DEMO", **_request_kwargs()).split("\n")
+    heads = [line.split(":", 1)[0] for line in lines]
+
+    expected_order = [
+        "Mode",
+        "Signal",
+        "Detected",
+        "Entry",
+        "Quantity",
+        "Notional",
+        "Margin",
+        "Loss at SL",
+        "Profit at TP1 (0.5 of quantity)",
+        "Profit at TP2 (0.5 of quantity)",
+        "Equity used",
+        "SL",
+        "TPs",
+    ]
+    assert heads[0].startswith("APPROVE BTCUSDT LONG")
+    assert heads[1 : 1 + len(expected_order)] == expected_order
+    assert lines[3] == "Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)"
+    assert "Asia/Ho_Chi_Minh" not in "\n".join(lines)
+    assert "Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)" in lines
+    assert (
+        "Margin: 801.60 USDT at 5x leverage (PLAN_CONSTRAINT_SNAPSHOT:verified_leverage)" in lines
+    )
+    assert (
+        "Equity used: 800 USDT (ACCOUNT_LIVE:min(totalWalletBalance,totalMarginBalance), "
+        "observed 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC))" in lines
+    )
+
+
+def test_request_is_accepted_by_the_demo_and_live_fake_bots() -> None:
+    import asyncio
+
+    from src.adapters.telegram_notify import format_approval_request
+
+    from tests.shadow_fakes import FakeBot
+
+    for mode in ("DEMO", "LIVE"):
+        bot = FakeBot.for_mode(mode)
+        text = format_approval_request(mode_label=mode, **_request_kwargs())
+        asyncio.run(bot.send_message(chat_id=1, text=text))
+        assert len(bot.sent) == 1
+
+
+def test_format_approve_has_utc_times_and_no_display_note() -> None:
+    from src.adapters.telegram_notify import format_approve
+
+    text = format_approve(**_generator().approve_fields())
+
+    assert text + "\n" == _golden("approve_base.txt")
+    assert "Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)\n" in text
+    assert "Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)\n" in text
+    assert "Display:" not in text and "Asia/Ho_Chi_Minh" not in text
+
+
+def test_format_presentation_time_is_local_plus7_with_utc_in_brackets() -> None:
+    """Owner O-3 (2026-10-30): the local Vietnam time is the main time, UTC is in brackets."""
+    from datetime import timedelta, timezone
+
+    from src.adapters.telegram_notify import format_presentation_time
+
+    assert (
+        format_presentation_time(datetime(2026, 10, 30, 14, 15, 0, tzinfo=UTC))
+        == "2026-10-30 21:15:00 +07 (2026-10-30 14:15:00 UTC)"
+    )
+    # An aware instant in another zone is converted: 10:00 +07 is 03:00 UTC.
+    plus7 = timezone(timedelta(hours=7))
+    assert (
+        format_presentation_time(datetime(2026, 10, 9, 10, 0, 0, tzinfo=plus7))
+        == "2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)"
+    )
+    minus5 = timezone(timedelta(hours=-5))
+    assert (
+        format_presentation_time(datetime(2026, 10, 9, 0, 0, 0, tzinfo=minus5))
+        == "2026-10-09 12:00:00 +07 (2026-10-09 05:00:00 UTC)"
+    )
+
+
+def test_format_presentation_time_crosses_midnight_in_both_directions() -> None:
+    from src.adapters.telegram_notify import format_presentation_time
+
+    # 20:30 UTC is already the next local day (03:30 +07).
+    assert (
+        format_presentation_time(datetime(2026, 10, 30, 20, 30, 0, tzinfo=UTC))
+        == "2026-10-31 03:30:00 +07 (2026-10-30 20:30:00 UTC)"
+    )
+    # 16:59:59 UTC is 23:59:59 local, 17:00:00 UTC is the next local day.
+    assert (
+        format_presentation_time(datetime(2026, 12, 31, 16, 59, 59, tzinfo=UTC))
+        == "2026-12-31 23:59:59 +07 (2026-12-31 16:59:59 UTC)"
+    )
+    assert (
+        format_presentation_time(datetime(2026, 12, 31, 17, 0, 0, tzinfo=UTC))
+        == "2027-01-01 00:00:00 +07 (2026-12-31 17:00:00 UTC)"
+    )
+
+
+def test_format_presentation_time_refuses_a_naive_time_and_a_non_datetime() -> None:
+    from src.adapters.telegram_notify import format_presentation_time
+
+    with pytest.raises(ValueError, match="UTC-aware"):
+        format_presentation_time(datetime(2026, 10, 9, 3, 0, 0))
+    with pytest.raises(TypeError):
+        format_presentation_time("2026-10-09 03:00:00")  # type: ignore[arg-type]
+
+
+def test_no_golden_message_names_the_local_zone() -> None:
+    for path in sorted(_MESSAGES.glob("*.txt")):
+        assert "Asia/Ho_Chi_Minh" not in _golden(path.name), path.name
+
+
+def test_the_renderers_do_no_arithmetic() -> None:
+    """D-13: the only operations on amounts are format(value, 'f') and string joins."""
+    import src.adapters.telegram_notify as module
+
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    names = {"render_money_block", "format_approval_request", "require_money_consistent"}
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            found.add(node.name)
+            binops = [n for n in ast.walk(node) if isinstance(n, (ast.BinOp, ast.AugAssign))]
+            assert not binops, f"{node.name} does arithmetic at line {binops[0].lineno}"
+    assert found == names
+
+
+# --------------------------------------------------------------------------- #
+# Plan 23-09 task 2 (D-05, D-13): one keyboard for every mode, refusals, plain figures.
+# --------------------------------------------------------------------------- #
+
+
+def test_decision_keyboard_has_one_row_with_approve_and_skip() -> None:
+    from src.adapters.telegram_notify import (
+        build_decision_keyboard,
+        build_shadow_decision_keyboard,
+    )
+
+    signal_id = "sig_test_0000000000000000000000000000000000000000000000000000"
+    keyboard = build_decision_keyboard(signal_id)
+
+    assert len(keyboard.inline_keyboard) == 1
+    row = keyboard.inline_keyboard[0]
+    assert [button.text for button in row] == ["APPROVE", "SKIP"]
+    approve, skip = (button.callback_data for button in row)
+    assert approve is not None and skip is not None
+    assert approve.startswith("APR:") and skip.startswith("SKP:")
+    assert approve[len("APR:") :] == skip[len("SKP:") :]
+    assert len(approve.encode("utf-8")) == 36 and len(skip.encode("utf-8")) == 36
+    shadow = build_shadow_decision_keyboard(signal_id)
+    assert shadow.inline_keyboard == keyboard.inline_keyboard
+
+
+_TP1_PRICE = Decimal("51000")
+_TP2_PRICE = Decimal("52000")
+_HALF = Decimal("0.5")
+
+
+def _refusal_kwargs(**overrides: Any) -> dict[str, Any]:
+    kwargs = _request_kwargs()
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_request_without_money_is_refused_naming_the_reason() -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    with pytest.raises(ValueError, match="MONEY_AT_STAKE_MISSING"):
+        format_approval_request(mode_label="DEMO", **_refusal_kwargs(money=None))
+    with pytest.raises(ValueError, match="MONEY_AT_STAKE_MISSING"):
+        format_approval_request(mode_label="DEMO", **_refusal_kwargs(money={"notional": "1"}))
+
+
+@pytest.mark.parametrize(
+    ("override", "field"),
+    [
+        ({"approved_quantity": Decimal("0.07")}, "approved_quantity"),
+        ({"stop_loss": Decimal("49400")}, "stop_loss"),
+        ({"direction": "SHORT"}, "direction"),
+        ({"take_profits": [(_TP1_PRICE + 1, _HALF), (_TP2_PRICE, _HALF)]}, "TP1 price"),
+        ({"take_profits": [(_TP1_PRICE, _HALF), (_TP2_PRICE, Decimal("0.4"))]}, "TP2 fraction"),
+        ({"take_profits": [(Decimal("51000"), Decimal("1"))]}, "take_profits"),
+        ({"entry_max": Decimal("50000")}, "outside the entry zone"),
+        ({"entry_min": Decimal("50200"), "entry_max": Decimal("50300")}, "outside the entry zone"),
+    ],
+)
+def test_request_whose_money_disagrees_with_the_message_is_refused(
+    override: dict[str, Any], field: str
+) -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    with pytest.raises(ValueError, match=field):
+        format_approval_request(mode_label="LIVE", **_refusal_kwargs(**override))
+
+
+@pytest.mark.parametrize("label", ["SHADOW", "demo", "", "SIMULATE", "Live"])
+def test_request_refuses_any_label_but_demo_and_live(label: str) -> None:
+    from src.adapters.telegram_notify import format_approval_request
+
+    with pytest.raises(ValueError, match="mode_label"):
+        format_approval_request(mode_label=label, **_request_kwargs())
+
+
+def test_money_block_prints_plain_fixed_point_and_never_rounds() -> None:
+    import copy
+
+    from src.adapters.telegram_notify import render_money_block
+
+    # The odd amounts are set on a copy, past `MoneyAtStake.__post_init__` (WR-04 made it check
+    # notional = quantity x entry): this test is about how the stored Decimals are PRINTED.
+    odd = copy.copy(_request_kwargs()["money"])
+    for name, value in (
+        ("notional", Decimal("1E+2")),
+        ("loss_at_stop_gross", Decimal("0.100")),
+        ("loss_at_stop_net", Decimal("0.1000001")),
+        ("equity", Decimal("1E-7")),
+    ):
+        object.__setattr__(odd, name, value)
+
+    lines = render_money_block(odd)
+
+    assert lines[0] == "Notional: 100 USDT"
+    assert lines[2] == "Loss at SL: 0.100 USDT gross, 0.1000001 USDT net of modeled costs"
+    assert lines[-1].startswith("Equity used: 0.0000001 USDT (")
+    assert not any(re.search(r"\d[Ee][+-]?\d", line) for line in lines)

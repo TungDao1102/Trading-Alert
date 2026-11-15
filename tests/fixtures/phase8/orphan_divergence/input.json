@@ -1,15 +1,8 @@
 {
   "scenario": "orphan_protective",
-  "description": "Local intent has a STOP_LOSS algo protective for BTCUSDT, but no matching local position and no exchange position. The reconciler must classify this as ORPHAN_PROTECTIVE divergence and the sweeper must cancel the algo order after authoritative position-zero verification.",
+  "description": "Local intent has a STOP_LOSS algo protective for BTCUSDT, but no matching local position and no exchange position, and its plan's ENTRY is no longer open locally or on the exchange (Phase 20, D-05: a protective of a resting entry is not an orphan). The reconciler must classify this as ORPHAN_PROTECTIVE divergence and the sweeper must cancel the algo order after authoritative position-zero verification.",
   "local_intent": {
-    "open_orders": [
-      {
-        "client_order_id": "x-11111111111111111111111111111111EN",
-        "symbol": "BTCUSDT",
-        "order_role": "ENTRY",
-        "status": "NEW"
-      }
-    ],
+    "open_orders": [],
     "open_algos": [
       {
         "client_algo_id": "xa-1111111111111111111111111111111SL",
@@ -21,26 +14,7 @@
     "open_positions": []
   },
   "exchange_truth": {
-    "normal_orders": [
-      {
-        "symbol": "BTCUSDT",
-        "client_order_id": "x-11111111111111111111111111111111EN",
-        "exchange_order_id": "100001",
-        "side": "BUY",
-        "position_side": "LONG",
-        "order_type": "LIMIT",
-        "time_in_force": "GTC",
-        "status": "NEW",
-        "quantity": "0.010",
-        "price": "50000.00",
-        "stop_price": null,
-        "reduce_only": false,
-        "close_position": false,
-        "working_type": null,
-        "price_protect": null,
-        "update_time_utc": "2026-09-19T10:00:00+00:00"
-      }
-    ],
+    "normal_orders": [],
     "algo_orders": [
       {
         "symbol": "BTCUSDT",

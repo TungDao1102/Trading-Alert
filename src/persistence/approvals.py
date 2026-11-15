@@ -40,6 +40,7 @@ database raises `StoreUnavailable` from the unit of work; there is no retry loop
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, update
@@ -83,6 +84,7 @@ _IDENTITY_FIELDS: tuple[str, ...] = (
     "requested_at_utc",
     "request_hash",
     "approved_quantity",
+    "money_json",
 )
 
 
@@ -90,6 +92,21 @@ def _constraint_name(exc: IntegrityError) -> str:
     diag = getattr(exc.orig, "diag", None)
     name = getattr(diag, "constraint_name", None)
     return str(name) if name else "unknown constraint"
+
+
+def _decided_row_of_plan(session: Session, trade_plan_id: str) -> ApprovalRow | None:
+    """The plan's APPROVED or SKIPPED row, or None (G4-042, plan 23-08).
+
+    EXPIRED rows are deliberately not selected: any number of them may exist for one plan, while
+    `uq_approvals_one_decided_per_plan` allows at most one APPROVED-or-SKIPPED row, so the result
+    can never be ambiguous.
+    """
+    return session.execute(
+        select(ApprovalRow).where(
+            ApprovalRow.trade_plan_id == trade_plan_id,
+            ApprovalRow.status.in_((ApprovalResult.APPROVED.value, ApprovalResult.SKIPPED.value)),
+        )
+    ).scalar_one_or_none()
 
 
 def _approval_values(approval: Approval) -> dict[str, Any]:
@@ -128,8 +145,18 @@ class PgApprovalStore:
 
     # ----------------------------------------------------------------- writes
 
-    def insert_pending(self, approval: Approval) -> None:
+    def insert_pending(
+        self,
+        approval: Approval,
+        *,
+        after_insert: Callable[[Session, Approval], None] | None = None,
+    ) -> None:
         """Insert a PENDING approval; replaying the same request is a no-op.
+
+        `after_insert(session, approval)` (Phase 24, plan 24-08) is optional and None by default.
+        When given, it runs inside the SAME transaction right after the row was newly inserted
+        (never on a replay no-op); any exception it raises rolls the insert back as a whole. The
+        hook must not commit or roll back.
 
         Raises:
             ValueError: the approval is not PENDING (decisions go through `save_atomic`).
@@ -164,6 +191,8 @@ class PgApprovalStore:
                     f"approval {approval.approval_id}: constraint violated ({name})"
                 ) from exc
             if inserted is not None:
+                if after_insert is not None:
+                    after_insert(session, approval)
                 return
             existing = session.get(ApprovalRow, approval.approval_id)
             if existing is None:
@@ -197,8 +226,21 @@ class PgApprovalStore:
         """`SaveApproval`: persist a decision without a mapping."""
         self.save_atomic(approval, None)
 
-    def save_atomic(self, approval: Approval, mapping: ShortIdMapping | None) -> None:
+    def save_atomic(
+        self,
+        approval: Approval,
+        mapping: ShortIdMapping | None,
+        *,
+        after_decide: Callable[[Session, Approval], None] | None = None,
+    ) -> None:
         """Decide a PENDING approval and record its short-id mapping in ONE transaction.
+
+        `after_decide(session, approval)` (Phase 21, plan 21-15; D-16, D-17) is optional and
+        None by default, so every existing caller (paper SHADOW) behaves as before. When given,
+        it runs inside the SAME transaction right after the decision is applied and before the
+        mapping insert; any exception it raises rolls the decision back as a whole, so the
+        approval stays PENDING. It is not called when the decision itself is refused
+        (`ApprovalAlreadyDecided`, `RowConflict`). The hook must not commit or roll back.
 
         Raises:
             ApprovalAlreadyDecided: the approval (or another approval of the same plan) was
@@ -211,6 +253,8 @@ class PgApprovalStore:
             raise ValueError("save_atomic requires a decided approval")
         with self._db.transaction() as session:
             self._decide(session, approval)
+            if after_decide is not None:
+                after_decide(session, approval)
             if mapping is not None:
                 self._record_mapping(session, mapping)
 
@@ -220,6 +264,13 @@ class PgApprovalStore:
     def _decide(session: Session, approval: Approval) -> None:
         try:
             with session.begin_nested():
+                if approval.status == ApprovalResult.EXPIRED:
+                    # G4-042 (23-08): EXPIRED rows are outside the one-decided-per-plan index, so
+                    # the index no longer stops the expiry of a decided plan's sibling. The store
+                    # does: it would release the plan's reservation as APPROVAL_EXPIRED.
+                    already = _decided_row_of_plan(session, approval.trade_plan_id)
+                    if already is not None:
+                        raise ApprovalAlreadyDecided(approval_from_row(already))
                 updated = session.execute(
                     update(ApprovalRow)
                     .where(
@@ -230,6 +281,7 @@ class PgApprovalStore:
                         result=approval.result.value,
                         status=approval.status.value,
                         acted_at_utc=approval.acted_at_utc,
+                        actor_id=approval.actor_id,
                     )
                 )
         except IntegrityError as exc:
@@ -238,12 +290,7 @@ class PgApprovalStore:
                 raise RowConflict(
                     f"approval {approval.approval_id}: constraint violated ({name})"
                 ) from exc
-            decided = session.execute(
-                select(ApprovalRow).where(
-                    ApprovalRow.trade_plan_id == approval.trade_plan_id,
-                    ApprovalRow.status != ApprovalResult.PENDING.value,
-                )
-            ).scalar_one_or_none()
+            decided = _decided_row_of_plan(session, approval.trade_plan_id)
             if decided is None:
                 raise RowConflict(
                     f"approval {approval.approval_id}: decided row for the plan not visible"

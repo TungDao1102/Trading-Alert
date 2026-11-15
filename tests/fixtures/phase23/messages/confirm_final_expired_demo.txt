@@ -1,0 +1,6 @@
+CONFIRM BTCUSDT LONG
+Mode: DEMO
+Quantity: 0.08
+Notional: 4008.00 USDT
+Loss at SL: 48.00 USDT gross, 53.5776 USDT net of modeled costs
+EXPIRED at 2026-10-09 10:01:01 +07 (2026-10-09 03:01:01 UTC): no confirmation was taken (CONFIRM_TTL_ELAPSED); nothing was placed

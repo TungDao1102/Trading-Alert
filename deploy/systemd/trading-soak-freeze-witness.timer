@@ -1,0 +1,20 @@
+# Timer for the host freeze tick with an S3 witness (quick task 261114-12e, owner decision
+# 16-DEC-HOST-TICK). It fires at the minute of the single hourly cron of
+# .github/workflows/paper_freeze_check.yml, read by
+# `deploy/freeze-witness.sh --install-timer --soak-env-file PATH` at install time, so the host tick
+# covers the same slot as the GitHub tick. The firing time itself proves nothing: lateness is
+# decided by the S3 server time of the uploaded object.
+# Catch-up (a persistent timer) and a randomised delay are absent on purpose: there is no catch-up,
+# because a tick uploaded late is a late tick and would never satisfy its slot anyway.
+[Unit]
+Description=Trading soak project: host freeze tick timer (S3 witness)
+
+[Timer]
+OnCalendar=*-*-* *:@CRON_MINUTE@:00 UTC
+Persistent=false
+# STRUCTURAL (not an evidence value): the default accuracy lets a timer slip by up to a minute.
+AccuracySec=1s
+Unit=trading-soak-freeze-witness.service
+
+[Install]
+WantedBy=timers.target

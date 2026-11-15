@@ -1,0 +1,14 @@
+{
+  "case_id": "gtd_min_lifetime_boundary",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "server_time",
+    "summary": {
+      "server_time_ms": "1792670645006",
+      "server_time_utc": "2026-10-22T12:04:05.006000+00:00"
+    }
+  }
+}

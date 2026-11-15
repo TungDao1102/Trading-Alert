@@ -1,0 +1,13 @@
+{
+  "case_id": "available_balance_with_resting_order",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

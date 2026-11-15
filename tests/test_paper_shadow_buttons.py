@@ -47,9 +47,11 @@ from src.paper.shadow import (
 from telegram import error as tg_error
 
 from tests.shadow_fakes import (
+    AUTHORIZED_USER_IDS,
     CHAT_ID,
     OTHER_CHAT_ID,
     T0,
+    USER_ID,
     FakeBot,
     InMemoryShadowStores,
     RecordingSleep,
@@ -58,7 +60,9 @@ from tests.shadow_fakes import (
     make_callback_update,
     make_shadow_plan,
     make_shadow_signal,
+    make_shadow_sized,
 )
+from tests.support.press_identity import OWNER_PRESS
 
 T_PRESS = T0 + timedelta(minutes=7)
 
@@ -88,6 +92,7 @@ class Harness:
             exposure_quote=Decimal("0"),
             reason_codes=["SETUP_DETECTED"],
             now_utc=T0,
+            sized=make_shadow_sized(plan),
             sleep=self.sleep,
         )
         return outcome, signal.signal_id, plan
@@ -102,6 +107,7 @@ class Harness:
             raw_token="",
             correlation_id=f"cbq:{query}",
             binding_context=self.book.resolve(parsed.short_id),
+            **OWNER_PRESS,
         )
 
     def buttons(self, index: int = -1) -> tuple[str, str]:
@@ -130,6 +136,26 @@ async def test_skp_callback_skips_with_action_and_timestamp() -> None:
     assert result.approval.actor_id == str(CHAT_ID)
     decision = h.book.take_last_decision()
     assert decision is not None and decision.outcome is ShadowDecisionOutcome.SKIPPED
+
+
+async def test_on_callback_records_the_pressing_user_as_actor() -> None:
+    """Phase 23 (D-03): through `on_callback` the actor is the user id, not the chat id."""
+    h = Harness()
+    await h.alert()
+    _, skp = h.buttons()
+
+    result = await on_callback(
+        make_callback_update(data=skp, chat_id=CHAT_ID, query_id="skip-user"),
+        cast(Any, None),
+        authorized_chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
+        binding_context_resolver=h.book.resolve,
+        dispatch=h.book.dispatch,
+        reply_text_fn=None,
+    )
+
+    assert result.approval is not None
+    assert result.approval.actor_id == str(USER_ID)
 
 
 async def test_skip_after_approve_cannot_flip_the_decision() -> None:
@@ -275,9 +301,10 @@ async def test_restart_expires_pending_approvals_and_later_callbacks_are_rejecte
 
     report = invalidate_pending_on_restart(h.stores, restart_at)
 
-    # One decision per plan is all PostgreSQL allows; the rest of the pair can no longer be
-    # decided by anyone (its raw token died with the process).
-    assert len(report.expired) == 2
+    # EXPIRED rows are outside the one-decided-per-plan index (G4-042, Alembic 0014): both rows
+    # of each undecided plan are expired and none is left PENDING with a dead token.
+    assert len(report.expired) == 4
+    assert report.left_pending == []
     for approval in report.expired:
         stored = h.stores.approvals[approval.approval_id]
         assert stored.status == ApprovalResult.EXPIRED
@@ -290,7 +317,7 @@ async def test_restart_expires_pending_approvals_and_later_callbacks_are_rejecte
             a.status
             for a in h.stores.approvals.values()
             if a.trade_plan_id == plan_id and a.status != ApprovalResult.PENDING
-        ] == [ApprovalResult.EXPIRED]
+        ] == [ApprovalResult.EXPIRED, ApprovalResult.EXPIRED]
 
     # A new process has an empty book: the callback finds no binding context and is rejected.
     h.book = ShadowApprovalBook(h.stores, clock=lambda: restart_at)
@@ -315,6 +342,7 @@ async def test_restart_expires_pending_approvals_and_later_callbacks_are_rejecte
 async def test_demo_and_live_cannot_reach_the_alert_path(mode: Mode) -> None:
     h = Harness()
     signal = make_shadow_signal()
+    plan = make_shadow_plan(signal)
 
     with pytest.raises(ModeNotConstructible):
         await send_shadow_alert(
@@ -324,10 +352,11 @@ async def test_demo_and_live_cannot_reach_the_alert_path(mode: Mode) -> None:
             chat_id=CHAT_ID,
             mode=mode,
             signal=signal,
-            plan=make_shadow_plan(signal),
+            plan=plan,
             exposure_quote=Decimal("0"),
             reason_codes=["SETUP_DETECTED"],
             now_utc=T0,
+            sized=make_shadow_sized(plan),
             sleep=h.sleep,
         )
 
@@ -359,6 +388,7 @@ async def test_every_outcome_reply_is_one_labelled_shadow_message() -> None:
             update,
             cast(Any, None),
             authorized_chat_id=CHAT_ID,
+            authorized_user_ids=AUTHORIZED_USER_IDS,
             binding_context_resolver=h.book.resolve,
             dispatch=h.book.dispatch,
             reply_text_fn=reply,
@@ -400,6 +430,7 @@ async def test_a_failed_reply_never_raises_into_the_handler() -> None:
         update,
         cast(Any, None),
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=AUTHORIZED_USER_IDS,
         binding_context_resolver=h.book.resolve,
         dispatch=h.book.dispatch,
         reply_text_fn=reply,
@@ -594,3 +625,37 @@ async def test_wr01_the_pending_approvals_carry_the_issued_plan_quantity() -> No
     assert result.approval is not None
     assert result.approval.status == ApprovalResult.APPROVED
     assert result.approval.approved_quantity == plan.quantity_after_rounding
+
+
+# --------------------------------------------------------------------------- #
+# G4-042 (plan 23-08): the in-memory store mirrors the PostgreSQL expiry rule.
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_fake_expires_both_siblings_of_an_undecided_plan() -> None:
+    h = Harness()
+    await h.alert()
+    first, second = sorted(h.stores.approvals.values(), key=lambda a: a.approval_id)
+
+    report = invalidate_pending_on_restart(h.stores, T0 + timedelta(minutes=30))
+
+    assert {a.approval_id for a in report.expired} == {first.approval_id, second.approval_id}
+    assert report.left_pending == []
+    assert {a.status for a in h.stores.approvals.values()} == {ApprovalResult.EXPIRED}
+
+
+async def test_the_fake_refuses_to_expire_the_sibling_of_a_decided_plan() -> None:
+    h = Harness()
+    await h.alert()
+    apr, _ = h.buttons()
+    assert h.press(apr, query="g4042-1").ok
+
+    report = invalidate_pending_on_restart(h.stores, T0 + timedelta(minutes=30))
+
+    assert report.expired == []
+    assert [a.action for a in report.left_pending] == [ApprovalAction.SKIP_USER]
+    outcomes = {
+        json.loads(e.payload_json)["outcome"]
+        for e in h.stores.journal_of_type("SHADOW_PENDING_INVALIDATED")
+    }
+    assert outcomes == {"LEFT_PENDING_SIBLING_DECIDED"}

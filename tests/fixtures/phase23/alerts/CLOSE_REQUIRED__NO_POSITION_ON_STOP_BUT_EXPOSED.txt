@@ -1,0 +1,8 @@
+[CRITICAL] CLOSE_REQUIRED
+subject: plan-0001
+reason: NO_POSITION_ON_STOP_BUT_EXPOSED
+at: 2026-10-09T03:00:00Z
+What happened: The exchange refused the stop because it saw no position, but the position read that followed shows an open position (NO_POSITION_ON_STOP_BUT_EXPOSED).
+Position: A position is open without a stop.
+System already did: The plan moved to CLOSE_REQUIRED, new entries are blocked (SAFE_MODE CLOSE_REQUIRED) and a reduce-only MARKET emergency close was attempted; if that close fails, EMERGENCY_CLOSE_FAILED or EMERGENCY_CLOSE_NOT_SENT follows as its own alert.
+You must: Check the exchange position and the journal before any manual action. If the position is still open, close it or protect it yourself.

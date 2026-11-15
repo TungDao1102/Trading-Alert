@@ -1,0 +1,29 @@
+{
+  "E": 1792764634842,
+  "T": 1792764634835,
+  "e": "ALGO_UPDATE",
+  "o": {
+    "R": true,
+    "S": "SELL",
+    "V": "EXPIRE_MAKER",
+    "X": "NEW",
+    "ai": "",
+    "aid": 1000000253708044,
+    "at": "CONDITIONAL",
+    "caid": "dprobe-srs-20261023T141029Z-4",
+    "cp": false,
+    "f": "GTC",
+    "gtd": 0,
+    "ia": false,
+    "o": "STOP_MARKET",
+    "p": "0",
+    "pP": false,
+    "pm": "NONE",
+    "ps": "BOTH",
+    "q": "0.0014",
+    "s": "BTCUSDT",
+    "tp": "81832.4",
+    "tt": 0,
+    "wt": "MARK_PRICE"
+  }
+}

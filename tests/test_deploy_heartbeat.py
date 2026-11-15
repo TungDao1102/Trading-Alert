@@ -83,6 +83,8 @@ SCRUBBED_VARS = (
     "COMPOSE_PROJECT_NAME",
     "CREDENTIALS_DIRECTORY",
     "HEARTBEAT_URL_FILE",
+    "HEARTBEAT_PAPER_URL_FILE",
+    "HEARTBEAT_LIVE_URL_FILE",
     "HEARTBEAT_FAIL_PING",
     "HEARTBEAT_STEP_TIMEOUT_SECONDS",
     "SHELLOPTS",
@@ -982,3 +984,253 @@ def test_the_paper_target_refuses_xtrace_before_reading_the_url(paper_rig: Rig) 
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert paper_rig.lines() == []
     assert_no_secret(proc, paper_rig)
+
+
+# --- plan 24-24: the separate live heartbeat (D-30, R-8, 16-50; 24-01 Q11) ----------------------
+
+LIVE_PROBE_LINE = f"docker compose exec -T live {PY} -m src.live.runtime --liveness"
+LIVE_SERVICE = "trading-live-heartbeat.service"
+LIVE_TIMER = "trading-live-heartbeat.timer"
+LIVE_INTERVAL = "60"  # 24-LIMITS-CHECKPOINT recommendation: period 60 s, grace 120 s
+
+
+def _live_url_path(made: Rig) -> Path:
+    return made.prefix / "etc" / "trading" / "heartbeat-live.url"
+
+
+@pytest.fixture
+def live_rig(tmp_path: Path) -> Rig:
+    """Only the live URL file holds the sentinel; the collector's and the paper's hold another."""
+    made = _make_rig(tmp_path, ("docker", "curl", "systemctl"))
+    made.write_url(OTHER_URL + "\n")  # the collector's file must never be read for live
+    contents = {_paper_url_path(made): OTHER_URL, _live_url_path(made): SENTINEL_URL}
+    for path, url in contents.items():
+        _write(path, url + "\n")
+        if _posix_modes():
+            path.chmod(0o600)
+    return made
+
+
+def test_the_live_target_runs_only_the_liveness_probe_and_sends_one_ping(live_rig: Rig) -> None:
+    proc = live_rig.run("--target", "live")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert live_rig.docker_lines() == [LIVE_PROBE_LINE]
+    assert len(live_rig.curl_lines()) == 1
+    config = live_rig.curl_stdin(1)
+    assert config.count(SENTINEL_URL) == 1 and OTHER_URL not in config, "the live URL only"
+    assert_no_secret(proc, live_rig)
+
+
+def test_a_failed_live_probe_sends_no_success_ping(live_rig: Rig) -> None:
+    """A held refusal or a stale liveness stamp: the probe exits 1, so no ping is sent."""
+    proc = live_rig.run("--target", "live", env={"STUB_PROBE_RC": "1"})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert live_rig.curl_lines() == []
+    assert "live liveness probe failed" in proc.stderr and "no ping" in proc.stderr
+    assert_no_secret(proc, live_rig)
+
+
+def test_a_failed_live_probe_sends_one_fail_ping_only_when_asked(live_rig: Rig) -> None:
+    proc = live_rig.run("--target", "live", "--fail-ping", env={"STUB_PROBE_RC": "1"})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert len(live_rig.curl_lines()) == 1
+    assert re.search(re.escape(SENTINEL_URL) + r"/fail\"", live_rig.curl_stdin(1))
+    assert_no_secret(proc, live_rig)
+
+
+@pytest.mark.parametrize(
+    ("args", "env"),
+    [
+        ([], {}),
+        ([], {"STUB_PROBE_RC": "1"}),
+        (["--fail-ping"], {"STUB_PROBE_RC": "1"}),
+        ([], {"STUB_CURL_RC": "28"}),
+        (["--dry-run"], {}),
+    ],
+    ids=["pass", "probe-fails", "fail-ping", "ping-fails", "dry-run"],
+)
+def test_the_live_target_only_ever_runs_docker_exec(
+    live_rig: Rig, args: list[str], env: dict[str, str]
+) -> None:
+    proc = live_rig.run("--target", "live", *args, env=env)
+    assert proc.returncode in {0, 1, 3}, proc.stdout + proc.stderr
+    assert all(ln.startswith("docker compose exec -T live ") for ln in live_rig.docker_lines())
+    assert len(live_rig.docker_lines()) <= 1
+    assert not any(
+        w in " ".join(live_rig.docker_lines()) for w in ("restart", "stop", " up", "down")
+    )
+    assert_no_secret(proc, live_rig)
+
+
+def test_the_live_target_reads_its_own_credential_never_the_others(
+    live_rig: Rig, tmp_path: Path
+) -> None:
+    cred_dir = tmp_path / "cred"
+    _write(cred_dir / "heartbeat-url", OTHER_URL + "\n")
+    _write(cred_dir / "heartbeat-paper-url", OTHER_URL + "\n")
+    env = {"CREDENTIALS_DIRECTORY": cred_dir.as_posix()}
+    proc = live_rig.run("--target", "live", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert OTHER_URL not in live_rig.curl_stdin(1) and SENTINEL_URL in live_rig.curl_stdin(1)
+    _write(cred_dir / "heartbeat-live-url", OTHER_URL + "\n")
+    again = live_rig.run("--target", "live", env=env)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert OTHER_URL in live_rig.curl_stdin(2), "its own systemd credential wins"
+    assert_no_secret(again, live_rig)
+
+
+def test_a_missing_live_url_never_falls_back_to_another_targets_url(live_rig: Rig) -> None:
+    _live_url_path(live_rig).unlink()
+    proc = live_rig.run("--target", "live")
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+    assert live_rig.lines() == []
+    assert_no_secret(proc, live_rig)
+
+
+def test_the_live_url_file_can_come_from_its_own_environment_variable(live_rig: Rig) -> None:
+    custom = _write(live_rig.prefix / "opt" / "secrets" / "live.url", SENTINEL_URL + "\n")
+    if _posix_modes():
+        custom.chmod(0o600)
+    _live_url_path(live_rig).unlink()
+    proc = live_rig.run(
+        "--target", "live", env={"HEARTBEAT_LIVE_URL_FILE": "/opt/secrets/live.url"}
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL_URL in live_rig.curl_stdin(1)
+    assert_no_secret(proc, live_rig)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--target", "live", "--url-file", "/etc/trading/heartbeat.url"],
+        ["--target", "live", "--url-file", "/etc/trading/heartbeat-paper.url"],
+        ["--target", "paper", "--url-file", "/etc/trading/heartbeat-live.url"],
+        ["--url-file", "/etc/trading/heartbeat-live.url"],
+        ["--target", "live", "--soak-env-file", SOAK_ENV],
+        ["--target", "live", "--install-timer"],
+        ["--target", "live", "--interval-seconds", LIVE_INTERVAL],
+        ["--target", "live", "--install-timer", "--interval-seconds", "0"],
+        ["--target", "live", "--set-url", "--install-timer", "--interval-seconds", LIVE_INTERVAL],
+    ],
+)
+def test_live_usage_errors_exit_two_and_run_nothing(live_rig: Rig, args: list[str]) -> None:
+    proc = live_rig.run(*args, stdin=SENTINEL_URL + "\n")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert live_rig.lines() == []
+    assert not (live_rig.prefix / "etc" / "systemd").exists()
+    assert_no_secret(proc, live_rig)
+
+
+def test_live_set_url_stores_its_own_file(live_rig: Rig) -> None:
+    _live_url_path(live_rig).unlink()
+    proc = live_rig.run("--target", "live", "--set-url", stdin=SENTINEL_URL + "\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _live_url_path(live_rig).read_text(encoding="utf-8").strip() == SENTINEL_URL
+    assert live_rig.url_path.read_text(encoding="utf-8").strip() == OTHER_URL, "untouched"
+    assert _paper_url_path(live_rig).read_text(encoding="utf-8").strip() == OTHER_URL
+    if _posix_modes():
+        assert (_live_url_path(live_rig).stat().st_mode & 0o777) == 0o600
+    assert_no_secret(proc, live_rig)
+
+
+def test_live_install_timer_writes_the_live_units_with_the_command_interval(
+    live_rig: Rig,
+) -> None:
+    proc = live_rig.run("--target", "live", "--install-timer", "--interval-seconds", LIVE_INTERVAL)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    service = (_unit_dir(live_rig) / LIVE_SERVICE).read_text(encoding="utf-8")
+    timer = (_unit_dir(live_rig) / LIVE_TIMER).read_text(encoding="utf-8")
+    checkout = _checkout_as_bash_sees_it(live_rig)
+    for text in (service, timer):
+        assert "@" not in text.replace("@@", ""), "a substitution token was left behind"
+    lines = service.splitlines()
+    assert f"WorkingDirectory={checkout}" in lines
+    assert f"ExecStart=/usr/bin/env bash {checkout}/deploy/heartbeat.sh --target live" in lines
+    assert "LoadCredential=heartbeat-live-url:/etc/trading/heartbeat-live.url" in lines
+    assert "Environment=HEARTBEAT_FAIL_PING=0" in lines
+    assert not [ln for ln in lines if "heartbeat-url" in ln or "heartbeat-paper-url" in ln]
+    assert f"OnBootSec={LIVE_INTERVAL}s" in timer.splitlines()
+    assert f"OnUnitActiveSec={LIVE_INTERVAL}s" in timer.splitlines()
+    assert f"Unit={LIVE_SERVICE}" in timer.splitlines()
+    assert _systemctl(live_rig) == [
+        "systemctl daemon-reload",
+        f"systemctl enable --now {LIVE_TIMER}",
+        f"systemctl restart {LIVE_TIMER}",
+    ]
+    for other in (SERVICE, PAPER_SERVICE):
+        assert not (_unit_dir(live_rig) / other).exists(), "only the live units are installed"
+    assert live_rig.docker_lines() == [] and live_rig.curl_lines() == []
+    assert_no_secret(proc, live_rig)
+
+
+def test_live_install_timer_needs_the_live_url_file_first(live_rig: Rig) -> None:
+    _live_url_path(live_rig).unlink()
+    proc = live_rig.run("--target", "live", "--install-timer", "--interval-seconds", LIVE_INTERVAL)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "--target live --set-url" in proc.stderr
+    assert not (live_rig.prefix / "etc" / "systemd").exists()
+    assert live_rig.lines() == []
+
+
+def test_the_live_unit_templates_are_tokenised_oneshots_with_only_the_live_credential() -> None:
+    raw = (UNITS / LIVE_SERVICE).read_text(encoding="utf-8")
+    lines = _directive_lines(raw)
+    assert "Type=oneshot" in lines and "User=trading" in lines
+    assert [ln for ln in lines if LINK_DIRECTIVE.match(ln)] == []
+    assert "LoadCredential=heartbeat-live-url:@URL_FILE@" in lines
+    assert "ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/heartbeat.sh --target live" in lines
+    assert "heartbeat-paper-url" not in raw and "heartbeat-url:" not in raw
+    timer = _directive_lines((UNITS / LIVE_TIMER).read_text(encoding="utf-8"))
+    assert "OnBootSec=@INTERVAL_SECONDS@s" in timer
+    assert "OnUnitActiveSec=@INTERVAL_SECONDS@s" in timer
+    assert f"Unit={LIVE_SERVICE}" in timer and "WantedBy=timers.target" in timer
+    assert [
+        ln for ln in timer if re.match(r"^(Persistent|RandomizedDelaySec|OnCalendar)", ln)
+    ] == []
+    for path in (UNITS / LIVE_SERVICE, UNITS / LIVE_TIMER):
+        text = path.read_text(encoding="utf-8").lower()
+        assert "://" not in text
+        for banned in ("hc-ping", "healthchecks.io", "uuid"):
+            assert banned not in text
+
+
+def test_the_live_script_and_units_are_lf_in_the_index() -> None:
+    paths = [
+        "deploy/heartbeat.sh",
+        f"deploy/systemd/{LIVE_SERVICE}",
+        f"deploy/systemd/{LIVE_TIMER}",
+    ]
+    attrs = subprocess.run(
+        ["git", "ls-files", "--eol", *paths],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if attrs.returncode != 0 or not attrs.stdout.strip():
+        pytest.skip("git ls-files unavailable")
+    for line in attrs.stdout.splitlines():
+        assert "i/crlf" not in line, line
+
+
+def test_the_secret_survives_set_url_install_and_run_for_the_live_target(live_rig: Rig) -> None:
+    _live_url_path(live_rig).unlink()
+    steps = [
+        live_rig.run("--target", "live", "--set-url", stdin=SENTINEL_URL + "\n"),
+        live_rig.run("--target", "live", "--install-timer", "--interval-seconds", LIVE_INTERVAL),
+        live_rig.run("--target", "live"),
+    ]
+    for proc in steps:
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert_no_secret(proc, live_rig)
+    for unit in (LIVE_SERVICE, LIVE_TIMER):
+        text = (_unit_dir(live_rig) / unit).read_text(encoding="utf-8")
+        assert not any(marker in text for marker in SECRET_MARKERS)
+
+
+def test_the_live_target_refuses_xtrace_before_reading_the_url(live_rig: Rig) -> None:
+    proc = live_rig.run("--target", "live", env={"SHELLOPTS": "xtrace"})
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert live_rig.lines() == []
+    assert_no_secret(proc, live_rig)

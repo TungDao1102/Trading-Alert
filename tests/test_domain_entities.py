@@ -749,6 +749,19 @@ def test_journal_event_rejects_empty_correlation_or_entity_id() -> None:
     assert JournalEvent(**ok).payload_json == ""
 
 
+def test_p23_approval_money_json_is_none_or_a_json_object_text() -> None:
+    """D-13: None (not recorded) and an object-shaped text construct; anything else is refused."""
+    from src.domain.approval import Approval
+
+    assert Approval(**_approval_kwargs()).money_json is None
+    ok = Approval(**_approval_kwargs(), money_json='{"a":"1"}')
+    assert ok.money_json == '{"a":"1"}'
+
+    for bad in ("", "[1]", "x", "{", "}", '{"a":1', 5, b"{}"):
+        with pytest.raises(ValueError):
+            Approval(**_approval_kwargs(), money_json=bad)  # type: ignore[arg-type]
+
+
 def test_wr01_approval_approved_quantity_is_none_or_a_finite_positive_decimal() -> None:
     """D078: None (not recorded) and a positive Decimal construct; anything else is refused."""
     from src.domain.approval import Approval

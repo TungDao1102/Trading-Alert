@@ -724,10 +724,10 @@ def test_20_7_export_and_publish_commands_use_flags_the_exporter_accepts() -> No
 
 
 def test_20_7_states_the_recorded_cron_reader_crypt_layer_and_loss_window() -> None:
-    from tests.test_paper_freeze_workflow_pin_source import record
+    from tests.test_paper_freeze_workflow_pin_source import Q_Q_RECORD, record
 
     body = _sub20("20.7")
-    cron = record("16-DEC-Q-Q.md")["cron"]
+    cron = record(Q_Q_RECORD)["cron"]
     o01 = record("16-DEC-O-01.md")
     assert f"`{cron}`" in body, "the recorded cron is stated"
     for phrase in ("G15", "REV-18", "unproven", "EVIDENCE_GAP"):
@@ -979,3 +979,118 @@ def test_the_paper_heartbeat_subsection_states_the_recorded_numbers_and_the_limi
         for line in commands
     ), commands
     assert "https://" not in body
+
+
+# ----- 20.10 Host freeze tick and its S3 witness (quick 261114-12e, plan B) -----------------
+
+DECISIONS_FILE = REPO_ROOT / "docs" / "DECISIONS.md"
+DOC_STATUS_FILE = REPO_ROOT / "docs" / "DOC_STATUS.md"
+
+
+def _commands_of(body: str) -> list[list[str]]:
+    """The fenced commands of one subsection as argv lists (backslash continuations joined)."""
+    import shlex
+
+    joined = "\n".join(_fenced_lines(body)).replace("\\\n", " ")
+    return [shlex.split(line.strip(), posix=True) for line in joined.split("\n") if line.strip()]
+
+
+def _host_tick_decision_rows() -> list[list[str]]:
+    rows: list[list[str]] = []
+    for line in DECISIONS_FILE.read_text(encoding="utf-8").splitlines():
+        if re.match(r"^\| D\d+ \|", line) and "16-DEC-HOST-TICK" in line:
+            rows.append([cell.strip() for cell in line.split("|")[1:-1]])
+    return rows
+
+
+def test_20_10_installs_verifies_and_operates_the_host_freeze_tick_witness() -> None:
+    body = _sub20("20.10")
+    assert body, "RUNBOOK 20.10 does not exist"
+    for phrase in (
+        "deploy/freeze-witness.sh",
+        "--set-credential",
+        "--install-timer",
+        "--soak-env-file",
+        "--dry-run",
+        "trading-soak-freeze-witness.timer",
+        "Persistent=false",
+        "/etc/trading/freeze-witness.conf",
+        "LoadCredential",
+        "s3:PutObject",
+        "s3:if-none-match",
+        "If-None-Match",
+        "--use-server-modtime",
+        "--host-witness",
+        "EVIDENCE_S3_WITNESS_PREFIX",
+        "1800",
+        "D065 item 4",
+        "16-DEC-HOST-TICK",
+        "owner-run",
+    ):
+        assert phrase in body, f"20.10 lacks: {phrase}"
+    assert (REPO_ROOT / "deploy" / "freeze-witness.sh").is_file()
+
+
+def test_20_10_export_commands_parse_with_the_exporter_and_carry_host_witness() -> None:
+    from scripts import export_soak_evidence as export
+
+    seen = False
+    for argv in _commands_of(_sub20("20.10")):
+        if "scripts/export_soak_evidence.py" not in argv:
+            continue
+        tokens = ["x" if t.startswith("<") and t.endswith(">") else t for t in argv]
+        rest = tokens[tokens.index("scripts/export_soak_evidence.py") + 1 :]
+        args = export._parser().parse_args(rest)
+        assert args.source == "pg"
+        assert args.host_witness is True
+        seen = True
+    assert seen, "20.10 must show the export with --host-witness"
+
+
+def test_the_decision_row_amends_o_01_with_least_privilege_and_is_cited() -> None:
+    rows = _host_tick_decision_rows()
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert len(row) == 4, row
+    decision_id, decision, status, rationale = row
+    assert status.startswith("Accepted"), status
+    for phrase in ("16-DEC-O-01", "PutObject", "If-None-Match", "1800", "D065 item 4"):
+        assert phrase in decision + status + rationale, f"{decision_id} lacks: {phrase}"
+    assert decision_id in _sub20("20.10"), "20.10 must cite the decision row"
+    dated = [
+        line
+        for line in DOC_STATUS_FILE.read_text(encoding="utf-8").splitlines()
+        if re.match(r"^- 2026-(11-1[4-9]|11-[23]\d|12-\d\d) ", line) and decision_id in line
+    ]
+    assert dated, f"DOC_STATUS has no line dated 2026-11-14 or later naming {decision_id}"
+
+
+def test_20_7_names_the_one_write_exception_and_still_has_its_old_phrases() -> None:
+    body = _sub20("20.7")
+    for phrase in ("exporter-schedule", "loss window", "hourly", "at most"):
+        assert phrase in body, f"20.7 lacks: {phrase}"
+    bullet = next(
+        (ln for ln in body.splitlines() if ln.startswith("- **Write timing and loss window.**")),
+        "",
+    )
+    assert "20.10" in bullet and "16-DEC-HOST-TICK" in bullet, bullet
+    assert "decisions/16-DEC-HOST-TICK.md" in body.split("**What the records say.**")[0]
+    assert "applies seven decision records" in body
+
+
+def test_20_10_holds_placeholders_only_and_its_policy_json_is_valid() -> None:
+    import json
+
+    body = _sub20("20.10")
+    assert "amazonaws.com" not in body
+    assert not re.search(r"\b\d{12}\b", body), "a 12-digit account id"
+    assert "AKIA" not in body
+    for placeholder in ("<evidence-bucket>", "<witness-prefix>", "<account-id>", "<witness-user>"):
+        assert placeholder in body, f"20.10 lacks the placeholder {placeholder}"
+    blocks = re.findall(r"```json\n(.*?)```", body.replace("\r\n", "\n"), re.S)
+    assert blocks, "20.10 must show the policy as a fenced json block"
+    for block in blocks:
+        json.loads(block)
+    policy = "\n".join(blocks)
+    for phrase in ("NotAction", "NotResource", "s3:if-none-match", "s3:PutObject"):
+        assert phrase in policy, f"the policy example lacks {phrase}"

@@ -65,6 +65,12 @@ PRE_PHASE_12_REFERENCED = {
     "DAILY_STOP_BLOCK", "STALE_CONSTRAINTS", "UNCERTAIN_ACCOUNT_STATE",
 }  # fmt: skip
 PHASE_12_CODES = {"STOP_TOO_TIGHT", "COST_TO_RISK_EXCEEDED"}
+# Phase 20 D-10 promoted ENTRY_WITHOUT_PROTECTIVE (G3-005); the manager now references it.
+PHASE_20_CODES = {"ENTRY_WITHOUT_PROTECTIVE"}
+# Phase 22 (plan 22-04): the margin predicate emits INSUFFICIENT_MARGIN, an existing enum member.
+PHASE_22_CODES = {"INSUFFICIENT_MARGIN"}
+# Phase 24 (plan 24-02, G3-005): the manager and the health module emit these through the enum.
+PHASE_24_CODES = {"NO_FILL", "HEALTH_CHECK_FAILED"}
 
 
 def test_referenced_codes_are_the_seventeen_plus_optional_phase_12_codes() -> None:
@@ -72,15 +78,19 @@ def test_referenced_codes_are_the_seventeen_plus_optional_phase_12_codes() -> No
     # Superset/subset pair: the two cost-guard codes become referenced when plan 12-06
     # lands, so this assertion needs no edit then.
     assert PRE_PHASE_12_REFERENCED <= referenced
-    assert referenced <= PRE_PHASE_12_REFERENCED | PHASE_12_CODES
+    allowed = (
+        PRE_PHASE_12_REFERENCED | PHASE_12_CODES | PHASE_20_CODES | PHASE_22_CODES | PHASE_24_CODES
+    )
+    assert referenced <= allowed
 
 
-def test_real_glossary_split_is_20_canonical_and_5_retired() -> None:
+def test_real_glossary_split_is_21_canonical_and_5_retired() -> None:
+    # name kept; Phase 24 promoted NO_FILL and HEALTH_CHECK_FAILED (G3-005): 23 canonical.
     parsed = bk.parse_glossary_sections(_read(GLOSSARY))
-    assert len(parsed["canonical"]) == 20
+    assert len(parsed["canonical"]) == 23
     assert sorted(parsed["aliases"]) == sorted(bk.RETIRED_ALIASES)
     assert len(bk.RETIRED_ALIASES) == 5
-    assert len(ENUM_VALUES) == 20
+    assert len(ENUM_VALUES) == 23
     assert not hasattr(bk, "ALIASES")
 
 
@@ -152,7 +162,7 @@ def test_approval_mismatch_fails_gl04() -> None:
 
 
 def test_missing_string_code_fails_gl05() -> None:
-    text = _read(GLOSSARY).replace("HEALTH_CHECK_FAILED", "REDACTED_CODE")
+    text = _read(GLOSSARY).replace("EXPIRED", "REDACTED_CODE")
     assert _gl(text)["GL-05"] is False
 
 

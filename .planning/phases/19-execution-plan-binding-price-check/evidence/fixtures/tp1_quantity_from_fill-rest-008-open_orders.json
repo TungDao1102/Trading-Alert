@@ -1,0 +1,13 @@
+{
+  "case_id": "tp1_quantity_from_fill",
+  "index": 8,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

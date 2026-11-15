@@ -17,21 +17,31 @@ set -Eeuo pipefail
 # The wrapper holds no backup, encryption or remote logic: it only calls
 # `python -m src.ops.backup <subcommand>` in the compose ops image and returns that command's exit
 # code, so a failed backup fails the systemd oneshot service visibly. COMPOSE_PROJECT_NAME and
-# TRADING_ENV_FILE are honoured from the environment. --install-soak-timer refuses a soak env file
-# whose BACKUP_S3_BUCKET is empty or equals the one of the trading env file (TRADING_BACKUP_ENV_FILE,
-# default the checkout's .env): one bucket per project, never a shared snapshot series. Only
-# variable names are printed, never a value.
+# TRADING_ENV_FILE are honoured from the environment.
 #
-# Local-only mode (261020-bkp): BACKUP_REMOTE=none in the env file the backup container reads
-# (TRADING_ENV_FILE, default the checkout's .env) is the operator's explicit opt-in to run
-# without any off-host remote. The scheduled run and deploy/backup-drill.sh then make and verify
-# the local bundle and restore-drill it, contact no remote, exit 0, print the multi-line warning
-# "OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host" and the marker line
-# OFFSITE_COPY=skipped (a remote run prints OFFSITE_COPY=verified). --init-remote refuses in that
-# mode (exit 2, nothing to initialise); --install-soak-timer accepts a soak env file without a
-# bucket but still refuses the trading bucket. Unset, empty or s3 is the default: a missing
-# BACKUP_S3_* variable still fails closed. Any other value refuses. A local-only backup never
-# satisfies the soak pin (RUNBOOK 20.5).
+# Backup env file (plan 24-36, D-29, WR-06): the BACKUP_ names live in their own file, read by the
+# backup and ops compose services and by this script: TRADING_BACKUP_ENV_FILE, default the
+# checkout's .env.backup (template: .env.backup.example). The shared .env no longer carries them,
+# so the always-on collector never holds a backup secret. A project that selects its own env file
+# with TRADING_ENV_FILE (the soak, the cutover and drill tests) keeps that one file: when
+# TRADING_BACKUP_ENV_FILE is not set it defaults to TRADING_ENV_FILE (compose_init in lib.sh), and
+# the trading-soak-backup unit sets both to the soak env file.
+#
+# --install-soak-timer refuses a soak env file whose BACKUP_S3_BUCKET is empty or equals the one of
+# the trading backup env file (TRADING_BACKUP_ENV_FILE, default the checkout's .env.backup): one
+# bucket per project, never a shared snapshot series. Only variable names are printed, never a
+# value.
+#
+# Local-only mode (261020-bkp): BACKUP_REMOTE=none in the backup env file the backup container
+# reads (TRADING_BACKUP_ENV_FILE, default the checkout's .env.backup) is the operator's explicit
+# opt-in to run without any off-host remote. The scheduled run and deploy/backup-drill.sh then
+# make and verify the local bundle and restore-drill it, contact no remote, exit 0, print the
+# multi-line warning "OFF-HOST COPY SKIPPED: this backup does not survive the loss of this host"
+# and the marker line OFFSITE_COPY=skipped (a remote run prints OFFSITE_COPY=verified).
+# --init-remote refuses in that mode (exit 2, nothing to initialise); --install-soak-timer accepts
+# a soak env file without a bucket but still refuses the trading bucket. Unset, empty or s3 is the
+# default: a missing BACKUP_S3_* variable still fails closed. Any other value refuses. A
+# local-only backup never satisfies the soak pin (RUNBOOK 20.5).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -54,7 +64,7 @@ SOAK_ENV_FILE=""
 COMPOSE=()
 
 usage() {
-  sed -n '3,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '3,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
 }
 
 usage_error() {
@@ -245,10 +255,10 @@ warn_offsite_skipped() {
 }
 
 # check_init_remote_mode: --init-remote has nothing to initialise in local-only mode. The env
-# file is the one compose hands the backup container; when it is missing, compose fails anyway
-# and the python push refuses local-only mode a second time.
+# file is the backup env file compose hands the backup container (plan 24-36); when it is missing,
+# the python push fails closed on the missing BACKUP_ names.
 check_init_remote_mode() {
-  local env_file="${TRADING_ENV_FILE:-$REPO_ROOT/.env}" mode
+  local env_file="${TRADING_BACKUP_ENV_FILE:-${TRADING_ENV_FILE:-$REPO_ROOT/.env.backup}}" mode
   [[ -r $env_file ]] || return 0
   mode="$(mode_of "$env_file" backup)"
   if [[ $mode == none ]]; then
@@ -262,7 +272,7 @@ check_init_remote_mode() {
 # In local-only mode (BACKUP_REMOTE=none, 261020-bkp) no bucket is needed, but a bucket that is
 # set must still not be the trading bucket.
 check_soak_bucket() {
-  local trading_env="${TRADING_BACKUP_ENV_FILE:-$REPO_ROOT/.env}" soak_bucket trading_bucket mode
+  local trading_env="${TRADING_BACKUP_ENV_FILE:-$REPO_ROOT/.env.backup}" soak_bucket trading_bucket mode
   [[ -r $SOAK_ENV_FILE ]] || die "the soak env file is not readable: $SOAK_ENV_FILE"
   mode="$(mode_of "$SOAK_ENV_FILE" soak)"
   soak_bucket="$(bucket_of "$SOAK_ENV_FILE" soak)"

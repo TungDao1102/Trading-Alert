@@ -1,0 +1,13 @@
+{
+  "case_id": "margin_insufficient_at_target_leverage",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

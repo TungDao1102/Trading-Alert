@@ -18,8 +18,10 @@ The supervisor holds the process-wide `RestRateLimitGate` of plan 18-10 (user re
 (keepalive, listenKey start, rekey or rebuild, each snapshot attempt) it consults the gate: during a
 pause it waits the remaining pause through the injected sleep, sending nothing and consuming no
 attempt; during a ban it stays UNKNOWN, reports `RATE_LIMIT_BAN_ACTIVE` once and sends nothing
-until `request_resync()`. The end of a wait proves nothing: a stream that was UNKNOWN stays
-UNKNOWN until a snapshot succeeds.
+until `request_resync()`. A gate with no known end (not restored, or its persisted state lost)
+is not a pause: it is re-checked only as often as `reconnect_max_attempts` and
+`reconnect_max_delay_seconds` allow, then the recovery halts and reports its reason (WR-C4). The
+end of a wait proves nothing: a stream that was UNKNOWN stays UNKNOWN until a snapshot succeeds.
 
 Nothing in `src` imports this module for wiring (D-04: the composition is Phases 24 and 25),
 and it imports nothing from `src.paper`. No wall clock is read and no number is defined here:
@@ -649,16 +651,42 @@ class UserDataSupervisor:
     # -- the shared REST gate ------------------------------------------------ #
 
     async def _await_rest_allowed(self) -> None:
-        """Wait out a pause (no attempt used, nothing sent); a ban halts the recovery."""
+        """Wait out a timed pause (no attempt used, nothing sent); a ban halts the recovery.
+
+        A restriction with no known end (`GATE_NOT_RESTORED`, `GATE_STATE_UNKNOWN`) is not a
+        pause: `GATE_STATE_UNKNOWN` never lifts inside the process. It is checked at the gate's
+        own 1 second hint at most `reconnect_max_attempts` times or `reconnect_max_delay_seconds`
+        of the injected clock, whichever comes first (the two stops `_bounded_reconnect` uses),
+        then the recovery halts with the gate's reason and `on_failure` reports it once (WR-C4).
+        A timed pause is slept in slices of at most `reconnect_wait_max_seconds`, re-checking the
+        gate after each one; the total wait is the pause itself, which the policy bounds and
+        `restore()` refuses to exceed (WR-C3).
+        """
+        started_at = self._clock()
+        unknown_checks = 0
         while True:
             restriction = self._gate.restriction()
             if restriction is None:
                 return
             if restriction.reason == IP_BAN_418:
                 raise _RecoveryHalted(RATE_LIMIT_BAN_ACTIVE)
+            if restriction.until_utc is None:
+                unknown_checks += 1
+                spent = self._clock() - started_at
+                if unknown_checks >= self._limits.reconnect_max_attempts or spent >= timedelta(
+                    seconds=self._limits.reconnect_max_delay_seconds
+                ):
+                    log.error(
+                        "userdata.supervisor.rest_gate_no_known_end",
+                        reason=restriction.reason,
+                        checks=unknown_checks,
+                    )
+                    raise _RecoveryHalted(restriction.reason)
             remaining = self._gate.remaining_seconds()
             log.info("userdata.supervisor.rest_paused", remaining_seconds=remaining)
-            await self._sleep(remaining)
+            # One sleep is at most `reconnect_wait_max_seconds` (WR-C3); the gate is asked again
+            # after each slice, so the wait still ends when the gate opens.
+            await self._sleep(min(remaining, self._limits.reconnect_wait_max_seconds))
 
     async def _gated[T](self, call: Callable[[], Awaitable[T]]) -> T:
         """`call` once REST is allowed; a refusal raised by a holder anyway is handled alike."""

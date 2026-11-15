@@ -149,6 +149,18 @@ def test_hold_on_refusal_holds_until_the_stop_then_returns_the_refusal_code(
     assert "BINANCE_LIVE_API_KEY" in capsys.readouterr().err
 
 
+def test_every_binance_name_of_the_live_template_still_refuses_the_paper_runtime() -> None:
+    """Plan 24-30 (D-29): compose no longer delivers the Binance names to the paper service, and
+    the runtime's own refusal stays as the second barrier for every name of `.env.live.example`."""
+    import re
+
+    text = (REPO_ROOT / ".env.live.example").read_text(encoding="utf-8")
+    names = re.findall(r"^#?\s*(BINANCE_[A-Z0-9_]+)=", text, re.M)
+    assert names, "the live template names no BINANCE_ variable"
+    for name in names:
+        assert runtime_config.refuse_trade_capable_env({**BASE_ENV, name: ""}) == [name]
+
+
 def test_refusal_without_the_flag_returns_at_once(capsys: pytest.CaptureFixture[str]) -> None:
     stops, wait_for_stop = _stop_recorder()
     environ = {**BASE_ENV, "BINANCE_LIVE_API_KEY": "x"}

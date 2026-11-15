@@ -107,12 +107,50 @@ def test_allowed_names_are_exactly_the_documented_set() -> None:
             "POSTGRES_PORT",
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_AUTHORIZED_CHAT_ID",
+            "TELEGRAM_AUTHORIZED_USER_IDS",
             "PAPER_RUNTIME_CONFIG",
             "PAPER_STRATEGY_ID",
             "PAPER_PARAMETER_SET_ID",
         }
     )
     assert not any(name.startswith("BINANCE_") for name in ALLOWED_ENV_NAMES)
+
+
+def test_parse_authorized_user_ids_accepts_positive_integers() -> None:
+    from src.paper.runtime_config import parse_authorized_user_ids
+
+    assert parse_authorized_user_ids("777001") == frozenset({777001})
+    assert parse_authorized_user_ids(" 777001 , 777002 ") == frozenset({777001, 777002})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        " ",
+        "777001,",
+        ",777001",
+        "777001,,777002",
+        "abc",
+        "12a",
+        "-5",
+        "+5",
+        "0",
+        "1.5",
+        chr(0xFF11) + chr(0xFF12),  # fullwidth digits
+        "True",
+        "777001,777001",
+    ],
+)
+def test_parse_authorized_user_ids_refuses_anything_else_without_echoing_it(text: str) -> None:
+    from src.paper.runtime_config import parse_authorized_user_ids
+
+    with pytest.raises(ValueError) as info:
+        parse_authorized_user_ids(text)
+    message = str(info.value)
+    assert "TELEGRAM_AUTHORIZED_USER_IDS" in message
+    for fragment in text.replace(",", " ").split():
+        assert fragment not in message
 
 
 @pytest.fixture(autouse=True)
@@ -136,3 +174,26 @@ def test_unrelated_variable_is_never_logged(capsys: pytest.CaptureFixture[str]) 
     captured = capsys.readouterr()
     assert "leak-me-please" not in captured.out + captured.err
     assert "UNRELATED_THING" not in captured.out + captured.err
+
+
+def test_the_runtime_and_the_rehearsal_build_shadow_scoped_stores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 24-08: the SHADOW process lists SHADOW approvals only (C-7, OQ-6)."""
+    from scripts import shadow_rehearsal
+    from sqlalchemy import create_engine
+    from src.persistence import engine as engine_module
+
+    # `make_sync_engine` probes the database; an unconnected engine is enough to read the scope.
+    monkeypatch.setattr(
+        engine_module,
+        "make_sync_engine",
+        lambda url: create_engine("postgresql+psycopg://user@localhost/none_test"),
+    )
+
+    assert runtime._pg_shadow_stores("postgresql+psycopg://x/y").confirm_mode == "SHADOW"
+    stores, dispose = shadow_rehearsal._pg_stores("postgresql+psycopg://x/y")
+    try:
+        assert stores.confirm_mode == "SHADOW"  # type: ignore[attr-defined]
+    finally:
+        dispose()

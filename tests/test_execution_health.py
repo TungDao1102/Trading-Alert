@@ -311,12 +311,86 @@ def test_orphaned_orders_probe_fails_on_orphan_protective_divergence() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# G2-035 (D-35), 09-REVIEW IN-07 — impossible counters and a False send result fail closed.
+# --------------------------------------------------------------------------- #
+
+
+def test_rest_error_rate_refuses_more_errors_than_requests_as_a_fail_result() -> None:
+    """IN-07: error_count above total_count is a FAIL result, not a pass, not a rate above 1."""
+    from src.ops.health import check_rest_error_rate
+
+    journal = FakeJournal()
+    result = check_rest_error_rate(
+        error_count=5,
+        total_count=3,
+        max_error_rate=Decimal("2"),
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert result.status == "FAIL"
+    assert result.check_name == "rest_error_rate"
+    assert len(journal.events) == 1
+
+
+def test_rest_error_rate_with_errors_equal_to_requests_keeps_the_rate_result() -> None:
+    """IN-07 boundary: error_count equal to total_count is a rate of 1, judged against the max."""
+    from src.ops.health import check_rest_error_rate
+
+    journal = FakeJournal()
+    over = check_rest_error_rate(
+        error_count=3,
+        total_count=3,
+        max_error_rate=Decimal("0.05"),
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert over.status == "FAIL"
+    assert "exceeds max" in over.detail
+    within = check_rest_error_rate(
+        error_count=3,
+        total_count=3,
+        max_error_rate=Decimal("1"),
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert within.status == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_telegram_delivery_probe_fails_when_the_send_result_is_false() -> None:
+    """IN-07: a False send result is not a delivery."""
+    from src.ops.health import check_telegram_delivery
+
+    result = await check_telegram_delivery(
+        notifier=FakeNotifier(response=False),
+        chat_id=987654,
+        probe_text="health-probe-ping",
+        now_utc=NOW_UTC,
+        journal=FakeJournal(),
+    )
+    assert result.status == "FAIL"
+
+
+def test_health_verdict_reason_code_is_the_enum_value_byte_for_byte() -> None:
+    """G3-005 (D-35): the failing verdict emits RejectionReason.HEALTH_CHECK_FAILED.value."""
+    from src.domain.enums import RejectionReason
+    from src.ops.health import check_ws_connection_state, run_health_checks
+
+    journal = FakeJournal()
+    verdict = run_health_checks(
+        results=[check_ws_connection_state(connected=False, now_utc=NOW_UTC, journal=journal)]
+    )
+    assert verdict.reason_code == RejectionReason.HEALTH_CHECK_FAILED.value
+    assert verdict.reason_code == "HEALTH_CHECK_FAILED"
+
+
+# --------------------------------------------------------------------------- #
 # Beh. 7 — purity: no Binance SDK / PTB / SQLAlchemy / Pydantic / Polars imports.
 # --------------------------------------------------------------------------- #
 
 
 def test_health_module_purity() -> None:
-    """Beh. 7: src/ops/health.py imports stdlib + domain/journal only."""
+    """Beh. 7: src/ops/health.py imports stdlib + domain/journal and domain/enums only."""
     import re
     from pathlib import Path
 
@@ -430,3 +504,213 @@ def test_enable_then_disable_in_same_millisecond_get_distinct_ids() -> None:
     controller.disable(operator_id="op", now_utc=NOW_UTC)
     ids = [e.journal_event_id for e in journal.events]
     assert len(set(ids)) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-22 (D-26, DECISIONS D056) - the DEGRADED rows, per runtime mode.
+# --------------------------------------------------------------------------- #
+
+
+def _results_with_degraded(degraded: tuple[str, ...]) -> list[Any]:
+    """Ten results: PASS everywhere except the named checks, which are DEGRADED."""
+    from src.ops.health import ALL_CHECK_NAMES, HealthCheckResult
+
+    return [
+        HealthCheckResult(
+            check_name=name,
+            status="DEGRADED" if name in degraded else "PASS",
+            detail="not applicable" if name in degraded else "ok",
+            observed_at_utc=NOW_UTC,
+        )
+        for name in ALL_CHECK_NAMES
+    ]
+
+
+def test_d056_demo_degraded_passes_only_with_the_explicit_flag() -> None:
+    from src.ops.health import HealthRuntimeMode, run_health_checks
+
+    results = _results_with_degraded(("last_closed_candle_time",))
+    allowed = run_health_checks(
+        results=results, mode=HealthRuntimeMode.DEMO, demo_degraded_allowed=True
+    )
+    assert allowed.is_no_trade is False
+    assert allowed.reason_code == "OK"
+    assert allowed.mode is HealthRuntimeMode.DEMO
+    assert allowed.demo_degraded_allowed is True
+    assert allowed.degraded_names == ("last_closed_candle_time",)
+
+    refused = run_health_checks(results=results, mode=HealthRuntimeMode.DEMO)
+    assert refused.is_no_trade is True
+    assert refused.reason_code == "HEALTH_CHECK_FAILED"
+    assert refused.demo_degraded_allowed is False
+
+
+def test_d056_live_degraded_is_never_ok_whatever_the_caller_hopes() -> None:
+    from src.ops.health import HealthRuntimeMode, run_health_checks
+
+    results = _results_with_degraded(("last_closed_candle_time",))
+    verdict = run_health_checks(results=results, mode=HealthRuntimeMode.LIVE)
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == "HEALTH_CHECK_FAILED"
+    assert verdict.mode is HealthRuntimeMode.LIVE
+
+
+def test_d056_the_demo_flag_can_never_be_set_in_live_or_without_a_mode() -> None:
+    from src.ops.health import HealthRuntimeMode, run_health_checks
+
+    results = _results_with_degraded(("last_closed_candle_time",))
+    with pytest.raises(ValueError, match="demo_degraded_allowed"):
+        run_health_checks(results=results, mode=HealthRuntimeMode.LIVE, demo_degraded_allowed=True)
+    with pytest.raises(ValueError, match="demo_degraded_allowed"):
+        run_health_checks(results=results, demo_degraded_allowed=True)
+    with pytest.raises(TypeError):
+        run_health_checks(  # type: ignore[arg-type]
+            results=results, mode=HealthRuntimeMode.DEMO, demo_degraded_allowed="yes"
+        )
+
+
+def test_d056_the_mode_accepts_the_binance_environment_values_and_nothing_else() -> None:
+    from src.adapters.binance_client import Environment
+    from src.ops.health import HealthRuntimeMode, run_health_checks
+
+    results = _results_with_degraded(())
+    assert run_health_checks(results=results, mode=Environment.DEMO).mode is HealthRuntimeMode.DEMO
+    assert run_health_checks(results=results, mode=Environment.LIVE).mode is HealthRuntimeMode.LIVE
+    with pytest.raises(ValueError):
+        run_health_checks(results=results, mode=Environment.TESTNET)
+    with pytest.raises(ValueError):
+        run_health_checks(results=results, mode="demo")
+
+
+def test_d056_a_fail_or_a_missing_name_is_not_ok_in_either_mode() -> None:
+    from src.ops.health import (
+        ALL_CHECK_NAMES,
+        HealthCheckResult,
+        HealthRuntimeMode,
+        run_health_checks,
+    )
+
+    for mode in (HealthRuntimeMode.DEMO, HealthRuntimeMode.LIVE):
+        flag = mode is HealthRuntimeMode.DEMO
+        failing = [
+            HealthCheckResult(
+                check_name=name,
+                status="FAIL" if name == "db_writes" else "PASS",
+                detail="x",
+                observed_at_utc=NOW_UTC,
+            )
+            for name in ALL_CHECK_NAMES
+        ]
+        assert run_health_checks(results=failing, mode=mode, demo_degraded_allowed=flag).is_no_trade
+        assert run_health_checks(
+            results=failing[:-1], mode=mode, demo_degraded_allowed=flag
+        ).is_no_trade
+
+
+def test_d056_a_hand_built_ok_verdict_cannot_smuggle_a_degraded_result() -> None:
+    from src.ops.health import HealthRuntimeMode, HealthVerdict
+
+    results = tuple(_results_with_degraded(("last_closed_candle_time",)))
+    for mode, flag in (
+        (HealthRuntimeMode.LIVE, False),
+        (HealthRuntimeMode.DEMO, False),
+    ):
+        with pytest.raises(ValueError, match="DEGRADED"):
+            HealthVerdict(
+                is_no_trade=False,
+                reason_code="OK",
+                results=results,
+                mode=mode,
+                demo_degraded_allowed=flag,
+            )
+    with pytest.raises(ValueError, match="demo_degraded_allowed"):
+        HealthVerdict(
+            is_no_trade=False,
+            reason_code="OK",
+            results=tuple(_results_with_degraded(())),
+            mode=HealthRuntimeMode.LIVE,
+            demo_degraded_allowed=True,
+        )
+
+
+def test_d056_the_legacy_call_without_a_mode_keeps_its_old_result_for_the_rehearsal() -> None:
+    """Plan 24-22 hand-off: scripts/demo_rehearsal.py still calls without a mode until plan 24-29.
+
+    That call is the old behavior (DEGRADED passes) and its verdict carries no mode, so
+    `enable_demo` of the live process refuses it (tests/test_live_enablement_wiring.py).
+    """
+    from src.ops.health import run_health_checks
+
+    verdict = run_health_checks(results=_results_with_degraded(("ws_connection_state",)))
+    assert verdict.is_no_trade is False
+    assert verdict.mode is None
+    assert verdict.demo_degraded_allowed is False
+
+
+def test_d056_the_unchanged_policy_sentence_is_gone() -> None:
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "ops" / "health.py").read_text(
+        encoding="utf-8"
+    )
+    assert "unchanged policy" not in source
+
+
+def test_d056_the_only_production_caller_passes_the_mode() -> None:
+    """Every `run_health_checks(` call under src passes `mode=` (the live producer)."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src"
+    callers: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(node.func, "attr", None))
+                == "run_health_checks"
+            ):
+                callers.add(path.relative_to(root).as_posix())
+                assert "mode" in {k.arg for k in node.keywords}, path
+    assert callers == {"live/health.py"}
+
+
+def test_not_applicable_result_is_degraded_and_journaled() -> None:
+    from src.ops.health import CHECK_LAST_CLOSED_CANDLE_TIME, check_not_applicable
+
+    journal = FakeJournal()
+    result = check_not_applicable(
+        check_name=CHECK_LAST_CLOSED_CANDLE_TIME,
+        detail="not applicable to the live process",
+        now_utc=NOW_UTC,
+        journal=journal,
+    )
+    assert result.status == "DEGRADED"
+    assert len(journal.events) == 1
+    assert journal.events[0].event_type == "HEALTH_CHECK"
+
+
+def test_health_check_event_payload_without_extra_is_byte_identical_to_the_probe_event() -> None:
+    from src.ops.health import check_ws_connection_state, health_check_event
+
+    journal = FakeJournal()
+    result = check_ws_connection_state(connected=True, now_utc=NOW_UTC, journal=journal)
+    assert health_check_event(result) == journal.events[0]
+    enriched = health_check_event(result, extra={"python_version": "3.13", "mode": "DEMO"})
+    assert enriched.payload_json != journal.events[0].payload_json
+    assert '"python_version":"3.13"' in enriched.payload_json
+    assert enriched.journal_event_id != journal.events[0].journal_event_id
+
+
+def test_telegram_observed_delivery_probe() -> None:
+    from src.ops.health import check_telegram_delivery_observed
+
+    journal = FakeJournal()
+    never = check_telegram_delivery_observed(
+        last_delivery_ok=None, now_utc=NOW_UTC, journal=journal
+    )
+    ok = check_telegram_delivery_observed(last_delivery_ok=True, now_utc=NOW_UTC, journal=journal)
+    bad = check_telegram_delivery_observed(last_delivery_ok=False, now_utc=NOW_UTC, journal=journal)
+    assert (never.status, ok.status, bad.status) == ("FAIL", "PASS", "FAIL")
+    assert never.check_name == "telegram_delivery"

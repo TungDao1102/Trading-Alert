@@ -1,0 +1,13 @@
+{
+  "case_id": "insufficient_margin_order",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

@@ -40,8 +40,12 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models.user_
 from src.adapters import binance_userdata_supervisor as sup_mod
 from src.adapters.binance_limits import StreamLimits
 from src.adapters.binance_ratelimit_gate import (
+    GATE_NOT_RESTORED,
+    GATE_STATE_UNKNOWN,
     IP_BAN_418,
     RATE_LIMIT_PAUSE_429,
+    GateRecoveryStatus,
+    GateStateStore,
     RateLimitBanActive,
     RestRateLimitGate,
 )
@@ -66,6 +70,7 @@ from src.adapters.binance_userdata_supervisor import (
 )
 from src.domain.exchange_errors import ExchangeErrorCategory
 from src.ops import redaction
+from src.ops.rest_gate_state import FileGateStateStore
 
 from tests.support.ast_guards import (
     float_constructor_calls,
@@ -90,7 +95,7 @@ from tests.support.limits import (
     test_only_stream_limits,
 )
 from tests.support.userdata_frames import listen_key_expired_frame
-from tests.support.virtual_time import VirtualTime
+from tests.support.virtual_time import TEST_ONLY_VIRTUAL_START, VirtualTime
 from tests.userdata_fakes import (
     TEST_ONLY_LISTEN_KEY,
     TEST_ONLY_SECOND_LISTEN_KEY,
@@ -215,10 +220,13 @@ class Rig:
         rest: FakeRestUserDataApi | None = None,
         ws: FakeUserDataWsClient | None = None,
         factory: _Factory | None = None,
+        gate_store: GateStateStore | None = None,
     ) -> None:
         self.vt = VirtualTime()
         self.limits = limits if limits is not None else test_only_stream_limits()
-        self.gate = RestRateLimitGate(policy=test_only_rate_limit_policy(), clock=self.vt.now)
+        self.gate = RestRateLimitGate(
+            policy=test_only_rate_limit_policy(), clock=self.vt.now, state_store=gate_store
+        )
         self.rest = rest if rest is not None else FakeRestUserDataApi()
         self.ws = ws if ws is not None else FakeUserDataWsClient()
         self.factory = factory if factory is not None else _Factory()
@@ -565,7 +573,9 @@ async def test_keepalive_429_never_triggers_immediate_rekey_or_snapshot() -> Non
     # The 429 paused every REST call of the process; the supervisor is waiting it out.
     restriction = rig.gate.restriction()
     assert restriction is not None and restriction.reason == RATE_LIMIT_PAUSE_429
-    assert WAIT_429 in rig.vt.sleeps
+    # The wait is slept in slices of at most reconnect_wait_max_seconds (plan 20-30, WR-C3).
+    assert rig.limits.reconnect_wait_max_seconds in rig.vt.sleeps
+    assert WAIT_429 not in rig.vt.sleeps
     assert rig.supervisor.state is S.UNKNOWN
     assert rig.listen_key_posts() == 1
     assert rig.snapshots_provider.calls == 1
@@ -592,7 +602,9 @@ async def test_keepalive_429_with_retry_after_waits_capped_value() -> None:
     )
 
     await rig.vt.advance(KEEPALIVE)
-    assert CAP in rig.vt.sleeps
+    # Capped at the policy cap, then slept in slices of at most reconnect_wait_max_seconds.
+    assert rig.limits.reconnect_wait_max_seconds in rig.vt.sleeps
+    assert CAP not in rig.vt.sleeps
     assert CAP * 3 not in rig.vt.sleeps
 
     await rig.vt.advance(CAP - 1)
@@ -711,6 +723,113 @@ async def test_wait_end_does_not_restore_live() -> None:
     assert S.LIVE not in rig.state_names()[3:]
     assert rig.failures == ["SNAPSHOT_EXHAUSTED"]
     assert rig.events == []
+    await rig.stop()
+
+
+# --------------------------------------------------------------------------- #
+# WR-C4: a gate with no known end is not a pause; the wait is bounded by the stream limits.
+# --------------------------------------------------------------------------- #
+
+
+def _unknown_gate_rig(tmp_path: Path, limits: StreamLimits, *, restore: bool = True) -> Rig:
+    """A rig over a gate with a store whose file is missing (loss of initialized state)."""
+    store = FileGateStateStore(tmp_path / "gate.json", clock=lambda: TEST_ONLY_NOW)
+    rig = Rig(limits=limits, gate_store=store)
+    if restore:
+        assert rig.gate.restore() is GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+    return rig
+
+
+TEST_ONLY_NOW = TEST_ONLY_VIRTUAL_START
+
+
+async def _start_and_advance(rig: Rig, seconds: float) -> None:
+    starting = asyncio.ensure_future(rig.supervisor.start())
+    await rig.vt.advance(seconds)
+    await asyncio.wait_for(starting, timeout=5)  # real seconds: a spinning supervisor fails here
+
+
+async def test_unknown_gate_state_halts_after_the_reconnect_attempts_and_reports_once(
+    tmp_path: Path,
+) -> None:
+    rig = _unknown_gate_rig(tmp_path, limits_with())
+    attempts = rig.limits.reconnect_max_attempts
+
+    await _start_and_advance(rig, rig.limits.reconnect_max_delay_seconds)
+
+    # One check per attempt, one hint-length (1 s) wait between two checks, then the halt.
+    assert rig.vt.sleeps.count(1) == attempts - 1
+    assert rig.failures == [GATE_STATE_UNKNOWN]
+    assert rig.supervisor.state is S.UNKNOWN
+    assert rig.states[-1] == (S.UNKNOWN, GATE_STATE_UNKNOWN)
+    # Nothing was sent: the gate refused everything and the stream never connected.
+    assert sum(rig.rest.calls.values()) == 0
+    assert rig.snapshots_provider.calls == 0
+    # No further retries after the halt, however long the process runs.
+    sleeps = len(rig.vt.sleeps)
+    await rig.vt.advance(rig.limits.reconnect_max_delay_seconds)
+    assert len(rig.vt.sleeps) == sleeps
+    assert rig.failures == [GATE_STATE_UNKNOWN]
+    await rig.stop()
+
+
+async def test_unknown_gate_state_halts_after_the_reconnect_delay_when_attempts_are_many(
+    tmp_path: Path,
+) -> None:
+    limits = limits_with(reconnect_max_attempts=1000, reconnect_max_delay_seconds=3)
+    rig = _unknown_gate_rig(tmp_path, limits)
+
+    await _start_and_advance(rig, 3)
+
+    # Checks at 0, 1, 2 and 3 seconds of the injected clock; the fourth sees the delay spent.
+    assert rig.vt.sleeps.count(1) == 3
+    assert rig.failures == [GATE_STATE_UNKNOWN]
+    await rig.stop()
+
+
+async def test_a_gate_that_was_never_restored_halts_the_same_way(tmp_path: Path) -> None:
+    rig = _unknown_gate_rig(tmp_path, limits_with(), restore=False)
+    assert rig.gate.recovery_status() is GateRecoveryStatus.NOT_RESTORED
+
+    await _start_and_advance(rig, rig.limits.reconnect_max_delay_seconds)
+
+    assert rig.vt.sleeps.count(1) == rig.limits.reconnect_max_attempts - 1
+    assert rig.failures == [GATE_NOT_RESTORED]
+    assert sum(rig.rest.calls.values()) == 0
+    await rig.stop()
+
+
+async def test_a_resync_on_an_unknown_gate_is_bounded_again_and_reports_again(
+    tmp_path: Path,
+) -> None:
+    rig = _unknown_gate_rig(tmp_path, limits_with())
+    await _start_and_advance(rig, rig.limits.reconnect_max_delay_seconds)
+    assert rig.failures == [GATE_STATE_UNKNOWN]
+
+    rig.supervisor.request_resync()
+    await rig.vt.advance(rig.limits.reconnect_max_delay_seconds)
+
+    assert rig.failures == [GATE_STATE_UNKNOWN, GATE_STATE_UNKNOWN]
+    assert sum(rig.rest.calls.values()) == 0
+    await rig.stop()
+
+
+async def test_a_timed_pause_longer_than_the_reconnect_bound_is_still_waited_out() -> None:
+    limits = limits_with(reconnect_max_attempts=1, reconnect_max_delay_seconds=1)
+    rig = Rig(limits=limits)
+    rig.gate.record(_C.RATE_LIMITED, None)
+
+    starting = asyncio.ensure_future(rig.supervisor.start())
+    await rig.vt.advance(WAIT_429 - 1)
+    assert rig.failures == []
+    assert rig.listen_key_posts() == 0
+    await rig.vt.advance(1)
+    await asyncio.wait_for(starting, timeout=5)  # real seconds: a spinning supervisor fails here
+    await rig.settle()
+
+    assert rig.failures == []
+    assert rig.supervisor.state is S.LIVE
+    assert rig.listen_key_posts() == 1
     await rig.stop()
 
 
@@ -1181,11 +1300,17 @@ def _imports_supervisor(names: list[str]) -> bool:
     )
 
 
+# Plan 24-18 (D-14): the live stream composition root is the one legitimate importer; the same
+# allow-list is pinned, with its negative control, by tests/test_phase18_gate.py invariant 2.
+LIVE_STREAM_MODULE = REPO_ROOT / "src" / "live" / "stream.py"
+
+
 def test_no_src_module_imports_the_supervisor() -> None:
     offenders = [
         str(path.relative_to(REPO_ROOT))
         for path in sorted((REPO_ROOT / "src").rglob("*.py"))
-        if path != SUPERVISOR_PATH and _imports_supervisor(module_imports(path))
+        if path not in (SUPERVISOR_PATH, LIVE_STREAM_MODULE)
+        and _imports_supervisor(module_imports(path))
     ]
     assert offenders == []
 

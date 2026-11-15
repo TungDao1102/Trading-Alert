@@ -1,0 +1,13 @@
+{
+  "case_id": "trigger_cancel_race",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "positions",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

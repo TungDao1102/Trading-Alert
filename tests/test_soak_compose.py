@@ -36,6 +36,7 @@ RUNBOOK = REPO_ROOT / "docs" / "operations" / "RUNBOOK.md"
 SOAK_ENV_EXAMPLE = DEPLOY_DIR / "soak.env.example"
 SOAK_WRAPPER = DEPLOY_DIR / "compose-soak.sh"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+ENV_BACKUP_EXAMPLE = REPO_ROOT / ".env.backup.example"
 
 PYTHON = "/app/.venv/bin/python"
 PAPER_COMMAND = [PYTHON, "-m", "src.paper.runtime", "--hold-on-refusal"]
@@ -161,6 +162,16 @@ def test_paper_probe_timing_copies_the_collector() -> None:
     collector = _service_block("collector")
     for key in ("interval", "timeout", "start_period", "retries"):
         assert _health_scalar(paper, key) == _health_scalar(collector, key), key
+
+
+def test_the_paper_services_read_the_paper_env_file_and_the_others_do_not() -> None:
+    """Plan 24-36: paper and paper-pin share one env_file list; no other service lists it."""
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    assert "${TRADING_PAPER_ENV_FILE:-.env.paper}" in text
+    for name in ("paper", PIN_SERVICE):
+        assert "env_file: *paper-env-files" in _service_block(name), name
+    for name in ("collector", "db-upgrade", "live", "backup", "ops"):
+        assert "paper-env-files" not in _service_block(name), name
 
 
 def test_paper_command_arguments_parse_with_the_runtime_parser() -> None:
@@ -330,6 +341,16 @@ def _template_assignments() -> list[tuple[str, str]]:
 
 
 def _env_example_names() -> set[str]:
+    """Names of the backup template: since plan 24-36 the BACKUP_ names are not in .env.example."""
+    names: set[str] = set()
+    for line in ENV_BACKUP_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        match = _ASSIGNMENT.match(line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def _shared_example_names() -> set[str]:
     names: set[str] = set()
     for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
         match = _ASSIGNMENT.match(line)
@@ -353,7 +374,8 @@ def test_soak_template_lists_every_name_the_services_read_and_no_other() -> None
     # Collector and paper read the database and runtime names (ALLOWED_ENV_NAMES); the backup
     # service reads every BACKUP_ name of .env.example; compose interpolates IMAGE_TAG.
     backup_names = {n for n in _env_example_names() if n.startswith("BACKUP_")}
-    assert backup_names, ".env.example lists no BACKUP_ name"
+    assert backup_names, ".env.backup.example lists no BACKUP_ name"
+    assert not {n for n in _shared_example_names() if n.startswith("BACKUP_")}
     expected = set(ALLOWED_ENV_NAMES) | backup_names | {"IMAGE_TAG"}
     actual = {name for name, _ in _template_assignments()}
     assert expected - actual == set(), "missing from the template"
@@ -369,6 +391,7 @@ def test_soak_template_header_states_the_shared_env_file_and_the_refusal() -> No
     assert "BACKUP_" in header
     assert "WR-06" in header
     assert "Phase 24" in header
+    assert "TRADING_PAPER_ENV_FILE" in header and "TRADING_BACKUP_ENV_FILE" in header
     assert "BINANCE" in header
     assert "refuses to start" in header
     assert "even" in header and "empty" in header
@@ -404,7 +427,14 @@ def _wrapper_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {
         k: v
         for k, v in _hermetic_env().items()
-        if k not in {"COMPOSE_PROJECT_NAME", "TRADING_ENV_FILE", "DRY_RUN"}
+        if k
+        not in {
+            "COMPOSE_PROJECT_NAME",
+            "TRADING_ENV_FILE",
+            "TRADING_PAPER_ENV_FILE",
+            "TRADING_BACKUP_ENV_FILE",
+            "DRY_RUN",
+        }
     }
     # DRY_RUN=1 always: even an unexpectedly allowed command would only be printed.
     env["DRY_RUN"] = "1"
@@ -573,3 +603,50 @@ def test_runbook_and_deploy_scripts_hold_no_unguarded_down_with_volumes() -> Non
         if hits:
             found[script.name] = hits
     assert found == {}
+
+
+# --------------------------------------------------------------------------- #
+# Plan 24-36: the soak keeps one env file, so the wrapper points the split files at it.
+# --------------------------------------------------------------------------- #
+
+
+def _exported_split_files(extra_env: dict[str, str]) -> list[str]:
+    """TRADING_PAPER_ENV_FILE and TRADING_BACKUP_ENV_FILE as `main` leaves them for compose."""
+    proc = subprocess.run(
+        [
+            _bash(),
+            "-c",
+            'source "$1"; shift; run() { printf "%s\\n%s\\n" '
+            '"${TRADING_PAPER_ENV_FILE-unset}" "${TRADING_BACKUP_ENV_FILE-unset}"; }; main "$@"',
+            "soak",
+            SOAK_WRAPPER.as_posix(),
+            "ps",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        cwd=REPO_ROOT,
+        env=_wrapper_env(extra_env),
+    )
+    assert proc.returncode == 0, proc.stderr.strip()[:300]
+    return proc.stdout.splitlines()
+
+
+def test_wrapper_points_the_paper_and_backup_env_files_at_the_soak_env_file() -> None:
+    soak = "/somewhere/outside/soak.env"
+    assert _exported_split_files({"TRADING_ENV_FILE": soak}) == [soak, soak]
+
+
+def test_wrapper_overrides_a_paper_or_backup_file_inherited_from_the_environment() -> None:
+    soak = "/somewhere/outside/soak.env"
+    inherited = {
+        "TRADING_ENV_FILE": soak,
+        "TRADING_PAPER_ENV_FILE": "/checkout/.env.paper",
+        "TRADING_BACKUP_ENV_FILE": "/checkout/.env.backup",
+    }
+    assert _exported_split_files(inherited) == [soak, soak]
+
+
+def test_wrapper_leaves_the_compose_defaults_alone_without_a_soak_env_file() -> None:
+    assert _exported_split_files({}) == ["unset", "unset"]

@@ -24,6 +24,8 @@ from src.adapters.binance_errors import error_facts_from_exception
 from src.domain.exchange_errors import (
     DEMO_SMOKE_DATE,
     ERROR_CODE_TABLE,
+    ERROR_TABLE_PHASE22_READ_DATE,
+    ERROR_TABLE_PHASE22_SOURCE,
     ERROR_TABLE_READ_DATE,
     ERROR_TABLE_REREAD_DATE,
     ERROR_TABLE_SOURCE,
@@ -129,10 +131,28 @@ def test_taxonomy_is_pure_stdlib_no_float_no_clock() -> None:
 
 
 def test_normalizer_never_reads_message_text() -> None:
-    """`str(exc)`, `exc.args`, `error_message` and `repr` never appear in the normalizer."""
+    """`str(exc)`, `exc.args`, `error_message` and `repr` never appear in the normalizer.
+
+    The single exception is D083 item 2: the string constant ``"error_message"`` (the one
+    ``getattr`` read of the 418 / -1003 ban end) inside `_ban_until_epoch_ms` and nowhere else;
+    every other form stays an offender even inside that function.
+    """
     tree = ast.parse(NORMALIZER.read_text(encoding="utf-8"))
+    d083 = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_ban_until_epoch_ms"
+    ]
+    assert len(d083) == 1, "the D083 function is missing or duplicated"
+    permitted = {
+        id(node)
+        for node in ast.walk(d083[0])
+        if isinstance(node, ast.Constant) and node.value == "error_message"
+    }
     offenders: list[tuple[int, str]] = []
     for node in ast.walk(tree):
+        if id(node) in permitted:
+            continue
         if isinstance(node, ast.Attribute) and node.attr in {"args", "error_message", "msg"}:
             offenders.append((node.lineno, node.attr))
         if (
@@ -203,6 +223,21 @@ _EXPECTED_BY_CODE: dict[int, tuple[ExchangeErrorCategory, tuple[CallKind, ...]]]
     -4400: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4401: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
     -4509: (_C.PRECONDITION_NO_POSITION, _PLACEMENT),
+    # Added on purpose (plan 20-27, owner approval 2026-10-23): Binance Demo rejected a GTD entry
+    # with goodTillDate below now + 600 s (Demo run 20261022T120055Z, gtd_min_lifetime_boundary).
+    -5040: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    # Added on purpose (Phase 22 plan 22-03): the definitive refusals of the margin-type and
+    # leverage changes (POST /fapi/v1/marginType, POST /fapi/v1/leverage) and the entry-time
+    # leverage limits; error-code page read 2026-10-23 (22-RESEARCH.md 2.1, 2.2, 2.9).
+    -4046: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4047: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4048: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4028: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4161: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4168: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -4209: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -2027: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
+    -2028: (_C.REJECTED_DEFINITIVE, _PLACEMENT),
 }
 
 
@@ -225,8 +260,21 @@ def test_code_classifies_per_call_kind(code: int, http_class: HttpClass) -> None
 _REREAD_CODES: frozenset[int] = frozenset({-1106, -4016, -4024, -1125})
 
 
+# The nine codes of the Phase 22 read of the error-code page (2026-10-23, plan 22-03). They carry
+# their own read date and source; the 2026-10-16 and 2026-10-17 reads are not claimed for them.
+_PHASE22_CODES: frozenset[int] = frozenset(
+    {-4046, -4047, -4048, -4028, -4161, -4168, -4209, -2027, -2028}
+)
+
+
 def _expected_read_date(code: int) -> str:
+    if code in _PHASE22_CODES:
+        return ERROR_TABLE_PHASE22_READ_DATE
     return ERROR_TABLE_REREAD_DATE if code in _REREAD_CODES else ERROR_TABLE_READ_DATE
+
+
+def _expected_source(code: int) -> str:
+    return ERROR_TABLE_PHASE22_SOURCE if code in _PHASE22_CODES else ERROR_TABLE_SOURCE
 
 
 @pytest.mark.parametrize("code", sorted(_EXPECTED_BY_CODE), ids=lambda c: f"code{c}")
@@ -234,7 +282,7 @@ def test_table_entry_metadata(code: int) -> None:
     entry = ERROR_CODE_TABLE[code]
     assert entry.code == code
     assert entry.name.strip() != ""
-    assert entry.source == ERROR_TABLE_SOURCE
+    assert entry.source == _expected_source(code)
     assert entry.read_date == _expected_read_date(code)
     assert entry.evidence in EVIDENCE_LABELS
     assert entry.note.strip() != ""
@@ -288,11 +336,15 @@ def test_demo_observed_codes_are_exactly_the_probe_observed_codes_in_the_table()
     assert observed == sorted(
         [code for code, *_ in _PROBE_OBSERVED_IN_TABLE]
         + [code for code, *_ in _SMOKE_OBSERVED_IN_TABLE]
+        + [-5040]
     )
-    assert observed == [-4509, -4116, -4016, -2021, -2013, -2011, -1125, -1106]
+    # -5040 (plan 20-27) is the only code seen on a later Demo run (2026-10-22).
+    assert observed == [-5040, -4509, -4116, -4016, -2021, -2013, -2011, -1125, -1106]
     assert -4024 not in observed
     for code in observed:
-        assert ERROR_CODE_TABLE[code].demo_observed_on == "2026-10-16"
+        assert ERROR_CODE_TABLE[code].demo_observed_on == (
+            "2026-10-22" if code == -5040 else "2026-10-16"
+        )
         # The read date of the documentation is not changed by a Demo observation.
         assert ERROR_CODE_TABLE[code].read_date == _expected_read_date(code)
 
@@ -313,6 +365,28 @@ def test_a_demo_observation_does_not_relabel_a_documented_code() -> None:
     # The duplicate clientAlgoId case was observed as -4116 (DUPLICATE_CLIENT_ID on placement).
     assert "clientAlgoId" in ERROR_CODE_TABLE[-4116].note
     assert "observed" in ERROR_CODE_TABLE[-4116].note
+
+
+def test_5040_is_a_demo_observed_definitive_placement_rejection() -> None:
+    """Plan 20-27: goodTillDate below now + 600 s answered -5040 on Binance Demo (2026-10-22)."""
+    entry = ERROR_CODE_TABLE[-5040]
+    assert entry.evidence == "demo-observed"
+    assert entry.demo_observed_on == "2026-10-22"
+    assert entry.read_date == ERROR_TABLE_READ_DATE  # the page read; the code is not on it
+    assert dict(entry.categories_by_call_kind) == {_K.PLACEMENT: _C.REJECTED_DEFINITIVE}
+    # The evidence file and case are named in the row's note; it is not a page statement.
+    assert "demo-probe-EVIDENCE-20261022T120055Z.json" in entry.note
+    assert "gtd_min_lifetime_boundary" in entry.note
+    assert "600 seconds" in entry.note
+    assert "documented" not in entry.evidence
+    assert "re-read 2026-10-1" not in entry.note
+    for http_class in (HttpClass.BAD_REQUEST, HttpClass.NOT_FOUND):
+        facts = ErrorFacts(http_class, -5040, None)
+        assert classify(facts, _K.PLACEMENT) is _C.REJECTED_DEFINITIVE
+        for kind in (_K.CANCEL, _K.QUERY, _K.LISTEN_KEY, _K.TIME):
+            assert classify(facts, kind) is _C.UNKNOWN_EXCHANGE_ERROR
+    # A placement is never retried, whatever the category.
+    assert retry_eligible(_C.REJECTED_DEFINITIVE, _K.PLACEMENT) is False
 
 
 def test_demo_observed_on_must_be_an_iso_date() -> None:
@@ -433,6 +507,8 @@ def test_entry_read_date_defaults_to_the_first_read_and_can_be_overridden() -> N
     assert ERROR_TABLE_REREAD_DATE == "2026-10-17"
     assert ERROR_TABLE_REREAD_DATE > ERROR_TABLE_READ_DATE
     for code, entry in ERROR_CODE_TABLE.items():
+        if code in _PHASE22_CODES:  # their own read date, asserted in TestPhase22Codes
+            continue
         expected = ERROR_TABLE_REREAD_DATE if code in _REREAD_CODES else ERROR_TABLE_READ_DATE
         assert entry.read_date == expected, code
     override = dataclasses.replace(ERROR_CODE_TABLE[-2013], read_date=ERROR_TABLE_REREAD_DATE)
@@ -452,8 +528,90 @@ def test_only_the_owner_codes_carry_the_second_read_date() -> None:
     second = {c for c, e in ERROR_CODE_TABLE.items() if e.read_date == ERROR_TABLE_REREAD_DATE}
     assert second == set(_REREAD_CODES)
     for code, entry in ERROR_CODE_TABLE.items():
-        if code not in _REREAD_CODES:
+        if code not in _REREAD_CODES and code not in _PHASE22_CODES:
             assert entry.read_date == ERROR_TABLE_READ_DATE, code
+
+
+_PHASE22_NAMES: dict[int, str] = {
+    -4046: "NO_NEED_TO_CHANGE_MARGIN_TYPE",
+    -4047: "THERE_EXISTS_OPEN_ORDERS",
+    -4048: "THERE_EXISTS_QUANTITY",
+    -4028: "INVALID_LEVERAGE",
+    -4161: "ISOLATED_LEVERAGE_REJECT_WITH_POSITION",
+    -4168: "JOINT_MARGIN_REJECT_WITH_ISOLATED",
+    -4209: "ADJUST_LEVERAGE_SYMBOL_FAILED",
+    -2027: "MAX_LEVERAGE_RATIO",
+    -2028: "MIN_LEVERAGE_RATIO",
+}
+
+
+class TestPhase22Codes:
+    """Plan 22-03: the nine margin-type and leverage codes (22-RESEARCH.md 2.1, 2.2, 2.9)."""
+
+    def test_the_set_is_exactly_the_nine_codes(self) -> None:
+        assert set(_PHASE22_NAMES) == _PHASE22_CODES
+        assert len(_PHASE22_CODES) == 9
+        assert _PHASE22_CODES <= set(ERROR_CODE_TABLE)
+
+    @pytest.mark.parametrize("code", sorted(_PHASE22_NAMES), ids=lambda c: f"code{c}")
+    @pytest.mark.parametrize("http_class", [HttpClass.BAD_REQUEST, HttpClass.NOT_FOUND])
+    def test_definitive_on_placement_only(self, code: int, http_class: HttpClass) -> None:
+        facts = ErrorFacts(http_class, code, None)
+        assert classify(facts, _K.PLACEMENT) is _C.REJECTED_DEFINITIVE
+        for kind in (_K.QUERY, _K.CANCEL, _K.LISTEN_KEY, _K.TIME):
+            assert classify(facts, kind) is _C.UNKNOWN_EXCHANGE_ERROR, (code, kind)
+        # A definitive refusal is neither retried nor SAFE_MODE-eligible.
+        assert retry_eligible(_C.REJECTED_DEFINITIVE, _K.PLACEMENT) is False
+        assert safe_mode_eligible(_C.REJECTED_DEFINITIVE) is False
+
+    @pytest.mark.parametrize("code", sorted(_PHASE22_NAMES), ids=lambda c: f"code{c}")
+    def test_entry_metadata(self, code: int) -> None:
+        entry = ERROR_CODE_TABLE[code]
+        assert entry.name == _PHASE22_NAMES[code]
+        assert entry.evidence == "documented"
+        assert entry.demo_observed_on is None
+        assert entry.read_date == ERROR_TABLE_PHASE22_READ_DATE == "2026-10-23"
+        assert entry.source == ERROR_TABLE_PHASE22_SOURCE
+        assert "Facts read for Phase 22" in entry.source
+        assert "error-code" in entry.source
+        assert "error-code page read 2026-10-23 (22-RESEARCH.md)" in entry.note
+        assert dict(entry.categories_by_call_kind) == {_K.PLACEMENT: _C.REJECTED_DEFINITIVE}
+        # The earlier reads are not claimed for the new codes.
+        assert "re-read 2026-10-1" not in entry.note
+        assert entry.read_date not in (ERROR_TABLE_READ_DATE, ERROR_TABLE_REREAD_DATE)
+
+    def test_4046_says_the_requested_type_is_an_error_not_a_no_op(self) -> None:
+        note = ERROR_CODE_TABLE[-4046].note
+        assert "No need to change margin type." in note
+        assert "error and not a no-op" in note
+        assert "verification read" in note
+
+    @pytest.mark.parametrize("code", sorted(_PHASE22_NAMES), ids=lambda c: f"code{c}")
+    def test_class_rules_still_win_over_the_code(self, code: int) -> None:
+        assert classify(ErrorFacts(HttpClass.BANNED_418, code, None), _K.PLACEMENT) is (
+            _C.IP_BANNED
+        )
+        assert classify(ErrorFacts(HttpClass.TOO_MANY_429, code, None), _K.PLACEMENT) is (
+            _C.RATE_LIMITED
+        )
+        for http_class in (HttpClass.SERVER_5XX, HttpClass.NETWORK):
+            facts = ErrorFacts(http_class, code, None)
+            assert classify(facts, _K.PLACEMENT) is _C.STATUS_UNKNOWN
+
+    def test_the_other_leverage_and_region_codes_stay_out_of_the_table(self) -> None:
+        for code in (-4202, -4203, -4204, -4205, -4206, -4208, -4403):
+            assert code not in ERROR_CODE_TABLE, code
+            facts = ErrorFacts(HttpClass.BAD_REQUEST, code, None)
+            assert classify(facts, _K.PLACEMENT) is _C.UNKNOWN_EXCHANGE_ERROR
+
+    def test_the_phase22_constants_and_the_default_entry_source(self) -> None:
+        assert ERROR_TABLE_PHASE22_READ_DATE == "2026-10-23"
+        assert ERROR_TABLE_PHASE22_SOURCE == (
+            "docs/SOURCES.md, Facts read for Phase 22, error-code row"
+        )
+        for code, entry in ERROR_CODE_TABLE.items():
+            if code not in _PHASE22_CODES:
+                assert entry.source == ERROR_TABLE_SOURCE, code
 
 
 def test_1106_entry_keeps_page_and_demo_wording_apart() -> None:

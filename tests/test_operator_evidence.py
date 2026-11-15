@@ -267,6 +267,12 @@ def test_the_smoke_kind_loads_every_value_with_decimal_strings(tmp_path: Path) -
         case_timeout_seconds=None,
         cleanup_timeout_seconds=60,
         optional_cases=MappingProxyType({}),
+        near_trigger_fraction=None,
+        gtd_lifetime_seconds=None,
+        gtd_expiry_wait_seconds=None,
+        race_repeats=None,
+        insufficient_margin_quantity=None,
+        config_target_leverage=None,  # Phase 22 plan 22-05
     )
     assert limits.enabled_optional_cases == ()
 
@@ -412,6 +418,245 @@ def test_the_probe_kind_refuses_every_missing_unknown_or_malformed_key(
         oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
 
 
+# --------------------------------------------------------------------------- #
+# Quick task 261021-sj0: the ten owner opt-in evidence cases.
+# --------------------------------------------------------------------------- #
+
+PHASE18_PROBE_LIMITS = (
+    Path(__file__).resolve().parents[1]
+    / ".planning/phases/18-user-data-stream-error-taxonomy/decisions/18-probe-limits.toml"
+)
+NEW_KEYS = (
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "gtd_expiry",
+)
+
+
+def _with_new_keys(*pairs: tuple[str, str]) -> str:
+    """The TEST_ONLY probe file with `key = value` lines added to [optional_cases]."""
+    return TEST_ONLY_PROBE_LIMITS + "".join(f"{key} = {value}\n" for key, value in pairs)
+
+
+# Quick task 261022-sj1: five more keys, inserted before gtd_expiry (the only long case).
+SJ1_KEYS = (
+    "exchange_info_read",
+    "gtd_min_lifetime",
+    "partial_fill_attempt",
+    "cancel_fill_race",
+    "stream_loss",
+)
+
+
+# Quick task 261023-sj2: eight more keys, inserted before gtd_expiry (the only long case).
+SJ2_KEYS = (
+    "reduce_only_flat",
+    "reduce_only_oversize",
+    "min_notional_entry",
+    "insufficient_margin",
+    "stop_reject_after_accept",
+    "trigger_cancel_race",
+    "recv_window_error",
+    "income_history",
+)
+
+
+# Phase 22 plans 22-05 and 22-09: the owner-run symbol-configuration keys, before gtd_expiry.
+SJ3_KEYS = (
+    "symbol_config_change",
+    "margin_type_resting_order",
+    "leverage_above_max",
+    "margin_insufficient_target",
+    "available_balance_resting",
+    "isolated_liquidation",
+)
+
+
+def test_the_evidence_case_keys_are_the_ten_the_five_and_the_eight_in_script_order() -> None:
+    assert oe.EVIDENCE_CASE_KEYS == (
+        *NEW_KEYS[:9],
+        *SJ1_KEYS,
+        *SJ2_KEYS,
+        *SJ3_KEYS,  # Phase 22 plan 22-05
+        NEW_KEYS[9],
+    )
+    assert oe.EVIDENCE_CASE_KEYS[-2] == SJ3_KEYS[-1]  # right before the long case
+    assert oe.EVIDENCE_CASE_KEYS[-1] == "gtd_expiry"  # the case that waits runs last
+    assert "EVIDENCE_CASE_KEYS" in oe.__all__
+    assert not set(oe.EVIDENCE_CASE_KEYS) & set(oe.OPTIONAL_CASE_KEYS)
+
+
+def test_the_real_phase18_probe_file_loads_to_the_unchanged_values() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.enabled_optional_cases == ()
+    assert dict(limits.optional_cases) == {
+        "explicit_time_in_force": False,
+        "stream_gap": False,
+        "market_lot_size_out_of_range": False,
+    }
+    assert limits.symbol == "BTCUSDT"
+    assert limits.quantity == Decimal("0.0008")
+    assert limits.max_notional_quote == Decimal("100")
+    assert limits.far_price_fraction == Decimal("0.96")
+    assert limits.case_timeout_seconds == 30
+    assert limits.cleanup_timeout_seconds == 60
+    assert limits.near_trigger_fraction is None
+    assert limits.gtd_lifetime_seconds is None
+    assert limits.gtd_expiry_wait_seconds is None
+
+
+def test_an_evidence_key_enables_its_case_and_follows_the_phase18_keys(tmp_path: Path) -> None:
+    text = _with_new_keys(("account_capture", "true"), ("algo_query_timing", "false"))
+    text = text.replace("stream_gap = false", "stream_gap = true")
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert limits.optional_cases["account_capture"] is True
+    assert limits.optional_cases["algo_query_timing"] is False
+    assert "close_position_with_position" not in limits.optional_cases  # absent: not stored
+    assert limits.enabled_optional_cases == (
+        "explicit_time_in_force",
+        "stream_gap",
+        "account_capture",
+    )
+
+
+def test_a_non_bool_evidence_key_is_refused_by_name(tmp_path: Path) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _with_new_keys(("account_capture", '"true"'))), kind="probe"
+        )
+    assert "optional_cases.account_capture" in str(info.value)
+    assert "true" not in str(info.value).replace("must be true or false", "")
+
+
+def test_an_unknown_key_in_optional_cases_is_still_refused(tmp_path: Path) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _with_new_keys(("mystery_capture", "true"))), kind="probe"
+        )
+    assert "optional_cases.mystery_capture (unknown key)" in str(info.value)
+
+
+_NEAR = 'near_trigger_fraction = "0.999"\n'
+
+
+@pytest.mark.parametrize("key", ["triggered_bracket", "tp1_from_fill"])
+def test_the_near_trigger_fraction_is_required_exactly_when_its_cases_are_on(
+    tmp_path: Path, key: str
+) -> None:
+    on = _with_new_keys((key, "true")).replace(
+        'symbol = "BTCUSDT"\n', 'symbol = "BTCUSDT"\n' + _NEAR
+    )
+    limits = oe.load_demo_order_limits(_write(tmp_path, on), kind="probe")
+    assert limits.near_trigger_fraction == Decimal("0.999")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as missing:
+        oe.load_demo_order_limits(_write(tmp_path, _with_new_keys((key, "true"))), kind="probe")
+    assert "order.near_trigger_fraction (missing key" in str(missing.value)
+    off = TEST_ONLY_PROBE_LIMITS.replace('symbol = "BTCUSDT"\n', 'symbol = "BTCUSDT"\n' + _NEAR)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as present:
+        oe.load_demo_order_limits(_write(tmp_path, off), kind="probe")
+    assert "order.near_trigger_fraction (only allowed when" in str(present.value)
+
+
+@pytest.mark.parametrize(
+    "value", ['"0"', '"1"', '"1.5"', '"-0.5"', "0.999", '"abc"', '"9E-1"', "1"]
+)
+def test_the_near_trigger_fraction_must_be_a_plain_decimal_strictly_between_0_and_1(
+    tmp_path: Path, value: str
+) -> None:
+    text = _with_new_keys(("triggered_bracket", "true")).replace(
+        'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\nnear_trigger_fraction = {value}\n'
+    )
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert "order.near_trigger_fraction" in str(info.value)
+
+
+def _gtd_text(lifetime: str | None, wait: str | None, *, enabled: bool = True) -> str:
+    text = _with_new_keys(("gtd_expiry", "true" if enabled else "false"))
+    if lifetime is not None:
+        text = text.replace(
+            'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\ngtd_lifetime_seconds = {lifetime}\n'
+        )
+    if wait is not None:
+        text = text.replace(
+            "case_timeout_seconds = 45\n",
+            f"case_timeout_seconds = 45\ngtd_expiry_wait_seconds = {wait}\n",
+        )
+    return text
+
+
+def test_the_gtd_lifetime_and_wait_come_with_their_case(tmp_path: Path) -> None:
+    limits = oe.load_demo_order_limits(_write(tmp_path, _gtd_text("660", "720")), kind="probe")
+    assert limits.gtd_lifetime_seconds == 660
+    assert limits.gtd_expiry_wait_seconds == 720
+    assert "gtd_expiry" in limits.enabled_optional_cases
+
+
+@pytest.mark.parametrize(
+    ("lifetime", "wait", "enabled", "named"),
+    [
+        (None, "720", True, "order.gtd_lifetime_seconds"),
+        ("660", None, True, "waits.gtd_expiry_wait_seconds"),
+        ("660", "660", True, "waits.gtd_expiry_wait_seconds (must be greater"),
+        ("660", "600", True, "waits.gtd_expiry_wait_seconds (must be greater"),
+        ("0", "720", True, "order.gtd_lifetime_seconds (must be a positive integer)"),
+        ("true", "720", True, "order.gtd_lifetime_seconds (must be a positive integer)"),
+        ('"660"', "720", True, "order.gtd_lifetime_seconds (must be a positive integer)"),
+        ("660", "7.5", True, "waits.gtd_expiry_wait_seconds (must be a positive integer)"),
+        ("660", "720", False, "order.gtd_lifetime_seconds (only allowed when"),
+        (None, "720", False, "waits.gtd_expiry_wait_seconds (only allowed when"),
+    ],
+)
+def test_the_gtd_keys_are_refused_unless_valid_and_only_with_their_case(
+    tmp_path: Path, lifetime: str | None, wait: str | None, enabled: bool, named: str
+) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _gtd_text(lifetime, wait, enabled=enabled)), kind="probe"
+        )
+    assert named in str(info.value)
+
+
+def test_a_lifetime_below_the_exchange_floor_is_not_refused(tmp_path: Path) -> None:
+    """The exchange's answer to a short lifetime is itself evidence (A1): no floor here."""
+    limits = oe.load_demo_order_limits(_write(tmp_path, _gtd_text("30", "60")), kind="probe")
+    assert limits.gtd_lifetime_seconds == 30
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("order", 'near_trigger_fraction = "0.999"\n'),
+        ("order", "gtd_lifetime_seconds = 660\n"),
+        ("waits", "gtd_expiry_wait_seconds = 720\n"),
+        ("optional_cases", "account_capture = true\n"),
+    ],
+)
+def test_the_smoke_kind_refuses_the_new_keys_as_unknown(
+    tmp_path: Path, extra: tuple[str, str]
+) -> None:
+    section, line = extra
+    text = TEST_ONLY_SMOKE_LIMITS.replace(f"[{section}]\n", f"[{section}]\n{line}", 1)
+    if section == "optional_cases":
+        text += f"\n[optional_cases]\n{line}"
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+
+
+def test_the_refusals_of_the_new_keys_never_carry_a_value(tmp_path: Path) -> None:
+    text = _gtd_text("123456", "123457", enabled=False)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert "123456" not in str(info.value) and "123457" not in str(info.value)
+
+
 def test_a_smoke_file_is_refused_as_a_probe_file_and_the_reverse(tmp_path: Path) -> None:
     with pytest.raises(oe.DemoOrderLimitsRefused):
         oe.load_demo_order_limits(_write(tmp_path, TEST_ONLY_SMOKE_LIMITS, "s.toml"), kind="probe")
@@ -438,3 +683,440 @@ def test_the_module_imports_no_sdk_and_no_adapter() -> None:
             imported.add(node.module)
     assert not any(name.startswith(("binance", "src.adapters", "src.paper")) for name in imported)
     assert {name for name in imported if name.startswith("src")} == {"src.ops.redaction"}
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261022-sj1: five more owner opt-in cases and the key race_repeats.
+# --------------------------------------------------------------------------- #
+
+
+def _race_text(repeats: str | None, *, enabled: bool = True) -> str:
+    text = _with_new_keys(("cancel_fill_race", "true" if enabled else "false"))
+    if repeats is not None:
+        text = text.replace(
+            'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\nrace_repeats = {repeats}\n'
+        )
+    return text
+
+
+@pytest.mark.parametrize("key", SJ1_KEYS)
+def test_each_sj1_key_enables_only_its_case(tmp_path: Path, key: str) -> None:
+    text = _race_text("3") if key == "cancel_fill_race" else _with_new_keys((key, "true"))
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert [k for k in limits.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS] == [key]
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "false")), "off.toml"), kind="probe"
+    )
+    assert not [k for k in off.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS]
+    assert off.race_repeats is None
+
+
+def test_race_repeats_comes_with_its_case_and_is_a_small_positive_integer(tmp_path: Path) -> None:
+    limits = oe.load_demo_order_limits(_write(tmp_path, _race_text("3")), kind="probe")
+    assert limits.race_repeats == 3
+    assert isinstance(oe.RACE_REPEATS_MAX, int) and 1 <= oe.RACE_REPEATS_MAX <= 10
+    top = oe.load_demo_order_limits(
+        _write(tmp_path, _race_text(str(oe.RACE_REPEATS_MAX)), "top.toml"), kind="probe"
+    )
+    assert top.race_repeats == oe.RACE_REPEATS_MAX
+
+
+@pytest.mark.parametrize(
+    ("repeats", "enabled", "named"),
+    [
+        (None, True, "order.race_repeats (missing key"),
+        ("0", True, "order.race_repeats (must be a positive integer)"),
+        ("-2", True, "order.race_repeats (must be a positive integer)"),
+        ("true", True, "order.race_repeats (must be a positive integer)"),
+        ('"3"', True, "order.race_repeats (must be a positive integer)"),
+        ("2.5", True, "order.race_repeats (must be a positive integer)"),
+        ("11", True, "order.race_repeats (must be at most"),
+        ("1000000", True, "order.race_repeats (must be at most"),
+        ("3", False, "order.race_repeats (only allowed when"),
+    ],
+)
+def test_race_repeats_is_refused_unless_valid_and_only_with_its_case(
+    tmp_path: Path, repeats: str | None, enabled: bool, named: str
+) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _race_text(repeats, enabled=enabled)), kind="probe"
+        )
+    assert named in str(info.value)
+
+
+def test_the_race_repeats_refusal_never_carries_the_value(tmp_path: Path) -> None:
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, _race_text("987654")), kind="probe")
+    assert "987654" not in str(info.value)
+
+
+def test_the_smoke_kind_refuses_race_repeats_and_the_sj1_case_keys(tmp_path: Path) -> None:
+    lines = [("order", "race_repeats = 3\n")] + [
+        ("optional_cases", f"{key} = true\n") for key in SJ1_KEYS
+    ]
+    for section, line in lines:
+        text = TEST_ONLY_SMOKE_LIMITS.replace(f"[{section}]\n", f"[{section}]\n{line}", 1)
+        if section == "optional_cases":
+            text += f"\n[optional_cases]\n{line}"
+        with pytest.raises(oe.DemoOrderLimitsRefused):
+            oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+
+
+def test_the_phase18_file_has_no_race_repeats() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.race_repeats is None
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261023-sj2: eight more owner opt-in cases and their keys.
+# --------------------------------------------------------------------------- #
+
+MARGIN_QUANTITY_LINE = 'insufficient_margin_quantity = "5"\n'
+NEAR_LINE = 'near_trigger_fraction = "0.999"\n'
+RACE_LINE = "race_repeats = 3\n"
+
+
+def _sj2_text(*keys: str, extra_order: str = "") -> str:
+    text = _with_new_keys(*((key, "true") for key in keys))
+    if extra_order:
+        text = text.replace('symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{extra_order}', 1)
+    return text
+
+
+_SJ2_NEEDS: dict[str, str] = {
+    "stop_reject_after_accept": NEAR_LINE,
+    "trigger_cancel_race": NEAR_LINE + RACE_LINE,
+    "insufficient_margin": MARGIN_QUANTITY_LINE,
+}
+
+
+@pytest.mark.parametrize("key", SJ2_KEYS)
+def test_each_sj2_key_enables_only_its_case(tmp_path: Path, key: str) -> None:
+    text = _sj2_text(key, extra_order=_SJ2_NEEDS.get(key, ""))
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert [k for k in limits.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS] == [key]
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "false")), "off.toml"), kind="probe"
+    )
+    assert not [k for k in off.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS]
+    assert off.near_trigger_fraction is None
+    assert off.race_repeats is None
+    assert off.insufficient_margin_quantity is None
+
+
+def test_the_near_trigger_fraction_serves_the_two_new_stop_cases(tmp_path: Path) -> None:
+    for key in ("stop_reject_after_accept", "trigger_cancel_race"):
+        extra = _SJ2_NEEDS[key]
+        limits = oe.load_demo_order_limits(
+            _write(tmp_path, _sj2_text(key, extra_order=extra), f"{key}.toml"), kind="probe"
+        )
+        assert limits.near_trigger_fraction == Decimal("0.999")
+        with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+            oe.load_demo_order_limits(
+                _write(
+                    tmp_path,
+                    _sj2_text(key, extra_order=extra.replace(NEAR_LINE, "")),
+                    f"{key}-no.toml",
+                ),
+                kind="probe",
+            )
+        assert "order.near_trigger_fraction (missing key" in str(info.value)
+
+
+def test_race_repeats_serves_either_race_case_and_is_refused_otherwise(tmp_path: Path) -> None:
+    both = _sj2_text("cancel_fill_race", "trigger_cancel_race", extra_order=NEAR_LINE + RACE_LINE)
+    limits = oe.load_demo_order_limits(_write(tmp_path, both), kind="probe")
+    assert limits.race_repeats == 3
+    missing = _sj2_text("trigger_cancel_race", extra_order=NEAR_LINE)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, missing, "n.toml"), kind="probe")
+    assert "order.race_repeats (missing key" in str(info.value)
+    assert "optional_cases.trigger_cancel_race" in str(info.value)
+    toolong = _sj2_text("trigger_cancel_race", extra_order=NEAR_LINE + "race_repeats = 11\n")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info2:
+        oe.load_demo_order_limits(_write(tmp_path, toolong, "t.toml"), kind="probe")
+    assert "order.race_repeats (must be at most" in str(info2.value)
+
+
+def test_the_margin_quantity_is_the_owners_own_key_and_the_cap_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    text = _sj2_text("insufficient_margin", extra_order=MARGIN_QUANTITY_LINE)
+    limits = oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert limits.insufficient_margin_quantity == Decimal("5")
+    assert limits.max_notional_quote == Decimal("150")
+    assert limits.quantity == Decimal("0.002")
+
+
+@pytest.mark.parametrize(
+    ("line", "enabled", "named"),
+    [
+        ("", True, "order.insufficient_margin_quantity (missing key"),
+        (
+            'insufficient_margin_quantity = "<OWNER: whole quantity>"\n',
+            True,
+            "order.insufficient_margin_quantity (must be a plain decimal string)",
+        ),
+        (
+            'insufficient_margin_quantity = "0"\n',
+            True,
+            "order.insufficient_margin_quantity (must be positive)",
+        ),
+        (
+            'insufficient_margin_quantity = "-3"\n',
+            True,
+            "order.insufficient_margin_quantity (must be positive)",
+        ),
+        (
+            "insufficient_margin_quantity = 5\n",
+            True,
+            "order.insufficient_margin_quantity (must be a plain decimal string)",
+        ),
+        (
+            'insufficient_margin_quantity = "5"\n',
+            False,
+            "order.insufficient_margin_quantity (only allowed when",
+        ),
+    ],
+)
+def test_the_margin_quantity_is_refused_unless_a_positive_decimal_and_only_with_its_case(
+    tmp_path: Path, line: str, enabled: bool, named: str
+) -> None:
+    text = _with_new_keys(("insufficient_margin", "true" if enabled else "false")).replace(
+        'symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{line}', 1
+    )
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert named in str(info.value)
+    assert "OWNER" not in str(info.value)  # a refusal names keys, never a value
+
+
+def test_the_smoke_kind_refuses_the_sj2_case_keys_and_the_margin_quantity(tmp_path: Path) -> None:
+    for key in SJ2_KEYS:
+        text = TEST_ONLY_SMOKE_LIMITS + f"\n[optional_cases]\n{key} = true\n"
+        with pytest.raises(oe.DemoOrderLimitsRefused):
+            oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+    text = TEST_ONLY_SMOKE_LIMITS.replace(
+        "[order]\n", '[order]\ninsufficient_margin_quantity = "5"\n', 1
+    )
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, text, "m.toml"), kind="smoke")
+
+
+def test_the_phase18_file_has_no_margin_quantity() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.insufficient_margin_quantity is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-05: symbol_config_change and order.config_target_leverage.
+# --------------------------------------------------------------------------- #
+
+CONFIG_LEVERAGE_LINE = "config_target_leverage = 5\n"
+
+
+def _config_text(*, enabled: bool | None, line: str) -> str:
+    """The TEST_ONLY probe file with the flag (None: absent) and one `[order]` line."""
+    text = TEST_ONLY_PROBE_LIMITS
+    if enabled is not None:
+        text = _with_new_keys(("symbol_config_change", "true" if enabled else "false"))
+    return text.replace('symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{line}', 1)
+
+
+def test_the_owner_leverage_is_loaded_exactly_when_the_flag_is_on(tmp_path: Path) -> None:
+    on = oe.load_demo_order_limits(
+        _write(tmp_path, _config_text(enabled=True, line=CONFIG_LEVERAGE_LINE)), kind="probe"
+    )
+    assert on.config_target_leverage == 5 and type(on.config_target_leverage) is int
+    assert "symbol_config_change" in on.enabled_optional_cases
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _config_text(enabled=False, line=""), "off.toml"), kind="probe"
+    )
+    assert off.config_target_leverage is None
+    assert "symbol_config_change" not in off.enabled_optional_cases
+    absent = oe.load_demo_order_limits(
+        _write(tmp_path, _config_text(enabled=None, line=""), "absent.toml"), kind="probe"
+    )
+    assert absent.config_target_leverage is None
+
+
+_POSITIVE = "order.config_target_leverage (must be a positive integer)"
+
+
+@pytest.mark.parametrize(
+    ("line", "enabled", "named"),
+    [
+        ("", True, "order.config_target_leverage (missing key"),
+        ("config_target_leverage = 0\n", True, _POSITIVE),
+        ("config_target_leverage = -5\n", True, _POSITIVE),
+        ("config_target_leverage = true\n", True, _POSITIVE),
+        ("config_target_leverage = 5.0\n", True, _POSITIVE),
+        ('config_target_leverage = "5"\n', True, _POSITIVE),
+        ("config_target_leverage = 5\n", False, "order.config_target_leverage (only allowed when"),
+        ("config_target_leverage = 5\n", None, "order.config_target_leverage (only allowed when"),
+    ],
+)
+def test_the_owner_leverage_is_refused_unless_a_positive_int_and_only_with_its_flag(
+    tmp_path: Path, line: str, enabled: bool | None, named: str
+) -> None:
+    text = _config_text(enabled=enabled, line=line)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert named in str(info.value)
+
+
+def test_an_owner_placeholder_for_the_leverage_is_refused_without_echoing_it(
+    tmp_path: Path,
+) -> None:
+    text = _config_text(enabled=True, line="config_target_leverage = <OWNER: a whole number>\n")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="probe")
+    assert "OWNER" not in str(info.value)  # a refusal names keys, never a value
+
+
+def test_the_smoke_kind_refuses_the_leverage_key_and_the_config_flag(tmp_path: Path) -> None:
+    text = TEST_ONLY_SMOKE_LIMITS.replace("[order]\n", "[order]\nconfig_target_leverage = 5\n", 1)
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, text), kind="smoke")
+    flag = TEST_ONLY_SMOKE_LIMITS + "\n[optional_cases]\nsymbol_config_change = true\n"
+    with pytest.raises(oe.DemoOrderLimitsRefused):
+        oe.load_demo_order_limits(_write(tmp_path, flag, "f.toml"), kind="smoke")
+
+
+def test_the_phase18_file_has_no_config_target_leverage() -> None:
+    limits = oe.load_demo_order_limits(PHASE18_PROBE_LIMITS, kind="probe")
+    assert limits.config_target_leverage is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-09: the five other SJ3 keys and the two widened conditional rules.
+# --------------------------------------------------------------------------- #
+
+MARGIN_CASES = ("insufficient_margin", "margin_insufficient_target")
+CONFIG_CASES = ("symbol_config_change", "margin_insufficient_target", "isolated_liquidation")
+PLAIN_SJ3_KEYS = ("margin_type_resting_order", "leverage_above_max", "available_balance_resting")
+
+
+def test_the_sj3_keys_are_the_six_in_script_order_right_before_the_long_case() -> None:
+    keys = oe.EVIDENCE_CASE_KEYS
+    assert keys[-1 - len(SJ3_KEYS) : -1] == SJ3_KEYS
+    assert keys[-1] == "gtd_expiry"
+    assert SJ3_KEYS[0] == "symbol_config_change"  # plan 22-05's key keeps its place
+
+
+@pytest.mark.parametrize("key", PLAIN_SJ3_KEYS)
+def test_a_plain_sj3_key_enables_only_its_case_and_needs_no_owner_number(
+    tmp_path: Path, key: str
+) -> None:
+    limits = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "true"))), kind="probe"
+    )
+    assert [k for k in limits.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS] == [key]
+    assert limits.insufficient_margin_quantity is None
+    assert limits.config_target_leverage is None
+    off = oe.load_demo_order_limits(
+        _write(tmp_path, _with_new_keys((key, "false")), "off.toml"), kind="probe"
+    )
+    assert not [k for k in off.enabled_optional_cases if k in oe.EVIDENCE_CASE_KEYS]
+
+
+def _flagged(*keys: str, order_lines: str = "") -> str:
+    text = _with_new_keys(*((key, "true") for key in keys))
+    return text.replace('symbol = "BTCUSDT"\n', f'symbol = "BTCUSDT"\n{order_lines}', 1)
+
+
+def test_the_margin_shortfall_case_needs_both_owner_numbers(tmp_path: Path) -> None:
+    both = _flagged(
+        "margin_insufficient_target", order_lines=MARGIN_QUANTITY_LINE + CONFIG_LEVERAGE_LINE
+    )
+    limits = oe.load_demo_order_limits(_write(tmp_path, both), kind="probe")
+    assert limits.insufficient_margin_quantity == Decimal("5")
+    assert limits.config_target_leverage == 5
+    for name, lines, named in (
+        ("no-qty.toml", CONFIG_LEVERAGE_LINE, "order.insufficient_margin_quantity (missing key"),
+        ("no-lev.toml", MARGIN_QUANTITY_LINE, "order.config_target_leverage (missing key"),
+    ):
+        with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+            oe.load_demo_order_limits(
+                _write(tmp_path, _flagged("margin_insufficient_target", order_lines=lines), name),
+                kind="probe",
+            )
+        assert named in str(info.value)
+
+
+def test_the_isolated_liquidation_case_needs_the_leverage_but_not_the_margin_quantity(
+    tmp_path: Path,
+) -> None:
+    ok = _flagged("isolated_liquidation", order_lines=CONFIG_LEVERAGE_LINE)
+    limits = oe.load_demo_order_limits(_write(tmp_path, ok), kind="probe")
+    assert limits.config_target_leverage == 5 and limits.insufficient_margin_quantity is None
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(tmp_path, _flagged("isolated_liquidation"), "no-lev.toml"), kind="probe"
+        )
+    assert "order.config_target_leverage (missing key" in str(info.value)
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info2:
+        oe.load_demo_order_limits(
+            _write(
+                tmp_path,
+                _flagged(
+                    "isolated_liquidation", order_lines=CONFIG_LEVERAGE_LINE + MARGIN_QUANTITY_LINE
+                ),
+                "qty.toml",
+            ),
+            kind="probe",
+        )
+    assert "order.insufficient_margin_quantity (only allowed when" in str(info2.value)
+
+
+def test_the_margin_quantity_rule_names_both_flags_and_each_flag_serves_it(tmp_path: Path) -> None:
+    for flag in MARGIN_CASES:
+        lines = MARGIN_QUANTITY_LINE + (CONFIG_LEVERAGE_LINE if flag in CONFIG_CASES else "")
+        limits = oe.load_demo_order_limits(
+            _write(tmp_path, _flagged(flag, order_lines=lines), f"{flag}.toml"), kind="probe"
+        )
+        assert limits.insufficient_margin_quantity == Decimal("5")
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(
+                tmp_path,
+                _flagged("available_balance_resting", order_lines=MARGIN_QUANTITY_LINE),
+                "x.toml",
+            ),
+            kind="probe",
+        )
+    message = str(info.value)
+    assert (
+        "optional_cases.insufficient_margin or optional_cases.margin_insufficient_target" in message
+    )
+    assert "order.insufficient_margin_quantity (only allowed when" in message
+
+
+def test_the_config_leverage_rule_names_the_three_flags_and_each_flag_serves_it(
+    tmp_path: Path,
+) -> None:
+    for flag in CONFIG_CASES:
+        lines = CONFIG_LEVERAGE_LINE + (MARGIN_QUANTITY_LINE if flag in MARGIN_CASES else "")
+        limits = oe.load_demo_order_limits(
+            _write(tmp_path, _flagged(flag, order_lines=lines), f"{flag}.toml"), kind="probe"
+        )
+        assert limits.config_target_leverage == 5
+    with pytest.raises(oe.DemoOrderLimitsRefused) as info:
+        oe.load_demo_order_limits(
+            _write(
+                tmp_path, _flagged("leverage_above_max", order_lines=CONFIG_LEVERAGE_LINE), "y.toml"
+            ),
+            kind="probe",
+        )
+    message = str(info.value)
+    for flag in CONFIG_CASES:
+        assert f"optional_cases.{flag}" in message
+    assert "order.config_target_leverage (only allowed when" in message
+
+
+def test_the_smoke_kind_refuses_every_sj3_key(tmp_path: Path) -> None:
+    for key in SJ3_KEYS:
+        text = TEST_ONLY_SMOKE_LIMITS + f"\n[optional_cases]\n{key} = true\n"
+        with pytest.raises(oe.DemoOrderLimitsRefused):
+            oe.load_demo_order_limits(_write(tmp_path, text, f"{key}.toml"), kind="smoke")

@@ -25,17 +25,28 @@ from binance_sdk_derivatives_trading_usds_futures.rest_api import (
     DerivativesTradingUsdsFuturesRestAPI as SdkRestApi,
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    AccountInformationV3Response,
     CancelAlgoOrderResponse,
     CancelAllAlgoOpenOrdersResponse,
     CancelAllOpenOrdersResponse,
     CancelOrderResponse,
+    ChangeInitialLeverageResponse,
+    ChangeMarginTypeResponse,
+    CheckServerTimeResponse,
     ExchangeInformationResponse,
     ExchangeInformationResponseSymbolsInner,
     ExchangeInformationResponseSymbolsInnerFiltersInner,
+    FuturesAccountConfigurationResponse,
+    GetIncomeHistoryResponse,
+    MarkPriceResponse,
+    MarkPriceResponse1,
     NewAlgoOrderResponse,
     NewOrderResponse,
+    NotionalAndLeverageBracketsResponse,
+    OrderBookResponse,
     QueryAlgoOrderResponse,
     QueryOrderResponse,
+    SymbolConfigurationResponse,
 )
 from src.adapters import binance_probe
 from src.adapters.binance_probe import SDK_REST_METHODS, BinanceProbeAdapter
@@ -47,10 +58,20 @@ MODULE_PATH = Path(binance_probe.__file__)
 
 _Op = Callable[[BinanceProbeAdapter], Awaitable[Any]]
 
-# The two public SDK reads the adapter makes through `BinancePublicMarketData` (mark price and
-# symbol filters). They are unsigned, so they are not in `SDK_REST_METHODS` and carry no
-# recvWindow, but a mistyped keyword there would surface at the same user checkpoint.
-PUBLIC_SDK_METHODS = frozenset({"mark_price_kline_candlestick_data", "exchange_information"})
+# The public SDK reads the adapter makes through `BinancePublicMarketData` (the mark-price kline,
+# the symbol filters and, since quick task 261021-sj0, the premiumIndex `mark_price`). They are
+# unsigned, so they are not in `SDK_REST_METHODS` and carry no recvWindow, but a mistyped keyword
+# there would surface at the same user checkpoint.
+PUBLIC_SDK_METHODS = frozenset(
+    {
+        "mark_price_kline_candlestick_data",
+        "exchange_information",
+        "mark_price",
+        # quick task 261022-sj1: the server time and the depth read
+        "check_server_time",
+        "order_book",
+    }
+)
 
 # Plain text is accepted for these enum-annotated parameters: the installed SDK copies the
 # value into the request payload unchanged (`MarketDataApi.mark_price_kline_candlestick_data`
@@ -118,8 +139,39 @@ _SUCCESS_PAYLOADS: dict[str, Any] = {
     "position_information_v3": [],
     "account_trade_list": [],
     "futures_account_balance_v3": [],
+    "account_information_v3": AccountInformationV3Response.from_dict(
+        {"totalWalletBalance": "1", "assets": [{"asset": "USDT"}]}
+    ),
+    "futures_account_configuration": FuturesAccountConfigurationResponse.from_dict(
+        {"dualSidePosition": False, "multiAssetsMargin": False}
+    ),
+    "symbol_configuration": SymbolConfigurationResponse.from_dict(
+        [{"symbol": "BTCUSDT", "leverage": 20}]
+    ),
+    "notional_and_leverage_brackets": NotionalAndLeverageBracketsResponse.from_dict(
+        [{"symbol": "BTCUSDT", "brackets": [{"bracket": 1, "initialLeverage": 125}]}]
+    ),
+    "get_income_history": [GetIncomeHistoryResponse(symbol="BTCUSDT", income_type="COMMISSION")],
+    # Phase 22 plan 22-05: the two symbol-configuration changes
+    "change_margin_type": ChangeMarginTypeResponse(code=200, msg="success"),
+    "change_initial_leverage": ChangeInitialLeverageResponse(
+        symbol="BTCUSDT", leverage=5, max_notional_value="5000000"
+    ),
+    "mark_price": MarkPriceResponse(
+        actual_instance=MarkPriceResponse1(
+            symbol="BTCUSDT", mark_price="83748.10", time=1791360000000
+        )
+    ),
     "mark_price_kline_candlestick_data": [_MARK_ROW],
     "exchange_information": _exchange_information(),
+    "check_server_time": CheckServerTimeResponse(server_time=1791360123456),
+    "order_book": OrderBookResponse(
+        last_update_id=7,
+        E=1791360123456,
+        T=1791360123450,
+        bids=[["83900.10", "1.500"]],
+        asks=[["83900.20", "0.250"]],
+    ),
 }
 
 _Q = Decimal("0.010")
@@ -204,6 +256,37 @@ _OPERATIONS: dict[str, _Op] = {
     "account_balance": lambda a: a.account_balance(),
     "mark_price": lambda a: a.mark_price(symbol="BTCUSDT"),
     "symbol_filters": lambda a: a.symbol_filters(symbol="BTCUSDT"),
+    # quick task 261021-sj0: the capture operations
+    "account_information": lambda a: a.account_information(),
+    "account_balance_all": lambda a: a.account_balance_all(),
+    "account_config": lambda a: a.account_config(),
+    "symbol_config": lambda a: a.symbol_config(symbol="BTCUSDT"),
+    "leverage_brackets": lambda a: a.leverage_brackets(symbol="BTCUSDT"),
+    "income_history": lambda a: a.income_history(symbol="BTCUSDT", start_time_ms=1791360000000),
+    "query_algo_order_by_algo_id": lambda a: a.query_algo_order_by_algo_id(algo_id=1000000001),
+    "new_gtd_limit_order": lambda a: a.new_gtd_limit_order(
+        symbol="BTCUSDT",
+        side="BUY",
+        quantity=_Q,
+        price=_T,
+        client_order_id="c9",
+        position_side="BOTH",
+        good_till_date_ms=1791360660000,
+    ),
+    "live_mark_price": lambda a: a.live_mark_price(symbol="BTCUSDT"),
+    # Phase 22 plan 22-05: the two symbol-configuration changes (mutating, sent once each)
+    "change_margin_type": lambda a: a.change_margin_type(symbol="BTCUSDT", margin_type="ISOLATED"),
+    "change_margin_type_crossed": lambda a: a.change_margin_type(
+        symbol="BTCUSDT", margin_type="CROSSED"
+    ),
+    "change_initial_leverage": lambda a: a.change_initial_leverage(symbol="BTCUSDT", leverage=5),
+    # quick task 261022-sj1: the server time and the depth read
+    "server_time": lambda a: a.server_time(),
+    "order_book": lambda a: a.order_book(symbol="BTCUSDT"),
+    # quick task 261023-sj2: the stale-timestamp read (a signed GET with the policy window)
+    "stale_timestamp_read": lambda a: a.stale_timestamp_read(
+        symbol="BTCUSDT", recv_window_ms=TEST_ONLY_RECV_WINDOW_MS, timestamp_behind_ms=10_000
+    ),
 }
 
 
@@ -367,3 +450,130 @@ async def test_the_mark_price_interval_is_the_only_plain_text_exception() -> Non
         _check_argument_types(name, {**kwargs, "interval": 1})
     with pytest.raises(TypeError):
         _bind(name, {**kwargs, "intervall": kwargs["interval"]})
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261023-sj2: the stale clock is honoured by the REAL installed SDK.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeHttpResponse:
+    status_code = 200
+    text = "[]"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+
+    def json(self) -> list[Any]:
+        return []
+
+
+class _FakeSession:
+    """Records the query string of every request; never opens a connection."""
+
+    def __init__(self) -> None:
+        self.params: list[str] = []
+
+    def request(self, **kwargs: Any) -> _FakeHttpResponse:
+        self.params.append(kwargs["params"])
+        return _FakeHttpResponse()
+
+    def mount(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _real_sdk_rest_with_fake_session() -> tuple[Any, _FakeSession]:
+    from binance_common.configuration import ConfigurationRestAPI
+
+    config = ConfigurationRestAPI(
+        api_key="TESTONLYkey", api_secret="s" * 32, base_path="https://sdk-contract.invalid"
+    )
+    rest = SdkRestApi(config)
+    session = _FakeSession()
+    for name in vars(rest):
+        holder = getattr(rest, name)
+        if hasattr(holder, "_session"):
+            holder._session = session
+    return rest, session
+
+
+async def test_the_installed_sdk_signs_the_stale_timestamp_the_adapter_asks_for() -> None:
+    import re
+
+    import binance_common.utils as sdk_utils
+
+    original = sdk_utils.get_timestamp
+    rest, session = _real_sdk_rest_with_fake_session()
+    gate = make_gate()
+    adapter = BinanceProbeAdapter(
+        FakeProbeSdk(rest),  # type: ignore[arg-type]
+        policy=test_only_signed_call_policy(),
+        rest_gate=gate,
+        public=make_public(FakeProbeRest(), gate),
+    )
+    before = original()
+    observation = await adapter.stale_timestamp_read(
+        symbol="BTCUSDT", recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    after = original()
+    assert observation.ok is True
+    (query,) = session.params
+    match = re.search(r"timestamp=(\d+)", query)
+    assert match is not None
+    sent = int(match.group(1))
+    assert before - 10_000 <= sent <= after - 10_000
+    assert "recvWindow=5000" in query and "symbol=BTCUSDT" in query
+    assert observation.summary["clock_calls"] == "1"
+    assert observation.summary["timestamp_sent_ms"] == str(sent)
+    assert sdk_utils.get_timestamp is original
+    # an ordinary signed read afterwards carries the real clock again
+    other = await adapter.open_orders(symbol="BTCUSDT")
+    assert other.ok is True
+    later = int(re.search(r"timestamp=(\d+)", session.params[-1]).group(1))  # type: ignore[union-attr]
+    assert later >= before
+
+
+def test_the_sdk_send_request_reads_the_clock_by_the_name_the_adapter_replaces() -> None:
+    import binance_common.utils as sdk_utils
+
+    source = inspect.getsource(sdk_utils.send_request)
+    assert 'cleaned_payload["timestamp"] = get_timestamp()' in source
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 plan 22-05: the symbol-configuration changes against the installed SDK.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_margin_type_enum_has_exactly_isolated_and_crossed() -> None:
+    from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+        ChangeMarginTypeMarginTypeEnum,
+    )
+
+    assert {member.value for member in ChangeMarginTypeMarginTypeEnum} == {"ISOLATED", "CROSSED"}
+
+
+@pytest.mark.parametrize(
+    ("name", "parameters"),
+    [
+        ("change_margin_type", {"symbol", "margin_type", "recv_window"}),
+        ("change_initial_leverage", {"symbol", "leverage", "recv_window"}),
+    ],
+)
+def test_the_change_methods_take_exactly_the_keywords_the_adapter_sends(
+    name: str, parameters: set[str]
+) -> None:
+    signature = inspect.signature(getattr(SdkRestApi, name))
+    assert set(signature.parameters) - {"self"} == parameters
+    assert name in SDK_REST_METHODS
+
+
+async def test_each_change_makes_one_sdk_call_with_the_policy_window() -> None:
+    recorded = await _record_all()
+    changes = [(name, kwargs) for name, kwargs in recorded if name.startswith("change_")]
+    assert [name for name, _ in changes] == [
+        "change_margin_type",
+        "change_margin_type",
+        "change_initial_leverage",
+    ]
+    for _, kwargs in changes:
+        assert kwargs["recv_window"] == TEST_ONLY_RECV_WINDOW_MS
+        assert kwargs["symbol"] == "BTCUSDT"

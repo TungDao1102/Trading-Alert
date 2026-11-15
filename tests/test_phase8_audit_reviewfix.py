@@ -64,8 +64,10 @@ from src.reconcile.compare import (
     OrphanProtective,
     compare,
 )
-from src.reconcile.safe_mode import SafeModeController, SafeModeVerdict
+from src.reconcile.safe_mode import ExitReadiness, SafeModeController, SafeModeVerdict
 from src.reconcile.sweeper import OrphanSweeper
+
+from tests.support.press_identity import OWNER_PRESS
 
 # --------------------------------------------------------------------------- #
 # Shared fixtures / helpers.
@@ -76,6 +78,7 @@ EXPIRY = datetime(2026, 9, 19, 14, 0, tzinfo=UTC)
 PLAN_HASH = "0" * 64
 PARAM_HASH = "1" * 64
 CHAT_ID = 123
+USER_ID = 777001  # the one listed operator of the local fakes (Phase 23, D-02)
 
 
 def _make_pending_approval(
@@ -193,9 +196,16 @@ class _FakeSweepAdapter:
         self.found = found
         self.cancel_exc = cancel_exc
         self.cancels: list[tuple[str, str]] = []
+        self._queries: dict[str, int] = {}
 
     async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any:
-        return SimpleNamespace(found=self.found, algo_status="WORKING", update_time_utc=NOW)
+        # Plan 20-11 (D-17): the sweeper queries once before the cancel (the orphan is still
+        # there) and once after it (the cancel is verified). The first answer is the old
+        # fixture value; every later one shows the order canceled, as a healthy exchange does.
+        n = self._queries.get(client_algo_id, 0) + 1
+        self._queries[client_algo_id] = n
+        status = "WORKING" if n == 1 else "CANCELED"
+        return SimpleNamespace(found=self.found, algo_status=status, update_time_utc=NOW)
 
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None:
         self.cancels.append((symbol, client_algo_id))
@@ -307,6 +317,7 @@ def test_cr01_dispatch_skip_press_does_not_approve() -> None:
         save_atomic=lambda approval, mapping: saved.append(approval),
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     # The mapping short-id check fires first here (signal differs), but the
     # outcome must still be a fail-closed INVALIDATED with no state change.
@@ -408,6 +419,7 @@ class _FakeQuery:
         self.id = query_id
         self.data = data
         self.message = SimpleNamespace(chat_id=chat_id)
+        self.from_user = SimpleNamespace(id=USER_ID)
         self.answered = False
 
     async def answer(self) -> None:
@@ -417,7 +429,7 @@ class _FakeQuery:
 class _FakeUpdate:
     def __init__(self, query: _FakeQuery, chat_id: int) -> None:
         self.callback_query = query
-        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.effective_chat = SimpleNamespace(id=chat_id, type="private")
 
 
 async def test_wr01_on_callback_gates_chat_before_resolver() -> None:
@@ -438,6 +450,7 @@ async def test_wr01_on_callback_gates_chat_before_resolver() -> None:
         update,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=frozenset({USER_ID}),
         binding_context_resolver=lambda sid: resolver_calls.append(sid),
         dispatch=fake_dispatch,
         reply_text_fn=None,
@@ -469,6 +482,7 @@ async def test_wr02_unauthorized_chat_gets_generic_rejection() -> None:
         update,  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=frozenset({USER_ID}),
         binding_context_resolver=lambda sid: None,
         dispatch=fake_dispatch,
         reply_text_fn=fake_reply,
@@ -497,6 +511,7 @@ async def test_wr17_rapid_callbacks_get_distinct_correlations() -> None:
             update,  # type: ignore[arg-type]
             None,  # type: ignore[arg-type]
             authorized_chat_id=CHAT_ID,
+            authorized_user_ids=frozenset({USER_ID}),
             binding_context_resolver=lambda sid: None,
             dispatch=fake_dispatch,
             reply_text_fn=None,
@@ -526,6 +541,7 @@ def test_wr03_unknown_short_id_returns_invalidated() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is False
     assert result.reason_code == RejectionReason.INVALIDATED
@@ -548,6 +564,7 @@ def test_wr03_missing_binding_context_returns_invalidated() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=None,
+        **OWNER_PRESS,
     )
     assert result.ok is False
     assert result.reason_code == RejectionReason.INVALIDATED
@@ -580,6 +597,7 @@ def test_wr04_success_path_journals_received_and_resolved() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is True
     types = _event_types(journal)
@@ -604,6 +622,7 @@ def test_wr04_reject_path_journals_received_and_rejected() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is False
     types = _event_types(journal)
@@ -644,6 +663,7 @@ def test_wr05_divergent_mapping_short_id_is_rejected() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=NOW,
         binding_context=_binding_context(),
+        **OWNER_PRESS,
     )
     assert result.ok is False
     assert result.reason_code == RejectionReason.INVALIDATED
@@ -708,6 +728,7 @@ def test_wr06_dispatch_defaults_to_server_time() -> None:
         save_atomic=lambda approval, mapping: None,
         now_utc=None,
         binding_context=_binding_context(expiry=far_expiry),
+        **OWNER_PRESS,
     )
     assert result.ok is True
 
@@ -994,6 +1015,17 @@ async def test_wr15_async_position_verifier_supported() -> None:
 # --------------------------------------------------------------------------- #
 
 
+class _LocalIntentStub:
+    """Duck-typed local intent: the compare accepts plain dict rows (WR-14)."""
+
+    def __init__(self, orders: list[Any], algos: list[Any], positions: list[Any]) -> None:
+        self.orders = orders
+        self.algos = algos
+        self.positions = positions
+        # Plan 20-28 (WR-B3): the exit also reads the active plans.
+        self.active_plans: list[Any] = []
+
+
 async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
     """A stale caller snapshot cannot force the exit decision."""
     journal = _FakeJournal()
@@ -1007,13 +1039,19 @@ async def test_wr16_exit_prefers_fresh_intent_fn_over_stale_lists() -> None:
             "status": OrderStatus.NEW.value,
         }
     ]
-    # Fresh supplier matches the empty truth: exit must succeed.
-    exited = await controller.exit_safe_mode(
-        local_open_orders=stale_orders,
-        local_intent_fn=lambda: ([], [], []),
+    # Fresh supplier matches the empty truth: exit must succeed. Since plan 20-15 there is no
+    # list argument at all, so a stale caller snapshot cannot exist (`stale_orders` documents the
+    # shape the old signature accepted).
+    assert stale_orders
+    decision = await controller.exit_safe_mode(
+        operator_id="operator-1",
+        local_intent_fn=lambda: _LocalIntentStub([], [], []),
+        readiness=lambda: ExitReadiness(0, 0, 0, True),
+        gate_status=lambda: (None, "RESTORED_DURABLE"),
+        stream_state=lambda: "LIVE",
         now_utc=NOW,
     )
-    assert exited is True
+    assert decision.exited is True
     assert controller.in_safe_mode is False
 
 
@@ -1030,12 +1068,16 @@ async def test_wr16_divergent_intent_fn_blocks_exit() -> None:
             "status": OrderStatus.NEW.value,
         }
     ]
-    exited = await controller.exit_safe_mode(
-        local_open_orders=[],
-        local_intent_fn=lambda: (divergent, [], []),
+    decision = await controller.exit_safe_mode(
+        operator_id="operator-1",
+        local_intent_fn=lambda: _LocalIntentStub(divergent, [], []),
+        readiness=lambda: ExitReadiness(0, 0, 0, True),
+        gate_status=lambda: (None, "RESTORED_DURABLE"),
+        stream_state=lambda: "LIVE",
         now_utc=NOW,
     )
-    assert exited is False
+    assert decision.exited is False
+    assert decision.refusals == ("COMPARE_NOT_CLEAN",)
     assert controller.in_safe_mode is True
 
 
@@ -1368,11 +1410,21 @@ def test_wr28_manual_close_uses_injected_compare() -> None:
         "algo_orders": [SimpleNamespace(client_algo_id=algo_id, symbol="BTCUSDT")],
         "positions": [],
     }
+    controller = _drill_controller()
+
+    async def close_control() -> None:
+        # Plan 20-23: the control (emergency_manual_close) enters SAFE_MODE itself.
+        controller.enter_safe_mode(reason="MANUAL_CLOSE")
+
+    async def read_truth() -> dict[str, Any]:
+        return truth
+
     declaration = make_manual_close_drill(
+        close_control=close_control,
+        read_truth=read_truth,
         sweeper=sweeper,
-        safe_mode_controller=_drill_controller(),
+        safe_mode_controller=controller,
         local_intent=local_intent,
-        truth=truth,
         position_verifier=lambda symbol: Decimal("0"),
         compare_fn=sentinel,
     )

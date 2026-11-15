@@ -590,6 +590,18 @@ _MUTATING_CALLS: dict[str, dict[str, Any]] = {
     "cancel_algo_order": {"client_algo_id": "dprobe-test-5"},
     "cancel_all_open_orders": {"symbol": "BTCUSDT"},
     "cancel_all_algo_open_orders": {"symbol": "BTCUSDT"},
+    "new_gtd_limit_order": {
+        "symbol": "BTCUSDT",
+        "side": "BUY",
+        "quantity": Decimal("0.002"),
+        "price": Decimal("48000"),
+        "client_order_id": "dprobe-test-6",
+        "position_side": "BOTH",
+        "good_till_date_ms": 1791360660000,
+    },
+    # Phase 22 plan 22-05: the two symbol-configuration changes
+    "change_margin_type": {"symbol": "BTCUSDT", "margin_type": "ISOLATED"},
+    "change_initial_leverage": {"symbol": "BTCUSDT", "leverage": 5},
 }
 
 
@@ -629,8 +641,31 @@ async def test_reads_are_guarded_and_delegated() -> None:
     await port.symbol_filters(symbol="BTCUSDT")
     await port.query_order(symbol="BTCUSDT", client_order_id="x")
     await port.query_algo_order(client_algo_id="y")
-    assert len(inner.calls) == 9
-    assert len(guard_calls) == 9
+    # quick task 261021-sj0: the capture reads
+    await port.account_information()
+    await port.account_balance_all()
+    await port.account_config()
+    await port.symbol_config(symbol="BTCUSDT")
+    await port.leverage_brackets(symbol="BTCUSDT")
+    await port.income_history(symbol="BTCUSDT", start_time_ms=1791360000000)
+    await port.query_algo_order_by_algo_id(algo_id=1000000001)
+    await port.live_mark_price(symbol="BTCUSDT")
+    # quick task 261022-sj1: the exchange clock and the depth of the book
+    await port.server_time()
+    await port.order_book(symbol="BTCUSDT")
+    # quick task 261023-sj2: the read-only signed GET with a stale timestamp (not mutating)
+    observation = await port.stale_timestamp_read(
+        symbol="BTCUSDT", recv_window_ms=5000, timestamp_behind_ms=10_000
+    )
+    assert observation.error is not None and observation.error.code == -1021
+    assert len(inner.calls) == 20
+    assert len(guard_calls) == 20
+    assert port.call_count == 20
+    assert inner.calls[-1] == (
+        "stale_timestamp_read",
+        {"symbol": "BTCUSDT", "recv_window_ms": 5000, "timestamp_behind_ms": 10_000},
+    )
+    assert "stale_timestamp_read" not in dp.MUTATING_OPERATIONS
 
 
 def test_the_guarded_port_has_no_attribute_passthrough() -> None:

@@ -1,0 +1,18 @@
+# Timer for the separate live heartbeat ping (plan 24-24). The interval is the owner's value
+# (24-LIMITS-CHECKPOINT recommendation: check period 60 s, grace 120 s, the same as the paper check),
+# passed to `deploy/heartbeat.sh --target live --install-timer --interval-seconds N`; it has no
+# default. The check period and the grace are set in the monitor's dashboard, not here.
+# Catch-up (a persistent timer) and a randomised delay are absent on purpose: a ping sent after
+# downtime would hide the very outage the external monitor exists to report.
+[Unit]
+Description=Trading stack: external heartbeat ping timer for the live runtime
+
+[Timer]
+OnBootSec=@INTERVAL_SECONDS@s
+OnUnitActiveSec=@INTERVAL_SECONDS@s
+# STRUCTURAL (not a monitor value): the default accuracy lets a timer slip by up to a minute.
+AccuracySec=1s
+Unit=trading-live-heartbeat.service
+
+[Install]
+WantedBy=timers.target

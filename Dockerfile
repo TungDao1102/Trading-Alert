@@ -43,6 +43,20 @@ COPY docs/research/universe ./docs/research/universe
 # deploy/soak-image.sh checks inside the built image that both load before it records the build.
 COPY params ./params
 COPY config/paper ./config/paper
+# The live process loads its limits from the image (plan 24-25, R-6, research C-8): the
+# execution limits and the Binance limits are part of the decision surface too, so they belong
+# in the image hash like config/paper. Only the committed TOML and README files are copied.
+COPY config/execution ./config/execution
+COPY config/binance ./config/binance
+
+# Build-time revision stamp (OPS-04, D-31, research C-9). The image has no .git and no git, so
+# the running process cannot ask which commit it is: deploy/update.sh and deploy/soak-image.sh
+# pass the checked-out 40-hex commit as `--build-arg TRADING_APP_REVISION=<commit>` (compose
+# passes it through build.args). There is deliberately no default: an unstamped build answers
+# `unknown` in the healthcheck instead of claiming a revision. The ARG sits after the dependency
+# install, so a new commit never invalidates the `uv sync` layer. It carries no secret.
+ARG TRADING_APP_REVISION
+ENV TRADING_APP_REVISION=${TRADING_APP_REVISION}
 
 # Never run as root. Fixed numeric UID so named-volume ownership is predictable on every
 # host. The volume mount points are created and owned here, BEFORE first use: a named

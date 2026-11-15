@@ -1,0 +1,57 @@
+# Owner probe limits for the RETEST of two sj2 cases (follows 19-probe-limits-sj2.toml).
+#
+# STATUS: PROPOSED BY THE ASSISTANT, NOT APPROVED. The owner reads every value, changes what they
+# want and records the approval in a decision note of their own. Nothing here is a trading
+# parameter: every number only bounds how much the Demo probe may send (D-17).
+#
+# Why a retest (evidence demo-probe-EVIDENCE-20261023T140731Z.json): reduce_only_market_larger_than_position
+# and stop_rejected_after_acceptance both ended NOT_OBSERVED. They open HALF of the approved quantity first,
+# and Demo answered -4164 ("Order's notional must be no smaller than 50"): 0.0004 BTC at about 81845 is
+# about 32.7 USDT, below the Demo minimum notional of 50. Half of the approved quantity must be worth at
+# least 50, so the approved quantity must be about 0.0013 BTC or more at this price (nothing here follows
+# the price: if BTC falls, raise it). The quantity and the notional cap below are PROPOSED, both are yours.
+#   quantity 0.0014 -> half 0.0007 -> about 57.3 USDT (above 50); the full quantity is about 114.6 USDT.
+#   max_notional_quote 150 -> above the 114.6 USDT of the full quantity, with room for a price move.
+# Both cases run with the same limits; only these two are on. Run them in one session or one by one.
+
+[order]
+symbol = "BTCUSDT"
+quantity = "0.0014"
+max_notional_quote = "150"
+far_price_fraction = "0.96"
+near_trigger_fraction = "0.9999"
+
+[waits]
+case_timeout_seconds = 90
+cleanup_timeout_seconds = 60
+
+[optional_cases]
+# Phase 18 optional cases, left off as before.
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
+# Cases of 261021-sj0 and 261022-sj1: off in this file (already captured on 2026-10-22).
+account_capture = false
+algo_query_timing = false
+close_position_with_position = false
+stop_trigger_after_fill = false
+stop_absent_same_id = false
+manual_close_open_legs = false
+commission_realized_pnl = false
+triggered_bracket = false
+tp1_from_fill = false
+exchange_info_read = false
+gtd_min_lifetime = false
+partial_fill_attempt = false
+cancel_fill_race = false
+stream_loss = false
+gtd_expiry = false
+# Cases of 261023-sj2: all on.
+reduce_only_flat = false
+reduce_only_oversize = true       # section 17, A8: reduce-only MARKET larger than the position
+min_notional_entry = false
+insufficient_margin = false
+stop_reject_after_accept = true   # section 20, P5: best effort
+trigger_cancel_race = false
+recv_window_error = false
+income_history = false

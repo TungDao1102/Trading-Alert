@@ -1,0 +1,17 @@
+{
+  "case_id": "stop_would_trigger_after_fill",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "REJECTED_DEFINITIVE",
+      "code": -2021,
+      "http_class": "BAD_REQUEST",
+      "message": "Order would immediately trigger.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "new_conditional_order",
+    "summary": {}
+  }
+}

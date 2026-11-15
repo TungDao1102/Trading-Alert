@@ -81,8 +81,9 @@ def _verdict(name: str, missing: list[str], forbidden: list[str]) -> Gate:
 SAFE_MODE_SEC_OPS_PHRASES = (
     "SAFE_MODE blocks new entry orders only",
     "Protective and reduce-only orders are always allowed",
-    "automatically re-placed",
-    "original plan stop-loss",
+    "placed again under the same client id",
+    "plan stop-loss",
+    "never re-placed",
     "never wider",
     "reduce-only market close",
     "HIGH-priority alert",

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from src.adapters.binance_limits import CANONICAL_KEYS, NULLABLE_KEYS, PROVENANCE_LABELS
-from src.execution.execution_limits import EXECUTION_LIMIT_KEYS
+from src.execution.execution_limits import EXECUTION_LIMIT_FIELDS, EXECUTION_LIMIT_KEYS
 
 ROOT = Path(__file__).resolve().parents[1]
 SCAN_ROOTS = (ROOT / "src", ROOT / "scripts")
@@ -34,7 +34,11 @@ RATE_LIMIT_FIELD_NAMES = frozenset(
 # Phase 19 adds the execution-limit keys of D-07/D-13 (plan 19-01) and the owner's 19-REVIEW
 # keys `entry_unknown_grace_ms` (WR-05) and `emergency_close_poll_timeout_ms` (WR-03), then
 # `max_last_price_age_ms` (quick task 261020-l4p, the last-price check): seven keys.
-EXECUTION_LIMIT_NAMES = frozenset(key for keys in EXECUTION_LIMIT_KEYS.values() for key in keys)
+# Phase 20 (plan 20-01) adds seven more keys; their dataclass field names are
+# "<section>_<key>" (EXECUTION_LIMIT_FIELDS), so both spellings are guarded.
+EXECUTION_LIMIT_NAMES = frozenset(key for keys in EXECUTION_LIMIT_KEYS.values() for key in keys) | (
+    frozenset(EXECUTION_LIMIT_FIELDS.values())
+)
 GUARDED_NAMES = (
     frozenset(key for keys in CANONICAL_KEYS.values() for key in keys)
     | RATE_LIMIT_FIELD_NAMES
@@ -201,9 +205,54 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # 30 ratified Binance-limit names + 7 execution-limit names (the fifth,
     # entry_unknown_grace_ms, is the owner's 19-REVIEW WR-05 key; the sixth,
     # emergency_close_poll_timeout_ms, the owner's WR-03 key; the seventh,
-    # max_last_price_age_ms, the last-price check of quick task 261020-l4p).
-    assert len(GUARDED_NAMES) == 37
+    # max_last_price_age_ms, the last-price check of quick task 261020-l4p) + the Phase 20 keys of
+    # plan 20-01: 6 new key texts (stale_feed.max_mark_price_age_ms repeats a Phase 19 text) and
+    # 7 "<section>_<key>" field names = 30 + 7 + 6 + 7 = 50 guarded names, plus the alert-only key
+    # of plan 20-28 (key text `entry_stale_grace_ms` and field `reconcile_entry_stale_grace_ms`),
+    # plus Phase 21 (plan 21-02): key text `max_equity_age_ms` and field
+    # `account_max_equity_age_ms` (52 -> 54), plus Phase 22 (plan 22-02): the three margin key texts
+    # `liquidation_buffer_bps`, `max_bracket_age_ms`, `headroom_bps` and their three field names
+    # `margin_<key>` (54 -> 60; derived from the code, no text collides with an earlier name), plus
+    # the daily-loss age of the Phase 21 review WR-05: key text `max_daily_loss_age_ms` and field
+    # `account_max_daily_loss_age_ms` (60 -> 62).
+    # 62 until plan 24-03: D083 added the clock margin of the 418 ban end (two names: the key text
+    # `ban_end_clock_margin_ms` and the field `rest_gate_ban_end_clock_margin_ms`); the key is
+    # NOT_CONFIGURED and no numeric default for either name may exist.
+    # 66 since quick 261114-mp1 (D111): the alert-only stall bound adds the key text
+    # `protection_stall_after_ms` and the field `scheduler_protection_stall_after_ms`; the key is
+    # NOT_CONFIGURED and no numeric default for either name may exist.
+    # 68 since quick 261115-kra (D112): the optional summary window adds the key text
+    # `duration_summary_interval_ms` and the field `scheduler_duration_summary_interval_ms`;
+    # the key is NOT_CONFIGURED and no numeric default for either name may exist.
+    assert len(GUARDED_NAMES) == 68
+    assert {"protection_stall_after_ms", "scheduler_protection_stall_after_ms"} <= GUARDED_NAMES
+    assert {
+        "duration_summary_interval_ms",
+        "scheduler_duration_summary_interval_ms",
+    } <= GUARDED_NAMES
+    assert {"ban_end_clock_margin_ms", "rest_gate_ban_end_clock_margin_ms"} <= GUARDED_NAMES
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
+    # Plan 21-02 (D-03): the equity-age bound has no numeric default under either spelling.
+    assert {"max_equity_age_ms", "account_max_equity_age_ms"} <= GUARDED_NAMES
+    assert {"max_daily_loss_age_ms", "account_max_daily_loss_age_ms"} <= GUARDED_NAMES
+    # Plan 22-02 (D-10, D-11, D-13): the buffer, the bracket age and the headroom have no numeric
+    # default under either spelling (OWNER-OPEN O-2, O-3).
+    assert {
+        "liquidation_buffer_bps",
+        "max_bracket_age_ms",
+        "headroom_bps",
+        "margin_liquidation_buffer_bps",
+        "margin_max_bracket_age_ms",
+        "margin_headroom_bps",
+    } <= GUARDED_NAMES
+    # Plan 20-01: the key texts AND the "<section>_<key>" field names of the Phase 20 keys are
+    # guarded, so a numeric default cannot hide behind either spelling.
+    assert {
+        "reconcile_tick_interval_ms",
+        "stale_feed_max_mark_price_age_ms",
+        "alerts_dedupe_window_ms",
+    } <= GUARDED_NAMES
+    assert set(EXECUTION_LIMIT_FIELDS.values()) <= GUARDED_NAMES
 
 
 def test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts() -> None:
@@ -266,6 +315,17 @@ _FORBIDDEN_FORMS = {
     "execution limit keyword": "build(entry_terminal_timeout_ms=9000)\n",
     "execution limit parameter default": "def f(max_mark_price_age_ms=800):\n    pass\n",
     "execution limit upper-case constant": "MIN_REMAINING_VALIDITY_SECONDS = 600\n",
+    "phase 20 key text assignment": "tick_interval_ms = 60000\n",
+    "phase 20 field name assignment": "reconcile_tick_interval_ms = 60000\n",
+    "phase 20 stale feed field keyword": "build(stale_feed_max_user_data_silence_ms=9000)\n",
+    "phase 20 probe count default": "def f(reconcile_entry_unknown_probe_count=3):\n    pass\n",
+    "phase 20 alerts constant": "ALERTS_DEDUPE_WINDOW_MS = 60000\n",
+    "phase 22 buffer key text assignment": "liquidation_buffer_bps = 50\n",
+    "phase 22 buffer field name assignment": "margin_liquidation_buffer_bps = 50\n",
+    "phase 22 bracket age key text default": "def f(max_bracket_age_ms=60000):\n    pass\n",
+    "phase 22 bracket age field keyword": "build(margin_max_bracket_age_ms=60000)\n",
+    "phase 22 headroom key text constant": "HEADROOM_BPS = 100\n",
+    "phase 22 headroom field name assignment": "margin_headroom_bps = 100\n",
     "positional execution limits argument": "ExecutionLimits(1, 2, 3, 4)\n",
     "positional limits argument": "StreamLimits(1800, 3)\n",
     "positional limits argument through a module": "limits_mod.RateLimitPolicy(10, 20, 30)\n",

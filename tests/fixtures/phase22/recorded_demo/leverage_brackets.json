@@ -1,0 +1,87 @@
+[
+  {
+    "brackets": [
+      {
+        "bracket": 1,
+        "cum": 0.0,
+        "initialLeverage": 125,
+        "maintMarginRatio": 0.004,
+        "notionalCap": 50000,
+        "notionalFloor": 0
+      },
+      {
+        "bracket": 2,
+        "cum": 50.0,
+        "initialLeverage": 100,
+        "maintMarginRatio": 0.005,
+        "notionalCap": 250000,
+        "notionalFloor": 50000
+      },
+      {
+        "bracket": 3,
+        "cum": 1300.0,
+        "initialLeverage": 50,
+        "maintMarginRatio": 0.01,
+        "notionalCap": 3000000,
+        "notionalFloor": 250000
+      },
+      {
+        "bracket": 4,
+        "cum": 46300.0,
+        "initialLeverage": 20,
+        "maintMarginRatio": 0.025,
+        "notionalCap": 20000000,
+        "notionalFloor": 3000000
+      },
+      {
+        "bracket": 5,
+        "cum": 546300.0,
+        "initialLeverage": 10,
+        "maintMarginRatio": 0.05,
+        "notionalCap": 40000000,
+        "notionalFloor": 20000000
+      },
+      {
+        "bracket": 6,
+        "cum": 2546300.0,
+        "initialLeverage": 5,
+        "maintMarginRatio": 0.1,
+        "notionalCap": 100000000,
+        "notionalFloor": 40000000
+      },
+      {
+        "bracket": 7,
+        "cum": 5046300.0,
+        "initialLeverage": 4,
+        "maintMarginRatio": 0.125,
+        "notionalCap": 120000000,
+        "notionalFloor": 100000000
+      },
+      {
+        "bracket": 8,
+        "cum": 8046300.0,
+        "initialLeverage": 3,
+        "maintMarginRatio": 0.15,
+        "notionalCap": 200000000,
+        "notionalFloor": 120000000
+      },
+      {
+        "bracket": 9,
+        "cum": 28046300.0,
+        "initialLeverage": 2,
+        "maintMarginRatio": 0.25,
+        "notionalCap": 300000000,
+        "notionalFloor": 200000000
+      },
+      {
+        "bracket": 10,
+        "cum": 103046300.0,
+        "initialLeverage": 1,
+        "maintMarginRatio": 0.5,
+        "notionalCap": 500000000,
+        "notionalFloor": 300000000
+      }
+    ],
+    "symbol": "BTCUSDT"
+  }
+]

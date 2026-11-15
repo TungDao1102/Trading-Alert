@@ -132,3 +132,31 @@ def test_quantize_result_exceeding_working_precision_raises_value_error() -> Non
     # precision: fail closed with ValueError, never a wrong value.
     with pytest.raises(ValueError):
         quantize_for_storage(Decimal("1" + "0" * 44))
+
+
+# --------------------------------------------------------------------------- #
+# IN-05 (plan 24-15): the finite-exponent invariant is an explicit raise, not an assert, so
+# it still holds under `python -O`.
+# --------------------------------------------------------------------------- #
+
+
+class _BrokenExponent(Decimal):
+    """A finite non-zero Decimal whose digit tuple reports a non-int exponent."""
+
+    def as_tuple(self) -> tuple[int, tuple[int, ...], str]:  # type: ignore[override]
+        return (0, (1,), "n")
+
+
+def test_a_non_integer_exponent_raises_runtime_error_naming_the_invariant() -> None:
+    with pytest.raises(RuntimeError, match="finite Decimal exponent"):
+        canonical_decimal_text(_BrokenExponent("1"))
+
+
+def test_canonical_module_has_no_runtime_assert() -> None:
+    import ast
+    from pathlib import Path
+
+    import src.domain.canonical as module
+
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    assert [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assert)] == []

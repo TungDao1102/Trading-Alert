@@ -1,0 +1,82 @@
+[
+  {
+    "asset": "FDUSD",
+    "availableBalance": "0.00000000",
+    "balance": "0.00000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "0.00000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "0.00000000",
+    "updateTime": 0
+  },
+  {
+    "asset": "U",
+    "availableBalance": "0.00000000",
+    "balance": "0.00000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "0.00000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "0.00000000",
+    "updateTime": 0
+  },
+  {
+    "asset": "BNB",
+    "availableBalance": "0.00000000",
+    "balance": "0.00000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "0.00000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "0.00000000",
+    "updateTime": 0
+  },
+  {
+    "asset": "ETH",
+    "availableBalance": "0.00000000",
+    "balance": "0.00000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "0.00000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "0.00000000",
+    "updateTime": 0
+  },
+  {
+    "asset": "BTC",
+    "availableBalance": "0.01000000",
+    "balance": "0.01000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "0.01000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "0.01000000",
+    "updateTime": 1791048383827
+  },
+  {
+    "asset": "USDT",
+    "availableBalance": "4999.09343961",
+    "balance": "4999.09343961",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "4999.09343961",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "4999.09343961",
+    "updateTime": 1792589257306
+  },
+  {
+    "asset": "USD1",
+    "availableBalance": "0.00000000",
+    "balance": "0.00000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "0.00000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "0.00000000",
+    "updateTime": 0
+  },
+  {
+    "asset": "USDC",
+    "availableBalance": "5000.00000000",
+    "balance": "5000.00000000",
+    "crossUnPnl": "0.00000000",
+    "crossWalletBalance": "5000.00000000",
+    "marginAvailable": true,
+    "maxWithdrawAmount": "5000.00000000",
+    "updateTime": 1791048383797
+  }
+]

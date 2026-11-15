@@ -1,0 +1,8 @@
+[CRITICAL] EMERGENCY_CLOSE_FAILED
+subject: plan-0001
+reason: POSITION_READ_FAILED
+at: 2026-10-09T03:00:00Z
+What happened: The automatic emergency close could not be shown to end with a flat position (EMERGENCY_CLOSE_FAILED); the reason code in the header says where it stopped.
+Position: A position may still be open, with or without a stop.
+System already did: SAFE_MODE EMERGENCY_CLOSE_FAILED blocks new entries and the failure is journaled. The position was not declared safe, and a second close order is never sent while the first is undetermined.
+You must: Check the exchange position now and close it yourself if it is still open; read the journal for the reason code.

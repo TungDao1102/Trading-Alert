@@ -20,10 +20,28 @@ decisions/18-DEC-O-18-01.md` and its amendment of 2026-10-16:
 The lengths come from the `RateLimitPolicy` the gate holds, through `rate_limit_decision`
 (`src/domain/exchange_errors.py`): no wait number exists in this module.
 
+D083 (plan 24-03): a 418 answered with code -1003 and no valid Retry-After may carry the ban end
+time the exchange put in the body (`ErrorFacts.ban_until_epoch_ms`, epoch milliseconds, read by
+`src.adapters.binance_errors`). The gate takes it only when it is in the future against the
+injected clock, not later than `now` plus `retry_after_cap_seconds`, and the owner has configured
+`ban_end_clock_margin`; the deadline is then that time plus the margin, stored like any other
+deadline. Every other case keeps the 418 fallback wait. The number is never logged. With no
+margin the feature is off and no number is assumed.
+
 The end of a ban or of a pause proves nothing about an order, a cancel, a fill or a
 protective stop. The gate opening sends no request, replays nothing and emits no recovery
 signal; there is no method that clears a restriction, only the injected clock passing the end
 time lifts it. The unresolved account state stays with reconciliation.
+
+Restart recovery (plan 20-07, T-D, D-18). The two end times live in memory; a gate built with a
+`state_store` (the `GateStateStore` Protocol) saves them after every change and restores them
+once, through `restore()`, at the start of the process. Until `restore()` ran, the empty
+in-memory state is NOT proof that REST may be dispatched: `check()` refuses with
+`GateNotRestored` (a `RestGateRefusal`, so a refused safety action stays a durable PENDING row
+and is never sent around the gate). There is no exemption for any request category.
+An open gate means no currently known restriction; it is not proof that REST is healthy. Fresh
+successful reads from Binance stay mandatory. A gate built without a store behaves as before and
+reports `LEGACY_IN_MEMORY`, which no SAFE_MODE exit accepts.
 
 Known gap (Phase 18): the data jobs (backfill, universe freeze, collector), the Phase 16 paper
 runtime and the scripts `paper_ws_smoke.py` and `shadow_rehearsal.py` do not hold this gate and
@@ -31,15 +49,18 @@ keep their existing rate-limit handling; gating them is left to the phases that 
 processes.
 
 Pure: standard library, `src.domain.exchange_errors` and the `RateLimitPolicy` type only. No
-SDK import, no I/O, no wall clock (the clock is injected), no sleep, no float.
+SDK import, no I/O (persistence goes through the injected `GateStateStore`), no wall clock (the
+clock is injected), no sleep, no float.
 """
 
 from __future__ import annotations
 
+import enum
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from src.adapters.binance_limits import RateLimitPolicy
 from src.domain.exchange_errors import (
@@ -51,7 +72,25 @@ from src.domain.exchange_errors import (
 
 IP_BAN_418 = "IP_BAN_418"
 RATE_LIMIT_PAUSE_429 = "RATE_LIMIT_PAUSE_429"
+GATE_NOT_RESTORED = "GATE_NOT_RESTORED"
+GATE_STATE_UNKNOWN = "GATE_STATE_UNKNOWN"
+GATE_STATE_SCHEMA_VERSION = 1
 
+# Alert event name handed to the injected `on_alert` hook, once per gate, when the persisted
+# state is lost, unreadable or corrupt (a human must act; see `FileGateStateStore.initialize`).
+REST_GATE_RECOVERY_REQUIRED = "REST_GATE_RECOVERY_REQUIRED"
+
+# A restriction with no known end (not restored, unknown state) reports this many seconds: the
+# smallest whole-second re-check hint. It is never the 259200 s wait: a consumer that sleeps on
+# the value (binance_userdata_supervisor._await_rest_allowed) must not be parked for days.
+_NO_KNOWN_END_SECONDS = 1
+
+# Alert event name handed to `on_alert` when a 418 starts or extends the ban (D083 point 5). The
+# string is `REST_GATE_BAN_ENTERED until_utc=<ISO-8601 deadline>`: the deadline is the gate's own
+# end time (never the parsed number of the body).
+REST_GATE_BAN_ENTERED = "REST_GATE_BAN_ENTERED"
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _ONE_MICROSECOND = timedelta(microseconds=1)
 _MICROSECONDS_PER_SECOND = 1_000_000
 
@@ -63,6 +102,8 @@ class RestGateRefusal(PreSendRefusal):  # noqa: N818 - a refusal, not an error o
     number of seconds (rounded up) until the gate stops refusing. The message carries these
     two only: never a URL, a key or SDK text.
     """
+
+    reason: str
 
     def __init__(self, reason: str, retry_after_seconds: int) -> None:
         self.reason = reason
@@ -86,16 +127,93 @@ class RateLimitPauseActive(RestGateRefusal):
         super().__init__(RATE_LIMIT_PAUSE_429, retry_after_seconds)
 
 
+class GateNotRestored(RestGateRefusal):  # noqa: N818 - a refusal, not an error of the caller
+    """Refused because the gate has no trustworthy knowledge of the ban or pause state.
+
+    `reason` is `GATE_NOT_RESTORED` (restore() has not produced a verdict yet) or
+    `GATE_STATE_UNKNOWN` (the persisted state was lost or is unreadable). A `RestGateRefusal`
+    on purpose: plan 20-14 keeps a refused safety action as a durable PENDING row and sends it
+    only when the gate permits. `retry_after_seconds` is 1 (no end is known). The message names
+    the reason only: never a URL, a key or a path.
+    """
+
+    def __init__(self, reason: str, retry_after_seconds: int = _NO_KNOWN_END_SECONDS) -> None:
+        super().__init__(reason, retry_after_seconds)
+
+
+class GateRecoveryStatus(enum.Enum):
+    """What the gate knows about its own restart recovery (read by plan 20-25, row 6).
+
+    Only `RESTORED_DURABLE` (with `restriction()` None) may count toward a SAFE_MODE exit, and
+    never without the fresh Binance reads of row 3. `RESTORED_BARRIER` is reserved for the
+    startup-barrier option and is never produced by the persisted-deadline mechanism.
+    """
+
+    LEGACY_IN_MEMORY = "LEGACY_IN_MEMORY"
+    NOT_RESTORED = "NOT_RESTORED"
+    RESTORED_DURABLE = "RESTORED_DURABLE"
+    RESTORED_BARRIER = "RESTORED_BARRIER"
+    RESTORED_UNKNOWN_STATE = "RESTORED_UNKNOWN_STATE"
+    PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
+
+
+class GateStateCorrupt(Exception):  # noqa: N818 - a state, not an error of the caller
+    """The persisted gate state exists but does not parse; the store has set the file aside."""
+
+
+@dataclass(frozen=True, slots=True)
+class GateStateRecord:
+    """The persisted gate state (schema_version 1): two deadlines and who initialized it.
+
+    `initialized_at_utc` / `initialized_by` prove that the explicit first-install bootstrap ran;
+    a state file without them is corrupt. A deadline is None while none is recorded.
+    """
+
+    ban_until_utc: datetime | None
+    pause_until_utc: datetime | None
+    recorded_at_utc: datetime
+    initialized_at_utc: datetime
+    initialized_by: str
+    schema_version: int = GATE_STATE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        for name in ("ban_until_utc", "pause_until_utc", "recorded_at_utc", "initialized_at_utc"):
+            value = getattr(self, name)
+            required = name in ("recorded_at_utc", "initialized_at_utc")
+            if value is None and not required:
+                continue
+            if not isinstance(value, datetime) or value.utcoffset() is None:
+                raise ValueError(f"{name} must be a timezone-aware datetime")
+        if not isinstance(self.initialized_by, str) or not self.initialized_by.strip():
+            raise ValueError("initialized_by must be a non-empty string")
+        if self.schema_version != GATE_STATE_SCHEMA_VERSION:
+            raise ValueError("unsupported gate state schema_version")
+
+
+class GateStateStore(Protocol):
+    """Where the gate keeps its deadlines (the file store lives in `src.ops.rest_gate_state`).
+
+    `load()` returns None when no state exists and raises `GateStateCorrupt` when the state
+    does not parse; `save()` raises on a failure to persist.
+    """
+
+    def save(self, record: GateStateRecord) -> None: ...
+
+    def load(self) -> GateStateRecord | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class GateRestriction:
     """The active restriction: the refusing reason (the ban wins) and when REST opens again.
 
     `until_utc` is the later of the active end times (the moment `check()` stops refusing);
-    `remaining_seconds` is the whole seconds until then, rounded up.
+    `remaining_seconds` is the whole seconds until then, rounded up. `until_utc` is None only
+    while no end is known (`GATE_NOT_RESTORED`, `GATE_STATE_UNKNOWN`); `remaining_seconds` is
+    then 1, never a long wait.
     """
 
     reason: str
-    until_utc: datetime
+    until_utc: datetime | None
     remaining_seconds: int
 
 
@@ -116,18 +234,47 @@ class RestRateLimitGate:
     `rate_limit_decision`; every other category changes nothing. An end time only moves
     later. A `threading.Lock` guards the end times because every holder of the process shares
     the one instance (the SDK calls run in worker threads).
+
+    With a `state_store` the gate starts NOT_RESTORED (see the module docstring): `check()`
+    refuses with `GateNotRestored` until `restore()` has adopted a valid persisted record, and
+    every change of an end time is saved. `check()` has no argument: no request category is
+    exempt.
     """
 
-    def __init__(self, *, policy: RateLimitPolicy, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        *,
+        policy: RateLimitPolicy,
+        clock: Callable[[], datetime],
+        state_store: GateStateStore | None = None,
+        on_alert: Callable[[str], None] | None = None,
+        ban_end_clock_margin: timedelta | None = None,
+    ) -> None:
         if not isinstance(policy, RateLimitPolicy):
             raise TypeError("policy must be a RateLimitPolicy")
         if not callable(clock):
             raise TypeError("clock must be a callable returning a timezone-aware datetime")
+        if on_alert is not None and not callable(on_alert):
+            raise TypeError("on_alert must be a callable taking the alert event name")
+        if ban_end_clock_margin is not None:
+            if not isinstance(ban_end_clock_margin, timedelta):
+                raise TypeError("ban_end_clock_margin must be a timedelta or None")
+            if ban_end_clock_margin <= timedelta(0):
+                raise ValueError("ban_end_clock_margin must be positive")
         self._policy = policy
+        self._ban_end_clock_margin = ban_end_clock_margin
         self._clock = clock
+        self._state_store = state_store
+        self._on_alert = on_alert
         self._lock = threading.Lock()
+        self._restore_lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self._ban_until: datetime | None = None
         self._pause_until: datetime | None = None
+        self._restore_done = False
+        self._unknown_state = False
+        self._save_failed = False
+        self._loaded: GateStateRecord | None = None
 
     @property
     def policy(self) -> RateLimitPolicy:
@@ -153,9 +300,26 @@ class RestRateLimitGate:
         ]
         return max(ends) if ends else None
 
+    def _blocking_reason(self) -> str | None:
+        """The reason the gate refuses without a known end, or None (caller holds the lock)."""
+        if self._state_store is None:
+            return None
+        if not self._restore_done:
+            return GATE_NOT_RESTORED
+        if self._unknown_state:
+            return GATE_STATE_UNKNOWN
+        return None
+
     def check(self) -> None:
-        """Refuse the REST call about to be sent while a ban or a pause is active."""
+        """Refuse the REST call about to be sent while a ban or a pause is active.
+
+        A save that failed earlier is tried again first (WR-C2).
+        """
+        self._retry_failed_save()
         with self._lock:
+            blocking = self._blocking_reason()
+            if blocking is not None:
+                raise GateNotRestored(blocking)
             now = self._now()
             banned, paused = self._active(now)
             opens_at = self._refuse_until(now)
@@ -167,10 +331,34 @@ class RestRateLimitGate:
         if paused:
             raise RateLimitPauseActive(remaining)
 
+    def _body_ban_end(
+        self, now: datetime, ban_until_epoch_ms: int | None, retry_after_seconds: int | None
+    ) -> datetime | None:
+        """D083 points 1, 3, 4: the padded ban end from the body, or None for the fallback.
+
+        None when a valid Retry-After exists (it wins), no margin is configured, no number was
+        read, or the time is not in the future or later than `now + retry_after_cap_seconds`.
+        """
+        margin = self._ban_end_clock_margin
+        if margin is None or ban_until_epoch_ms is None or retry_after_seconds is not None:
+            return None
+        parsed = _EPOCH + timedelta(milliseconds=ban_until_epoch_ms)
+        if not now < parsed <= now + timedelta(seconds=self._policy.retry_after_cap_seconds):
+            return None
+        return parsed + margin
+
     def record(
-        self, category: ExchangeErrorCategory, retry_after_seconds: int | None
+        self,
+        category: ExchangeErrorCategory,
+        retry_after_seconds: int | None,
+        *,
+        ban_until_epoch_ms: int | None = None,
     ) -> RateLimitDecision:
-        """Record a classified failure: a 418 extends the ban, a 429 extends the pause."""
+        """Record a classified failure: a 418 extends the ban, a 429 extends the pause.
+
+        `ban_until_epoch_ms` is the D083 body number of a 418 / -1003 (None otherwise); it is
+        ignored for a 429 and whenever a valid Retry-After exists.
+        """
         policy = self._policy
         decision = rate_limit_decision(
             category,
@@ -181,19 +369,40 @@ class RestRateLimitGate:
         )
         if decision.wait_seconds is None:
             return decision
+        changed = False
+        ban_entered: datetime | None = None
         with self._lock:
-            end = self._now() + timedelta(seconds=decision.wait_seconds)
+            now = self._now()
+            end = now + timedelta(seconds=decision.wait_seconds)
             if category is ExchangeErrorCategory.IP_BANNED:
+                end = self._body_ban_end(now, ban_until_epoch_ms, retry_after_seconds) or end
                 if self._ban_until is None or end > self._ban_until:
                     self._ban_until = end
+                    changed = True
+                    ban_entered = end
             elif category is ExchangeErrorCategory.RATE_LIMITED:
                 if self._pause_until is None or end > self._pause_until:
                     self._pause_until = end
+                    changed = True
+        if changed:
+            self._persist()
+        else:
+            self._retry_failed_save()
+        if ban_entered is not None:
+            self._alert(f"{REST_GATE_BAN_ENTERED} until_utc={ban_entered.isoformat()}")
         return decision
 
     def restriction(self) -> GateRestriction | None:
-        """The active restriction, or None when REST calls are not refused."""
+        """The active restriction, or None when no restriction is currently known.
+
+        None is not proof that REST is healthy (module docstring).
+        """
         with self._lock:
+            blocking = self._blocking_reason()
+            if blocking is not None:
+                return GateRestriction(
+                    reason=blocking, until_utc=None, remaining_seconds=_NO_KNOWN_END_SECONDS
+                )
             now = self._now()
             banned, _ = self._active(now)
             opens_at = self._refuse_until(now)
@@ -206,15 +415,177 @@ class RestRateLimitGate:
         )
 
     def remaining_seconds(self) -> int:
-        """Whole seconds (rounded up) until REST calls are no longer refused; 0 when open."""
+        """Whole seconds (rounded up) until REST calls are no longer refused; 0 when open.
+
+        1 while no end is known (the smallest re-check hint, never a long wait).
+        """
         restriction = self.restriction()
         return 0 if restriction is None else restriction.remaining_seconds
 
+    # -- restart recovery (plan 20-07, T-D) ----------------------------------- #
+
+    def recovery_status(self) -> GateRecoveryStatus:
+        """What the gate knows about its own restart recovery (see `GateRecoveryStatus`)."""
+        with self._lock:
+            if self._state_store is None:
+                return GateRecoveryStatus.LEGACY_IN_MEMORY
+            if not self._restore_done:
+                return GateRecoveryStatus.NOT_RESTORED
+            if self._unknown_state:
+                return GateRecoveryStatus.RESTORED_UNKNOWN_STATE
+            if self._save_failed:
+                return GateRecoveryStatus.PERSISTENCE_FAILED
+            return GateRecoveryStatus.RESTORED_DURABLE
+
+    def restore(self) -> GateRecoveryStatus:
+        """Adopt the persisted deadlines; call once at process start, before any REST call.
+
+        One verdict per gate instance; a second call changes nothing (a running gate is never
+        cleared in process, only by a restart whose `restore()` reads a valid record).
+
+        * a valid record is adopted (end times only move later): `RESTORED_DURABLE`;
+        * a record whose `ban_until_utc` or `pause_until_utc` lies beyond `recorded_at_utc` plus
+          the largest wait the policy can produce (the largest of `retry_after_cap_seconds`,
+          `no_retry_after_wait_418_seconds`, `no_retry_after_wait_429_seconds`; zero extra
+          allowance) was not written by this policy (host clock skew, a corrupted year): it is
+          untrusted and treated like the cases below (WR-C3);
+        * no record (loss of initialized state: a first install must have run the explicit
+          bootstrap), a record that does not parse, or a store that cannot be read: the gate
+          is restricted with no known end (`GATE_STATE_UNKNOWN`, status
+          `RESTORED_UNKNOWN_STATE`) until a restart reads a valid record, and `on_alert` is
+          called once with `REST_GATE_RECOVERY_REQUIRED`.
+
+        Without a store nothing is restored and the status is `LEGACY_IN_MEMORY`.
+        """
+        store = self._state_store
+        if store is None:
+            return GateRecoveryStatus.LEGACY_IN_MEMORY
+        with self._restore_lock:
+            if self._restore_done:
+                return self.recovery_status()
+            record: GateStateRecord | None
+            try:
+                record = store.load()
+            except Exception:
+                # A missing record, a corrupt one and an unreadable store are the same verdict:
+                # the persisted state cannot be trusted (D-10: decided by type, never by text).
+                record = None
+            if record is None or self._deadline_beyond_policy(record):
+                with self._lock:
+                    self._unknown_state = True
+                    self._restore_done = True
+                self._alert(REST_GATE_RECOVERY_REQUIRED)
+                return self.recovery_status()
+            with self._lock:
+                if record.ban_until_utc is not None and (
+                    self._ban_until is None or record.ban_until_utc > self._ban_until
+                ):
+                    self._ban_until = record.ban_until_utc
+                if record.pause_until_utc is not None and (
+                    self._pause_until is None or record.pause_until_utc > self._pause_until
+                ):
+                    self._pause_until = record.pause_until_utc
+                self._loaded = record
+                self._restore_done = True
+                merged = (
+                    self._ban_until != record.ban_until_utc
+                    or self._pause_until != record.pause_until_utc
+                )
+            if merged:
+                self._persist()  # a deadline recorded before restore() is saved now
+        return self.recovery_status()
+
+    def _deadline_beyond_policy(self, record: GateStateRecord) -> bool:
+        """True when a persisted deadline is later than the policy could ever have produced.
+
+        A deadline is `now + wait` with `wait` at most the largest of the three policy waits, and
+        `recorded_at_utc` is read at save time, not before the deadline was set, so a genuine
+        record never has `deadline > recorded_at_utc + largest wait`. No skew allowance is added:
+        the policy gives none and none is invented (WR-C3).
+        """
+        policy = self._policy
+        latest = record.recorded_at_utc + timedelta(
+            seconds=max(
+                policy.retry_after_cap_seconds,
+                policy.no_retry_after_wait_418_seconds,
+                policy.no_retry_after_wait_429_seconds,
+            )
+        )
+        # D083: a padded body ban end may lie the owner's margin beyond the cap; the margin is the
+        # only allowance and exists only when the owner configured it.
+        margin = self._ban_end_clock_margin or timedelta(0)
+        ban = record.ban_until_utc
+        pause = record.pause_until_utc
+        return (ban is not None and ban > latest + margin) or (pause is not None and pause > latest)
+
+    def _alert(self, event: str) -> None:
+        """Tell the injected hook; a failing hook never changes the restriction."""
+        hook = self._on_alert
+        if hook is None:
+            return
+        try:
+            hook(event)
+        except Exception:
+            pass
+
+    def _retry_failed_save(self) -> None:
+        """Save again when the last save failed, so the file cannot stay without the deadline.
+
+        Called from `check()` and from a `record()` that changed nothing. A no-op while no save
+        failed, and while another thread is saving. The status stays `PERSISTENCE_FAILED`
+        until a save succeeds. A restart before that would restore a record without the deadline
+        (WR-C2), so every REST call is a chance to close the gap.
+        """
+        if not self._save_failed or self._save_lock.locked():
+            return
+        self._persist()
+
+    def _persist(self) -> None:
+        """Save the current end times; a no-op unless a valid record was restored.
+
+        A failing save never raises into the REST caller: the in-memory restriction stays
+        enforced and the status becomes `PERSISTENCE_FAILED` until a later save succeeds. An
+        unknown state is never saved (a valid-looking file would reopen a closed gate).
+        """
+        store = self._state_store
+        if store is None:
+            return
+        with self._save_lock:
+            with self._lock:
+                loaded = self._loaded
+                if loaded is None:
+                    return
+                record = GateStateRecord(
+                    ban_until_utc=self._ban_until,
+                    pause_until_utc=self._pause_until,
+                    recorded_at_utc=self._now(),
+                    initialized_at_utc=loaded.initialized_at_utc,
+                    initialized_by=loaded.initialized_by,
+                )
+            try:
+                store.save(record)
+            except Exception:
+                failed = True
+            else:
+                failed = False
+            with self._lock:
+                self._save_failed = failed
+
 
 __all__ = [
+    "GATE_NOT_RESTORED",
+    "GATE_STATE_SCHEMA_VERSION",
+    "GATE_STATE_UNKNOWN",
     "IP_BAN_418",
     "RATE_LIMIT_PAUSE_429",
+    "REST_GATE_BAN_ENTERED",
+    "REST_GATE_RECOVERY_REQUIRED",
+    "GateNotRestored",
+    "GateRecoveryStatus",
     "GateRestriction",
+    "GateStateCorrupt",
+    "GateStateRecord",
+    "GateStateStore",
     "RateLimitBanActive",
     "RateLimitPauseActive",
     "RestGateRefusal",

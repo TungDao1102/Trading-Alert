@@ -5,18 +5,22 @@ replay needs, so the trial evaluator (D061 item D, L-04: tolerance zero) rebuild
 an evidence bundle and nothing else. Two record payloads are built here:
 
 - `PAPER_REPLAY_INPUTS` (`replay_inputs_payload`): per evaluated live 1h bar, what the risk stage
-  read: the constraint snapshot, the account state, the open positions and daily loss the
-  risk-inputs port returned at the close, the plan ttl, the digests of the whole `BarContext` and of
-  both windows, and `window_accept_seq` (the last accepted bar the live windows were cut after);
+  read: the constraint snapshot, the account state, the four absolute portfolio thresholds, the
+  open positions and daily loss the risk-inputs port returned at the close, the plan ttl, the
+  digests of the whole `BarContext` and of both windows, and `window_accept_seq` (the last
+  accepted bar the live windows were cut after). Schema /2 (16-DEC-EQUITY-BASE) records the
+  resolved thresholds because the sizing equity (the current ledger equity) is no longer the base
+  they were resolved on (the UTC day-start equity); schema /1 records carry no such group;
 - `PAPER_HISTORY_BARS` (`history_log_payload`): every bar the pipeline accepted into its history,
   live bars included, each with its acceptance sequence `accept_seq`. The live windows depend on
   the ORDER in which bars entered the buffers (a bar backfilled after a later live bar is absent
   from that bar's window), so the replay feeds a fresh buffer set from this log in acceptance order.
 
 `context_from_inputs` rebuilds the `BarContext` of a recorded bar the way `make_context_factory`
-derived it (cost model from the registry slice of the pinned set, absolute thresholds from the
-set's rates times the recorded equity) and verifies the parameter set hash, the cost model hash and
-the recomputed `context_digest`; any difference raises `ReplayInputsError` naming the field group.
+derived it (cost model from the registry slice of the pinned set; absolute thresholds from the
+recorded group for /2, from the set's rates times the recorded equity for /1, the derivation that
+wrote /1 records) and verifies the parameter set hash, the cost model hash and the recomputed
+`context_digest`; any difference raises `ReplayInputsError` naming the field group.
 
 Pure module: stdlib, Decimal, the canonical hash helper and project types. No clock, no float, no
 adapter, no SQLAlchemy. It never implements the risk-inputs port (the replay builds `BarContext`
@@ -37,10 +41,11 @@ from src.core.types import AccountState, Candle
 from src.domain.canonical import sha256_hex
 from src.domain.registry import ParameterSet
 from src.paper.loop import BarContext
-from src.risk.portfolio import resolve_absolute_thresholds
+from src.risk.portfolio import RATE_THRESHOLD_KEYS, resolve_absolute_thresholds
 from src.risk.types import ConstraintSnapshot, OpenPosition
 
-REPLAY_INPUTS_SCHEMA = "paper-replay-inputs/1"
+REPLAY_INPUTS_SCHEMA = "paper-replay-inputs/2"
+_LEGACY_REPLAY_INPUTS_SCHEMA = "paper-replay-inputs/1"  # read-only: thresholds = rates x equity
 HISTORY_LOG_SCHEMA = "paper-history-bars/1"
 _CONTEXT_DIGEST_SCHEMA = "paper-context/1"
 _WINDOW_DIGEST_SCHEMA = "paper-window/1"
@@ -112,6 +117,17 @@ def _loss_text(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
 
+def _thresholds_form(context: BarContext) -> dict[str, str]:
+    """The four resolved absolute thresholds the risk stage read, as Decimal text (fail closed)."""
+    form: dict[str, str] = {}
+    for key in RATE_THRESHOLD_KEYS:
+        value = context.absolute_thresholds.get(key)
+        if not isinstance(value, Decimal):
+            raise ReplayInputsError(f"absolute_thresholds.{key}: missing or not a Decimal")
+        form[key] = str(value)
+    return form
+
+
 def _ttl_seconds(ttl: timedelta) -> int:
     if ttl % _ONE_SECOND != timedelta(0):
         raise ReplayInputsError(f"ttl {ttl!r} is not a whole number of seconds (fail closed)")
@@ -157,7 +173,8 @@ def replay_inputs_payload(
     """The payload of the replay-inputs record of one evaluated bar (see the module docstring).
 
     Raises:
-        ReplayInputsError: the ttl is not a whole number of seconds (fail closed).
+        ReplayInputsError: the ttl is not a whole number of seconds, or a threshold is not a
+            Decimal (fail closed).
     """
     if isinstance(window_accept_seq, bool) or window_accept_seq < 0:
         raise ReplayInputsError("window_accept_seq must be a non-negative integer")
@@ -168,6 +185,7 @@ def replay_inputs_payload(
         "cost_model_hash": context.cost_model.cost_model_hash,
         "constraint_snapshot": _constraint_form(context.constraint_snapshot),
         "account_state": _account_form(context.account_state),
+        "absolute_thresholds": _thresholds_form(context),
         "open_positions": [_position_form(p) for p in context.open_positions],
         "daily_loss_quote": _loss_text(context.daily_loss_quote),
         "ttl_seconds": _ttl_seconds(context.ttl),
@@ -232,14 +250,34 @@ def window_accept_seq_of(payload: Mapping[str, Any]) -> int:
     return _whole(payload, "window_accept_seq", "replay_inputs")
 
 
+def _rebuild_thresholds(
+    payload: Mapping[str, Any], parameter_set: ParameterSet, account_state: AccountState
+) -> dict[str, Any]:
+    """The absolute thresholds of a recorded bar: the /2 group, else the /1 derivation."""
+    if payload.get("schema") != REPLAY_INPUTS_SCHEMA:
+        return resolve_absolute_thresholds(
+            parameter_set=parameter_set.params, equity=account_state.equity
+        )
+    group = _group(payload, "absolute_thresholds", "absolute_thresholds")
+    if set(group) != set(RATE_THRESHOLD_KEYS):
+        raise ReplayInputsError(
+            f"absolute_thresholds: must hold exactly {sorted(RATE_THRESHOLD_KEYS)}"
+        )
+    thresholds = dict(parameter_set.params)
+    for key in RATE_THRESHOLD_KEYS:
+        thresholds[key] = _decimal(group, key, "absolute_thresholds")
+    return thresholds
+
+
 def rebuild_context(
     payload: Mapping[str, Any], *, symbol: str, parameter_set: ParameterSet
 ) -> BarContext:
     """Rebuild the `BarContext` of a recorded bar WITHOUT checking any hash or digest.
 
     The derivation is the one `make_context_factory` uses: the cost model from the registry slice of
-    the set and the absolute thresholds from the set's rates times the recorded equity. Use
-    `context_from_inputs` to rebuild and verify.
+    the set. The absolute thresholds of a /2 record are the recorded group (the ledger's day-start
+    thresholds the risk stage read, 16-DEC-EQUITY-BASE); a /1 record keeps the derivation that wrote
+    it, the set's rates times the recorded equity. Use `context_from_inputs` to rebuild and verify.
 
     Raises:
         ReplayInputsError: a field group is missing or malformed.
@@ -277,9 +315,7 @@ def rebuild_context(
         daily_loss = None if loss_raw is None else _decimal(payload, "daily_loss_quote", "context")
         ttl = timedelta(seconds=_whole(payload, "ttl_seconds", "replay_inputs"))
         cost_model = build_cost_model(cost_slice(parameter_set.params))
-        thresholds = resolve_absolute_thresholds(
-            parameter_set=parameter_set.params, equity=account_state.equity
-        )
+        thresholds = _rebuild_thresholds(payload, parameter_set, account_state)
     except ReplayInputsError:
         raise
     except (ValueError, TypeError, KeyError) as exc:
@@ -307,8 +343,10 @@ def context_from_inputs(
         ReplayInputsError: the schema, the parameter set hash, the cost model hash or the
             recomputed `context_digest` differs from the record (the message names the group).
     """
-    if payload.get("schema") != REPLAY_INPUTS_SCHEMA:
-        raise ReplayInputsError(f"schema is not {REPLAY_INPUTS_SCHEMA!r}")
+    if payload.get("schema") not in (REPLAY_INPUTS_SCHEMA, _LEGACY_REPLAY_INPUTS_SCHEMA):
+        raise ReplayInputsError(
+            f"schema is not {REPLAY_INPUTS_SCHEMA!r} or {_LEGACY_REPLAY_INPUTS_SCHEMA!r}"
+        )
     if payload.get("parameter_set_hash") != parameter_set.parameter_set_hash:
         raise ReplayInputsError("parameter_set_hash differs from the registry set")
     context = rebuild_context(payload, symbol=symbol, parameter_set=parameter_set)

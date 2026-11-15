@@ -1,0 +1,29 @@
+{
+  "case_id": "gtd_entry_expiry_status",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "cancel_order",
+    "summary": {
+      "client_order_id": "dprobe-gtd-20261022T125303Z-1",
+      "close_position": "false",
+      "executed_qty": "0.0000",
+      "good_till_date": "1792674245000",
+      "order_id": "28645841970",
+      "orig_qty": "0.0008",
+      "orig_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "78466.90",
+      "reduce_only": "false",
+      "side": "BUY",
+      "status": "CANCELED",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTD",
+      "type": "LIMIT",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

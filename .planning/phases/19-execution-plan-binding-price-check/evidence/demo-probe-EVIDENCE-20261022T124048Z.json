@@ -1,0 +1,800 @@
+{
+  "acceptance": {
+    "account_state": {
+      "proof_class": "REAL_DEMO",
+      "reason": "account state recorded before and after",
+      "result": "PASS"
+    },
+    "below_min_notional_reduce_only_leg": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cancel_algo_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cancel_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "cleanup": {
+      "proof_class": "REAL_DEMO",
+      "reason": "zero open orders, zero open algo orders, flat position",
+      "result": "PASS"
+    },
+    "closeposition_stop_flat": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "commission_vs_realized_pnl": {
+      "proof_class": "REAL_DEMO",
+      "reason": "OBSERVED: 8 exchange answer(s) recorded",
+      "result": "PASS"
+    },
+    "duplicate_client_algo_id": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "entry_never_fills_protective_orphan": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "evidence": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the evidence passes check_probe_evidence",
+      "result": "PASS"
+    },
+    "full_fill_protective_quantity": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "get_algo_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "get_order_not_found": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "gtd_entry_expiry_status": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_algo": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_canceled_normal": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "id_reuse_after_filled": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "label_and_d055": {
+      "proof_class": "REAL_DEMO",
+      "reason": "labelled demo-observed, not mainnet; D055 stays OPEN",
+      "result": "PASS"
+    },
+    "overall": {
+      "proof_class": "REAL_DEMO",
+      "reason": "failing: ['below_min_notional_reduce_only_leg', 'cancel_algo_order_not_found', 'cancel_order_not_found', 'closeposition_stop_flat', 'duplicate_client_algo_id', 'entry_never_fills_protective_orphan', 'full_fill_protective_quantity', 'get_algo_order_not_found', 'get_order_not_found', 'gtd_entry_expiry_status', 'id_reuse_after_canceled_algo', 'id_reuse_after_canceled_normal', 'id_reuse_after_filled', 'partial_fill', 'preplaced_stop_reduce_only_flat', 'rejected_protective_variants', 'triggered_market_exit_lifecycle']",
+      "result": "FAIL"
+    },
+    "partial_fill": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "preplaced_stop_reduce_only_flat": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "proof_class": {
+      "proof_class": "REAL_DEMO",
+      "reason": "executed on Demo",
+      "result": "PASS"
+    },
+    "rejected_protective_variants": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    },
+    "triggered_market_exit_lifecycle": {
+      "proof_class": "REAL_DEMO",
+      "reason": "the case was not run",
+      "result": "FAIL"
+    }
+  },
+  "account_after": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "3",
+        "row_0_asset": "BTC",
+        "row_0_available_balance": "0.01000000",
+        "row_0_balance": "0.01000000",
+        "row_1_asset": "USDT",
+        "row_1_available_balance": "4998.39137539",
+        "row_1_balance": "4998.39137539",
+        "row_2_asset": "USDC",
+        "row_2_available_balance": "5000.00000000",
+        "row_2_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "account_before": {
+    "balance": {
+      "error": null,
+      "ok": true,
+      "operation": "account_balance",
+      "summary": {
+        "count": "3",
+        "row_0_asset": "BTC",
+        "row_0_available_balance": "0.01000000",
+        "row_0_balance": "0.01000000",
+        "row_1_asset": "USDT",
+        "row_1_available_balance": "4998.44635765",
+        "row_1_balance": "4998.44635765",
+        "row_2_asset": "USDC",
+        "row_2_available_balance": "5000.00000000",
+        "row_2_balance": "5000.00000000"
+      }
+    },
+    "dual_side_position": false,
+    "flat": true,
+    "open_algo_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_algo_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "open_orders": {
+      "error": null,
+      "ok": true,
+      "operation": "open_orders",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "position_mode": {
+      "error": null,
+      "ok": true,
+      "operation": "position_mode",
+      "summary": {
+        "dual_side_position": "false"
+      }
+    },
+    "positions": {
+      "error": null,
+      "ok": true,
+      "operation": "positions",
+      "summary": {
+        "count": "0"
+      }
+    },
+    "remaining": {
+      "open_algo_orders": 0,
+      "open_orders": 0,
+      "positions": [],
+      "readable": true
+    },
+    "status": "READ"
+  },
+  "ban": null,
+  "case_order": [
+    "commission_vs_realized_pnl"
+  ],
+  "cases": [
+    {
+      "case_id": "commission_vs_realized_pnl",
+      "cleanup": {
+        "actions": [
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "cancel_all_algo_open_orders",
+            "summary": {
+              "code": "200",
+              "msg": "The operation of cancel all open order is done."
+            }
+          },
+          {
+            "error": null,
+            "ok": true,
+            "operation": "positions",
+            "summary": {
+              "count": "0"
+            }
+          }
+        ],
+        "notes": [],
+        "remaining": {
+          "open_algo_orders": 0,
+          "open_orders": 0,
+          "positions": [],
+          "readable": true
+        },
+        "status": "FLAT",
+        "waited_seconds": 0
+      },
+      "details": {
+        "close": "accepted status=NEW",
+        "close_client_id": "dprobe-crx-20261022T124048Z-2",
+        "close_order_id": "28645824940",
+        "close_trade_1": "549740116|SELL|81658.10|0.0008|65.326480|0.02613059|USDT|-0.00271999|false|1792672851726",
+        "close_trades_query": "accepted",
+        "commission_assets": "USDT",
+        "derived_income_commission_sum": "NOT_OBSERVED: no matching income row",
+        "derived_income_realized_pnl_sum": "NOT_OBSERVED: no matching income row",
+        "derived_sell_quote_minus_buy_quote": "-0.002720",
+        "derived_sum_commission_trades": "0.05226227",
+        "derived_sum_realized_pnl_trades": "-0.00271999",
+        "entry": "accepted status=NEW",
+        "entry_client_id": "dprobe-cre-20261022T124048Z-1",
+        "entry_order_id": "28645824937",
+        "entry_status": "accepted status=FILLED",
+        "entry_statuses": "NEW,FILLED",
+        "entry_trade_1": "549740115|BUY|81661.50|0.0008|65.329200|0.02613168|USDT|0|false|1792672851493",
+        "entry_trades_query": "accepted",
+        "held_quantity": "0.0008",
+        "income_history_query": "accepted",
+        "income_history_query_2": "accepted",
+        "mark_price": "81686.35563406",
+        "position_before_close": "accepted"
+      },
+      "finished_utc": "2026-10-22T12:45:52.204243+00:00",
+      "frames": {
+        "events": [
+          {
+            "after_gap": "false",
+            "connection_epoch": "1",
+            "event_name": "TradeLite",
+            "event_type": "IgnoredEvent",
+            "reason": "not used: fills come from ORDER_TRADE_UPDATE only (single fill source)",
+            "received_at_utc": "2026-10-22T12:40:51.435220+00:00"
+          },
+          {
+            "accumulated_filled_quantity": "0",
+            "after_gap": "false",
+            "client_order_id": "dprobe-cre-20261022T124048Z-1",
+            "close_position": "false",
+            "connection_epoch": "1",
+            "event_type": "OrderUpdateEvent",
+            "exchange_order_id": "28645824937",
+            "execution_type": "NEW",
+            "expire_reason": "0",
+            "last_filled_price": "0",
+            "last_filled_quantity": "0",
+            "order_status": "NEW",
+            "order_type": "LIMIT",
+            "original_order_type": "LIMIT",
+            "original_price": "83728.5",
+            "original_quantity": "0.0008",
+            "position_side": "BOTH",
+            "received_at_utc": "2026-10-22T12:40:51.435473+00:00",
+            "reduce_only": "false",
+            "side": "BUY",
+            "stop_price": "0",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "working_type": "CONTRACT_PRICE"
+          },
+          {
+            "after_gap": "false",
+            "connection_epoch": "1",
+            "event_type": "AccountUpdateEvent",
+            "reason": "ORDER",
+            "received_at_utc": "2026-10-22T12:40:51.435786+00:00"
+          },
+          {
+            "accumulated_filled_quantity": "0.0008",
+            "after_gap": "false",
+            "client_order_id": "dprobe-cre-20261022T124048Z-1",
+            "close_position": "false",
+            "connection_epoch": "1",
+            "event_type": "OrderUpdateEvent",
+            "exchange_order_id": "28645824937",
+            "execution_type": "TRADE",
+            "expire_reason": "0",
+            "last_filled_price": "81661.5",
+            "last_filled_quantity": "0.0008",
+            "order_status": "FILLED",
+            "order_type": "LIMIT",
+            "original_order_type": "LIMIT",
+            "original_price": "83728.5",
+            "original_quantity": "0.0008",
+            "position_side": "BOTH",
+            "received_at_utc": "2026-10-22T12:40:51.436023+00:00",
+            "reduce_only": "false",
+            "side": "BUY",
+            "stop_price": "0",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "trade_id": "549740115",
+            "working_type": "CONTRACT_PRICE"
+          },
+          {
+            "after_gap": "false",
+            "connection_epoch": "1",
+            "event_name": "TradeLite",
+            "event_type": "IgnoredEvent",
+            "reason": "not used: fills come from ORDER_TRADE_UPDATE only (single fill source)",
+            "received_at_utc": "2026-10-22T12:40:51.671475+00:00"
+          },
+          {
+            "accumulated_filled_quantity": "0",
+            "after_gap": "false",
+            "client_order_id": "dprobe-crx-20261022T124048Z-2",
+            "close_position": "false",
+            "connection_epoch": "1",
+            "event_type": "OrderUpdateEvent",
+            "exchange_order_id": "28645824940",
+            "execution_type": "NEW",
+            "expire_reason": "0",
+            "last_filled_price": "0",
+            "last_filled_quantity": "0",
+            "order_status": "NEW",
+            "order_type": "MARKET",
+            "original_order_type": "MARKET",
+            "original_price": "0",
+            "original_quantity": "0.0008",
+            "position_side": "BOTH",
+            "received_at_utc": "2026-10-22T12:40:51.671688+00:00",
+            "reduce_only": "true",
+            "side": "SELL",
+            "stop_price": "0",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "working_type": "CONTRACT_PRICE"
+          },
+          {
+            "after_gap": "false",
+            "connection_epoch": "1",
+            "event_type": "AccountUpdateEvent",
+            "reason": "ORDER",
+            "received_at_utc": "2026-10-22T12:40:51.671962+00:00"
+          },
+          {
+            "accumulated_filled_quantity": "0.0008",
+            "after_gap": "false",
+            "client_order_id": "dprobe-crx-20261022T124048Z-2",
+            "close_position": "false",
+            "connection_epoch": "1",
+            "event_type": "OrderUpdateEvent",
+            "exchange_order_id": "28645824940",
+            "execution_type": "TRADE",
+            "expire_reason": "0",
+            "last_filled_price": "81658.1",
+            "last_filled_quantity": "0.0008",
+            "order_status": "FILLED",
+            "order_type": "MARKET",
+            "original_order_type": "MARKET",
+            "original_price": "0",
+            "original_quantity": "0.0008",
+            "position_side": "BOTH",
+            "received_at_utc": "2026-10-22T12:40:51.672197+00:00",
+            "reduce_only": "true",
+            "side": "SELL",
+            "stop_price": "0",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "trade_id": "549740116",
+            "working_type": "CONTRACT_PRICE"
+          }
+        ],
+        "fixtures": [
+          "commission_vs_realized_pnl-001-TRADE_LITE-2.json",
+          "commission_vs_realized_pnl-002-ORDER_TRADE_UPDATE-2.json",
+          "commission_vs_realized_pnl-003-ACCOUNT_UPDATE-2.json",
+          "commission_vs_realized_pnl-004-ORDER_TRADE_UPDATE-2.json",
+          "commission_vs_realized_pnl-005-TRADE_LITE-2.json",
+          "commission_vs_realized_pnl-006-ORDER_TRADE_UPDATE.json",
+          "commission_vs_realized_pnl-007-ACCOUNT_UPDATE.json",
+          "commission_vs_realized_pnl-008-ORDER_TRADE_UPDATE.json"
+        ],
+        "status": "OBSERVED",
+        "stream_states": []
+      },
+      "handler_registered": true,
+      "notes": [],
+      "observations": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "new_limit_order",
+          "summary": {
+            "client_order_id": "dprobe-cre-20261022T124048Z-1",
+            "close_position": "false",
+            "executed_qty": "0.0000",
+            "good_till_date": "0",
+            "order_id": "28645824937",
+            "orig_qty": "0.0008",
+            "orig_type": "LIMIT",
+            "position_side": "BOTH",
+            "price": "83728.50",
+            "reduce_only": "false",
+            "side": "BUY",
+            "status": "NEW",
+            "stop_price": "0.00",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "type": "LIMIT",
+            "working_type": "CONTRACT_PRICE"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "query_order",
+          "summary": {
+            "avg_price": "81661.500000",
+            "client_order_id": "dprobe-cre-20261022T124048Z-1",
+            "close_position": "false",
+            "executed_qty": "0.0008",
+            "good_till_date": "0",
+            "order_id": "28645824937",
+            "orig_qty": "0.0008",
+            "orig_type": "LIMIT",
+            "position_side": "BOTH",
+            "price": "83728.50",
+            "reduce_only": "false",
+            "side": "BUY",
+            "status": "FILLED",
+            "stop_price": "0.00",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "type": "LIMIT",
+            "working_type": "CONTRACT_PRICE"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "positions",
+          "summary": {
+            "count": "1",
+            "row_0_break_even_price": "81694.1646",
+            "row_0_entry_price": "81661.5",
+            "row_0_liquidation_price": "0",
+            "row_0_margin_asset": "USDT",
+            "row_0_mark_price": "81680.42396739",
+            "row_0_notional": "65.34433917",
+            "row_0_position_amt": "0.0008",
+            "row_0_position_side": "BOTH",
+            "row_0_symbol": "BTCUSDT",
+            "row_0_unrealized_profit": "0.01513917"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "new_market_order",
+          "summary": {
+            "client_order_id": "dprobe-crx-20261022T124048Z-2",
+            "close_position": "false",
+            "executed_qty": "0.0000",
+            "good_till_date": "0",
+            "order_id": "28645824940",
+            "orig_qty": "0.0008",
+            "orig_type": "MARKET",
+            "position_side": "BOTH",
+            "price": "0.00",
+            "reduce_only": "true",
+            "side": "SELL",
+            "status": "NEW",
+            "stop_price": "0.00",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC",
+            "type": "MARKET",
+            "working_type": "CONTRACT_PRICE"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "user_trades",
+          "summary": {
+            "count": "1",
+            "row_0_buyer": "false",
+            "row_0_commission": "0.02613059",
+            "row_0_commission_asset": "USDT",
+            "row_0_maker": "false",
+            "row_0_margin_asset": "USDT",
+            "row_0_order_id": "28645824940",
+            "row_0_position_side": "BOTH",
+            "row_0_price": "81658.10",
+            "row_0_qty": "0.0008",
+            "row_0_quote_qty": "65.326480",
+            "row_0_realized_pnl": "-0.00271999",
+            "row_0_side": "SELL",
+            "row_0_time_ms": "1792672851726",
+            "row_0_trade_id": "549740116"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "user_trades",
+          "summary": {
+            "count": "1",
+            "row_0_buyer": "true",
+            "row_0_commission": "0.02613168",
+            "row_0_commission_asset": "USDT",
+            "row_0_maker": "false",
+            "row_0_margin_asset": "USDT",
+            "row_0_order_id": "28645824937",
+            "row_0_position_side": "BOTH",
+            "row_0_price": "81661.50",
+            "row_0_qty": "0.0008",
+            "row_0_quote_qty": "65.329200",
+            "row_0_realized_pnl": "0",
+            "row_0_side": "BUY",
+            "row_0_time_ms": "1792672851493",
+            "row_0_trade_id": "549740115"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "income_history",
+          "summary": {
+            "count": "0"
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "income_history",
+          "summary": {
+            "count": "0"
+          }
+        }
+      ],
+      "planned_requests": [],
+      "reason": null,
+      "rest_fixtures": [
+        "commission_vs_realized_pnl-rest-001-new_limit_order-2.json",
+        "commission_vs_realized_pnl-rest-002-query_order-2.json",
+        "commission_vs_realized_pnl-rest-003-positions-2.json",
+        "commission_vs_realized_pnl-rest-004-new_market_order-2.json",
+        "commission_vs_realized_pnl-rest-005-user_trades-2.json",
+        "commission_vs_realized_pnl-rest-006-user_trades-2.json",
+        "commission_vs_realized_pnl-rest-007-income_history-2.json",
+        "commission_vs_realized_pnl-rest-008-income_history-2.json"
+      ],
+      "started_utc": "2026-10-22T12:40:51.018972+00:00",
+      "status": "OBSERVED"
+    }
+  ],
+  "cleanup": {
+    "final": {
+      "actions": [
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_open_orders",
+          "summary": {
+            "code": "200",
+            "msg": "The operation of cancel all open order is done."
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "cancel_all_algo_open_orders",
+          "summary": {
+            "code": "200",
+            "msg": "The operation of cancel all open order is done."
+          }
+        },
+        {
+          "error": null,
+          "ok": true,
+          "operation": "positions",
+          "summary": {
+            "count": "0"
+          }
+        }
+      ],
+      "notes": [],
+      "remaining": {
+        "open_algo_orders": 0,
+        "open_orders": 0,
+        "positions": [],
+        "readable": true
+      },
+      "status": "FLAT",
+      "waited_seconds": 0
+    }
+  },
+  "d055": {
+    "parameters": "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "statement": "D055 stays OPEN: this tool records facts and stops",
+    "status": "OPEN: the probe records facts and stops; D055 is decided by the user, never by this tool"
+  },
+  "environment": "DEMO",
+  "failures": [],
+  "finished_utc": "2026-10-22T12:45:53.814059+00:00",
+  "fixtures": [
+    "commission_vs_realized_pnl-001-TRADE_LITE-2.json",
+    "commission_vs_realized_pnl-002-ORDER_TRADE_UPDATE-2.json",
+    "commission_vs_realized_pnl-003-ACCOUNT_UPDATE-2.json",
+    "commission_vs_realized_pnl-004-ORDER_TRADE_UPDATE-2.json",
+    "commission_vs_realized_pnl-005-TRADE_LITE-2.json",
+    "commission_vs_realized_pnl-006-ORDER_TRADE_UPDATE.json",
+    "commission_vs_realized_pnl-007-ACCOUNT_UPDATE.json",
+    "commission_vs_realized_pnl-008-ORDER_TRADE_UPDATE.json",
+    "commission_vs_realized_pnl-rest-001-new_limit_order-2.json",
+    "commission_vs_realized_pnl-rest-002-query_order-2.json",
+    "commission_vs_realized_pnl-rest-003-positions-2.json",
+    "commission_vs_realized_pnl-rest-004-new_market_order-2.json",
+    "commission_vs_realized_pnl-rest-005-user_trades-2.json",
+    "commission_vs_realized_pnl-rest-006-user_trades-2.json",
+    "commission_vs_realized_pnl-rest-007-income_history-2.json",
+    "commission_vs_realized_pnl-rest-008-income_history-2.json"
+  ],
+  "label": "demo-observed, not mainnet",
+  "live_port_calls": 34,
+  "market": {
+    "mark_price": {
+      "error": null,
+      "ok": true,
+      "operation": "mark_price",
+      "summary": {
+        "close": "81686.35563406",
+        "close_time_utc": "2026-10-22T12:40:59.999000+00:00",
+        "count": "1",
+        "interval": "1m",
+        "open_time_utc": "2026-10-22T12:40:00+00:00",
+        "symbol": "BTCUSDT"
+      }
+    },
+    "status": "READ",
+    "symbol_filters": {
+      "error": null,
+      "ok": true,
+      "operation": "symbol_filters",
+      "summary": {
+        "found": "true",
+        "market_lot_max_quantity": "120",
+        "market_lot_min_quantity": "0.0001",
+        "market_lot_step_size": "0.0001",
+        "max_quantity": "1000",
+        "min_notional": "50",
+        "min_quantity": "0.0001",
+        "percent_price_multiplier_decimals": "4",
+        "percent_price_multiplier_down": "0.9500",
+        "percent_price_multiplier_up": "1.0500",
+        "status": "TRADING",
+        "step_size": "0.0001",
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10"
+      }
+    }
+  },
+  "mode": "execute",
+  "notes": [
+    "D055 stays OPEN: this tool records facts and stops",
+    "Demo observations are never used to choose a trading parameter or a model (D-17)",
+    "The account's listenKey is a singleton: no other process may run on the same account during the probe (research P7)."
+  ],
+  "outcome": "COMPLETE",
+  "proof_class": "REAL_DEMO",
+  "schema": "demo-probe-evidence/schema-1",
+  "sdk_version": "17.4.0",
+  "settings": {
+    "case_timeout_seconds": 300,
+    "cleanup_timeout_seconds": 60,
+    "far_price_fraction": "0.96",
+    "gtd_expiry_wait_seconds": 1500,
+    "gtd_lifetime_seconds": 660,
+    "limits_file": "binance-limits-v1.toml",
+    "limits_file_sha256": "9f522adcd35d56fa5dddbf79b42ab1f8c1d3f770bda7527caaf2cb28f8c43383",
+    "market_lot_probe_quantity": null,
+    "max_notional_quote": "100",
+    "near_trigger_fraction": null,
+    "only": [
+      "commission_vs_realized_pnl"
+    ],
+    "optional_cases": {
+      "account_capture": false,
+      "algo_query_timing": false,
+      "cancel_fill_race": false,
+      "close_position_with_position": false,
+      "commission_realized_pnl": true,
+      "exchange_info_read": false,
+      "explicit_time_in_force": false,
+      "gtd_expiry": true,
+      "gtd_min_lifetime": false,
+      "manual_close_open_legs": false,
+      "market_lot_size_out_of_range": false,
+      "partial_fill_attempt": false,
+      "stop_absent_same_id": false,
+      "stop_trigger_after_fill": false,
+      "stream_gap": false,
+      "stream_loss": false,
+      "tp1_from_fill": false,
+      "triggered_bracket": false
+    },
+    "probe_limits_file": "19-probe-limits-retest.toml",
+    "probe_limits_file_sha256": "5e29dab554f245fe919613c97a1b610b78d0db78f95f01a269d9290f494dbf81",
+    "quantity": "0.0008",
+    "race_repeats": null
+  },
+  "started_utc": "2026-10-22T12:40:48.322792+00:00",
+  "stream": {
+    "status": "STARTED",
+    "stop": "stopped"
+  },
+  "symbol": "BTCUSDT"
+}

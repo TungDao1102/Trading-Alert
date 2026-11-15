@@ -440,6 +440,9 @@ class _SweepAdapter:
         self.cancelled: list[tuple[str, str]] = []
 
     async def query_algo_order_by_client(self, *, client_algo_id: str) -> Any:
+        # Plan 20-11: the sweeper verifies the cancel, so the order is gone after the cancel.
+        if self.cancelled:
+            return SimpleNamespace(found=False, algo_status=None, update_time_utc=None)
         return SimpleNamespace(found=True, algo_status="NEW", update_time_utc=T0)
 
     async def cancel_algo_order(self, *, symbol: str, client_algo_id: str) -> None:

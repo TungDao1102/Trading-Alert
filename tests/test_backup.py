@@ -31,6 +31,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from src.ops import backup as backup_mod
@@ -646,6 +647,109 @@ def test_prune_keeps_unmapped_keys(tmp_path: Path) -> None:
 
     assert report.pruned_files == ()
     assert ghost.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Path safety: roots and manifest keys that escape or overlap the bundle (quick 261114-kxu).
+# --------------------------------------------------------------------------- #
+
+
+def _refused_backup(tmp_path: Path, make_root: Any) -> tuple[Path, Path, list[Path]]:
+    """Run a backup that must be refused; returns (bundle, sentinel, pg_dump calls)."""
+    bundle = tmp_path / "outer" / "bundle"
+    bundle.mkdir(parents=True)
+    sentinel = bundle / "sentinel.txt"
+    sentinel.write_text("keep me", encoding="utf-8")
+    root = make_root(bundle)
+    if root == bundle / "inside":
+        root.mkdir()
+    calls: list[Path] = []
+
+    def runner(out: Path) -> Path:
+        calls.append(out)
+        return _no_op_pg_dump(out)
+
+    with pytest.raises(ValueError):
+        backup_mod.backup(bundle_root=bundle, pg_dump_runner=runner, parquet_roots=[root])
+    return bundle, sentinel, calls
+
+
+@pytest.mark.parametrize(
+    "make_root",
+    [
+        pytest.param(lambda bundle: bundle / "..", id="dotdot-name"),
+        pytest.param(lambda bundle: Path("."), id="dot-name"),
+        pytest.param(lambda bundle: bundle, id="the-bundle-itself"),
+        pytest.param(lambda bundle: bundle / "inside", id="inside-the-bundle"),
+        pytest.param(lambda bundle: bundle.parent, id="contains-the-bundle"),
+    ],
+)
+def test_backup_refuses_a_parquet_root_that_escapes_or_overlaps_the_bundle(
+    tmp_path: Path, make_root: Any
+) -> None:
+    bundle, sentinel, calls = _refused_backup(tmp_path, make_root)
+
+    assert calls == [], "refused before pg_dump runs"
+    assert sentinel.read_text(encoding="utf-8") == "keep me", "nothing was deleted"
+    assert not (bundle / "manifest.json").exists()
+
+
+def test_drill_refuses_a_root_named_dotdot_before_deleting_anything(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    source = tmp_path / "parquet"
+    source.mkdir()
+    _seed_fake_parquet(source / "a.parquet")
+    backup_mod.backup(
+        bundle_root=bundle, pg_dump_runner=lambda out: _no_op_pg_dump(out), parquet_roots=[source]
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    sentinel = scratch / "sentinel.txt"
+    sentinel.write_text("keep me", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        run_drill(bundle_root=bundle, scratch_root=scratch, parquet_roots=[source / ".."])
+
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+
+
+def _bundle_with_outside_file(tmp_path: Path) -> tuple[Path, Path, Path]:
+    bundle = tmp_path / "bundle"
+    source = tmp_path / "parquet"
+    source.mkdir()
+    _seed_fake_parquet(source / "x.parquet")
+    backup_mod.backup(
+        bundle_root=bundle, pg_dump_runner=lambda out: _no_op_pg_dump(out), parquet_roots=[source]
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not part of the bundle", encoding="utf-8")
+    return bundle, source, outside
+
+
+@pytest.mark.parametrize(
+    "key_for",
+    [
+        pytest.param(lambda base, outside: f"parquet/{base}/../../outside.txt", id="dotdot"),
+        pytest.param(lambda base, outside: outside.as_posix(), id="absolute"),
+        pytest.param(lambda base, outside: f"parquet\\{base}\\..\\..\\outside.txt", id="backslash"),
+    ],
+)
+def test_prune_refuses_a_manifest_key_that_escapes_the_bundle(tmp_path: Path, key_for: Any) -> None:
+    bundle, source, outside = _bundle_with_outside_file(tmp_path)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[key_for(source.name, outside)] = _sha256(outside)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    before = manifest_path.read_bytes()
+    kept = bundle / f"parquet/{source.name}/x.parquet"
+    (source / "x.parquet").unlink()  # a stale safe key, which a clean prune would delete
+
+    with pytest.raises(ValueError, match="manifest keys"):
+        backup_mod.prune_bundle(bundle_root=bundle, parquet_roots=[source])
+
+    assert outside.read_text(encoding="utf-8") == "not part of the bundle"
+    assert manifest_path.read_bytes() == before, "the manifest is unchanged"
+    assert kept.exists(), "nothing was deleted, not even the safe stale key"
 
 
 # --------------------------------------------------------------------------- #

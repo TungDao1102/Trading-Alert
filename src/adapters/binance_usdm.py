@@ -58,8 +58,17 @@ re-verification policy):
   | query_order_by_client       | query_order(symbol, orig_client_order_id) | 17.4.0: no signature change; `symbol` required, `order_id` / `orig_client_order_id` optional — populate `orig_client_order_id` for no-blind-recovery probe (EXECUTION_SPEC §10).  # noqa: E501
   | get_position_mode           | get_current_position_mode(recv_window) | 17.4.0: no signature change; returns dual_side_position bool (True=hedge, False=one-way); re-checked at placement time per D-02.  # noqa: E501
   | __init__(sdk_client, *, rest_gate, sleep) | (no SDK call) | plan 18-10: `rest_gate` is the process-wide RestRateLimitGate (checked before every REST call, records a 418 or 429; also handed to the inner BinancePublicMarketData); `sleep` serves only the waits of the STATUS_UNKNOWN cancel retry.  # noqa: E501
-  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all eleven SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
+  | __init__(..., signed_call_policy, drift_guard, clock, on_clock_skew) | (no SDK call) | plan 18-13: every signed method in this table passes `recv_window=signed_call_policy.recv_window_ms` explicitly through the one helper `_sdk_call` (all twenty SDK methods have a `recv_window` parameter in 17.4.0, pinned offline by tests/test_binance_usdm_signed_calls.py); no policy -> SignedCallPolicyMissing before any SDK call; a configured drift guard blocks `place_entry` only (EntriesBlocked); -1021 calls `on_clock_skew` once and is never retried.  # noqa: E501
   | user_commission_rate       | user_commission_rate(symbol, recv_window) | 17.4.0: `symbol` required (passed by keyword), `recv_window` explicit (plan 18-13); returns UserCommissionRateResponse with Optional str fields (symbol, makerCommissionRate, takerCommissionRate, rpiCommissionRate); strict parse, unknown raises, never zero (Phase 12, D-11).  # noqa: E501
+  | account_information_snapshot | account_information_v3(recv_window) | plan 21-03: GET /fapi/v3/account; every field Optional[str] in the model, parsed strictly to Decimal (a missing or non-finite field raises, never a zero); `totalMarginBalance` is the equity field (D-02), `availableBalance` is not read.  # noqa: E501
+  | account_balances_snapshot   | futures_account_balance_v3(recv_window) | plan 21-03: GET /fapi/v3/balance; reads asset, balance, crossUnPnl only; the account alias attribute is never read (D-21).  # noqa: E501
+  | user_trades_in_window       | account_trade_list(symbol, start_time, end_time, from_id, recv_window) | plan 21-08: GET /fapi/v1/userTrades; page 1 sends start_time and end_time, later pages send `from_id` = last trade id + 1 and no time bounds (the endpoint refuses `fromId` with a time bound); trade ids must strictly increase, else ValueError; no `limit` is sent.  # noqa: E501
+  | income_in_window            | get_income_history(income_type, start_time, end_time, page, recv_window) | plan 21-08: GET /fapi/v1/income; pages 1, 2, ... until an empty page; the free-text `info` field is never read; the funding source is unverified on Demo (0 rows in the recorded reads).  # noqa: E501
+  | symbol_config_snapshot      | symbol_configuration(symbol, recv_window) | plan 22-01: GET /fapi/v1/symbolConfig (weight 5); `symbol`, `recv_window` Optional; one row for the symbol with `marginType` text, `leverage` StrictInt, `isAutoAddMargin` StrictBool and `maxNotionalValue` text; each parsed strictly (a missing or mistyped field raises, never a default).  # noqa: E501
+  | leverage_brackets_snapshot   | notional_and_leverage_brackets(symbol, recv_window) | plan 22-01: GET /fapi/v1/leverageBracket; the answer is a oneOf wrapper (`actual_instance`: a list of entries or one entry), both unwrapped; `maintMarginRatio` and `cum` are SDK floats, converted with Decimal(repr(value)) (the object shape declares `cum` StrictInt only: SDK quirk); no bracket value is a constant of this project.  # noqa: E501
+  | change_margin_type          | change_margin_type(symbol, margin_type, recv_window) | plan 22-06: POST /fapi/v1/marginType (weight 1); `margin_type` is `ChangeMarginTypeMarginTypeEnum` (ISOLATED, CROSSED) converted after a membership check; call kind PLACEMENT (mutating, never retried, never slept on); the answer body is not read; the same-type request is an exchange error (-4046), decided by a symbol_config_snapshot read.  # noqa: E501
+  | change_initial_leverage     | change_initial_leverage(symbol, leverage, recv_window) | plan 22-06: POST /fapi/v1/leverage (weight 1); `leverage` a positive int (not a bool), no cap in the adapter (the guard owns it, D-02); call kind PLACEMENT (never retried); the answer body is not read.  # noqa: E501
+  | account_config_snapshot     | futures_account_configuration(recv_window) | plan 21-03: GET /fapi/v1/accountConfig; reads multiAssetsMargin and dualSidePosition as strict bools, nothing else (OPS-02 is an owner attestation).  # noqa: E501
 
 The 17.3.1 -> 17.4.0 changelog (per RESEARCH Open Question 2): the
 Delta closed during 08-04 was "no public REST method-signature change
@@ -74,9 +83,10 @@ follow the same posture: no signature change in the four new methods.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
@@ -87,6 +97,9 @@ from binance_sdk_derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
     RateLimitBanError,
     TooManyRequestsError,
+)
+from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
+    GetIncomeHistoryIncomeTypeEnum,
 )
 from src.adapters.binance_clock import ClockDriftGuard, DriftBlockReason
 from src.adapters.binance_errors import error_facts_from_exception
@@ -344,6 +357,10 @@ class PositionSnapshot:
     notional: Decimal | None
     margin_asset: str
     update_time_utc: datetime
+    # Plan 24-21 (D-34): True when the row carried `entry_price` as a float instead of the
+    # exchange's own string. The value is then exact text of that float, never rounded, but it may
+    # hold float noise (84816.40000000001); readers that need the exact price check this flag.
+    entry_price_from_float: bool = False
 
 
 @dataclass(frozen=True)
@@ -487,6 +504,170 @@ class CommissionRates:
     symbol: str
     maker_rate: Decimal
     taker_rate: Decimal
+
+
+@dataclass(frozen=True)
+class AccountAssetRow:
+    """One row of the `assets` list of `account_information_v3` (plan 21-03).
+
+    All four amounts are Decimal, parsed from the exchange text. The USDT row is the
+    cross-check of the account equity: `margin_balance` equals the account-level
+    `total_margin_balance` in single-asset mode (demo-observed, not mainnet). Other
+    assets (USDC, BTC on the Demo account) are kept as their own rows; the account totals
+    exclude them. `available_balance` (plan 22-10) is the free margin of the asset: the
+    cross-check of the account-level `available_balance`, never an equity.
+    """
+
+    asset: str
+    wallet_balance: Decimal
+    unrealized_profit: Decimal
+    margin_balance: Decimal
+    available_balance: Decimal
+
+
+@dataclass(frozen=True)
+class AccountInformationSnapshot:
+    """Result of `account_information_snapshot` (GET /fapi/v3/account, plan 21-03, D-02).
+
+    The equity field is `total_margin_balance` ("USDT only in single-asset mode" in the SDK
+    17.4.0 model; on Demo equal to `total_wallet_balance + total_unrealized_profit` and to
+    the USDT row's `margin_balance`, all 4999.09343961, demo-observed, not mainnet). The
+    choice and the identity checks belong to the pure resolver of plan 21-04; this value
+    only carries the parsed numbers. Since Phase 22 (plan 22-10) the same answer also carries
+    `available_balance` and `total_open_order_initial_margin` (the free-margin figures of the
+    margin check, D-13): they share the equity's stamp and are never used as the equity.
+    `assets` keeps the response order.
+    """
+
+    total_margin_balance: Decimal
+    total_wallet_balance: Decimal
+    total_unrealized_profit: Decimal
+    available_balance: Decimal
+    total_open_order_initial_margin: Decimal
+    assets: tuple[AccountAssetRow, ...]
+
+
+@dataclass(frozen=True)
+class AccountBalanceRow:
+    """One row of `account_balances_snapshot` (GET /fapi/v3/balance, plan 21-03, D-02).
+
+    `balance` is the wallet balance of `asset`; `cross_unrealized_pnl` its cross unrealized
+    PnL. Only these three fields are read. The account alias field of the endpoint is
+    deliberately never read, stored or logged (D-21), so this dataclass has no field for it.
+    """
+
+    asset: str
+    balance: Decimal
+    cross_unrealized_pnl: Decimal
+
+
+@dataclass(frozen=True)
+class AccountConfigSnapshot:
+    """Result of `account_config_snapshot` (GET /fapi/v1/accountConfig, plan 21-03).
+
+    Both flags are detected, never assumed: a missing or non-bool value raises. The other
+    fields of the response (canWithdraw, canTrade, feeTier, ...) are not read: the
+    no-withdraw check is an owner attestation (OPS-02, D-21), not an adapter read.
+    """
+
+    multi_assets_margin: bool
+    dual_side_position: bool
+
+
+@dataclass(frozen=True)
+class SymbolConfigSnapshot:
+    """Result of `symbol_config_snapshot` (GET /fapi/v1/symbolConfig, weight 5, plan 22-01).
+
+    The only read that returns the margin type, the leverage, `isAutoAddMargin` and
+    `maxNotionalValue` of one symbol (the `positionRisk` answer of the current API has no
+    leverage field, 22-RESEARCH 2.3). `margin_type` is kept as the exchange text: the CROSSED
+    casing is demo-observed, not mainnet; the ISOLATED casing is ASSUMED until the owner-run
+    case records it (22-RESEARCH A5, D-18). Choosing a target and comparing it with this
+    snapshot belong to the guard of plan 22-11, not to the adapter.
+    """
+
+    symbol: str
+    margin_type: str
+    leverage: int
+    is_auto_add_margin: bool
+    max_notional_value: Decimal
+
+
+@dataclass(frozen=True)
+class LeverageBracketRow:
+    """One bracket of `leverage_brackets_snapshot` (plan 22-01, D-08).
+
+    `maint_margin_ratio` and `cum` (the cumulative maintenance amount) are the exchange numbers
+    as exact Decimals. The SDK 17.4.0 models carry them as floats; the adapter converts them with
+    `Decimal(repr(value))`, never `Decimal(float)` (22-RESEARCH Pitfall 4).
+    """
+
+    bracket: int
+    initial_leverage: int
+    notional_floor: Decimal
+    notional_cap: Decimal
+    maint_margin_ratio: Decimal
+    cum: Decimal
+
+
+@dataclass(frozen=True)
+class SymbolLeverageBrackets:
+    """Result of `leverage_brackets_snapshot` (GET /fapi/v1/leverageBracket, plan 22-01).
+
+    The bracket numbers are INPUTS read from the exchange, never defaults: no bracket value,
+    maintenance ratio or leverage may become a constant of `src/` or a parameter (D-08). The
+    recorded Demo table differs from the mainnet figure (Demo first bracket 125x, the mainnet
+    figure of the official change-log is 150x; demo-observed, not mainnet, 22-RESEARCH 2.4).
+    `notional_coef` is carried as read (None when absent) and is not interpreted here: the guard
+    refuses a value other than 1. `brackets` keeps the response order.
+    """
+
+    symbol: str
+    notional_coef: Decimal | None
+    brackets: tuple[LeverageBracketRow, ...]
+
+
+# The exchange window rule for userTrades (SDK 17.4.0 docstring): startTime to endTime may not
+# be longer than seven days.
+_MAX_WINDOW = timedelta(days=7)
+_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+# The documented maximum of `GET /fapi/v1/income` `limit` (the default is 100).
+_INCOME_PAGE_LIMIT = 1000
+
+
+@dataclass(frozen=True)
+class UserTradeRow:
+    """One fill of `user_trades_in_window` (GET /fapi/v1/userTrades, plan 21-08).
+
+    `realized_pnl` and `commission` are strict Decimals of the exchange text (USDT for the
+    USDT-margined symbols); `trade_id` is the key space of the user-data stream's `t` field.
+    """
+
+    symbol: str
+    order_id: int
+    trade_id: int
+    realized_pnl: Decimal
+    commission: Decimal
+    commission_asset: str
+    margin_asset: str
+    time_utc: datetime
+
+
+@dataclass(frozen=True)
+class IncomeRow:
+    """One row of `income_in_window` (GET /fapi/v1/income, plan 21-08).
+
+    The free-text `info` field of the response has no counterpart here: it is never read.
+    `symbol` is None for an account-level row, `trade_id` None when the exchange sent none.
+    """
+
+    symbol: str | None
+    income_type: str
+    income: Decimal
+    asset: str
+    tran_id: int
+    trade_id: str | None
+    time_utc: datetime
 
 
 # --------------------------------------------------------------------------- #
@@ -718,7 +899,11 @@ class BinanceUsdmAdapter:
             facts = error_facts_from_exception(exc)
             category = classify(facts, call_kind)
             if category in _RATE_LIMIT_CATEGORIES:
-                gate.record(category, facts.retry_after_seconds)
+                gate.record(
+                    category,
+                    facts.retry_after_seconds,
+                    ban_until_epoch_ms=facts.ban_until_epoch_ms,
+                )
             elif category is ExchangeErrorCategory.CLOCK_SKEW and self._on_clock_skew is not None:
                 try:
                     self._on_clock_skew()
@@ -1481,6 +1666,9 @@ class BinanceUsdmAdapter:
         Flag-never-fabricate (D-09, D-11): a missing, non-decimal,
         non-finite, negative, above-0.01 or wrong-symbol field raises
         `ValueError` — the adapter never returns a zero to mean unknown.
+        A symbol that is empty, not a str, padded or not upper-case raises `ValueError`
+        before any request (the call costs weight 20). A negative maker rate stays a refusal
+        (owner decision D-22, Phase 12 review IN-01).
         There is no retry and no fallback value; an SDK exception
         propagates unchanged. The adapter takes no clock: the caller stamps
         `observed_at_utc` when it builds the risk-layer `AccountCommission`,
@@ -1489,6 +1677,14 @@ class BinanceUsdmAdapter:
         Returns:
             A frozen `CommissionRates` for the requested symbol.
         """
+        # IN-01 (plan 24-15): a malformed symbol must not spend the weight-20 call.
+        if (
+            not isinstance(symbol, str)
+            or symbol == ""
+            or symbol != symbol.strip()
+            or symbol != symbol.upper()
+        ):
+            raise ValueError("symbol must be a non-empty upper-case string")
         from binance_sdk_derivatives_trading_usds_futures.rest_api.models import (
             UserCommissionRateResponse,
         )
@@ -1509,6 +1705,353 @@ class BinanceUsdmAdapter:
         maker = _require_commission_rate(raw.maker_commission_rate, "makerCommissionRate", symbol)
         taker = _require_commission_rate(raw.taker_commission_rate, "takerCommissionRate", symbol)
         return CommissionRates(symbol=symbol, maker_rate=maker, taker_rate=taker)
+
+    async def account_information_snapshot(self) -> AccountInformationSnapshot:
+        """Read the account equity and free-margin figures (GET /fapi/v3/account, plan 21-03).
+
+        Phase 22 (plan 22-10) reads `availableBalance` and `totalOpenOrderInitialMargin` from the
+        same answer for the margin check; they are never the equity.
+
+        Through the official SDK `rest_api.account_information_v3(recv_window)` and the one
+        signed helper `_sdk_call` (policy, shared REST gate, never retried; an SDK exception
+        propagates unchanged). Every amount is parsed as a Decimal from the exchange text;
+        a missing, empty, non-decimal or non-finite field raises `ValueError` naming the
+        field only, never a zero (D-04). The adapter takes no clock (the caller stamps the
+        reading time before the call) and logs nothing about the response.
+        """
+        response = await self._sdk_call(CallKind.QUERY, self._sdk.rest_api.account_information_v3)
+        raw = response.data()
+        if raw is None:
+            raise ValueError("account information response empty: refusing to fabricate")
+        raw_assets = raw.assets
+        if raw_assets is None:
+            raise ValueError("account field assets missing: refusing to fabricate")
+        assets = tuple(_row_to_account_asset(item) for item in raw_assets)
+        return AccountInformationSnapshot(
+            total_margin_balance=_require_exchange_decimal(
+                raw.total_margin_balance, "totalMarginBalance"
+            ),
+            total_wallet_balance=_require_exchange_decimal(
+                raw.total_wallet_balance, "totalWalletBalance"
+            ),
+            total_unrealized_profit=_require_exchange_decimal(
+                raw.total_unrealized_profit, "totalUnrealizedProfit"
+            ),
+            available_balance=_require_exchange_decimal(raw.available_balance, "availableBalance"),
+            total_open_order_initial_margin=_require_exchange_decimal(
+                raw.total_open_order_initial_margin, "totalOpenOrderInitialMargin"
+            ),
+            assets=assets,
+        )
+
+    async def account_balances_snapshot(self) -> tuple[AccountBalanceRow, ...]:
+        """Read the per-asset balances (GET /fapi/v3/balance, USER_DATA, plan 21-03).
+
+        Through the official SDK `rest_api.futures_account_balance_v3(recv_window)` and the
+        one signed helper `_sdk_call` (shared REST gate, never retried). Only `asset`,
+        `balance` and `crossUnPnl` of each row are read; the account alias attribute is
+        never touched (D-21). Strict Decimal parse as `account_information_snapshot` (D-04).
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.futures_account_balance_v3
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError("account balance response empty: refusing to fabricate")
+        rows = raw if isinstance(raw, list) else [raw]
+        out: list[AccountBalanceRow] = []
+        for item in rows:
+            asset = item.asset
+            if not isinstance(asset, str) or asset.strip() == "":
+                raise ValueError("account field asset missing or empty: refusing to fabricate")
+            out.append(
+                AccountBalanceRow(
+                    asset=asset,
+                    balance=_require_exchange_decimal(item.balance, "balance"),
+                    cross_unrealized_pnl=_require_exchange_decimal(item.cross_un_pnl, "crossUnPnl"),
+                )
+            )
+        return tuple(out)
+
+    async def account_config_snapshot(self) -> AccountConfigSnapshot:
+        """Read the account mode flags (GET /fapi/v1/accountConfig, USER_DATA, plan 21-03).
+
+        Through the official SDK `rest_api.futures_account_configuration(recv_window)` and
+        `_sdk_call` (shared REST gate, never retried). `multiAssetsMargin` and
+        `dualSidePosition` must be real bools, like `get_position_mode`: a dropped or
+        renamed field must not read as a default. No other field is read (OPS-02 is an owner
+        attestation, D-21).
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.futures_account_configuration
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError("account config response empty: refusing to fabricate")
+        if not isinstance(raw.multi_assets_margin, bool):
+            raise ValueError("multiAssetsMargin missing or not a bool")
+        if not isinstance(raw.dual_side_position, bool):
+            raise ValueError("dualSidePosition missing or not a bool")
+        return AccountConfigSnapshot(
+            multi_assets_margin=raw.multi_assets_margin,
+            dual_side_position=raw.dual_side_position,
+        )
+
+    async def symbol_config_snapshot(self, *, symbol: str) -> SymbolConfigSnapshot:
+        """Read the margin type and leverage of one symbol (GET /fapi/v1/symbolConfig, plan 22-01).
+
+        USER_DATA, IP weight 5, through the official SDK `rest_api.symbol_configuration(symbol,
+        recv_window)` and `_sdk_call` (policy, shared REST gate, never retried). Exactly one row
+        for the requested symbol is required; an empty answer, two rows or a row for another
+        symbol raises. `marginType` must be non-empty text, `leverage` an int (not a bool) of at
+        least 1, `isAutoAddMargin` a real bool and `maxNotionalValue` a finite decimal text: a
+        dropped or renamed field must not read as a default. Every `ValueError` names the field
+        only, never the value, and nothing about the response is logged. The adapter takes no
+        clock.
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.symbol_configuration, symbol=symbol
+        )
+        raw = response.data()
+        if raw is None:
+            raise ValueError("symbol config response empty: refusing to fabricate")
+        rows = raw if isinstance(raw, list) else [raw]
+        if len(rows) != 1:
+            raise ValueError("symbol config answer must hold exactly one row for the symbol")
+        row = rows[0]
+        if row.symbol != symbol:
+            raise ValueError("symbol config row is for another symbol: refusing to use it")
+        margin_type = row.margin_type
+        if not isinstance(margin_type, str) or margin_type.strip() == "":
+            raise ValueError("marginType missing or not text: refusing to fabricate")
+        leverage = row.leverage
+        if isinstance(leverage, bool) or not isinstance(leverage, int) or leverage < 1:
+            raise ValueError("leverage missing or not a positive int: refusing to fabricate")
+        if not isinstance(row.is_auto_add_margin, bool):
+            raise ValueError("isAutoAddMargin missing or not a bool")
+        return SymbolConfigSnapshot(
+            symbol=symbol,
+            margin_type=margin_type,
+            leverage=leverage,
+            is_auto_add_margin=row.is_auto_add_margin,
+            max_notional_value=_require_exchange_decimal(
+                row.max_notional_value, "maxNotionalValue"
+            ),
+        )
+
+    async def leverage_brackets_snapshot(self, *, symbol: str) -> SymbolLeverageBrackets:
+        """Read the exchange leverage brackets of one symbol (GET /fapi/v1/leverageBracket, 22-01).
+
+        USER_DATA, through the official SDK `rest_api.notional_and_leverage_brackets(symbol,
+        recv_window)` and `_sdk_call` (policy, shared REST gate, never retried). The SDK answer is
+        a oneOf wrapper (`actual_instance`: a list of entries, or one entry); both shapes are
+        unwrapped and exactly one entry for the requested symbol is required. The floats the SDK
+        models carry (`maintMarginRatio`, `cum`, `notionalCoef`) become Decimal through
+        `Decimal(repr(value))`; None, bool and non-finite values are refused. Every `ValueError`
+        names the field only, never the value; nothing about the response is logged.
+        """
+        response = await self._sdk_call(
+            CallKind.QUERY, self._sdk.rest_api.notional_and_leverage_brackets, symbol=symbol
+        )
+        # The oneOf wrapper holds the answer in `actual_instance`; a plain list or entry passes.
+        data: Any = response.data()
+        raw: Any = getattr(data, "actual_instance", data)
+        if raw is None:
+            raise ValueError("leverage bracket response empty: refusing to fabricate")
+        entries = raw if isinstance(raw, list) else [raw]
+        if len(entries) != 1:
+            raise ValueError("leverage bracket answer must hold exactly one entry for the symbol")
+        entry = entries[0]
+        if entry.symbol != symbol:
+            raise ValueError("leverage bracket entry is for another symbol: refusing to use it")
+        raw_brackets = entry.brackets
+        if not isinstance(raw_brackets, list) or len(raw_brackets) == 0:
+            raise ValueError("brackets missing or empty: refusing to fabricate")
+        coef = entry.notional_coef
+        return SymbolLeverageBrackets(
+            symbol=symbol,
+            notional_coef=None
+            if coef is None
+            else _exchange_number_to_decimal(coef, "notionalCoef"),
+            brackets=tuple(_row_to_leverage_bracket(item) for item in raw_brackets),
+        )
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> None:
+        """Change the margin type of one symbol (POST /fapi/v1/marginType, plan 22-06).
+
+        TRADE, IP weight 1, through the official SDK `rest_api.change_margin_type(symbol,
+        margin_type, recv_window)` and `_sdk_call`. This call MUTATES the account
+        configuration, so the call kind is PLACEMENT: it is never retried and never slept on
+        (`CallKind` has no separate configuration kind, 22-RESEARCH Open Question 5), it
+        uses the shared REST gate and the signed-call policy recv window, and the original
+        exception propagates unchanged. Requesting the type the symbol already has is an
+        exchange ERROR (-4046), a change with open orders or a position is -4047 / -4048: the
+        caller must not read a failure as "not ISOLATED" and decides only by a
+        `symbol_config_snapshot` read. The answer body is not trusted and is not read; nothing
+        about it is logged. `margin_type` must be exactly "ISOLATED" or "CROSSED" and is
+        converted with the SDK enum; `symbol` must be a non-empty text. The adapter holds no
+        target: what to send is the guard's decision (D-01).
+        """
+        if not isinstance(symbol, str) or symbol == "":
+            raise ValueError("symbol must be non-empty text")
+        if not isinstance(margin_type, str) or margin_type not in ("ISOLATED", "CROSSED"):
+            raise ValueError("margin_type must be ISOLATED or CROSSED")
+        from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
+            ChangeMarginTypeMarginTypeEnum,
+        )
+
+        await self._sdk_call(
+            CallKind.PLACEMENT,
+            self._sdk.rest_api.change_margin_type,
+            symbol=symbol,
+            margin_type=ChangeMarginTypeMarginTypeEnum(margin_type),
+        )
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> None:
+        """Change the initial leverage of one symbol (POST /fapi/v1/leverage, plan 22-06).
+
+        TRADE, IP weight 1, through the official SDK `rest_api.change_initial_leverage(symbol,
+        leverage, recv_window)` and `_sdk_call`. Like `change_margin_type` this MUTATES the
+        account configuration: the call kind is PLACEMENT (never retried, never slept on), the
+        shared REST gate and the policy recv window apply, and the original exception
+        propagates unchanged. The answer body is not trusted and is not read; the caller
+        decides by a `symbol_config_snapshot` read. The maximum leverage is symbol-specific (the
+        `initialLeverage` of bracket 1 of the leverage-bracket read, not a constant: the
+        2026-10-09 change-log correction); the adapter enforces NO cap, the guard compares with
+        the D035 cap and the bracket (D-02). A leverage reduction in isolated mode with a
+        position is refused by the exchange (-4161, 22-RESEARCH 2.2). `leverage` must be an
+        int (not a bool) of at least 1; `symbol` a non-empty text.
+        """
+        if not isinstance(symbol, str) or symbol == "":
+            raise ValueError("symbol must be non-empty text")
+        if isinstance(leverage, bool) or not isinstance(leverage, int):
+            raise TypeError("leverage must be an int")
+        if leverage < 1:
+            raise ValueError("leverage must be at least 1")
+        await self._sdk_call(
+            CallKind.PLACEMENT,
+            self._sdk.rest_api.change_initial_leverage,
+            symbol=symbol,
+            leverage=leverage,
+        )
+
+    async def user_trades_in_window(
+        self, *, symbol: str, start_utc: datetime, end_utc: datetime
+    ) -> tuple[UserTradeRow, ...]:
+        """Read every fill of `symbol` inside a UTC window (GET /fapi/v1/userTrades, plan 21-08).
+
+        The REST trade list is the arbiter of the realized PnL and commission of a UTC day
+        (D-09): the stream feeds fills of known orders only and drops frames sent during a
+        gap. Through the official SDK `rest_api.account_trade_list` and `_sdk_call` (policy,
+        shared REST gate, never retried; an SDK exception propagates unchanged). Page 1 sends
+        `start_time` and `end_time`; every later page sends `from_id` = last trade id + 1 and
+        no time bound (the endpoint refuses `fromId` with a time bound). The loop ends on an
+        empty page or on a page holding only trades after `end_utc`; rows after `end_utc` are
+        dropped. Trade ids must strictly increase, within a page and across pages, else
+        `ValueError` (the order the exchange pages in is not documented in the SDK; this check
+        fails closed either way and also bounds the loop). No `limit` is sent, no clock is
+        read, nothing about the response is logged. A malformed row, a row of another symbol
+        or a bad window raises `ValueError` naming the field only: the caller then treats the
+        loss as unknown (D-04, D-20).
+        """
+        start_ms, end_ms = _window_ms(start_utc, end_utc)
+        found: list[UserTradeRow] = []
+        last_id: int | None = None
+        while True:
+            if last_id is None:
+                response = await self._sdk_call(
+                    CallKind.QUERY,
+                    self._sdk.rest_api.account_trade_list,
+                    symbol=symbol,
+                    start_time=start_ms,
+                    end_time=end_ms,
+                )
+            else:
+                response = await self._sdk_call(
+                    CallKind.QUERY,
+                    self._sdk.rest_api.account_trade_list,
+                    symbol=symbol,
+                    from_id=last_id + 1,
+                )
+            page = response.data()
+            if not isinstance(page, list):
+                raise ValueError("trade list page is not a list: refusing to fabricate")
+            if not page:
+                break
+            in_window = False
+            for item in page:
+                trade_id = _require_exchange_int(getattr(item, "id", None), "id")
+                if last_id is not None and trade_id <= last_id:
+                    raise ValueError("trade ids must strictly increase: refusing a partial read")
+                last_id = trade_id
+                row, row_ms = _row_to_user_trade(item, symbol, trade_id)
+                if row_ms <= end_ms:
+                    in_window = True
+                    found.append(row)
+            if not in_window:
+                break
+        return tuple(found)
+
+    async def income_in_window(
+        self, *, income_type: str, start_utc: datetime, end_utc: datetime
+    ) -> tuple[IncomeRow, ...]:
+        """Read every income row of one type inside a UTC window (GET /fapi/v1/income).
+
+        Plan 21-08. Through the official SDK `rest_api.get_income_history` and `_sdk_call`
+        (policy, shared REST gate, never retried). `income_type` must be a member of the SDK
+        income enum, else `ValueError` before any call. A page shorter than the limit ends the
+        read; a full page is followed by a read from the newest time seen (a time cursor, see the
+        loop). `tranId` is unique within one income type: a repeat within one page raises, a
+        repeat across pages is dropped, and a full page with no new row raises, so a server that
+        ignored the cursor cannot make this loop.
+        Funding is read as `income_type="FUNDING_FEE"`; that source is UNVERIFIED on Demo (0 rows
+        in four recorded tries, demo-observed, not mainnet). The free-text `info` field is never
+        read and nothing about the response is logged (D-21 secret-free logging; OPS-02 itself
+        is an owner attestation this method does not claim). Rows are returned ordered by
+        `(time_utc, tran_id)`.
+        """
+        try:
+            income_enum = GetIncomeHistoryIncomeTypeEnum(income_type)
+        except ValueError:
+            raise ValueError("income_type is not a member of the SDK income enum") from None
+        start_ms, end_ms = _window_ms(start_utc, end_utc)
+        found: dict[int, IncomeRow] = {}
+        cursor_ms = start_ms
+        while True:
+            response = await self._sdk_call(
+                CallKind.QUERY,
+                self._sdk.rest_api.get_income_history,
+                income_type=income_enum,
+                start_time=cursor_ms,
+                end_time=end_ms,
+                limit=_INCOME_PAGE_LIMIT,
+            )
+            page = response.data()
+            if not isinstance(page, list):
+                raise ValueError("income page is not a list: refusing to fabricate")
+            in_page: set[int] = set()
+            fresh = 0
+            newest_ms = cursor_ms
+            for item in page:
+                row = _row_to_income(item, income_type)
+                if row.tran_id in in_page:
+                    raise ValueError("income tranId repeated within one page: refusing a bad read")
+                in_page.add(row.tran_id)
+                newest_ms = max(newest_ms, (row.time_utc - _EPOCH_UTC) // timedelta(milliseconds=1))
+                if row.tran_id not in found:
+                    found[row.tran_id] = row
+                    fresh += 1
+            # A page shorter than the limit is the last one. A full page is followed by a read
+            # that starts at the newest time seen (a time cursor: the `page` parameter is not
+            # used, Demo answered the same rows to every page, first Demo run 2026-11-01); the
+            # rows of that instant come back again and are dropped by transaction id. A full page
+            # that adds no new row cannot advance the cursor: refuse rather than loop.
+            if len(page) < _INCOME_PAGE_LIMIT:
+                break
+            if fresh == 0:
+                raise ValueError("income page made no progress: refusing a partial read")
+            cursor_ms = newest_ms
+        return tuple(sorted(found.values(), key=lambda row: (row.time_utc, row.tran_id)))
 
 
 # --------------------------------------------------------------------------- #
@@ -1603,13 +2146,12 @@ def _row_to_position_snapshot(
     position_amt = Decimal(str(item.position_amt))
     if not position_amt.is_finite():
         raise ValueError("position row positionAmt is not finite")
+    entry_price, entry_price_from_float = _entry_price_decimal(item.entry_price)
     return PositionSnapshot(
         symbol=item.symbol,
         position_side=item.position_side or "",
         position_amt=position_amt,
-        entry_price=Decimal(str(item.entry_price))
-        if item.entry_price is not None
-        else Decimal("0"),
+        entry_price=entry_price,
         break_even_price=Decimal(str(item.break_even_price))
         if item.break_even_price is not None
         else Decimal("0"),
@@ -1623,7 +2165,27 @@ def _row_to_position_snapshot(
         notional=(Decimal(str(item.notional)) if item.notional is not None else None),
         margin_asset=item.margin_asset or "",
         update_time_utc=_require_update_time_utc(item.update_time),
+        entry_price_from_float=entry_price_from_float,
     )
+
+
+def _entry_price_decimal(value: object) -> tuple[Decimal, bool]:
+    """The position `entry_price` as a Decimal, and whether it came from a float (D-34).
+
+    The installed SDK model types `entryPrice` as a string, so the exchange's own text reaches
+    here and `Decimal(text)` is exact (84816.4 stays 84816.4). A float can only arrive through a
+    row built without validation or from another SDK version: it is converted through its
+    shortest text (never rounded or quantized) and flagged, because float noise such as
+    84816.40000000001 cannot be repaired from the float alone. A missing value is zero, as before.
+    """
+    if value is None:
+        return Decimal("0"), False
+    if isinstance(value, float):
+        converted = Decimal(repr(value))
+        if not converted.is_finite():
+            raise ValueError("position row entryPrice is not finite")
+        return converted, True
+    return Decimal(str(value)), False
 
 
 def _algo_order_to_probe(
@@ -1793,6 +2355,159 @@ def _require_commission_rate(value: Any, field_name: str, symbol: str) -> Decima
             "likely a unit error"
         )
     return rate
+
+
+def _require_exchange_decimal(value: Any, field_name: str) -> Decimal:
+    """Parse one exchange amount strictly: a finite Decimal from non-empty text (plan 21-03).
+
+    A missing (None), empty, non-text, non-decimal or non-finite value raises `ValueError`
+    naming the field only; the offending text is never put in the message. No float is built
+    and a failure is never turned into a zero (D-04).
+    """
+    message = f"account field {field_name} missing or not a finite decimal: refusing to fabricate"
+    if not isinstance(value, str) or value.strip() != value or value == "" or "_" in value:
+        raise ValueError(message)
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        raise ValueError(message) from None
+    if not parsed.is_finite():
+        raise ValueError(message)
+    return parsed
+
+
+def _window_ms(start_utc: datetime, end_utc: datetime) -> tuple[int, int]:
+    """Epoch milliseconds of a UTC window; anything but a valid window raises (plan 21-08).
+
+    Both bounds must be timezone-aware UTC datetimes, `start_utc <= end_utc`, and the span at
+    most seven days (the exchange window rule). Integer arithmetic only.
+    """
+    for bound in (start_utc, end_utc):
+        if (
+            not isinstance(bound, datetime)
+            or bound.tzinfo is None
+            or bound.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("window bounds must be timezone-aware UTC datetimes")
+    if start_utc > end_utc:
+        raise ValueError("window start is after its end")
+    if end_utc - start_utc > _MAX_WINDOW:
+        raise ValueError("window is longer than seven days")
+    one_ms = timedelta(milliseconds=1)
+    return (start_utc - _EPOCH_UTC) // one_ms, (end_utc - _EPOCH_UTC) // one_ms
+
+
+def _require_exchange_int(value: Any, field_name: str) -> int:
+    """A real integer (not a bool) from the exchange; anything else raises, naming the field."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"exchange field {field_name} missing or not an integer")
+    return value
+
+
+def _exchange_number_to_decimal(value: Any, field_name: str) -> Decimal:
+    """A non-negative finite exchange number (SDK float or int) as an exact Decimal (22-01).
+
+    The SDK models carry the bracket ratios as `StrictFloat | StrictInt`. A float becomes
+    `Decimal(repr(value))`, the shortest text that round-trips (`0.004` -> `Decimal("0.004")`),
+    never `Decimal(value)`, which would expose the binary expansion (22-RESEARCH Pitfall 4).
+    None, bool, text, non-finite and negative values raise `ValueError` naming the field only.
+    """
+    message = f"exchange field {field_name} missing or not a finite non-negative number"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(message)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(message)
+    if value < 0:
+        raise ValueError(message)
+    return Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
+
+
+def _row_to_leverage_bracket(item: Any) -> LeverageBracketRow:
+    """Project one SDK bracket into `LeverageBracketRow`; a bad field raises, naming it (22-01)."""
+    initial_leverage = _require_exchange_int(item.initial_leverage, "initialLeverage")
+    if initial_leverage < 1:
+        raise ValueError("exchange field initialLeverage below 1")
+    notional_floor = _require_exchange_int(item.notional_floor, "notionalFloor")
+    notional_cap = _require_exchange_int(item.notional_cap, "notionalCap")
+    if notional_floor < 0 or notional_cap < 0:
+        raise ValueError("exchange field notionalFloor or notionalCap negative")
+    return LeverageBracketRow(
+        bracket=_require_exchange_int(item.bracket, "bracket"),
+        initial_leverage=initial_leverage,
+        notional_floor=Decimal(notional_floor),
+        notional_cap=Decimal(notional_cap),
+        maint_margin_ratio=_exchange_number_to_decimal(item.maint_margin_ratio, "maintMarginRatio"),
+        cum=_exchange_number_to_decimal(item.cum, "cum"),
+    )
+
+
+def _require_exchange_text(value: Any, field_name: str) -> str:
+    """Non-empty exchange text; anything else raises, naming the field only."""
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"exchange field {field_name} missing or empty")
+    return value
+
+
+def _utc_from_ms(ms: int) -> datetime:
+    """Exact UTC datetime of an epoch millisecond count (no float)."""
+    return _EPOCH_UTC + timedelta(milliseconds=ms)
+
+
+def _row_to_user_trade(item: Any, symbol: str, trade_id: int) -> tuple[UserTradeRow, int]:
+    """Project one `userTrades` row; the second value is its epoch milliseconds (plan 21-08)."""
+    row_symbol = _require_exchange_text(getattr(item, "symbol", None), "symbol")
+    if row_symbol != symbol:
+        raise ValueError("trade row symbol differs from the requested symbol")
+    time_ms = _require_exchange_int(getattr(item, "time", None), "time")
+    row = UserTradeRow(
+        symbol=row_symbol,
+        order_id=_require_exchange_int(getattr(item, "order_id", None), "orderId"),
+        trade_id=trade_id,
+        realized_pnl=_require_exchange_decimal(getattr(item, "realized_pnl", None), "realizedPnl"),
+        commission=_require_exchange_decimal(getattr(item, "commission", None), "commission"),
+        commission_asset=_require_exchange_text(
+            getattr(item, "commission_asset", None), "commissionAsset"
+        ),
+        margin_asset=_require_exchange_text(getattr(item, "margin_asset", None), "marginAsset"),
+        time_utc=_utc_from_ms(time_ms),
+    )
+    return row, time_ms
+
+
+def _row_to_income(item: Any, income_type: str) -> IncomeRow:
+    """Project one income row; `info` is deliberately never touched (plan 21-08, D-21)."""
+    row_type = _require_exchange_text(getattr(item, "income_type", None), "incomeType")
+    if row_type != income_type:
+        raise ValueError("income row incomeType differs from the requested type")
+    raw_symbol = getattr(item, "symbol", None)
+    if raw_symbol is not None and not isinstance(raw_symbol, str):
+        raise ValueError("exchange field symbol is not text")
+    raw_trade_id = getattr(item, "trade_id", None)
+    if raw_trade_id is not None and not isinstance(raw_trade_id, str):
+        raise ValueError("exchange field tradeId is not text")
+    return IncomeRow(
+        symbol=raw_symbol if raw_symbol else None,
+        income_type=row_type,
+        income=_require_exchange_decimal(getattr(item, "income", None), "income"),
+        asset=_require_exchange_text(getattr(item, "asset", None), "asset"),
+        tran_id=_require_exchange_int(getattr(item, "tran_id", None), "tranId"),
+        trade_id=raw_trade_id if raw_trade_id else None,
+        time_utc=_utc_from_ms(_require_exchange_int(getattr(item, "time", None), "time")),
+    )
+
+
+def _row_to_account_asset(item: Any) -> AccountAssetRow:
+    """Project one `assets` row of `account_information_v3` into the frozen dataclass."""
+    asset = item.asset
+    if not isinstance(asset, str) or asset.strip() == "":
+        raise ValueError("account field asset missing or empty: refusing to fabricate")
+    return AccountAssetRow(
+        asset=asset,
+        wallet_balance=_require_exchange_decimal(item.wallet_balance, "walletBalance"),
+        unrealized_profit=_require_exchange_decimal(item.unrealized_profit, "unrealizedProfit"),
+        margin_balance=_require_exchange_decimal(item.margin_balance, "marginBalance"),
+        available_balance=_require_exchange_decimal(item.available_balance, "availableBalance"),
+    )
 
 
 def _require_update_time_utc(value: Any) -> datetime:

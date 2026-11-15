@@ -44,6 +44,7 @@ from src.paper.coverage import (
     FreezeEvidenceReport,
     HealthInterval,
     HealthThresholds,
+    HostTickVerdict,
     coverage_report,
     derive_health_intervals,
     freeze_evidence_report,
@@ -391,6 +392,10 @@ def _freeze_continuity(inputs: _FreezeInputs) -> CriterionResult:
         f"EVIDENCE_GAP {len(report.gaps)}, non-CLEAN lines after the pin {len(report.breaks)}",
         report.statement,
     ]
+    if report.host_results:
+        counts = Counter(result.verdict for result in report.host_results)
+        shown = ", ".join(f"{v.value} {counts[v]}" for v in HostTickVerdict if counts[v])
+        evidence.append(f"host witness ticks judged {len(report.host_results)}: {shown}")
     if inputs.in_window_gap_records:
         evidence.append(
             f"{inputs.in_window_gap_records} EVIDENCE_GAP record(s) in the bundle fall inside "
@@ -1366,6 +1371,9 @@ def evaluate_trial(
         runs=bundle.runs,
         grace_seconds=thresholds.freeze_tick_grace_seconds,
         detected_at_utc=end,
+        host_ticks=bundle.host_ticks,
+        pinned_epoch_id=bundle.pinned.epoch_id,
+        pinned_hash=bundle.pinned.parameter_set_hash,
     )
     in_window_gaps = sum(1 for g in bundle.evidence_gaps if pin < g.slot_utc <= end)
 
@@ -1390,7 +1398,7 @@ def evaluate_trial(
         window_end_utc=end,
         pinned_hash=bundle.pinned.parameter_set_hash,
         pinned_epoch_id=bundle.pinned.epoch_id,
-        diff_records=bundle.diff_records,
+        diff_records=bundle.diff_records + bundle.host_diff_records,
         report=freeze,
         in_window_gap_records=in_window_gaps,
     )

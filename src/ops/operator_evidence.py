@@ -18,7 +18,17 @@ change it.
   exact phrase.
 * `DemoOrderLimits` and `load_demo_order_limits`: the owner-approved order size and waits of a
   Demo run, from a TOML file. Kind "smoke" (plan 18-16) and kind "probe" (plans 18-17, 18-23).
-  Nothing has a default: every missing, unknown or malformed key refuses the file.
+  Nothing has a default: every missing, unknown or malformed key refuses the file. Quick task
+  261021-sj0 adds ten owner opt-in evidence cases (`EVIDENCE_CASE_KEYS`) and three keys that are
+  required exactly when their case is enabled; quick task 261022-sj1 adds five more cases and the
+  key `race_repeats` (required exactly with `cancel_fill_race`, at most `RACE_REPEATS_MAX`);
+  quick task 261023-sj2 adds eight more cases, lets `race_repeats` and `near_trigger_fraction`
+  serve the new race and stop cases too, and adds the key `insufficient_margin_quantity`
+  (required exactly with `insufficient_margin`); the Phase 18 file loads unchanged. Phase 22
+  plans 22-05 and 22-09 add six owner-run SJ3 cases: `insufficient_margin_quantity` is then
+  required exactly when `insufficient_margin` OR `margin_insufficient_target` is enabled, and
+  `config_target_leverage` exactly when `symbol_config_change`, `margin_insufficient_target` or
+  `isolated_liquidation` is enabled.
 * `sha256_lf`: the sha256 of a text file with CRLF normalized to LF.
 
 Standard library and `src.ops.redaction` only: no SDK, no adapter, no network.
@@ -179,6 +189,79 @@ OPTIONAL_CASE_KEYS: tuple[str, ...] = (
 _MARKET_LOT_CASE = "market_lot_size_out_of_range"
 _MARKET_LOT_QUANTITY = "market_lot_probe_quantity"
 
+# Quick task 261021-sj0 (ten), 261022-sj1 (five) and 261023-sj2 (eight): the owner opt-in
+# evidence-capture cases of
+# `scripts/demo_probe.py`, in the order the script runs them (`gtd_expiry`, the only case that
+# waits more than ten minutes, stays last). They are optional in `[optional_cases]` (absent = not
+# enabled, not stored), so a file written for Phase 18 keeps its exact meaning.
+EVIDENCE_CASE_KEYS: tuple[str, ...] = (
+    "account_capture",
+    "algo_query_timing",
+    "close_position_with_position",
+    "stop_trigger_after_fill",
+    "stop_absent_same_id",
+    "manual_close_open_legs",
+    "commission_realized_pnl",
+    "triggered_bracket",
+    "tp1_from_fill",
+    "exchange_info_read",
+    "gtd_min_lifetime",
+    "partial_fill_attempt",
+    "cancel_fill_race",
+    "stream_loss",
+    "reduce_only_flat",
+    "reduce_only_oversize",
+    "min_notional_entry",
+    "insufficient_margin",
+    "stop_reject_after_accept",
+    "trigger_cancel_race",
+    "recv_window_error",
+    "income_history",
+    # Phase 22 plans 22-05 and 22-09: owner-run symbol-configuration and margin cases
+    # (SJ3_CASES), in the script's order, before gtd_expiry.
+    "symbol_config_change",
+    "margin_type_resting_order",
+    "leverage_above_max",
+    "margin_insufficient_target",
+    "available_balance_resting",
+    "isolated_liquidation",
+    "gtd_expiry",
+)
+_NEAR_TRIGGER_FRACTION = "near_trigger_fraction"
+_NEAR_TRIGGER_CASES: tuple[str, ...] = (
+    "triggered_bracket",
+    "tp1_from_fill",
+    "stop_reject_after_accept",
+    "trigger_cancel_race",
+)
+_GTD_CASE = "gtd_expiry"
+_GTD_LIFETIME = "gtd_lifetime_seconds"
+_GTD_WAIT = "gtd_expiry_wait_seconds"
+_RACE_CASES: tuple[str, ...] = ("cancel_fill_race", "trigger_cancel_race")
+_RACE_REPEATS = "race_repeats"
+# `insufficient_margin` (quick task 261023-sj2) sends ONE order that is deliberately larger than
+# the account's margin allows. It has its OWN owner quantity: no default, and no relation to the
+# `quantity` / `max_notional_quote` cap that every other case obeys.
+# Phase 22 plan 22-09: `margin_insufficient_target` sends the same kind of order under the same
+# owner quantity, so the key is required exactly when EITHER of the two cases is enabled.
+_MARGIN_CASES: tuple[str, ...] = ("insufficient_margin", "margin_insufficient_target")
+_MARGIN_QUANTITY = "insufficient_margin_quantity"
+# Phase 22 plan 22-05: the SJ3 cases that CHANGE the symbol configuration (margin type, leverage).
+# `order.config_target_leverage` is the owner's leverage for them: required exactly when one is
+# enabled, no default (D-02 keeps the guard's own constant in the guard module; the probe asks for
+# what the owner wrote). Plan 22-09 added the two SJ3 cases that need it as well: the margin
+# shortfall at the target leverage and the isolated liquidation inputs (both require the symbol to
+# read ISOLATED at that leverage; only the first case changes it).
+_CONFIG_CASES: tuple[str, ...] = (
+    "symbol_config_change",
+    "margin_insufficient_target",
+    "isolated_liquidation",
+)
+_CONFIG_LEVERAGE = "config_target_leverage"
+# The most place-and-cancel pairs the owner may ask of `cancel_fill_race`: a tool cap on the
+# number of probe orders (each repeat may open and close a position), not a trading number.
+RACE_REPEATS_MAX = 5
+
 # Per kind: section -> the keys it must carry (exactly).
 _LAYOUT: Mapping[str, Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {
@@ -218,6 +301,20 @@ class DemoOrderLimits:
     `market_lot_probe_quantity` and `case_timeout_seconds` for the smoke; `event_wait_seconds`
     for the probe); `optional_cases` is empty for the smoke. `market_lot_probe_quantity` is set
     exactly when the optional case `market_lot_size_out_of_range` is enabled.
+    `near_trigger_fraction` is set exactly when `triggered_bracket` or `tp1_from_fill` is
+    enabled (a decimal strictly between 0 and 1: how close to the live mark the trigger sits),
+    `gtd_lifetime_seconds` and `gtd_expiry_wait_seconds` exactly when `gtd_expiry` is enabled
+    (the wait exceeds the lifetime). The 600 second exchange floor of goodTillDate is not
+    checked: the exchange's answer to a shorter lifetime is itself evidence. `race_repeats`
+    (quick task 261022-sj1) is set exactly when `cancel_fill_race` or `trigger_cancel_race` is
+    enabled: a positive integer of at most `RACE_REPEATS_MAX`. `insufficient_margin_quantity`
+    (quick task 261023-sj2) is set exactly when `insufficient_margin` or (Phase 22 plan 22-09)
+    `margin_insufficient_target` is enabled: a positive plain decimal the OWNER chose to exceed
+    the available margin; it is the one quantity the probe may send above the cap, and only for
+    those two cases. `config_target_leverage` (Phase 22 plans 22-05 and 22-09) is set exactly
+    when `symbol_config_change`, `margin_insufficient_target` or `isolated_liquidation` is
+    enabled: the leverage the owner asks the probe to request or expects the symbol to read, a
+    positive int.
     """
 
     kind: str
@@ -230,11 +327,21 @@ class DemoOrderLimits:
     case_timeout_seconds: int | None
     cleanup_timeout_seconds: int
     optional_cases: Mapping[str, bool]
+    near_trigger_fraction: Decimal | None
+    gtd_lifetime_seconds: int | None
+    gtd_expiry_wait_seconds: int | None
+    race_repeats: int | None
+    insufficient_margin_quantity: Decimal | None
+    config_target_leverage: int | None
 
     @property
     def enabled_optional_cases(self) -> tuple[str, ...]:
-        """The enabled optional cases, in `OPTIONAL_CASE_KEYS` order."""
-        return tuple(key for key in OPTIONAL_CASE_KEYS if self.optional_cases.get(key) is True)
+        """The enabled optional cases: `OPTIONAL_CASE_KEYS` order, then `EVIDENCE_CASE_KEYS`."""
+        return tuple(
+            key
+            for key in (*OPTIONAL_CASE_KEYS, *EVIDENCE_CASE_KEYS)
+            if self.optional_cases.get(key) is True
+        )
 
 
 def _decimal(section: Mapping[str, Any], dotted: str, key: str, problems: list[str]) -> Decimal:
@@ -287,6 +394,111 @@ def _check_keys(
     return sections
 
 
+def _near_trigger_fraction(
+    order: Mapping[str, Any], enabled: Mapping[str, bool], problems: list[str]
+) -> Decimal | None:
+    """`order.near_trigger_fraction`: required exactly when a near-trigger case is enabled."""
+    needed = any(enabled.get(case) is True for case in _NEAR_TRIGGER_CASES)
+    dotted = f"order.{_NEAR_TRIGGER_FRACTION}"
+    cases = " or ".join(f"optional_cases.{case}" for case in _NEAR_TRIGGER_CASES)
+    if not needed:
+        if _NEAR_TRIGGER_FRACTION in order:
+            problems.append(f"{dotted} (only allowed when {cases} is true)")
+        return None
+    if _NEAR_TRIGGER_FRACTION not in order:
+        problems.append(f"{dotted} (missing key: required when {cases} is true)")
+        return None
+    value = _decimal(order, dotted, _NEAR_TRIGGER_FRACTION, problems)
+    if value >= 1:
+        problems.append(f"{dotted} (must be strictly between 0 and 1)")
+    return value
+
+
+def _gtd_limits(
+    order: Mapping[str, Any],
+    waits: Mapping[str, Any],
+    enabled: Mapping[str, bool],
+    problems: list[str],
+) -> tuple[int | None, int | None]:
+    """The GTD lifetime and expiry wait: required exactly when `gtd_expiry` is enabled."""
+    lifetime_dotted = f"order.{_GTD_LIFETIME}"
+    wait_dotted = f"waits.{_GTD_WAIT}"
+    case = f"optional_cases.{_GTD_CASE}"
+    if enabled.get(_GTD_CASE) is not True:
+        if _GTD_LIFETIME in order:
+            problems.append(f"{lifetime_dotted} (only allowed when {case} is true)")
+        if _GTD_WAIT in waits:
+            problems.append(f"{wait_dotted} (only allowed when {case} is true)")
+        return None, None
+    lifetime: int | None = None
+    wait: int | None = None
+    if _GTD_LIFETIME not in order:
+        problems.append(f"{lifetime_dotted} (missing key: required when {case} is true)")
+    else:
+        lifetime = _positive_int(order, lifetime_dotted, _GTD_LIFETIME, problems)
+    if _GTD_WAIT not in waits:
+        problems.append(f"{wait_dotted} (missing key: required when {case} is true)")
+    else:
+        wait = _positive_int(waits, wait_dotted, _GTD_WAIT, problems)
+    if lifetime and wait and wait <= lifetime:
+        problems.append(f"{wait_dotted} (must be greater than {lifetime_dotted})")
+    return lifetime, wait
+
+
+def _race_repeats(
+    order: Mapping[str, Any], enabled: Mapping[str, bool], problems: list[str]
+) -> int | None:
+    """`order.race_repeats`: required exactly when a race case is enabled, small."""
+    dotted = f"order.{_RACE_REPEATS}"
+    case = " or ".join(f"optional_cases.{name}" for name in _RACE_CASES)
+    if not any(enabled.get(name) is True for name in _RACE_CASES):
+        if _RACE_REPEATS in order:
+            problems.append(f"{dotted} (only allowed when {case} is true)")
+        return None
+    if _RACE_REPEATS not in order:
+        problems.append(f"{dotted} (missing key: required when {case} is true)")
+        return None
+    value = _positive_int(order, dotted, _RACE_REPEATS, problems)
+    if value > RACE_REPEATS_MAX:
+        problems.append(f"{dotted} (must be at most {RACE_REPEATS_MAX})")
+    return value
+
+
+def _margin_quantity(
+    order: Mapping[str, Any], enabled: Mapping[str, bool], problems: list[str]
+) -> Decimal | None:
+    """`order.insufficient_margin_quantity`: required exactly when a margin case is on."""
+    dotted = f"order.{_MARGIN_QUANTITY}"
+    case = " or ".join(f"optional_cases.{name}" for name in _MARGIN_CASES)
+    if not any(enabled.get(name) is True for name in _MARGIN_CASES):
+        if _MARGIN_QUANTITY in order:
+            problems.append(f"{dotted} (only allowed when {case} is true)")
+        return None
+    if _MARGIN_QUANTITY not in order:
+        problems.append(f"{dotted} (missing key: required when {case} is true)")
+        return None
+    return _decimal(order, dotted, _MARGIN_QUANTITY, problems)
+
+
+def _config_target_leverage(
+    order: Mapping[str, Any],
+    enabled: Mapping[str, bool],
+    config_cases: Sequence[str],
+    problems: list[str],
+) -> int | None:
+    """`order.config_target_leverage`: required exactly when a configuration case is enabled."""
+    dotted = f"order.{_CONFIG_LEVERAGE}"
+    cases = " or ".join(f"optional_cases.{name}" for name in config_cases)
+    if not any(enabled.get(name) is True for name in config_cases):
+        if _CONFIG_LEVERAGE in order:
+            problems.append(f"{dotted} (only allowed when {cases} is true)")
+        return None
+    if _CONFIG_LEVERAGE not in order:
+        problems.append(f"{dotted} (missing key: required when {cases} is true)")
+        return None
+    return _positive_int(order, dotted, _CONFIG_LEVERAGE, problems)
+
+
 def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     """Load the owner's order-limits file of `kind` ("smoke" or "probe").
 
@@ -306,7 +518,22 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         raise DemoOrderLimitsRefused(["the order limits file is not valid TOML"]) from None
 
     problems: list[str] = []
-    optional_keys = {"order": (_MARKET_LOT_QUANTITY,)} if kind == KIND_PROBE else {}
+    optional_keys: Mapping[str, tuple[str, ...]] = (
+        {
+            "order": (
+                _MARKET_LOT_QUANTITY,
+                _NEAR_TRIGGER_FRACTION,
+                _GTD_LIFETIME,
+                _RACE_REPEATS,
+                _MARGIN_QUANTITY,
+                _CONFIG_LEVERAGE,
+            ),
+            "waits": (_GTD_WAIT,),
+            "optional_cases": EVIDENCE_CASE_KEYS,
+        }
+        if kind == KIND_PROBE
+        else {}
+    )
     sections = _check_keys(raw, _LAYOUT[kind], optional_keys, problems)
     order = sections["order"]
     waits = sections["waits"]
@@ -327,6 +554,12 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
     lot_quantity: Decimal | None = None
     event_wait: int | None = None
     case_timeout: int | None = None
+    near_trigger: Decimal | None = None
+    gtd_lifetime: int | None = None
+    gtd_wait: int | None = None
+    race_repeats: int | None = None
+    margin_quantity: Decimal | None = None
+    config_leverage: int | None = None
     optional_cases: dict[str, bool] = {}
     if kind == KIND_SMOKE:
         event_wait = _positive_int(
@@ -358,6 +591,16 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
                 f"order.{_MARKET_LOT_QUANTITY} (only allowed when "
                 f"optional_cases.{_MARKET_LOT_CASE} is true)"
             )
+        for key in EVIDENCE_CASE_KEYS:
+            if key in cases:
+                if not isinstance(cases[key], bool):
+                    problems.append(f"optional_cases.{key} (must be true or false)")
+                optional_cases[key] = cases[key] is True
+        near_trigger = _near_trigger_fraction(order, optional_cases, problems)
+        gtd_lifetime, gtd_wait = _gtd_limits(order, waits, optional_cases, problems)
+        race_repeats = _race_repeats(order, optional_cases, problems)
+        margin_quantity = _margin_quantity(order, optional_cases, problems)
+        config_leverage = _config_target_leverage(order, optional_cases, _CONFIG_CASES, problems)
 
     if problems:
         raise DemoOrderLimitsRefused(problems)
@@ -372,6 +615,12 @@ def load_demo_order_limits(path: Path | str, *, kind: str) -> DemoOrderLimits:
         case_timeout_seconds=case_timeout,
         cleanup_timeout_seconds=cleanup,
         optional_cases=MappingProxyType(optional_cases),
+        near_trigger_fraction=near_trigger,
+        gtd_lifetime_seconds=gtd_lifetime,
+        gtd_expiry_wait_seconds=gtd_wait,
+        race_repeats=race_repeats,
+        insufficient_margin_quantity=margin_quantity,
+        config_target_leverage=config_leverage,
     )
 
 
@@ -387,6 +636,7 @@ def sha256_lf(path: Path | str) -> str:
 
 
 __all__ = [
+    "EVIDENCE_CASE_KEYS",
     "EXIT_ABORTED",
     "EXIT_FAILED",
     "EXIT_OK",
@@ -394,6 +644,7 @@ __all__ = [
     "KIND_PROBE",
     "KIND_SMOKE",
     "OPTIONAL_CASE_KEYS",
+    "RACE_REPEATS_MAX",
     "ConfirmationRefused",
     "DemoOrderLimits",
     "DemoOrderLimitsRefused",

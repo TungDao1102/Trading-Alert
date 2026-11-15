@@ -74,6 +74,7 @@ from tests.support.pg_rows import (
     make_plan,
     make_signal,
 )
+from tests.support.press_identity import OWNER_PRESS
 
 ONE_DECIDED = "uq_approvals_one_decided_per_plan"
 CHAT_ID = 4242
@@ -723,6 +724,7 @@ def test_dispatch_callback_resolves_an_approve_end_to_end(
             "parameter_set_hash": PARAM_HASH,
             "expiry_utc": T1,
         },
+        **OWNER_PRESS,
     )
 
     assert result.ok is True
@@ -817,3 +819,221 @@ def test_seeded_round_trip_for_approvals_and_mappings_including_consumed(engine:
         assert store.lookup_by_token_hash(pending.approval_token_hash) == expected
 
     assert consumed_cases > 0, "the property must exercise CONSUMED approvals"
+
+
+# --------------------------------------------------------------------------- #
+# actor_id and money_json (Phase 23, plan 23-04; D-03, D-13).
+# --------------------------------------------------------------------------- #
+
+MONEY_JSON = '{"schema":"money-at-stake/1","risk_amount":"10.5"}'
+
+
+def _stored_text(engine: Engine, column: str, approval_id: str) -> str | None:
+    with Session(engine) as session:
+        value = session.execute(
+            text(f"SELECT {column} FROM approvals WHERE approval_id = :id"),  # noqa: S608
+            {"id": approval_id},
+        ).scalar_one()
+    return None if value is None else str(value)
+
+
+def test_tracer_decided_actor_and_money_survive_a_new_store_instance(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approval = _pending(1, approved_quantity=Decimal("0.08"), money_json=MONEY_JSON, actor_id="")
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.APPROVED), actor_id="777001"),
+        None,
+    )
+
+    fresh = PgApprovalStore(OperationalDatabase(seeded))
+    assert fresh is not store
+    stored = fresh.get(approval.approval_id)
+    assert stored is not None
+    assert stored.actor_id == "777001"
+    assert stored.money_json == MONEY_JSON
+    assert stored.status is ApprovalResult.APPROVED
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "777001"
+    assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
+
+
+def test_a_second_decision_keeps_the_first_actor(seeded: Engine, store: PgApprovalStore) -> None:
+    approval = _pending(1, actor_id="")
+    store.insert_pending(approval)
+    decided = _decided(approval, ApprovalResult.APPROVED)
+    store.save_atomic(replace(decided, actor_id="777001"), None)
+
+    with pytest.raises(ApprovalAlreadyDecided):
+        store.save_atomic(replace(decided, actor_id="777002"), None)
+
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "777001"
+
+
+def test_a_lost_race_to_a_sibling_row_never_overwrites_the_stored_actor(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approve = _pending(1, action=ApprovalAction.APPROVE, actor_id="")
+    skip = _pending(2, action=ApprovalAction.SKIP_USER, actor_id="")
+    store.insert_pending(approve)
+    store.insert_pending(skip)
+    store.save_atomic(replace(_decided(approve, ApprovalResult.APPROVED), actor_id="777001"), None)
+
+    with pytest.raises(ApprovalAlreadyDecided):
+        store.save_atomic(replace(_decided(skip, ApprovalResult.SKIPPED), actor_id="777002"), None)
+
+    assert _stored_text(seeded, "actor_id", approve.approval_id) == "777001"
+    assert _stored_text(seeded, "actor_id", skip.approval_id) == ""
+    assert _approval_status(seeded, skip.approval_id) == "PENDING"
+
+
+def test_money_json_is_part_of_the_insert_identity(seeded: Engine, store: PgApprovalStore) -> None:
+    approval = _pending(1, money_json=MONEY_JSON)
+    store.insert_pending(approval)
+    store.insert_pending(approval)  # the same request again is a no-op
+    assert _count(seeded, "approvals") == 1
+
+    with pytest.raises(RowConflict, match="money_json"):
+        store.insert_pending(replace(approval, money_json='{"schema":"other"}'))
+    with pytest.raises(RowConflict, match="money_json"):
+        store.insert_pending(replace(approval, money_json=None))
+    assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
+
+
+def test_a_decision_never_changes_the_stored_money(seeded: Engine, store: PgApprovalStore) -> None:
+    approval = _pending(1, money_json=MONEY_JSON)
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.APPROVED), money_json='{"tampered":"1"}'),
+        None,
+    )
+
+    assert _stored_text(seeded, "money_json", approval.approval_id) == MONEY_JSON
+
+
+def test_a_row_written_without_money_reads_back_none(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    insert_and_commit(seeded, make_approval(1, 1, 1))
+
+    stored = store.get(hexid(0x2001))
+    assert stored is not None
+    assert stored.money_json is None
+
+
+def test_the_restart_expiry_persists_its_runtime_actor(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    """`invalidate_pending_on_restart` stamps RUNTIME_RESTART; since 23-04 PostgreSQL keeps it."""
+    approval = _pending(1, actor_id="")
+    store.insert_pending(approval)
+
+    store.save_atomic(
+        replace(_decided(approval, ApprovalResult.EXPIRED), actor_id="RUNTIME_RESTART"), None
+    )
+
+    assert _stored_text(seeded, "actor_id", approval.approval_id) == "RUNTIME_RESTART"
+    stored = store.get(approval.approval_id)
+    assert stored is not None
+    assert stored.status is ApprovalResult.EXPIRED
+
+
+# --------------------------------------------------------------------------- #
+# G4-042 (Phase 23 plan 23-08, D-16, OWNER-OPEN O-2): EXPIRED rows are outside the index.
+# --------------------------------------------------------------------------- #
+
+
+def _expired_by_restart(approval: Approval) -> Approval:
+    return replace(_decided(approval, ApprovalResult.EXPIRED), actor_id="RUNTIME_RESTART")
+
+
+def _statuses_of_plan(engine: Engine, plan_n: int = 1) -> list[str]:
+    with Session(engine) as session:
+        return list(
+            session.execute(
+                text("SELECT status FROM approvals WHERE trade_plan_id = :p ORDER BY approval_id"),
+                {"p": hexid(0x1000 + plan_n)},
+            ).scalars()
+        )
+
+
+def test_both_pending_siblings_of_an_undecided_plan_can_be_expired_at_restart(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approve = _pending(1)
+    skip = _pending(2, action=ApprovalAction.SKIP_USER)
+    store.insert_pending(approve)
+    store.insert_pending(skip)
+
+    store.save_atomic(_expired_by_restart(approve), None)
+    store.save_atomic(_expired_by_restart(skip), None)  # LEFT_PENDING_SIBLING_DECIDED before 0014
+
+    assert _statuses_of_plan(seeded) == ["EXPIRED", "EXPIRED"]
+    for approval in (approve, skip):
+        stored = store.get(approval.approval_id)
+        assert stored is not None
+        assert stored.status is ApprovalResult.EXPIRED
+        assert stored.actor_id == "RUNTIME_RESTART"
+
+
+@pytest.mark.parametrize("decided_as", [ApprovalResult.APPROVED, ApprovalResult.SKIPPED])
+def test_a_decided_plans_sibling_is_never_expired(
+    seeded: Engine, store: PgApprovalStore, decided_as: ApprovalResult
+) -> None:
+    approve = _pending(1)
+    skip = _pending(2, action=ApprovalAction.SKIP_USER)
+    store.insert_pending(approve)
+    store.insert_pending(skip)
+    decided = _decided(approve, decided_as)
+    store.save_atomic(decided, None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as expired:
+        store.save_atomic(_expired_by_restart(skip), None)
+    with pytest.raises(ApprovalAlreadyDecided) as skipped:
+        store.save_atomic(_decided(skip, ApprovalResult.SKIPPED), None)
+
+    assert expired.value.existing == decided
+    assert skipped.value.existing == decided
+    assert _approval_status(seeded, skip.approval_id) == "PENDING"
+    assert _approval_status(seeded, approve.approval_id) == decided_as.value
+
+
+def test_the_race_query_ignores_expired_rows_and_names_the_one_decided_row(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    """Rows 1 and 2 EXPIRED, row 3 APPROVED, row 4 loses on the index: the lookup of the
+    decided row must pick row 3 and never raise MultipleResultsFound."""
+    rows = [
+        _pending(1),
+        _pending(2, action=ApprovalAction.SKIP_USER),
+        _pending(3),
+        _pending(4, action=ApprovalAction.SKIP_USER),
+    ]
+    for row in rows:
+        store.insert_pending(row)
+    store.save_atomic(_expired_by_restart(rows[0]), None)
+    store.save_atomic(_expired_by_restart(rows[1]), None)
+    approved = _decided(rows[2], ApprovalResult.APPROVED)
+    store.save_atomic(approved, None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as lost:
+        store.save_atomic(_decided(rows[3], ApprovalResult.SKIPPED), None)
+
+    assert lost.value.existing == approved
+    assert _statuses_of_plan(seeded) == ["EXPIRED", "EXPIRED", "APPROVED", "PENDING"]
+
+
+def test_expiring_the_same_approval_twice_replays_to_the_stored_row(
+    seeded: Engine, store: PgApprovalStore
+) -> None:
+    approve = _pending(1)
+    store.insert_pending(approve)
+    expired = _expired_by_restart(approve)
+    store.save_atomic(expired, None)
+
+    with pytest.raises(ApprovalAlreadyDecided) as again:
+        store.save_atomic(expired, None)
+
+    assert again.value.existing.status is ApprovalResult.EXPIRED

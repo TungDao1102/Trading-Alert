@@ -1,0 +1,17 @@
+{
+  "case_id": "entry_cancel_fill_race",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": {
+      "category": "ORDER_ABSENT",
+      "code": -2011,
+      "http_class": "BAD_REQUEST",
+      "message": "Unknown order sent.",
+      "retry_after_seconds": null
+    },
+    "ok": false,
+    "operation": "cancel_order",
+    "summary": {}
+  }
+}

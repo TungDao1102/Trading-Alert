@@ -91,6 +91,9 @@ DEMO_PROBE_DATE = "2026-10-16"
 # The Demo user-data smoke run (20261016T140446Z) that answered -1125 on a keepalive after a
 # delete (evidence/18-smoke-check.txt item f). Demo evidence, not mainnet.
 DEMO_SMOKE_DATE = "2026-10-16"
+# The Phase 19 Demo probe run 20261022T120055Z (case gtd_min_lifetime_boundary) that answered
+# -5040 on a GTD entry (plan 20-27). Demo evidence, not mainnet.
+DEMO_GTD_PROBE_DATE = "2026-10-22"
 
 
 def _is_strict_int(value: object) -> bool:
@@ -104,16 +107,27 @@ class PreSendRefusal(Exception):  # noqa: N818 - a refusal, not an error of the 
     entry block, a missing signed-call policy). It is never an ambiguous send, so the
     execution core can retry or fall back without treating it as a possible placement. An
     exception that is not a `PreSendRefusal` carries no such guarantee.
+
+    `reason` is a fixed project code that says why (a subclass sets it); the execution core
+    journals it instead of the message text, which no decision may read.
     """
+
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ErrorFacts:
-    """The only facts classification may use: class, int body code, Retry-After seconds."""
+    """The only facts classification may use: class, int body code, Retry-After seconds.
+
+    `ban_until_epoch_ms` is NOT a classification fact: it is the one number D083 lets the REST
+    gate take from a 418 / -1003 body (epoch milliseconds, 13 digits), set only by the one
+    function that reads it (`src.adapters.binance_errors`). `classify` never looks at it.
+    """
 
     http_class: HttpClass
     code: int | None
     retry_after_seconds: int | None
+    ban_until_epoch_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.http_class, HttpClass):
@@ -124,6 +138,19 @@ class ErrorFacts:
             not _is_strict_int(self.retry_after_seconds) or self.retry_after_seconds < 0
         ):
             raise ValueError("retry_after_seconds must be a non-negative int (not a bool) or None")
+        if self.ban_until_epoch_ms is not None:
+            if not _is_strict_int(self.ban_until_epoch_ms):
+                raise TypeError("ban_until_epoch_ms must be an int (not a bool) or None")
+            if not _BAN_UNTIL_MIN_MS <= self.ban_until_epoch_ms <= _BAN_UNTIL_MAX_MS:
+                raise ValueError("ban_until_epoch_ms must have exactly 13 digits")
+            if self.http_class is not HttpClass.BANNED_418 or self.code != _CODE_TOO_MANY_REQUESTS:
+                raise ValueError("ban_until_epoch_ms is only valid for an HTTP 418 with code -1003")
+
+
+# D083: the ban end of a 418 / -1003 body is epoch milliseconds with exactly 13 digits.
+_BAN_UNTIL_MIN_MS = 1_000_000_000_000
+_BAN_UNTIL_MAX_MS = 9_999_999_999_999
+_CODE_TOO_MANY_REQUESTS = -1003
 
 
 # documented: on the Binance error-code page (the 2026-10-16 re-read, the 2026-10-17 re-read
@@ -169,6 +196,11 @@ ERROR_TABLE_SOURCE: str = "docs/SOURCES.md, Facts read for Phase 18, error-code 
 ERROR_TABLE_READ_DATE: str = "2026-10-16"
 # The second read of the error-code page (plan 18-26): -1106, -4016, -4024 and -1125 only.
 ERROR_TABLE_REREAD_DATE: str = "2026-10-17"
+# The Phase 22 read of the error-code page through the llms-full bundle (22-RESEARCH.md,
+# 2026-10-23): the nine margin-type and leverage codes only. The 2026-10-16 and 2026-10-17 reads
+# are not claimed for them; no existing entry's read date or source changes.
+ERROR_TABLE_PHASE22_READ_DATE: str = "2026-10-23"
+ERROR_TABLE_PHASE22_SOURCE: str = "docs/SOURCES.md, Facts read for Phase 22, error-code row"
 
 _C = ExchangeErrorCategory
 _K = CallKind
@@ -199,12 +231,13 @@ def _entry(
     demo_observed_on: str | None = None,
     *,
     read_date: str = ERROR_TABLE_READ_DATE,
+    source: str = ERROR_TABLE_SOURCE,
 ) -> CodeEntry:
     return CodeEntry(
         code=code,
         name=name,
         categories_by_call_kind=MappingProxyType(dict(categories)),
-        source=ERROR_TABLE_SOURCE,
+        source=source,
         read_date=read_date,
         evidence=evidence,
         note=note,
@@ -380,6 +413,26 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "The Demo probe of 2026-10-16 observed the same answer for the close-position "
                 "variant while flat.",
                 DEMO_PROBE_DATE,
+            ),
+            # GTD lifetime floor (Demo-observed only, plan 20-27, owner approval 2026-10-23).
+            _entry(
+                -5040,
+                "GTD_TIME_TOO_SOON (project label; no page name)",
+                _REJECT_ON_PLACEMENT,
+                "demo-observed",
+                "Absent from the error-code page in the 2026-10-16 read. Observed on the Binance "
+                "Demo host on 2026-10-22 by the Phase 19 Demo probe run 20261022T120055Z, case "
+                "gtd_min_lifetime_boundary "
+                "(.planning/phases/19-execution-plan-binding-price-check/evidence/"
+                "demo-probe-EVIDENCE-20261022T120055Z.json): a GTD LIMIT entry whose goodTillDate "
+                "was 599 s ahead of the server time was rejected with BAD_REQUEST -5040 'The "
+                "goodTillDate timestamp must be greater than the current time plus 600 seconds "
+                "and smaller than 253402300799000 (UTC 9999-12-31 23:59:59)'; the same entry with "
+                "601 s was accepted (NEW) and cancelled. A definitive rejection of a placement: "
+                "nothing was placed. No retry; the consumer must not resend the entry with a "
+                "different goodTillDate (a placement is never re-sent, D080). Demo only, not "
+                "mainnet.",
+                DEMO_GTD_PROBE_DATE,
             ),
             # Definitive rejections of a placement: margin, balance, notional,
             # filters, would-trigger, reduce-only and conditional-order rules.
@@ -583,6 +636,111 @@ ERROR_CODE_TABLE: Mapping[int, CodeEntry] = MappingProxyType(
                 "(production REST answered -1121 'Invalid symbol.' on 2026-09-30; a live "
                 "probe, not a page read); INVALID_SYMBOL_CODE in src/adapters/binance_usdm.py.",
             ),
+            # Phase 22 (plan 22-03): the definitive refusals of the margin-type and leverage
+            # changes and the entry-time leverage limits. Error-code page read 2026-10-23 through
+            # the llms-full bundle (22-RESEARCH.md); the HTTP class of these codes is not stated
+            # on the page and was not observed on Demo, so only the 400 and 404 classes decide.
+            _entry(
+                -4046,
+                "NO_NEED_TO_CHANGE_MARGIN_TYPE",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "No need to change '
+                'margin type." Requesting the margin type the symbol already has is '
+                "an error and not a no-op, so the configuration guard decides by the "
+                "verification read and not by this answer. HTTP class not stated on "
+                "the page and not observed on Demo.",
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -4047,
+                "THERE_EXISTS_OPEN_ORDERS",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Margin type '
+                'cannot be changed if there exists open orders." Whether a pending '
+                "conditional (algo) order counts is not documented; the guard refuses "
+                "on open algo orders itself.",
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -4048,
+                "THERE_EXISTS_QUANTITY",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Margin type '
+                'cannot be changed if there exists position."',
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -4028,
+                "INVALID_LEVERAGE",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Invalid '
+                'leverage", "Leverage %s is not valid", "Leverage %s already exist '
+                'with %s". Which code a leverage above the symbol maximum returns '
+                "(this or -4209) is not stated and not observed.",
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -4161,
+                "ISOLATED_LEVERAGE_REJECT_WITH_POSITION",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Leverage '
+                "reduction is not supported in Isolated Margin Mode with open "
+                'positions".',
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -4168,
+                "JOINT_MARGIN_REJECT_WITH_ISOLATED",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Unable to adjust '
+                'to isolated-margin mode under the Multi-Assets mode."',
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -4209,
+                "ADJUST_LEVERAGE_SYMBOL_FAILED",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "The max leverage '
+                'of Symbol is 20x" / "Leverage adjustment failed. Current symbol max '
+                'leverage limit is %sx".',
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -2027,
+                "MAX_LEVERAGE_RATIO",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Exceeded the '
+                'maximum allowable position at current leverage." An entry-time '
+                "rejection (order notional above the limit of the current leverage).",
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
+            _entry(
+                -2028,
+                "MIN_LEVERAGE_RATIO",
+                _REJECT_ON_PLACEMENT,
+                "documented",
+                'Documented, error-code page read 2026-10-23 (22-RESEARCH.md): "Leverage is '
+                'smaller than permitted: insufficient margin balance." An entry-time '
+                "rejection.",
+                read_date=ERROR_TABLE_PHASE22_READ_DATE,
+                source=ERROR_TABLE_PHASE22_SOURCE,
+            ),
         )
     }
 )
@@ -714,6 +872,8 @@ def rate_limit_decision(
 
 __all__ = [
     "ERROR_CODE_TABLE",
+    "ERROR_TABLE_PHASE22_READ_DATE",
+    "ERROR_TABLE_PHASE22_SOURCE",
     "ERROR_TABLE_READ_DATE",
     "ERROR_TABLE_REREAD_DATE",
     "ERROR_TABLE_SOURCE",

@@ -166,8 +166,12 @@ def _watermarks(
 
 
 def _compose_prefix(name: str, env_file: Path) -> str:
+    # plan 24-36 (D-29): each side keeps one env file, so the paper and backup env files of the
+    # compose file are that file too (the cutover runs the same way on the hosts)
     return (
-        f"env TRADING_ENV_FILE={env_file.as_posix()} docker compose -p {name} "
+        f"env TRADING_ENV_FILE={env_file.as_posix()} "
+        f"TRADING_PAPER_ENV_FILE={env_file.as_posix()} "
+        f"TRADING_BACKUP_ENV_FILE={env_file.as_posix()} docker compose -p {name} "
         f"--env-file {env_file.as_posix()} -f {COMPOSE_FILE.as_posix()} "
         f"-f {OVERRIDE.as_posix()} --profile ops"
     )

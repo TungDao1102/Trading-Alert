@@ -245,9 +245,17 @@ async def make_rig(
     register: bool = True,
     real_closer: bool = False,
     closer_results: Iterable[bool] = (),
+    pending_actions: Any = None,
+    spill: Any = None,
+    liquidation_watch: Any = None,
     **entry_overrides: Any,
 ) -> ProtectionRig:
-    """A coordinator over the fake exchange; the entry is placed on the fake and registered."""
+    """A coordinator over the fake exchange; the entry is placed on the fake and registered.
+
+    ``pending_actions`` and ``spill`` (plan 20-14) are handed to the coordinator and, with
+    ``real_closer``, to the real closer. ``liquidation_watch`` (plan 22-13) is handed to the
+    coordinator only; None (the default) is the unchanged Phase 19/20 coordinator.
+    """
     clock = VirtualTime()
     fake = BinanceSemanticsFakeAdapter(now_utc=clock.now(), enforce_flat_stop_rejection=True)
     log: list[str] = []
@@ -267,6 +275,8 @@ async def make_rig(
             alert_sink=alerts,
             clock=clock,
             limits=resolved_limits,
+            pending_actions=pending_actions,
+            spill=spill,
         )
     else:
         closer = ScriptedEmergencyCloser(closer_results)
@@ -280,6 +290,9 @@ async def make_rig(
         emergency_closer=closer,
         limits=resolved_limits,
         clock=clock,
+        pending_actions=pending_actions,
+        spill=spill,
+        liquidation_watch=liquidation_watch,
     )
     if place_entry:
         await fake.place_entry(

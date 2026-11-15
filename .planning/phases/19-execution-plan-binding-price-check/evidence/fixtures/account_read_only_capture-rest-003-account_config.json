@@ -1,0 +1,20 @@
+{
+  "case_id": "account_read_only_capture",
+  "index": 3,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "account_config",
+    "summary": {
+      "canDeposit": "true",
+      "canTrade": "true",
+      "canWithdraw": "true",
+      "dualSidePosition": "false",
+      "feeTier": "0",
+      "multiAssetsMargin": "false",
+      "tradeGroupId": "-1",
+      "updateTime": "1791260302519"
+    }
+  }
+}

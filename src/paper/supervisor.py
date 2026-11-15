@@ -51,13 +51,13 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 import structlog
 import tenacity
 
 from src.adapters.binance_public import Kline as RestKline
-from src.adapters.paper_ws import LIFECYCLE_EVENTS
+from src.adapters.paper_ws import LIFECYCLE_EVENTS, WS_DIAGNOSTICS_SILENCE
 from src.adapters.paper_ws import Kline as WsKline
 
 from .resync import backfill_missed_closes, expected_close_times
@@ -118,6 +118,16 @@ class WsAdapterLike(Protocol):
     async def close(self) -> None: ...
 
     async def rebuild(self) -> None: ...
+
+
+@runtime_checkable
+class WsDiagnosticsSource(Protocol):
+    """An adapter that can log its own connection snapshot (`PaperWsAdapter.log_diagnostics`).
+
+    Kept apart from `WsAdapterLike` so every existing double stays a valid `WsAdapterLike`.
+    """
+
+    def log_diagnostics(self, reason: str) -> None: ...
 
 
 class RestAdapterLike(Protocol):
@@ -662,6 +672,25 @@ class PaperSupervisor:
     def _emit_connection_event(self, event: RuntimeEventType, at: datetime) -> None:
         self._call_sink("on_connection_event", self._on_connection_event, event, at)
 
+    def log_ws_diagnostics(self, reason: str) -> None:
+        """Ask the adapter to log one connection snapshot; never raises.
+
+        The runtime's watchdog calls it once when it enters the bounded recovery, so the silent
+        connections are recorded before the rebuild replaces them. SDK objects never leave the
+        adapter: only the adapter's own log line carries the counters. An adapter without
+        `log_diagnostics` is skipped at debug level.
+        """
+        ws = self._ws
+        if not isinstance(ws, WsDiagnosticsSource):
+            log.debug("paper.supervisor.ws_diagnostics_unavailable", reason=reason)
+            return
+        try:
+            ws.log_diagnostics(reason)
+        except Exception as exc:
+            log.warning(
+                "paper.supervisor.ws_diagnostics_failed", reason=reason, error=type(exc).__name__
+            )
+
     # ------------------------------------------------------------------ #
     # Teardown.
     # ------------------------------------------------------------------ #
@@ -670,7 +699,8 @@ class PaperSupervisor:
         """Unsubscribe every handle we own, then close the connection (best effort).
 
         ``_close_failures`` persists across calls and is reset only when a full pass succeeds,
-        so the logged count is truly consecutive.
+        so the logged count is truly consecutive. A handle stays valid across a rebuild: the
+        adapter resolves it to the subscription's current SDK handle (16-43, Finding 2).
         """
         pass_clean = True
         for symbol, interval, handle in self._handles:
@@ -709,7 +739,9 @@ __all__ = [
     "SUPERVISOR_MAX_DELAY_SECONDS",
     "SUPERVISOR_WAIT_MAX_SECONDS",
     "SUPERVISOR_WAIT_MULTIPLIER_SECONDS",
+    "WS_DIAGNOSTICS_SILENCE",
     "PaperSupervisor",
     "RestAdapterLike",
     "WsAdapterLike",
+    "WsDiagnosticsSource",
 ]

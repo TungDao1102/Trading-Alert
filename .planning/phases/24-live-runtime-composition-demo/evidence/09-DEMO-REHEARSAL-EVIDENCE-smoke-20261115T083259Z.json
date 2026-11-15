@@ -1,0 +1,224 @@
+{
+  "attestation_map": {
+    "composed_smoke": {
+      "account_clean": "NOT_OBSERVED",
+      "approve": "OBSERVED",
+      "card": "OBSERVED",
+      "close_cleanup": "NOT_OBSERVED",
+      "confirm_entry": "OBSERVED",
+      "demo_enable": "OBSERVED",
+      "drill_reservation_released": "NOT_OBSERVED",
+      "reconcile_clean": "OBSERVED",
+      "replays_place_nothing": "NOT_OBSERVED",
+      "reservation_released_on_close": "NOT_OBSERVED",
+      "restart_rehydrate": "NOT_OBSERVED",
+      "safe_mode_drill": "NOT_OBSERVED",
+      "signal": "OBSERVED",
+      "start": "OBSERVED",
+      "stop_confirmed": "OBSERVED",
+      "stream_fill": "OBSERVED",
+      "tp_legs": "NOT_REHEARSED",
+      "wiring_check": "OBSERVED"
+    }
+  },
+  "base_url": "https://demo-fapi.binance.com",
+  "constraints": {},
+  "details": {
+    "commission_rates": {
+      "BTCUSDT": {
+        "maker_rate": "0.000200",
+        "taker_rate": "0.000400"
+      }
+    },
+    "entry_acked": {
+      "open_algo_orders_at_ack": 1,
+      "protection_state": "TP_UNAVAILABLE"
+    },
+    "entry_price_raw": {
+      "boundary": "adapter output after the string/Decimal conversion (24-34)",
+      "type": "Decimal",
+      "value": "64516.1"
+    },
+    "evidence_kind": "DEMO_OBSERVED",
+    "fill_pnl_sample": {
+      "commission": "0.12903220",
+      "commission_asset": "USDT",
+      "note": "evidence only, D086: LIVE_NET_PNL_SEMANTICS_VERIFIED stays False",
+      "realized_pnl": "0"
+    },
+    "first_process_shutdown_failed_steps": [],
+    "operator_instructions": [
+      "On the live Demo bot tap APPROVE on the card (short id 50e360ce89d897c093e982b7ef83a2d6).",
+      "Tap CONFIRM on the confirm prompt that follows (short id 50e360ce89d897c093e982b7ef83a2d6).",
+      "Check the Binance Demo UI for any open position or order and close it by hand."
+    ],
+    "order_ids": [
+      {
+        "algo_client_ids": [],
+        "client_order_ids": [
+          "x-324558307da197976ae7e7259cb79d86EN"
+        ],
+        "demo_order_ids": [
+          "28681033217"
+        ],
+        "step": "confirm_entry"
+      },
+      {
+        "algo_client_ids": [
+          "xa-324558307da197976ae7e7259cb79d8SL"
+        ],
+        "client_order_ids": [
+          "x-324558307da197976ae7e7259cb79d86EN"
+        ],
+        "demo_order_ids": [
+          "28681033217"
+        ],
+        "step": "stop_confirmed"
+      },
+      {
+        "algo_client_ids": [
+          "xa-324558307da197976ae7e7259cb79d8SL",
+          "xa-324558307da197976ae7e7259cb79d8T1",
+          "xa-324558307da197976ae7e7259cb79d8T2"
+        ],
+        "client_order_ids": [
+          "x-324558307da197976ae7e7259cb79d86EN"
+        ],
+        "demo_order_ids": [
+          "28681033217"
+        ],
+        "step": "tp_legs"
+      }
+    ],
+    "reconcile_after_fill": {
+      "agreement": true,
+      "divergences": 0
+    },
+    "start_sequences": [
+      {
+        "admitted": true,
+        "label": "start",
+        "plans_restored": 0,
+        "recovery_failed_steps": [],
+        "recovery_safe_mode_reasons": [],
+        "safe_mode_reasons": [],
+        "steps": "CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=OK, ENABLE=OK"
+      },
+      {
+        "admitted": true,
+        "label": "restart",
+        "plans_restored": 1,
+        "recovery_failed_steps": [],
+        "recovery_safe_mode_reasons": [],
+        "safe_mode_reasons": [],
+        "steps": "CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=SKIPPED, ENABLE=SKIPPED"
+      }
+    ],
+    "user_data_liveness": [
+      {
+        "last_event_at_utc": null,
+        "last_ping_at_utc": null,
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-15T08:33:34.322398+00:00",
+        "last_ping_at_utc": null,
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      }
+    ],
+    "user_data_url_form": {
+      "listen_key": "[REDACTED]",
+      "observation": "documented form recorded; the SDK owns the transport (D-16)",
+      "path_form": "/private/ws/<LISTEN_KEY_REDACTED>",
+      "stream_base": "wss://demo-fstream.binance.com/stream"
+    }
+  },
+  "exchange_orders": [],
+  "failures": [
+    {
+      "exception_type": "SmokeHalt",
+      "step": "run"
+    }
+  ],
+  "mode": "EXECUTE",
+  "observations": [],
+  "outcome": "FAILED",
+  "planned_requests": [],
+  "runner_clock_utc": {
+    "finished": "2026-11-15T08:33:46.383069+00:00",
+    "started": "2026-11-15T08:32:59.849327+00:00"
+  },
+  "scenario": "smoke",
+  "schema": "demo-rehearsal-evidence/schema-1",
+  "steps": [
+    {
+      "detail": "admitted; CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=OK, ENABLE=OK",
+      "name": "start",
+      "status": "PASSED"
+    },
+    {
+      "detail": "check_wiring is empty",
+      "name": "wiring_check",
+      "status": "PASSED"
+    },
+    {
+      "detail": "entries enabled by the start sequence (DEMO), last step",
+      "name": "demo_enable",
+      "status": "PASSED"
+    },
+    {
+      "detail": "fill request queued by the Demo injector; quantity 0.0050",
+      "name": "signal",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the composed pump sent the approval card",
+      "name": "card",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the plan is APPROVED by the owner press",
+      "name": "approve",
+      "status": "PASSED"
+    },
+    {
+      "detail": "one GTD LIMIT entry acknowledged; no entry-time stop (D079)",
+      "name": "confirm_entry",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the fill reached the coordinator",
+      "name": "stream_fill",
+      "status": "PASSED"
+    },
+    {
+      "detail": "stop confirmed by REST (algo status NEW)",
+      "name": "stop_confirmed",
+      "status": "PASSED"
+    },
+    {
+      "detail": "take-profit legs not placed: ('TP_UNAVAILABLE', 'TP_UNAVAILABLE')",
+      "name": "tp_legs",
+      "status": "NOT_REHEARSED"
+    },
+    {
+      "detail": "reconcile agrees, no divergence",
+      "name": "reconcile_clean",
+      "status": "PASSED"
+    },
+    {
+      "detail": "admitted; CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=SKIPPED, ENABLE=SKIPPED",
+      "name": "restart",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the start did not enable entries: SAFE_MODE ENTRY_WITHOUT_PROTECTIVE; ENABLE SKIPPED BLOCKED_SAFE_MODE",
+      "name": "restart_enable",
+      "status": "FAILED"
+    }
+  ],
+  "symbol": "BTCUSDT",
+  "synthetic_inputs": []
+}

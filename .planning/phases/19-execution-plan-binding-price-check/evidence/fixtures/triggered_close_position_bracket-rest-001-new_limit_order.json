@@ -1,0 +1,29 @@
+{
+  "case_id": "triggered_close_position_bracket",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "new_limit_order",
+    "summary": {
+      "client_order_id": "dprobe-tbe-20261022T120704Z-11",
+      "close_position": "false",
+      "executed_qty": "0.0000",
+      "good_till_date": "0",
+      "order_id": "28645788398",
+      "orig_qty": "0.0008",
+      "orig_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "83808.20",
+      "reduce_only": "false",
+      "side": "BUY",
+      "status": "NEW",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "LIMIT",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

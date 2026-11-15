@@ -17,6 +17,8 @@ from typing import Any
 import pytest
 from src.domain import journal as journal_module
 
+from tests.support.press_identity import OWNER_PRESS
+
 NOW = datetime(2026, 9, 19, 13, 0, 0, tzinfo=UTC)
 
 
@@ -271,6 +273,7 @@ def _dispatch(
         lookup_by_short_id=lambda short_id: None,
         lookup_by_token_hash=lambda token_hash: None,
         save_atomic=lambda approval, mapping: None,
+        **OWNER_PRESS,
     )
     return events
 
@@ -336,11 +339,15 @@ def test_no_receipt_or_outcome_payload_has_a_wall_clock_field() -> None:
             assert "received_at" not in payload
 
 
+_USER_ID = 777001  # the one listed operator of the local fakes below (Phase 23, D-02)
+
+
 class _FakeQuery:
     def __init__(self, query_id: Any, data: str = f"APR:{SHORT_ID}") -> None:
         self.id = query_id
         self.data = data
         self.message = SimpleNamespace(chat_id=CHAT_ID)
+        self.from_user = SimpleNamespace(id=_USER_ID)
 
     async def answer(self) -> None:
         return None
@@ -349,7 +356,7 @@ class _FakeQuery:
 class _FakeUpdate:
     def __init__(self, query: _FakeQuery) -> None:
         self.callback_query = query
-        self.effective_chat = SimpleNamespace(id=CHAT_ID)
+        self.effective_chat = SimpleNamespace(id=CHAT_ID, type="private")
 
 
 async def _on_callback(query: _FakeQuery, seen: list[str]) -> None:
@@ -363,6 +370,7 @@ async def _on_callback(query: _FakeQuery, seen: list[str]) -> None:
         _FakeUpdate(query),  # type: ignore[arg-type]
         None,  # type: ignore[arg-type]
         authorized_chat_id=CHAT_ID,
+        authorized_user_ids=frozenset({_USER_ID}),
         binding_context_resolver=lambda sid: None,
         dispatch=fake_dispatch,
         reply_text_fn=None,

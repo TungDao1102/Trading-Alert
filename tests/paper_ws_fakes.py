@@ -15,6 +15,7 @@ dicts (research D8): the real callback payload is a `KlineCandlestickStreamsResp
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
@@ -133,6 +134,11 @@ class FakeSdkWsClient:
       stream map and sends SUBSCRIBE only for streams not already mapped (D3).
     - `simulate_unsolicited_close()` mirrors `_discard_connection`: the dead connection leaves
       `connections`, "close" connection callbacks fire, the stream names STAY in the map.
+    - `send_message` mirrors `WebSocketCommon.send_message`: it stores a future in the pending
+      requests (reusing one stored under the same id), records the call and returns the future.
+      `kline_candlestick_streams` sends a SUBSCRIBE through it for a NEW stream, as
+      `WebSocketStreamBase.subscribe` does. `answer_subscribes` plays the part of the SDK's
+      `receive_loop`: it resolves the pending futures with the server's answer.
     - `close_connection()` mirrors the user-initiated `_close_one`: connections leave
       `connections` and their stream names are forgotten.
     - `on_connection` registers only when connections exist (the SDK warns and drops otherwise)
@@ -152,6 +158,9 @@ class FakeSdkWsClient:
         self.connection_callbacks: dict[str, list[Callable[..., None]]] = defaultdict(list)
         self.dropped_connection_callbacks = 0
         self._next_connection_id = 1
+        self._next_request_id = 1
+        self.pending_requests: dict[Any, asyncio.Future[Any]] = {}
+        self.sent_messages: list[tuple[dict[str, Any], Any]] = []
 
     async def create_connection(self) -> None:
         self.create_connection_calls += 1
@@ -174,11 +183,23 @@ class FakeSdkWsClient:
             raise ValueError("No WebSocket connections available.")
         stream_map = _sdk_stream_map()
         if stream not in stream_map:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+            await self.send_message(
+                {"method": "SUBSCRIBE", "params": [stream], "id": request_id}, market[0]
+            )
             stream_map[stream] = market[0]
             self.subscribe_frames.append(stream)
         handle = FakeStreamHandle(stream)
         self.handles.append(handle)
         return handle
+
+    async def send_message(self, payload: dict[str, Any], connection: Any) -> asyncio.Future[Any]:
+        request_id = payload.get("id")
+        if request_id not in self.pending_requests:
+            self.pending_requests[request_id] = asyncio.get_running_loop().create_future()
+        self.sent_messages.append((payload, connection))
+        return self.pending_requests[request_id]
 
     async def close_connection(self, connection: Any = None, close_session: bool = True) -> None:
         self.close_calls += 1
@@ -205,6 +226,18 @@ class FakeSdkWsClient:
             self.connection_callbacks[event].append(callback)
 
     # -- test helpers (not part of the mirrored SDK surface) --
+
+    def answer_subscribes(self, *, error: Any = None) -> int:
+        """Resolve every pending request like the SDK `receive_loop`; return how many."""
+        answered = 0
+        for request_id in list(self.pending_requests):
+            future = self.pending_requests.pop(request_id)
+            if error is not None:
+                future.set_exception(ValueError(error))
+            else:
+                future.set_result({"result": None, "id": request_id})
+            answered += 1
+        return answered
 
     def simulate_unsolicited_close(self) -> None:
         """Mirror the SDK's unsolicited CLOSE: emit close, discard, keep the stream names."""

@@ -1,0 +1,16 @@
+{
+  "case_id": "stream_loss_during_case",
+  "index": 5,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "cancel_algo_order",
+    "summary": {
+      "algo_id": "1000000251921152",
+      "client_algo_id": "dprobe-slx-20261022T120704Z-24",
+      "code": "200",
+      "msg": "success"
+    }
+  }
+}

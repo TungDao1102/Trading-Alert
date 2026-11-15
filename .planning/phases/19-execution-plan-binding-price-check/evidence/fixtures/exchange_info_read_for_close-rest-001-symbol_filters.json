@@ -1,0 +1,26 @@
+{
+  "case_id": "exchange_info_read_for_close",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "symbol_filters",
+    "summary": {
+      "found": "true",
+      "market_lot_max_quantity": "120",
+      "market_lot_min_quantity": "0.0001",
+      "market_lot_step_size": "0.0001",
+      "max_quantity": "1000",
+      "min_notional": "50",
+      "min_quantity": "0.0001",
+      "percent_price_multiplier_decimals": "4",
+      "percent_price_multiplier_down": "0.9500",
+      "percent_price_multiplier_up": "1.0500",
+      "status": "TRADING",
+      "step_size": "0.0001",
+      "symbol": "BTCUSDT",
+      "tick_size": "0.10"
+    }
+  }
+}

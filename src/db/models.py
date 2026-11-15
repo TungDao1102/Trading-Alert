@@ -38,13 +38,14 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKeyConstraint,
     Index,
@@ -364,6 +365,9 @@ class ApprovalRow(Base):
     # Quantity of the plan the request was issued for (Phase 19 review-fix batch 4, D078,
     # migration 0006). Written once with the PENDING row; NULL = not recorded (pre-0006 rows).
     approved_quantity: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    # Canonical JSON of the money block the messages show (Phase 23 plan 23-04, D-13, migration
+    # 0013). Written once with the PENDING rows; NULL = not recorded (renderers refuse it).
+    money_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # PostgreSQL-only integrity objects: SQLite `create_all` keeps its pre-0004 DDL
     # (`ddl_if`), PostgreSQL (alembic 0004) enforces everything. Names match the migration.
@@ -377,8 +381,8 @@ class ApprovalRow(Base):
             "uq_approvals_one_decided_per_plan",
             "trade_plan_id",
             unique=True,
-            postgresql_where=text("status <> 'PENDING'"),
-            sqlite_where=text("status <> 'PENDING'"),
+            postgresql_where=text("status NOT IN ('PENDING','EXPIRED')"),
+            sqlite_where=text("status NOT IN ('PENDING','EXPIRED')"),
         ).ddl_if(dialect="postgresql"),
         ForeignKeyConstraint(
             ["trade_plan_id"],
@@ -417,6 +421,10 @@ class ApprovalRow(Base):
         CheckConstraint(
             "approved_quantity IS NULL OR approved_quantity > 0",
             name="ck_approvals_approved_quantity",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "money_json IS NULL OR (left(money_json, 1) = '{' AND right(money_json, 1) = '}')",
+            name="ck_approvals_money_json",
         ).ddl_if(dialect="postgresql"),
     )
 
@@ -460,6 +468,11 @@ class OrderRow(Base):
     submitted_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     canceled_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Migration 0015 (D-10): the newest Binance event time `E` applied; NULL = none yet. Not a
+    # domain field and not part of the order_id hash.
+    exchange_event_time_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # No CHECK on `order_role` (free-string domain field) - research A3.
     __table_args__ = (
@@ -554,6 +567,9 @@ class ExecutionIntentRow(Base):
     # Sizing-time realized risk of a live entry (Phase 19, D-22, G4-008, migration 0005).
     # Written once with the ENTRY INSERT; NULL when never recorded and on protective rows.
     sized_realized_risk: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    # Why a reconciliation closed the row (Phase 20, plan 20-03, T-B, migration 0007): written only
+    # by `finalize_reconciled_resolution`; NULL for every row the exchange's own answer closed.
+    resolution_reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     intended_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     sent_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -617,6 +633,11 @@ class ExecutionIntentRow(Base):
         CheckConstraint(
             "sized_realized_risk IS NULL OR (role = 'ENTRY' AND sized_realized_risk > 0)",
             name="ck_execution_intents_sized_realized_risk",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "resolution_reason_code IS NULL OR (intent_status = 'REJECTED' "
+            "AND resolution_reason_code IN ('RECONCILED_ABSENT', 'NEVER_SENT'))",
+            name="ck_execution_intents_resolution_reason",
         ).ddl_if(dialect="postgresql"),
     )
 
@@ -694,6 +715,11 @@ class PositionRow(Base):
     updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Migration 0015 (D-10): the newest exchange event time applied by `update_position_snapshot`;
+    # NULL = none yet. Not a domain field.
+    snapshot_event_time_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # `quantity` has NO sign CHECK: position_amt is signed (negative for SHORT in one-way
     # mode), so `>= 0` would reject a legal short (research C4 refinement, recorded for D051).
@@ -901,6 +927,296 @@ class SystemStateEventRow(Base):
         CheckConstraint(
             "state_version >= 1", name="ck_system_state_events_version_positive"
         ).ddl_if(dialect="postgresql"),
+    )
+
+
+# ---------- pending_protective_actions (Phase 20, plan 20-14, migration 0008) ------
+
+
+class PendingProtectiveActionRow(Base):
+    """The durable INTENT of a protective action the REST gate refused (D-19, Q4).
+
+    One row per episode of a refused stop, entry-remainder cancel or emergency close. It stores
+    the intent and never a payload: there is no price, quantity or side column, so a stale
+    request cannot be replayed from it. At most one row per (plan_hash, pending_kind) is open
+    (`state = 'PENDING'`); a closed row is RESOLVED or SUPERSEDED with a fixed-text note.
+    """
+
+    __tablename__ = "pending_protective_actions"
+
+    pending_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    approval_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    pending_kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    gate_reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_blocked_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_blocked_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    block_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    retry_after_until_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("pending_id", name="pk_pending_protective_actions"),
+        Index(
+            "uq_pending_protective_actions_open",
+            "plan_hash",
+            "pending_kind",
+            unique=True,
+            postgresql_where=text("state = 'PENDING'"),
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "pending_kind IN ('STOP_NOT_SENT', 'PROTECTION_ENTRY_CANCEL_NOT_SENT', "
+            "'CLOSE_NOT_SENT')",
+            name="ck_pending_protective_actions_kind",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "state IN ('PENDING', 'RESOLVED', 'SUPERSEDED')",
+            name="ck_pending_protective_actions_state",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "block_count >= 1", name="ck_pending_protective_actions_block_count"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "last_blocked_at_utc >= first_blocked_at_utc",
+            name="ck_pending_protective_actions_time_order",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(state = 'PENDING' AND resolved_at_utc IS NULL AND resolution_note IS NULL) "
+            "OR (state <> 'PENDING' AND resolved_at_utc IS NOT NULL "
+            "AND resolution_note IS NOT NULL)",
+            name="ck_pending_protective_actions_resolution",
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
+_VALIDATED_LOT_FILTER_POSITIVE_COLUMNS = (
+    "price_tick_size",
+    "lot_min_quantity",
+    "lot_max_quantity",
+    "lot_step_size",
+    "market_lot_min_quantity",
+    "market_lot_max_quantity",
+    "market_lot_step_size",
+    "min_notional",
+)
+
+
+class ValidatedLotFiltersRow(Base):
+    """The last validated exchangeInfo lot filters of one symbol (Q3, D-21, migration 0009).
+
+    One row per symbol (an upsert by `LotFilterSource`): the values the exchange returned and
+    `LotFilters` validated, with the time of that read. Only the emergency close may use a
+    stored row when the live read fails, and then flagged stale; a new entry never may.
+    """
+
+    __tablename__ = "validated_lot_filters"
+
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_tick_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    lot_min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    lot_max_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    lot_step_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    market_lot_min_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    market_lot_max_quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    market_lot_step_size: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    min_notional: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    fetched_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", name="pk_validated_lot_filters"),
+        CheckConstraint("symbol <> ''", name="ck_validated_lot_filters_symbol").ddl_if(
+            dialect="postgresql"
+        ),
+        *(
+            CheckConstraint(f"{name} > 0", name=f"ck_validated_lot_filters_{name}_positive").ddl_if(
+                dialect="postgresql"
+            )
+            for name in _VALIDATED_LOT_FILTER_POSITIVE_COLUMNS
+        ),
+        CheckConstraint(
+            "lot_min_quantity <= lot_max_quantity", name="ck_validated_lot_filters_lot_range"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "market_lot_min_quantity <= market_lot_max_quantity",
+            name="ck_validated_lot_filters_market_lot_range",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "updated_at_utc >= fetched_at_utc", name="ck_validated_lot_filters_time_order"
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
+class DailyRiskDayRow(Base):
+    """The persisted risk state of one UTC day (Phase 21 plan 21-09, D-07, D-14, migration 0010).
+
+    One row per UTC day: the day-start equity base (written once, never moved), when the base
+    was read, and the one-time DAILY_STOP latch and WARNING alert marks. The approval
+    transaction locks this row (`SELECT ... FOR UPDATE`). There is no delete path (owner-open
+    O-1).
+    """
+
+    __tablename__ = "daily_risk_days"
+
+    utc_day: Mapped[date] = mapped_column(Date, nullable=False)
+    equity_at_day_start: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    base_observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stop_latched_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    warning_alerted_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("utc_day", name="pk_daily_risk_days"),
+        CheckConstraint(
+            "equity_at_day_start > 0", name="ck_daily_risk_days_equity_positive"
+        ).ddl_if(dialect="postgresql"),
+    )
+
+
+class DailyLossComponentRow(Base):
+    """One signed daily-loss component as Binance reported it (Phase 21 plan 21-09, migration 0010).
+
+    Keyed by (utc_day, kind, source, source_key): the same fill or funding row from the stream
+    and from REST are two rows, folded once at the most adverse amount by
+    `src.risk.daily_loss.fold_daily_loss`. A stored key is never replaced with another amount.
+    """
+
+    __tablename__ = "daily_loss_components"
+
+    utc_day: Mapped[date] = mapped_column(Date, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    asset: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_time_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "utc_day", "kind", "source", "source_key", name="pk_daily_loss_components"
+        ),
+        CheckConstraint(
+            "kind IN ('FILL_PNL', 'FILL_COMMISSION', 'FUNDING')",
+            name="ck_daily_loss_components_kind",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "source IN ('USER_DATA_EVENT', 'REST_USER_TRADES', 'REST_INCOME')",
+            name="ck_daily_loss_components_source",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("amount <> 'NaN'", name="ck_daily_loss_components_amount_not_nan").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("source_key <> ''", name="ck_daily_loss_components_source_key").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("asset <> ''", name="ck_daily_loss_components_asset").ddl_if(
+            dialect="postgresql"
+        ),
+        Index("ix_daily_loss_components_utc_day", "utc_day"),
+    )
+
+
+class RiskReservationRow(Base):
+    """The risk reservation of one trade plan, for its whole life (Phase 21 plan 21-12, D-16).
+
+    One row per plan: REQUESTED (issued, not counted), RESERVED (approved, counted), PLACED,
+    OPEN (both counted) and RELEASED (terminal, not counted). The approval transaction locks
+    today's `daily_risk_days` row and flips REQUESTED to RESERVED through the shared cap gate.
+    `realized_risk` is the sized risk after rounding (Pitfall 9). There is no delete path.
+
+    Plan 22-08 (migration 0012) adds the margin the plan needs: `required_margin` =
+    quantity x `margin_entry_price` / `margin_leverage`. The three columns are all NULL (a row
+    from before the migration: an UNKNOWN margin, never zero) or all set.
+    """
+
+    __tablename__ = "risk_reservations"
+
+    trade_plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    approval_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    plan_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    position_side: Mapped[str] = mapped_column(String(8), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    realized_risk: Mapped[Decimal] = mapped_column(Numeric(38, 18), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    release_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    requested_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reserved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    placed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    opened_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    required_margin: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    margin_entry_price: Mapped[Decimal | None] = mapped_column(Numeric(38, 18), nullable=True)
+    margin_leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("trade_plan_id", name="pk_risk_reservations"),
+        ForeignKeyConstraint(
+            ["trade_plan_id"],
+            ["trade_plans.trade_plan_id"],
+            name="fk_risk_reservations_trade_plan_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        ForeignKeyConstraint(
+            ["approval_id"],
+            ["approvals.approval_id"],
+            name="fk_risk_reservations_approval_id",
+            ondelete="RESTRICT",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "status IN ('REQUESTED', 'RESERVED', 'PLACED', 'OPEN', 'RELEASED')",
+            name="ck_risk_reservations_status",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "position_side IN ('LONG', 'SHORT')", name="ck_risk_reservations_side"
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint("quantity > 0", name="ck_risk_reservations_quantity_positive").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint("realized_risk > 0", name="ck_risk_reservations_risk_positive").ddl_if(
+            dialect="postgresql"
+        ),
+        CheckConstraint(
+            "release_reason IS NULL OR release_reason IN ('APPROVAL_EXPIRED', "
+            "'APPROVAL_SKIPPED', 'PLAN_EXPIRED', 'PLAN_INVALIDATED', 'PLAN_SUPERSEDED', "
+            "'PLACEMENT_REFUSED', 'ENTRY_REJECTED', 'ENTRY_ENDED_NO_FILL', 'POSITION_CLOSED')",
+            name="ck_risk_reservations_release_reason",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(status = 'RELEASED') = (release_reason IS NOT NULL AND released_at_utc IS NOT NULL)",
+            name="ck_risk_reservations_released_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "status NOT IN ('RESERVED', 'PLACED', 'OPEN') OR approval_id IS NOT NULL",
+            name="ck_risk_reservations_approval_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "(required_margin IS NULL) = (margin_entry_price IS NULL) "
+            "AND (required_margin IS NULL) = (margin_leverage IS NULL)",
+            name="ck_risk_reservations_margin_coherent",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "required_margin IS NULL OR (required_margin > 0 AND margin_entry_price > 0 "
+            "AND margin_leverage >= 1)",
+            name="ck_risk_reservations_margin_positive",
+        ).ddl_if(dialect="postgresql"),
+        Index("ix_risk_reservations_status", "status"),
     )
 
 

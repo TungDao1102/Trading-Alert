@@ -1,5 +1,6 @@
-# Execution protection and pre-placement limits v1 (Phase 19, plan 19-01; D-07, D-13).
-# Purpose: the seven safety numbers the owner has not chosen yet.
+# Execution protection, pre-placement and Phase 20 reconcile limits v1 (Phase 19, plan 19-01; D-07, D-13;
+# Phase 20, plan 20-01; D-25).
+# Purpose: the safety numbers the owner has not chosen yet.
 #   protection.max_unprotected_ms              D-13: longest tolerated time an entry fill is open without a stop
 #   protection.entry_terminal_timeout_ms       D-13: how long the entry order may stay non-terminal
 #   protection.entry_unknown_grace_ms          19-REVIEW WR-05: grace past the GTD time of an ENTRY_STATE_UNKNOWN entry
@@ -7,30 +8,118 @@
 #   pre_placement.min_remaining_validity_seconds   D-07: minimum remaining plan validity at placement
 #   pre_placement.max_mark_price_age_ms        D-07: maximum age of the mark price used by the price check
 #   pre_placement.max_last_price_age_ms        quick task 261020-l4p (WR-06): maximum age of the last price used by the last-price check
-# Every value is the string NOT_CONFIGURED until the owner fills them after the Demo probes
-# (OWNER-OPEN O-04). The live path refuses while any key is NOT_CONFIGURED. A set value needs
+#   reconcile.tick_interval_ms                 Phase 20, D-25: cadence of the reconcile loop (replaces the hard-coded SAFE_MODE tick)
+#   reconcile.entry_unknown_probe_count        Phase 20, D-11: consecutive clean not-found probes of an UNKNOWN entry before it may close
+#   reconcile.entry_unknown_probe_interval_ms  Phase 20, D-11: spacing between those probes
+#   reconcile.lot_filter_refresh_interval_ms   Phase 20, D-21: how often the lot-size filters are refreshed
+#   reconcile.entry_stale_grace_ms             Plan 20-28 (ALERT ONLY): grace past goodTillDate before a resting entry that is still NEW raises the STALE_ENTRY_ORDER alert
+#   stale_feed.max_mark_price_age_ms           Phase 20, D-25: maximum age of the mark price before the feed counts as stale (not pre_placement.max_mark_price_age_ms)
+#   stale_feed.max_user_data_silence_ms        Phase 20, D-25, D058: maximum silence of the user-data stream (not the paper runtime max_ws_message_silence_seconds)
+#   alerts.dedupe_window_ms                    Phase 20, D-23: window in which a repeated alert is deduplicated
+#   account.max_equity_age_ms                  Phase 21, D-03 (F-012): maximum age of the account equity reading used for live sizing, the daily-loss base and the reservation gate
+#   account.max_daily_loss_age_ms              Phase 21 review WR-05: maximum age of a known daily loss, counted from the backfill that made it known (owner answer 2026-10-25, DECISIONS D087)
+#   rest_gate.ban_end_clock_margin_ms          Plan 24-03, D083 item 4 (OPTIONAL): clock-difference margin added to the ban end time read from a 418 / -1003 body
+#   scheduler.protection_stall_after_ms        Quick 261114-mp1, D111, D114 (ALERT ONLY): stall bound of one protection run, set by D114 (owner answer 2026-11-15); unset, the stall watchdog is off
+#   scheduler.duration_summary_interval_ms     Quick 261115-kra, D112 (OPTIONAL): window of the scheduler duration summary rows; unset, only new-maximum rows
+# A value is the string NOT_CONFIGURED until the owner fills it (OWNER-OPEN O-04). Set so far:
+# the account keys (D084, D087), the margin keys (D085) and, by DECISIONS D089 (Phase 24, plan
+# 24-06, owner answer 2026-10-31), every other key except rest_gate.ban_end_clock_margin_ms
+# (optional, stays unset); stale_feed.max_user_data_silence_ms was set last by DECISIONS D091 from
+# the Demo silence probe (longest gap 180374 ms, one server ping per 180 s); and
+# scheduler.protection_stall_after_ms was set by DECISIONS D114 (owner answer 2026-11-15) from the
+# 2026-11-15 Demo smoke and the longest legitimate protection path. Setting values does not enable live placement (LIVE_ORDERS_DISABLED stays). The live path refuses while any key is NOT_CONFIGURED, except
+# reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
+# stale-entry check is skipped (and says so) and nothing else changes, and
+# rest_gate.ban_end_clock_margin_ms: it only refines the 418 ban wait, so while it is NOT_CONFIGURED
+# the ratified fallback wait applies and nothing else changes (D083 item 4), and
+# scheduler.protection_stall_after_ms: it only switches the observe-only stall watchdog and its
+# TASK_STALLED alert on, so while it is NOT_CONFIGURED the watchdog is off and nothing else
+# changes (D111), and
+# scheduler.duration_summary_interval_ms: it only refines the duration record of the scheduler
+# tasks, so while it is NOT_CONFIGURED only the new-maximum rows are written and nothing else
+# changes (D112). A set value needs
 # a DECISIONS row and the provenance label DECISION. Key meanings and the file format:
 # config/execution/README.md. The ratified config/binance/binance-limits-v1.toml is a
 # separate, sha256-pinned file and is not edited.
 
 [protection]
-max_unprotected_ms = "NOT_CONFIGURED"
-entry_terminal_timeout_ms = "NOT_CONFIGURED"
-entry_unknown_grace_ms = "NOT_CONFIGURED"
-emergency_close_poll_timeout_ms = "NOT_CONFIGURED"
+max_unprotected_ms = 180000
+entry_terminal_timeout_ms = 900000
+entry_unknown_grace_ms = 1800000
+emergency_close_poll_timeout_ms = 30000
 
 [pre_placement]
-min_remaining_validity_seconds = "NOT_CONFIGURED"
-max_mark_price_age_ms = "NOT_CONFIGURED"
-max_last_price_age_ms = "NOT_CONFIGURED"
+min_remaining_validity_seconds = 900
+max_mark_price_age_ms = 5000
+max_last_price_age_ms = 30000
+
+[reconcile]
+tick_interval_ms = 15000
+entry_unknown_probe_count = 3
+entry_unknown_probe_interval_ms = 5000
+lot_filter_refresh_interval_ms = 3600000
+entry_stale_grace_ms = 900000
+
+[stale_feed]
+max_mark_price_age_ms = 60000
+max_user_data_silence_ms = 420000
+
+[alerts]
+dedupe_window_ms = 300000
+
+[account]
+max_equity_age_ms = 15000
+max_daily_loss_age_ms = 300000
+
+[margin]
+liquidation_buffer_bps = 300
+max_bracket_age_ms = 60000
+headroom_bps = 1000
+
+[rest_gate]
+ban_end_clock_margin_ms = "NOT_CONFIGURED"
+
+[scheduler]
+protection_stall_after_ms = 60000
+duration_summary_interval_ms = "NOT_CONFIGURED"
 
 [provenance.protection]
-max_unprotected_ms = "NOT_CONFIGURED"
-entry_terminal_timeout_ms = "NOT_CONFIGURED"
-entry_unknown_grace_ms = "NOT_CONFIGURED"
-emergency_close_poll_timeout_ms = "NOT_CONFIGURED"
+max_unprotected_ms = "DECISION"
+entry_terminal_timeout_ms = "DECISION"
+entry_unknown_grace_ms = "DECISION"
+emergency_close_poll_timeout_ms = "DECISION"
 
 [provenance.pre_placement]
-min_remaining_validity_seconds = "NOT_CONFIGURED"
-max_mark_price_age_ms = "NOT_CONFIGURED"
-max_last_price_age_ms = "NOT_CONFIGURED"
+min_remaining_validity_seconds = "DECISION"
+max_mark_price_age_ms = "DECISION"
+max_last_price_age_ms = "DECISION"
+
+[provenance.reconcile]
+tick_interval_ms = "DECISION"
+entry_unknown_probe_count = "DECISION"
+entry_unknown_probe_interval_ms = "DECISION"
+lot_filter_refresh_interval_ms = "DECISION"
+entry_stale_grace_ms = "DECISION"
+
+[provenance.stale_feed]
+max_mark_price_age_ms = "DECISION"
+max_user_data_silence_ms = "DECISION"
+
+[provenance.alerts]
+dedupe_window_ms = "DECISION"
+
+[provenance.account]
+max_equity_age_ms = "DECISION"
+max_daily_loss_age_ms = "DECISION"
+
+[provenance.margin]
+liquidation_buffer_bps = "DECISION"
+max_bracket_age_ms = "DECISION"
+headroom_bps = "DECISION"
+
+[provenance.rest_gate]
+ban_end_clock_margin_ms = "NOT_CONFIGURED"
+
+[provenance.scheduler]
+protection_stall_after_ms = "DECISION"
+duration_summary_interval_ms = "NOT_CONFIGURED"

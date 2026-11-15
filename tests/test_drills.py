@@ -18,22 +18,45 @@ The tests cover:
   3. Double-run determinism: running the drill suite twice with the
      same `now_utc` sequence produces a byte-identical ordered
      outcome list.
-  4. The no-place-order invariant holds across every drill (the
-     reconciler is query/cancel only).
+  4. The narrowed placement rule (Phase 20, plan 20-23, F-604, D034/D077): the
+     reconciler (`src/reconcile`) never calls a placement method; a protective
+     action it delegates is placed by the coordinator in `src/execution`, and
+     that placement carries the plan's own stop price and deterministic id.
   5. SAFE_MODE exit is rehearsed only through the restore path
      (Pitfall 4: a boolean flip without both a clean compare AND a
      journaled restore event is rejected).
+  6. Phase 20 (D-27, D-28, G2-016): the UNPROTECTED and STALE_FEED drills run through
+     a real `ReconcileLoop` tick, and the MANUAL_CLOSE drill runs through
+     `emergency_manual_close` and the sweeper, for both answers to G4-035.
+
+Evidence label: executed tests with fakes. Nothing touches Binance, Telegram or a database;
+the real-stack RUNBOOK rehearsal is Phases 25/26 [NOT_TESTED on Demo].
 """
 
 from __future__ import annotations
 
+import ast
 import json
-from datetime import UTC, datetime
+import sys
+from collections.abc import Awaitable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from src.domain.enums import OrderRole, OrderStatus
+from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
+
+from tests.support.fake_binance_exchange import BinanceSemanticsFakeAdapter
+from tests.support.reconcile_doubles import (
+    RecordingJournal,
+    make_algo_order,
+    make_plan_protection,
+    make_position,
+)
+from tests.support.reconcile_rig import FakeFeedSource, Rig, build_rig
 
 PHASE8_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "phase8"
 DRILL_LOG_FIXTURE_DIR = PHASE8_FIXTURES_DIR / "drill_log"
@@ -43,6 +66,67 @@ DRILL_LOG_FIXTURE_DIR = PHASE8_FIXTURES_DIR / "drill_log"
 # no-place-order runtime test reads this registry because the fakes
 # are otherwise function-local and inaccessible.
 BUILT_DRILL_ADAPTERS: list[Any] = []
+
+#: The loop-driven drills (plan 20-23): the rigs and fake exchanges of the latest build.
+BUILT_LOOP_RIGS: list[Rig] = []
+BUILT_MANUAL_CLOSE: list[Any] = []
+
+DRILL_NOW = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
+PLAN_H = "1" * 64
+MANUAL_PLAN_HASH = "6" * 64
+MANUAL_SYMBOL = "BTCUSDT"
+MANUAL_QUANTITY = Decimal("0.004")
+MANUAL_PRICE = Decimal("60000")
+SRC_ROOT = Path(__file__).parent.parent / "src"
+
+#: Methods that place something on the exchange (the adapter surface plus the legacy names).
+PLACEMENT_METHODS: tuple[str, ...] = (
+    "place_order",
+    "place_algo_order",
+    "place_entry",
+    "place_algo_protective",
+    "place_market_close",
+)
+
+
+@dataclass(frozen=True)
+class PlacementCall:
+    """One placement call: the method, the module that called it and the keywords."""
+
+    method: str
+    caller: str
+    kwargs: dict[str, Any]
+
+
+async def _already_done() -> None:
+    return None
+
+
+def record_placements(adapter: Any) -> list[PlacementCall]:
+    """Wrap the placement methods of `adapter` so each call is recorded with its caller module.
+
+    The wrapper is a plain function: `sys._getframe(1)` is the frame that made the call, so
+    `f_globals["__name__"]` is the module of the caller (`src.reconcile.loop`,
+    `src.execution.protection`, ...). The real method still runs (a recording wrapper never
+    raises), so a coordinator placement reaches the fake exchange as usual.
+    """
+    calls: list[PlacementCall] = []
+
+    def wrap(name: str) -> None:
+        original = getattr(adapter, name, None)
+        if original is None:
+            return
+
+        def recording(**kwargs: Any) -> Any:
+            caller = sys._getframe(1).f_globals.get("__name__", "?")
+            calls.append(PlacementCall(method=name, caller=caller, kwargs=dict(kwargs)))
+            return original(**kwargs)
+
+        setattr(adapter, name, recording)
+
+    for name in PLACEMENT_METHODS:
+        wrap(name)
+    return calls
 
 
 # --------------------------------------------------------------------------- #
@@ -74,10 +158,11 @@ class _FakeReconcileAdapter:
     the real `BinanceUsdmAdapter` so unit tests never touch the
     network.
 
-    The static guard at the end of the file asserts that no test ever
-    invokes `place_order` — the reconciler is query/cancel only and
-    invoking a place-order method on this fake is a hard test failure
-    by construction (the fake raises).
+    Phase 20 (F-604, D034/D077): the reconciler places nothing, but a placement by a
+    DIFFERENT module (the coordinator in `src/execution`) is legitimate. The placement
+    methods therefore RECORD the call with the caller's module name and never raise; the
+    tests assert which module called (none from `src/reconcile`, `src/ops`). The static
+    guard at the end of the file keeps the source-level rule for `src/ops`.
     """
 
     def __init__(
@@ -103,6 +188,7 @@ class _FakeReconcileAdapter:
         self.cancel_normal_order_calls: list[tuple[str, str]] = []
         self.cancel_algo_order_calls: list[tuple[str, str]] = []
         self.place_order_calls = 0
+        self.placement_callers: list[str] = []
 
     async def snapshot_open_normal_orders(self, *, symbol: str | None = None) -> list[Any]:
         self.snapshot_open_normal_orders_calls += 1
@@ -168,21 +254,18 @@ class _FakeReconcileAdapter:
             if not (o.symbol == symbol and o.client_algo_id == client_algo_id)
         ]
 
-    async def place_order(self, **_kwargs: Any) -> None:
-        """The reconciler must NEVER place a new order (D-03)."""
-        import logging
+    def place_order(self, **_kwargs: Any) -> Awaitable[None]:
+        """Record a placement attempt with the caller module (F-604); never raises."""
+        return self._record_placement(sys._getframe(1).f_globals.get("__name__", "?"))
 
-        logging.getLogger(__name__).error("place_order called on drill fake")
+    def place_algo_order(self, **_kwargs: Any) -> Awaitable[None]:
+        """Record a placement attempt with the caller module (F-604); never raises."""
+        return self._record_placement(sys._getframe(1).f_globals.get("__name__", "?"))
+
+    def _record_placement(self, caller: str) -> Awaitable[None]:
         self.place_order_calls += 1
-        raise AssertionError("reconciler must never place a new order — query/cancel only")
-
-    async def place_algo_order(self, **_kwargs: Any) -> None:
-        """The reconciler must NEVER place a new algo order (D-03)."""
-        import logging
-
-        logging.getLogger(__name__).error("place_algo_order called on drill fake")
-        self.place_order_calls += 1
-        raise AssertionError("reconciler must never place a new algo order — query/cancel only")
+        self.placement_callers.append(caller)
+        return _already_done()
 
 
 def _build_open_order(row: dict[str, Any]) -> Any:
@@ -317,91 +400,19 @@ def _make_truth(fixture: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _build_unprotected_scenario() -> dict[str, Any]:
-    """Build the UNPROTECTED drill scenario (§3).
-
-    Local intent has an ENTRY + position but no SL protective. The
-    compare classifies ENTRY_WITHOUT_PROTECTIVE divergence; SAFE_MODE
-    is entered; entries are blocked.
-    """
-    return {
-        "local_intent": {
-            "open_orders": [
-                {
-                    "client_order_id": "x-11111111111111111111111111111111EN",
-                    "symbol": "BTCUSDT",
-                    "order_role": "ENTRY",
-                    "status": "NEW",
-                }
-            ],
-            "open_algos": [],
-            "open_positions": [
-                {
-                    "symbol": "BTCUSDT",
-                    "position_side": "LONG",
-                    "position_amt": "0.010",
-                }
-            ],
-        },
-        "exchange_truth": {
-            "normal_orders": [
-                {
-                    "symbol": "BTCUSDT",
-                    "client_order_id": "x-11111111111111111111111111111111EN",
-                    "exchange_order_id": "100001",
-                    "side": "BUY",
-                    "position_side": "LONG",
-                    "order_type": "LIMIT",
-                    "time_in_force": "GTC",
-                    "status": "NEW",
-                    "quantity": "0.010",
-                    "price": "50000.00",
-                    "stop_price": None,
-                    "reduce_only": False,
-                    "close_position": False,
-                    "working_type": None,
-                    "price_protect": None,
-                    "update_time_utc": "2026-09-19T10:00:00+00:00",
-                }
-            ],
-            "algo_orders": [],
-            "positions": [
-                {
-                    "symbol": "BTCUSDT",
-                    "position_side": "LONG",
-                    "position_amt": "0.010",
-                    "entry_price": "50000.00",
-                    "break_even_price": "50000.00",
-                    "mark_price": "50100.00",
-                    "unrealized_profit": "1.00",
-                    "liquidation_price": None,
-                    "notional": "501.00",
-                    "margin_asset": "USDT",
-                    "update_time_utc": "2026-09-19T10:00:00+00:00",
-                }
-            ],
-        },
-    }
-
-
 def _build_orphan_scenario() -> dict[str, Any]:
     """Build the ORPHAN drill scenario (§4).
 
     Local intent has a STOP_LOSS algo for BTCUSDT but no local
-    position and no exchange position. The compare classifies
-    ORPHAN_PROTECTIVE divergence; the sweeper cancels the algo after
-    authoritative position-zero verification.
+    position and no exchange position, and the plan's ENTRY is no longer
+    open (Phase 20, D-05: a protective of a resting entry is not an
+    orphan). The compare classifies ORPHAN_PROTECTIVE divergence; the
+    sweeper cancels the algo after authoritative position-zero
+    verification.
     """
     return {
         "local_intent": {
-            "open_orders": [
-                {
-                    "client_order_id": "x-11111111111111111111111111111111EN",
-                    "symbol": "BTCUSDT",
-                    "order_role": "ENTRY",
-                    "status": "NEW",
-                }
-            ],
+            "open_orders": [],
             "open_algos": [
                 {
                     "client_algo_id": "xa-1111111111111111111111111111111SL",
@@ -413,26 +424,7 @@ def _build_orphan_scenario() -> dict[str, Any]:
             "open_positions": [],
         },
         "exchange_truth": {
-            "normal_orders": [
-                {
-                    "symbol": "BTCUSDT",
-                    "client_order_id": "x-11111111111111111111111111111111EN",
-                    "exchange_order_id": "100001",
-                    "side": "BUY",
-                    "position_side": "LONG",
-                    "order_type": "LIMIT",
-                    "time_in_force": "GTC",
-                    "status": "NEW",
-                    "quantity": "0.010",
-                    "price": "50000.00",
-                    "stop_price": None,
-                    "reduce_only": False,
-                    "close_position": False,
-                    "working_type": None,
-                    "price_protect": None,
-                    "update_time_utc": "2026-09-19T10:00:00+00:00",
-                }
-            ],
+            "normal_orders": [],
             "algo_orders": [
                 {
                     "symbol": "BTCUSDT",
@@ -459,13 +451,202 @@ def _build_orphan_scenario() -> dict[str, Any]:
     }
 
 
-def _build_manual_close_scenario() -> dict[str, Any]:
-    """Build the MANUAL_CLOSE drill scenario (§12).
+MANUAL_LEG_ROLES: tuple[str, ...] = ("STOP_LOSS", "TAKE_PROFIT_1", "TAKE_PROFIT_2")
 
-    After a manual close, the local algo protective survives as an
-    orphan. The sweeper cancels it after position-zero verification.
+
+def _manual_leg_ids() -> dict[str, str]:
+    return {
+        role: derive_algo_client_id(plan_hash=MANUAL_PLAN_HASH, role=role)
+        for role in MANUAL_LEG_ROLES
+    }
+
+
+async def _prepare_manual_exchange(
+    *, position_open: bool, legs_auto_cancelled: bool, control_read_fails: bool = False
+) -> BinanceSemanticsFakeAdapter:
+    """The Binance-semantics fake holding a filled entry and the three protective legs.
+
+    `position_open=False` models the operator closing the position on the exchange itself
+    (outside the system). `legs_auto_cancelled=True` is the first answer to G4-035 (the
+    exchange removes the closePosition legs with the position), False the second (they stay).
+    Both answers are modelled by the fake only; what Binance does is [NOT_TESTED] (Phase 25).
+    `control_read_fails=True` (plan 20-27) makes the first position read of the control fail, so
+    the control cannot prove the position flat and keeps the legs (a FILLED entry is terminal
+    since plan 20-27 and, with two flat reads, the control removes the legs itself).
     """
-    return _build_orphan_scenario()
+    fake = BinanceSemanticsFakeAdapter()
+    entry_id = derive_client_order_id(plan_hash=MANUAL_PLAN_HASH, role="ENTRY")
+    await fake.place_entry(
+        symbol=MANUAL_SYMBOL,
+        side="BUY",
+        position_side="BOTH",
+        time_in_force="GTC",
+        quantity=MANUAL_QUANTITY,
+        price=MANUAL_PRICE,
+        new_client_order_id=entry_id,
+    )
+    fake.fill(entry_id)
+    for role, client_algo_id in _manual_leg_ids().items():
+        stop = role == "STOP_LOSS"
+        await fake.place_algo_protective(
+            symbol=MANUAL_SYMBOL,
+            side="SELL",
+            algo_type="CONDITIONAL",
+            type="STOP_MARKET" if stop else "TAKE_PROFIT_MARKET",
+            position_side="BOTH",
+            trigger_price=Decimal("59000") if stop else Decimal("61000"),
+            close_position=stop,
+            quantity=None if stop else MANUAL_QUANTITY / 2,
+            working_type="MARK_PRICE",
+            client_algo_id=client_algo_id,
+            reduce_only=None if stop else True,
+        )
+    if not position_open:
+        fake.positions[MANUAL_SYMBOL] = Decimal("0")
+    if legs_auto_cancelled:
+        for client_algo_id in _manual_leg_ids().values():
+            fake.cancel_algo(client_algo_id)
+    fake.calls.clear()
+    if control_read_fails:
+        fake.fail_next("snapshot_positions", RuntimeError("scripted read failure"))
+    return fake
+
+
+def _manual_local_intent(*, position_open: bool) -> dict[str, Any]:
+    """The local view the drill compares against: the three legs, the position if still open."""
+    return {
+        "open_orders": [],
+        "open_algos": [
+            {
+                "client_algo_id": client_algo_id,
+                "symbol": MANUAL_SYMBOL,
+                "order_role": OrderRole(role),
+                "status": OrderStatus.NEW,
+            }
+            for role, client_algo_id in _manual_leg_ids().items()
+        ],
+        "open_positions": (
+            [{"symbol": MANUAL_SYMBOL, "position_side": "BOTH", "position_amt": MANUAL_QUANTITY}]
+            if position_open
+            else []
+        ),
+    }
+
+
+class _RecordingEnablement:
+    def __init__(self) -> None:
+        self.disabled = False
+
+    def disable(self, *, operator_id: str, now_utc: datetime) -> None:
+        self.disabled = True
+
+
+@dataclass
+class ManualCloseWiring:
+    """What one MANUAL_CLOSE drill touched (the fake exchange, controller and journal)."""
+
+    declaration: Any
+    exchange: BinanceSemanticsFakeAdapter
+    controller: Any
+    journal: RecordingJournal
+    enablement: _RecordingEnablement
+    placements: list[PlacementCall]
+
+
+def _build_manual_close_wiring(
+    *,
+    now_utc: datetime,
+    position_open: bool = False,
+    legs_auto_cancelled: bool = False,
+    control_read_fails: bool = False,
+) -> ManualCloseWiring:
+    """Build the MANUAL_CLOSE drill over the fake exchange (D-27, D-28, G2-016)."""
+    import asyncio
+
+    from src.execution.manager import emergency_manual_close
+    from src.ops.drills import make_manual_close_drill
+    from src.reconcile.safe_mode import SafeModeController
+    from src.reconcile.sweeper import OrphanSweeper
+
+    exchange = asyncio.run(
+        _prepare_manual_exchange(
+            position_open=position_open,
+            legs_auto_cancelled=legs_auto_cancelled,
+            control_read_fails=control_read_fails,
+        )
+    )
+    placements = record_placements(exchange)
+    journal = RecordingJournal()
+    enablement = _RecordingEnablement()
+    controller = SafeModeController(
+        adapter=_FakeReconcileAdapter(),  # type: ignore[arg-type]
+        journal=_FakeJournal(),  # type: ignore[arg-type]
+    )
+
+    def close_control() -> Awaitable[None]:
+        return emergency_manual_close(
+            plan_hash=MANUAL_PLAN_HASH,
+            symbol=MANUAL_SYMBOL,
+            adapter=exchange,  # type: ignore[arg-type]
+            journal=journal,
+            enablement=enablement,
+            safe_mode_controller=controller,
+            operator_id="operator_alpha",
+            now_utc=now_utc,
+        )
+
+    async def read_truth() -> dict[str, Any]:
+        return {
+            "normal_orders": await exchange.snapshot_open_normal_orders(),
+            "algo_orders": await exchange.snapshot_open_algo_orders(),
+            "positions": await exchange.snapshot_positions(),
+        }
+
+    def position_verifier(*, symbol: str) -> Decimal:
+        return exchange.positions.get(symbol, Decimal("0"))
+
+    declaration = make_manual_close_drill(
+        close_control=close_control,
+        read_truth=read_truth,
+        sweeper=OrphanSweeper(adapter=exchange, journal=journal, now_utc=now_utc),  # type: ignore[arg-type]
+        safe_mode_controller=controller,
+        local_intent=_manual_local_intent(position_open=position_open),
+        position_verifier=position_verifier,
+    )
+    return ManualCloseWiring(
+        declaration=declaration,
+        exchange=exchange,
+        controller=controller,
+        journal=journal,
+        enablement=enablement,
+        placements=placements,
+    )
+
+
+def _build_unprotected_rig() -> Rig:
+    """A tracked PROTECTED plan, an exchange position and no stop: POSITION_WITHOUT_STOP."""
+    plan = make_plan_protection(PLAN_H, symbol="BTCUSDT", state="PROTECTED")
+    return build_rig(plans=(plan,), positions=(make_position("BTCUSDT", "0.004"),))
+
+
+def _build_stale_feed_rig(*, stale: bool = True) -> Rig:
+    """A fully agreeing PROTECTED plan whose mark price feed is (or is not) stale."""
+    from src.reconcile.feed_freshness import FeedReading
+
+    plan = make_plan_protection(PLAN_H, symbol="BTCUSDT", state="PROTECTED")
+    stop = make_algo_order(
+        derive_algo_client_id(plan_hash=PLAN_H, role=OrderRole.STOP_LOSS.value), "BTCUSDT"
+    )
+    mark_at = DRILL_NOW - (timedelta(minutes=10) if stale else timedelta(milliseconds=10))
+    feed = FakeFeedSource(
+        FeedReading(
+            mark_price_at_utc={"BTCUSDT": mark_at},
+            user_data_last_event_at_utc=DRILL_NOW - timedelta(milliseconds=10),
+        )
+    )
+    return build_rig(
+        plans=(plan,), algo=(stop,), positions=(make_position("BTCUSDT", "0.004"),), feed=feed
+    )
 
 
 def _build_duplicate_scenario() -> dict[str, Any]:
@@ -518,7 +699,6 @@ def _build_all_drill_declarations(
         make_api_down_drill,
         make_db_failure_drill,
         make_duplicate_drill,
-        make_manual_close_drill,
         make_orphan_drill,
         make_restore_drill,
         make_stale_feed_drill,
@@ -528,25 +708,13 @@ def _build_all_drill_declarations(
     from src.reconcile.safe_mode import SafeModeController
     from src.reconcile.sweeper import OrphanSweeper
 
-    # --- UNPROTECTED (§3) -------------------------------------------------
-    unprotected = _build_unprotected_scenario()
-    unprotected_local = _make_local_intent(unprotected)
-    unprotected_truth = _make_truth(unprotected)
-    unprotected_adapter = _FakeReconcileAdapter(
-        normal_orders=unprotected_truth["normal_orders"],
-        algo_orders=unprotected_truth["algo_orders"],
-        positions=unprotected_truth["positions"],
-    )
-    unprotected_journal = _FakeJournal()
-    unprotected_controller = SafeModeController(
-        adapter=unprotected_adapter,  # type: ignore[arg-type]
-        journal=unprotected_journal,  # type: ignore[arg-type]
-    )
+    # --- UNPROTECTED (§3): a real ReconcileLoop tick (plan 20-23, D-27) -------
+    unprotected_rig = _build_unprotected_rig()
+    record_placements(unprotected_rig.adapter)
     unprotected_drill = make_unprotected_drill(
-        compare_fn=_compare,
-        safe_mode_controller=unprotected_controller,
-        local_intent=unprotected_local,
-        truth=unprotected_truth,
+        loop=unprotected_rig.loop,
+        safe_mode_controller=unprotected_rig.safe_mode,
+        now_utc=now_utc,
     )
 
     # --- ORPHAN (§4) ------------------------------------------------------
@@ -655,20 +823,13 @@ def _build_all_drill_declarations(
         api_call=_api_down_call,
     )
 
-    # --- STALE_FEED (§7) --------------------------------------------------
-    stale_feed_adapter = _FakeReconcileAdapter()
-    stale_feed_journal = _FakeJournal()
-    stale_feed_controller = SafeModeController(
-        adapter=stale_feed_adapter,  # type: ignore[arg-type]
-        journal=stale_feed_journal,  # type: ignore[arg-type]
-    )
-
-    def _stale_feed_check() -> bool:
-        return True
-
+    # --- STALE_FEED (§7): the loop's own feed check (plan 20-23, D-25, D-27) ---
+    stale_feed_rig = _build_stale_feed_rig()
+    record_placements(stale_feed_rig.adapter)
     stale_feed_drill = make_stale_feed_drill(
-        safe_mode_controller=stale_feed_controller,
-        feed_freshness_check=_stale_feed_check,
+        loop=stale_feed_rig.loop,
+        safe_mode_controller=stale_feed_rig.safe_mode,
+        now_utc=now_utc,
     )
 
     # --- DB_FAILURE (§9) --------------------------------------------------
@@ -687,33 +848,9 @@ def _build_all_drill_declarations(
         db_write=_db_failure_write,
     )
 
-    # --- MANUAL_CLOSE (§12) -----------------------------------------------
-    manual_close = _build_manual_close_scenario()
-    manual_close_local = _make_local_intent(manual_close)
-    manual_close_truth = _make_truth(manual_close)
-    manual_close_adapter = _FakeReconcileAdapter(
-        normal_orders=manual_close_truth["normal_orders"],
-        algo_orders=manual_close_truth["algo_orders"],
-        positions=manual_close_truth["positions"],
-        position_reads=[Decimal("0"), Decimal("0")],
-    )
-    manual_close_journal = _FakeJournal()
-    manual_close_controller = SafeModeController(
-        adapter=manual_close_adapter,  # type: ignore[arg-type]
-        journal=manual_close_journal,  # type: ignore[arg-type]
-    )
-    manual_close_sweeper = OrphanSweeper(
-        adapter=manual_close_adapter,  # type: ignore[arg-type]
-        journal=manual_close_journal,  # type: ignore[arg-type]
-        now_utc=now_utc,
-    )
-    manual_close_drill = make_manual_close_drill(
-        sweeper=manual_close_sweeper,
-        safe_mode_controller=manual_close_controller,
-        local_intent=manual_close_local,
-        truth=manual_close_truth,
-        position_verifier=manual_close_adapter.read_position,
-    )
+    # --- MANUAL_CLOSE (§12): emergency_manual_close + sweeper (plan 20-23, D-28) ---
+    manual_close_wiring = _build_manual_close_wiring(now_utc=now_utc)
+    manual_close_drill = manual_close_wiring.declaration
 
     # --- RESTORE (clean exit) ---------------------------------------------
     # The restore drill needs a controller that can exit cleanly. The
@@ -745,15 +882,16 @@ def _build_all_drill_declarations(
     BUILT_DRILL_ADAPTERS.clear()
     BUILT_DRILL_ADAPTERS.extend(
         [
-            unprotected_adapter,
             orphan_adapter,
             api_down_adapter,
-            stale_feed_adapter,
             db_failure_adapter,
-            manual_close_adapter,
             restore_adapter,
         ]
     )
+    BUILT_LOOP_RIGS.clear()
+    BUILT_LOOP_RIGS.extend([unprotected_rig, stale_feed_rig])
+    BUILT_MANUAL_CLOSE.clear()
+    BUILT_MANUAL_CLOSE.append(manual_close_wiring)
     return tuple(by_name[name] for name in DRILL_NAMES)
 
 
@@ -799,6 +937,7 @@ def test_eight_drills_rehearse_with_injected_faults() -> None:
         OUTCOME_ORPHAN_SWEPTED,
         OUTCOME_REPLAY_TRANSITIONED,
         OUTCOME_RESTORE_CLEAN_EXIT,
+        OUTCOME_SAFE_MODE_BLOCKED,
         OUTCOME_SAFE_MODE_ENTERED,
         DrillLog,
         run_all_drills,
@@ -843,13 +982,14 @@ def test_eight_drills_rehearse_with_injected_faults() -> None:
 
     # The expected outcome per drill (matches the RUNBOOK procedure).
     expected_outcomes = {
-        "unprotected": OUTCOME_SAFE_MODE_ENTERED,
+        "unprotected": OUTCOME_SAFE_MODE_BLOCKED,
         "orphan": OUTCOME_ORPHAN_SWEPTED,
         "duplicate": OUTCOME_REPLAY_TRANSITIONED,
         "api_down": OUTCOME_SAFE_MODE_ENTERED,
-        "stale_feed": OUTCOME_SAFE_MODE_ENTERED,
+        "stale_feed": OUTCOME_SAFE_MODE_BLOCKED,
         "db_failure": OUTCOME_SAFE_MODE_ENTERED,
-        "manual_close": OUTCOME_ORPHAN_SWEPTED,
+        # Plan 20-27 (WR-A3): the control removes the legs of a filled, flat plan itself.
+        "manual_close": OUTCOME_SAFE_MODE_ENTERED,
         "restore": OUTCOME_RESTORE_CLEAN_EXIT,
     }
     for outcome in outcomes:
@@ -958,39 +1098,381 @@ def test_double_run_drill_log_is_byte_identical() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Test 4 — the no-place-order invariant holds across every drill.
+# Test 4 — the narrowed placement rule (Phase 20, plan 20-23, F-604, D034/D077).
 # --------------------------------------------------------------------------- #
 
 
-def test_no_place_order_invariant_across_all_drills() -> None:
-    """Beh. 4: the no-place-order invariant holds across every drill.
+def test_reconcile_never_places_and_delegated_stops_keep_the_plan_price() -> None:
+    """Beh. 4 (F-604, D034/D077, D-27, criterion 5): the reconciler places nothing, the
+    coordinator places the delegated stop with the plan's own price.
 
-    Per D-03 + EXEC-02: the reconciler is query/cancel only. No
-    drill may invoke a place-order path on any adapter. The static
-    guard at the end of the file asserts the source-level invariant;
-    this test asserts the runtime invariant by checking the fake
-    adapter's `place_order_calls` counter after the full drill run.
+    Rewritten from `test_no_place_order_invariant_across_all_drills`, which asserted "no
+    drill places anything at all" (the pre-D034 rule, 08-REVIEW IN-08). The narrowed rule has
+    two halves, both asserted here:
+
+    1. Over the full drill run, no placement call came from `src/reconcile` or `src/ops`
+       (every adapter records the caller's module), and the legacy fakes saw none.
+    2. A stop-related divergence is handed to the REAL coordinator by a loop tick; the
+       placement that follows comes from `src.execution.protection`, is a STOP_MARKET with
+       the plan's `sl_trigger_price` and the deterministic STOP_LOSS client id.
     """
-    from src.ops.drills import DrillLog, run_all_drills
+    import asyncio
 
-    base = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
-    now_utc_sequence = _build_now_utc_sequence(base)
-    declarations = _build_all_drill_declarations(now_utc=base)
-    journal = DrillLog()
+    from src.ops.drills import (
+        OUTCOME_SAFE_MODE_BLOCKED,
+        DrillLog,
+        make_unprotected_drill,
+        run_all_drills,
+        run_drill,
+    )
+    from src.reconcile.loop import ReconcileLoop
+    from src.reconcile.safe_mode import SafeModeController
+    from src.reconcile.sweeper import OrphanSweeper
 
-    run_all_drills(
-        declarations,
-        journal=journal,
-        now_utc_sequence=now_utc_sequence,
+    from tests.support.execution_limits import test_only_execution_limits as make_test_limits
+    from tests.support.protection_doubles import make_rig
+    from tests.support.reconcile_doubles import (
+        FakeGate,
+        FakeIntentStore,
+        InMemorySafeModeStore,
+        RecordingAlertSink,
     )
 
-    # Runtime check: no fake adapter in the drill suite ever received
-    # a place-order call.
+    # --- half 1: the full drill run places nothing from the reconciler or the drills ------
+    base = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
+    declarations = _build_all_drill_declarations(now_utc=base)
+    run_all_drills(
+        declarations,
+        journal=DrillLog(),
+        now_utc_sequence=_build_now_utc_sequence(base),
+    )
     assert len(BUILT_DRILL_ADAPTERS) > 0, "expected the drill builder to register fake adapters"
     for adapter in BUILT_DRILL_ADAPTERS:
         assert adapter.place_order_calls == 0, (
-            f"place-order invariant violated: {adapter.place_order_calls} calls"
+            f"a placement reached a drill adapter: {adapter.placement_callers}"
         )
+    assert len(BUILT_LOOP_RIGS) == 2
+    for rig in BUILT_LOOP_RIGS:
+        assert rig.adapter.forbidden_calls == []
+    (manual_close,) = BUILT_MANUAL_CLOSE
+    assert manual_close.placements == []
+
+    # --- half 2: a delegated stop goes through the coordinator --------------------------------
+    rig = asyncio.run(make_rig())
+    rig.fake.fill(rig.entry_id, quantity=rig.entry.entry_quantity)  # exchange-side fill, unseen
+    placements = record_placements(rig.fake)
+    safe_mode = SafeModeController(
+        adapter=rig.fake,  # type: ignore[arg-type]
+        journal=RecordingJournal(),
+        state_store=InMemorySafeModeStore(),
+    )
+    loop = ReconcileLoop(
+        adapter=rig.fake,  # type: ignore[arg-type]
+        gate=FakeGate(),
+        safe_mode=safe_mode,
+        intent_store=FakeIntentStore(),
+        protection=rig.coordinator,
+        sweeper=OrphanSweeper(adapter=rig.fake, journal=RecordingJournal()),  # type: ignore[arg-type]
+        alerts=RecordingAlertSink(),
+        journal=RecordingJournal(),
+        limits=make_test_limits(),
+    )
+    outcome = run_drill(
+        make_unprotected_drill(loop=loop, safe_mode_controller=safe_mode, now_utc=base),
+        journal=DrillLog(),
+        now_utc=base,
+    )
+    assert outcome.outcome == OUTCOME_SAFE_MODE_BLOCKED
+    assert placements == [], "the reconcile tick placed something"
+
+    asyncio.run(rig.coordinator.step())  # the coordinator re-checks and decides (D077)
+
+    (stop,) = [c for c in placements if c.method == "place_algo_protective"]
+    assert [c.method for c in placements] == ["place_algo_protective"]
+    assert stop.caller == "src.execution.protection"
+    assert not [c for c in placements if c.caller.startswith(("src.reconcile", "src.ops"))]
+    assert stop.kwargs["type"] == "STOP_MARKET"
+    assert stop.kwargs["trigger_price"] == rig.entry.sl_trigger_price
+    assert stop.kwargs["client_algo_id"] == derive_algo_client_id(
+        plan_hash=rig.entry.plan_hash, role=OrderRole.STOP_LOSS.value
+    )
+    assert stop.kwargs["client_algo_id"] == rig.stop_id
+
+
+def test_placement_methods_of_the_drill_and_reconcile_fakes_do_not_raise() -> None:
+    """F-604: no fake adapter placement method in the two old-rule files raises any more.
+
+    Checked on the AST of `tests/test_drills.py` and `tests/test_reconcile.py`. The check is
+    armed: each file must still define the two methods (a deleted fake would not pass quietly).
+    """
+    here = Path(__file__).parent
+    for name in ("test_drills.py", "test_reconcile.py"):
+        tree = ast.parse((here / name).read_text(encoding="utf-8"))
+        defined: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if node.name not in {"place_order", "place_algo_order"}:
+                continue
+            defined.add(node.name)
+            raises = [n.lineno for n in ast.walk(node) if isinstance(n, ast.Raise)]
+            assert raises == [], f"{name}::{node.name} raises at line(s) {raises}"
+        assert defined == {"place_order", "place_algo_order"}, (name, defined)
+
+
+def test_no_place_order_invariant_outcome_is_retired() -> None:
+    """D-27, 08-REVIEW IN-08: the outcome that encoded the old rule is retired, not renamed."""
+    import src.ops.drills as drills
+
+    retired = "no_place_order_invariant_held"
+    assert not hasattr(drills, "OUTCOME_NO_PLACE_ORDER_INVARIANT")
+    assert retired not in drills.ALL_OUTCOMES
+    assert drills.RETIRED_OUTCOMES[retired] == (
+        "encoded the pre-D034 rule (08-REVIEW IN-08); replaced by the narrowed static guard"
+    )
+    assert not set(drills.RETIRED_OUTCOMES) & drills.ALL_OUTCOMES
+    # Removed from src: no module names the retired constant any more.
+    for py_file in SRC_ROOT.rglob("*.py"):
+        assert "OUTCOME_NO_PLACE_ORDER_INVARIANT" not in py_file.read_text(encoding="utf-8")
+    # A DrillOutcome carrying the retired string is refused.
+    with pytest.raises(ValueError, match="unknown outcome"):
+        drills.DrillOutcome(
+            drill="unprotected", fault="x", outcome=retired, occurred_at_utc=DRILL_NOW
+        )
+
+
+def test_safe_mode_blocked_outcome_is_emitted_by_the_entry_guard_drills() -> None:
+    """D-27: OUTCOME_SAFE_MODE_BLOCKED was never emitted before; two drills emit it now."""
+    from src.ops.drills import OUTCOME_SAFE_MODE_BLOCKED, DrillLog, run_all_drills
+
+    outcomes = run_all_drills(
+        _build_all_drill_declarations(now_utc=DRILL_NOW),
+        journal=DrillLog(),
+        now_utc_sequence=_build_now_utc_sequence(DRILL_NOW),
+    )
+    blocked = sorted(o.drill for o in outcomes if o.outcome == OUTCOME_SAFE_MODE_BLOCKED)
+    assert blocked == ["stale_feed", "unprotected"]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 20 drills (plan 20-23, D-27, D-28, G2-016).
+# --------------------------------------------------------------------------- #
+
+
+def test_unprotected_drill_blocks_entries_through_the_loop() -> None:
+    """D-27: UNPROTECTED runs one real ReconcileLoop tick (F-604: the loop places nothing)."""
+    from src.ops.drills import OUTCOME_SAFE_MODE_BLOCKED, DrillLog, run_drill
+
+    rig = _build_unprotected_rig()
+    placements = record_placements(rig.adapter)
+    from src.ops.drills import make_unprotected_drill
+
+    drill = make_unprotected_drill(
+        loop=rig.loop, safe_mode_controller=rig.safe_mode, now_utc=DRILL_NOW
+    )
+
+    outcome = run_drill(drill, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_SAFE_MODE_BLOCKED
+    assert rig.safe_mode.in_safe_mode is True
+    assert rig.safe_mode.entered_reason == "POSITION_WITHOUT_STOP"
+    assert rig.protection.notified == [(PLAN_H, "POSITION_WITHOUT_STOP")]
+    verdict = rig.safe_mode.guard_new_entries(trade_plan=None)
+    assert verdict.is_no_trade is True
+    assert verdict.reason_code == "RECONCILIATION_REQUIRED"
+    by_reason = {a.reason: a for a in rig.alerts.alerts}
+    assert by_reason["POSITION_WITHOUT_STOP"].event == "UNPROTECTED_POSITION"
+    assert by_reason["POSITION_WITHOUT_STOP"].plan_hash == PLAN_H
+    # The reconcile path placed and cancelled nothing.
+    assert placements == []
+    assert rig.adapter.forbidden_calls == []
+    assert rig.adapter.cancelled_algo == [] and rig.adapter.cancelled_normal == []
+
+
+def test_unprotected_drill_fails_when_the_scenario_has_no_divergence() -> None:
+    """A drill whose injected fault never shows up must fail, not pass."""
+    from src.ops.drills import DrillLog, make_unprotected_drill, run_drill
+
+    plan = make_plan_protection(PLAN_H, symbol="BTCUSDT", state="PROTECTED")
+    stop = make_algo_order(
+        derive_algo_client_id(plan_hash=PLAN_H, role=OrderRole.STOP_LOSS.value), "BTCUSDT"
+    )
+    rig = build_rig(plans=(plan,), algo=(stop,), positions=(make_position("BTCUSDT", "0.004"),))
+    drill = make_unprotected_drill(
+        loop=rig.loop, safe_mode_controller=rig.safe_mode, now_utc=DRILL_NOW
+    )
+    with pytest.raises(AssertionError, match="POSITION_WITHOUT_STOP"):
+        run_drill(drill, journal=DrillLog(), now_utc=DRILL_NOW)
+
+
+def test_stale_feed_drill_enters_safe_mode_through_the_loops_feed_check() -> None:
+    """D-25, D-27: a stale mark price is judged by the loop: STALE_FEED, STALE_DATA, blocked."""
+    from src.ops.drills import (
+        OUTCOME_SAFE_MODE_BLOCKED,
+        DrillLog,
+        make_stale_feed_drill,
+        run_drill,
+    )
+
+    rig = _build_stale_feed_rig()
+    placements = record_placements(rig.adapter)
+    drill = make_stale_feed_drill(
+        loop=rig.loop, safe_mode_controller=rig.safe_mode, now_utc=DRILL_NOW
+    )
+
+    outcome = run_drill(drill, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_SAFE_MODE_BLOCKED
+    assert rig.safe_mode.in_safe_mode is True
+    assert rig.safe_mode.entered_reason == "STALE_FEED"
+    assert [(a.event, a.subject, a.reason) for a in rig.alerts.alerts] == [
+        ("STALE_DATA", "BTCUSDT", "MARK_PRICE_STALE")
+    ]
+    assert rig.feed is not None and rig.feed.calls == 1
+    verdict = rig.safe_mode.guard_new_entries(trade_plan=None)
+    assert (verdict.is_no_trade, verdict.reason_code) == (True, "RECONCILIATION_REQUIRED")
+    assert placements == [] and rig.adapter.forbidden_calls == []
+
+
+def test_stale_feed_drill_fails_when_the_feed_is_fresh() -> None:
+    from src.ops.drills import DrillLog, make_stale_feed_drill, run_drill
+
+    rig = _build_stale_feed_rig(stale=False)
+    drill = make_stale_feed_drill(
+        loop=rig.loop, safe_mode_controller=rig.safe_mode, now_utc=DRILL_NOW
+    )
+    with pytest.raises(AssertionError, match="judge a feed stale"):
+        run_drill(drill, journal=DrillLog(), now_utc=DRILL_NOW)
+    assert rig.safe_mode.in_safe_mode is False
+
+
+def _phases_of(journal: RecordingJournal, identifier: str) -> list[str]:
+    return [
+        json.loads(e.payload_json)["phase"] for e in journal.events if e.entity_id == identifier
+    ]
+
+
+def test_manual_close_drill_removes_the_legs_that_stayed_after_a_filled_entry() -> None:
+    """D-28, G4-035 answer (b) since plan 20-27 (WR-A3): the position was closed outside, the
+    legs stay, the entry FILLED (terminal) and both position reads are zero: the control itself
+    cancels and verifies each leg, so nothing is left for the sweeper."""
+    from src.ops.drills import OUTCOME_SAFE_MODE_ENTERED, DrillLog, run_drill
+
+    wiring = _build_manual_close_wiring(now_utc=DRILL_NOW, position_open=False)
+
+    outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_SAFE_MODE_ENTERED
+    exchange = wiring.exchange
+    assert exchange.open_algos == {}
+    assert len(exchange.calls_to("cancel_algo_order")) == 3  # by the control, none by the sweeper
+    legs = _manual_leg_ids()
+    for client_algo_id in legs.values():
+        assert _phases_of(wiring.journal, client_algo_id) == ["pre_cancel", "post_cancel"]
+    assert [e for e in wiring.journal.events if e.event_type == "PROTECTIVES_KEPT"] == []
+    assert wiring.enablement.disabled is True
+    assert wiring.controller.in_safe_mode is True
+    assert wiring.controller.entered_reason == "MANUAL_CLOSE"
+    assert wiring.placements == []
+
+
+def test_manual_close_drill_orphan_variant_sweeps_the_legs_that_stayed_after_a_failed_read() -> (
+    None
+):
+    """D-28, G4-035 answer (b): the position was closed outside, the legs stay as orphans.
+
+    The control keeps the legs (its first position read fails, so the position is not proven
+    flat), enters SAFE_MODE MANUAL_CLOSE; the sweeper then cancels each leg after two zero reads
+    of its own and verifies it.
+    """
+    from src.ops.drills import OUTCOME_ORPHAN_SWEPTED, DrillLog, run_drill
+
+    wiring = _build_manual_close_wiring(
+        now_utc=DRILL_NOW, position_open=False, control_read_fails=True
+    )
+
+    outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_ORPHAN_SWEPTED
+    exchange = wiring.exchange
+    assert exchange.open_algos == {}
+    assert len(exchange.calls_to("cancel_algo_order")) == 3
+    legs = _manual_leg_ids()
+    for client_algo_id in legs.values():
+        assert _phases_of(wiring.journal, client_algo_id) == ["pre_cancel", "post_cancel"]
+    kept = [
+        json.loads(e.payload_json)
+        for e in wiring.journal.events
+        if e.event_type == "PROTECTIVES_KEPT"
+    ]
+    assert [k["reason_code"] for k in kept] == ["READ_FAILED"]
+    assert wiring.enablement.disabled is True
+    assert wiring.controller.in_safe_mode is True
+    assert wiring.controller.entered_reason == "MANUAL_CLOSE"
+    assert wiring.placements == []
+
+
+def test_manual_close_drill_auto_cancel_variant_has_nothing_to_sweep() -> None:
+    """D-28, G4-035 answer (a): the exchange removed the closePosition legs with the position."""
+    from src.ops.drills import OUTCOME_SAFE_MODE_ENTERED, DrillLog, run_drill
+
+    wiring = _build_manual_close_wiring(
+        now_utc=DRILL_NOW, position_open=False, legs_auto_cancelled=True
+    )
+
+    outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_SAFE_MODE_ENTERED
+    # Plan 20-27: the control (entry FILLED, two flat reads) asks for each leg to be cancelled; the
+    # exchange has already removed them, so each answers like an absent order and the sweeper
+    # finds nothing left: three cancel calls in all, all of them the control's.
+    assert len(wiring.exchange.calls_to("cancel_algo_order")) == 3
+    assert wiring.exchange.open_algos == {}
+    assert wiring.controller.in_safe_mode is True
+    assert wiring.controller.entered_reason == "MANUAL_CLOSE"
+    assert [
+        e for e in wiring.journal.events if e.event_type == "MANUAL_CLOSE_ORPHAN_UNVERIFIED"
+    ] == []
+    assert wiring.placements == []
+
+
+def test_manual_close_drill_with_the_position_still_open_never_cancels_the_stop() -> None:
+    """D-09, RISK-03: the position is still open, so no leg is cancelled by the control or the
+    sweeper; the drill ends with SAFE_MODE MANUAL_CLOSE and the stop in place."""
+    from src.ops.drills import OUTCOME_SAFE_MODE_ENTERED, DrillLog, run_drill
+
+    wiring = _build_manual_close_wiring(now_utc=DRILL_NOW, position_open=True)
+    stop_id = _manual_leg_ids()["STOP_LOSS"]
+
+    outcome = run_drill(wiring.declaration, journal=DrillLog(), now_utc=DRILL_NOW)
+
+    assert outcome.outcome == OUTCOME_SAFE_MODE_ENTERED
+    assert stop_id in wiring.exchange.open_algos
+    assert set(wiring.exchange.open_algos) == set(_manual_leg_ids().values())
+    assert wiring.exchange.calls_to("cancel_algo_order") == []
+    assert wiring.exchange.positions[MANUAL_SYMBOL] == MANUAL_QUANTITY
+    kept = [
+        json.loads(e.payload_json)
+        for e in wiring.journal.events
+        if e.event_type == "PROTECTIVES_KEPT"
+    ]
+    assert [k["reason_code"] for k in kept] == ["FIRST_READ_NONZERO"]
+
+
+def test_loop_drills_never_exit_safe_mode() -> None:
+    """D-15: none of the Phase 20 drills exits SAFE_MODE; the restore drill alone does, through
+    the operator exit (`test_the_restore_drill_exits_with_an_operator_id` pins the operator id)."""
+    from src.ops.drills import DrillLog, run_all_drills
+
+    declarations = _build_all_drill_declarations(now_utc=DRILL_NOW)
+    run_all_drills(
+        declarations,
+        journal=DrillLog(),
+        now_utc_sequence=_build_now_utc_sequence(DRILL_NOW),
+    )
+    for rig in BUILT_LOOP_RIGS:
+        assert rig.safe_mode.in_safe_mode is True
+    assert BUILT_MANUAL_CLOSE[0].controller.in_safe_mode is True
 
 
 # --------------------------------------------------------------------------- #
@@ -1035,6 +1517,7 @@ def test_safe_mode_exit_only_via_restore_drill() -> None:
             continue
         assert outcome.outcome in {
             "safe_mode_entered",
+            "safe_mode_blocked_entries",
             "orphan_swept",
             "replay_one_transition",
         }, (
@@ -1140,9 +1623,8 @@ def test_no_place_order_path_in_src_ops() -> None:
             # Allow the token in comments / docstrings / constant
             # names that describe the invariant (e.g.,
             # "OUTCOME_NO_PLACE_ORDER_INVARIANT" or "must never place
-            # a new order"). The runtime guard is the
-            # FakeReconcileAdapter's place_order() method which raises
-            # AssertionError.
+            # a new order"). The runtime check is the caller-module record of the fakes'
+            # placement methods (F-604, plan 20-23); this guard is the source-level rule.
             if token in text:
                 lines_with_token = [line for line in text.splitlines() if token in line]
                 for line in lines_with_token:
@@ -1157,8 +1639,7 @@ def test_no_place_order_path_in_src_ops() -> None:
                         or "PLACE_ORDER_INVARIANT" in line
                     ):
                         continue
-                    # Allow the FakeReconcileAdapter's place_order
-                    # method definition (which raises).
+                    # Allow a fake adapter's place_order method definition.
                     if "def place_order" in line or "def place_algo_order" in line:
                         continue
                     pytest.fail(

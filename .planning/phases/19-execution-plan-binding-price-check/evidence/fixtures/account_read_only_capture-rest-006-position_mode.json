@@ -1,0 +1,13 @@
+{
+  "case_id": "account_read_only_capture",
+  "index": 6,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "position_mode",
+    "summary": {
+      "dual_side_position": "false"
+    }
+  }
+}

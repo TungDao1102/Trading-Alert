@@ -33,6 +33,15 @@ force and the entry is never re-sent; the coordinator protects a fill if the ent
 exist. O-01 stays open: this module does not enable live orders; LIVE stays
 blocked until the owner accepts the D055 closure draft and runs the Demo probes.
 
+Phase 22 (plan 22-15): gate 5f2 calls the pre-entry margin guard (`live_context.margin_guard`,
+`src/execution/margin_guard.py`) after the position mode and BEFORE the hand-off record and the
+consume, so a refusal leaves no ENTRY intent row and the approval can be retried (amendment A7).
+A pass supplies the exchange-verified margin type, leverage and equity, which replace the
+in-memory plan constraint snapshot handed to the protection coordinator (amendment A8; the
+persisted write-once snapshot row is untouched). A configuration POST the guard sent is journaled
+as MARGIN_CONFIG_CHANGED and an unverifiable configuration raises one DIVERGENCE alert, both best
+effort (amendment A9). The guard is reached only after the enablement, limits and SAFE_MODE gates.
+
 Phase 17 (D-13/D-14): the approval is consumed durably by writing the ENTRY execution intent
 BEFORE `place_entry` runs, through the `ExecutionIntentStore` Protocol (the STOP_LOSS intent of
 F-703 is now written by the coordinator before its own `place_algo_protective`). A replayed
@@ -47,15 +56,22 @@ guard; the deterministic ids only let a probe find an order whose response was l
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Protocol
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.approval.binding import check_binding_full, check_binding_identity
-from src.domain.algo_status import is_protection_confirmed
+from src.domain.algo_status import (
+    AlgoStatusClass,
+    classify_algo_status,
+    is_protection_confirmed,
+)
 from src.domain.approval import Approval
 from src.domain.enums import (
     ApprovalAction,
@@ -84,10 +100,18 @@ from src.execution.binding import (
     check_working_type,
     take_profit_levels,
 )
+from src.execution.cancel_verification import (
+    PROVEN_GONE,
+    CancelDetail,
+    CancelVerdict,
+    confirm_algo_cancel,
+    confirm_entry_cancel,
+)
 from src.execution.constraint_snapshot import snapshot_is_valid_for_live
 from src.execution.intent_store import ExecutionIntentStore, IntentRecord
 from src.execution.live_context import LivePlacementContext
 from src.execution.lot_split import lot_filters_from_plan_snapshot
+from src.execution.margin_guard import MarginGuardRequest, MarginGuardVerdict
 from src.execution.order_ids import derive_algo_client_id, derive_client_order_id
 from src.execution.placement import (
     ProtectiveTemplate,
@@ -100,13 +124,15 @@ from src.execution.placement import (
 )
 from src.execution.pre_placement import (
     LIMITS_NOT_CONFIGURED,
+    SYMBOL_HAS_OPEN_ORDER,
     PrePlacementInputs,
     check_position_mode,
     evaluate_pre_placement,
     good_till_date_ms,
 )
-from src.execution.protection import RestingEntry
+from src.execution.protection import OperatorControlResult, ProtectionCoordinator, RestingEntry
 from src.execution.tp_sizing import TakeProfitSizing, size_take_profits
+from src.ops.risk_first import AuditRecordLost, act_then_record, record_after
 from src.persistence.errors import (
     ApprovedQuantityInconsistent,
     ApprovedQuantityRefused,
@@ -115,6 +141,9 @@ from src.persistence.errors import (
 )
 from src.risk.cost_rates import FEE_SOURCE_ACCOUNT_MAX, CostRates
 from src.risk.gating import evaluate_risk
+
+if TYPE_CHECKING:
+    from src.ops.spill import LocalSpill
 
 # --------------------------------------------------------------------------- #
 # Live-5 scope guard (09-04): every placement path is scoped to the
@@ -241,6 +270,17 @@ def resolve_position_mode(result: Any) -> str:
 # No-blind-recovery entry placement (EXECUTION_SPEC §10, 09-REVIEW CR-09, Q5).
 # --------------------------------------------------------------------------- #
 
+# Plan 20-22 (D-23, T-05): the alert for an approval that was already consumed, and its two
+# fixed reasons (a stored-outcome replay, and losing the consume race).
+ALERT_DUPLICATE_EXECUTION_ATTEMPT = "DUPLICATE_EXECUTION_ATTEMPT"
+ALERT_MANUAL_CLOSE_ORPHAN_UNVERIFIED = "MANUAL_CLOSE_ORPHAN_UNVERIFIED"
+# Phase 22 (plan 22-15, amendment A9): an existing OPS-05 event, raised when the margin guard could
+# not verify the symbol configuration; the journal event of a configuration the guard changed.
+ALERT_DIVERGENCE = "DIVERGENCE"
+EVENT_MARGIN_CONFIG_CHANGED = "MARGIN_CONFIG_CHANGED"
+_DUPLICATE_STORED_OUTCOME_REPLAY = "STORED_OUTCOME_REPLAY"
+_DUPLICATE_CONSUME_RACE_LOST = "CONSUME_RACE_LOST"
+
 _ENTRY_STATE_PLACED = "ENTRY_PLACED"
 _ENTRY_STATE_EXISTS = "ENTRY_EXISTS"
 _ENTRY_STATE_UNKNOWN = "ENTRY_STATE_UNKNOWN"
@@ -253,6 +293,8 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # Plain NO_TRADE reason: a request the gate, the drift guard or a missing signed-call policy
 # refused before anything reached the exchange (src/WR-02).
 ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
+# The journal event that names the refusal (the outcome above carries only the reason code).
+EVENT_ENTRY_REFUSED_BEFORE_SEND: str = "ENTRY_REFUSED_BEFORE_SEND"
 
 # Plain NO_TRADE reason (D078 (5), quick task 261020-q2d): the approval row read inside the
 # consume transaction stores no approved quantity, one that differs from the quantity bound at
@@ -268,6 +310,8 @@ class _EntryPlacement:
     state: str
     exchange_order_id: str | None = None
     exchange_status: str | None = None
+    # A PreSendRefusal: its class name and project-fixed message (never SDK text), for the journal.
+    refusal: str | None = None
 
 
 def _text_or_none(value: Any) -> str | None:
@@ -330,8 +374,12 @@ async def _place_entry_no_blind_retry(
     """
     try:
         response = await adapter.place_entry(**entry_kwargs)
-    except PreSendRefusal:
-        return _EntryPlacement(state=_ENTRY_STATE_REFUSED)
+    except PreSendRefusal as exc:
+        label = type(exc).__name__
+        return _EntryPlacement(
+            state=_ENTRY_STATE_REFUSED,
+            refusal=label if exc.reason is None else f"{label}: {exc.reason}",
+        )
     except Exception as exc:  # noqa: BLE001 — classified by facts; ambiguous ones are probed
         category = _placement_failure_category(adapter, exc)
         if category is ExchangeErrorCategory.REJECTED_DEFINITIVE:
@@ -442,11 +490,66 @@ def _live_cost_rates_are_verified(
     return observed <= now_utc <= expires
 
 
+# Placements in flight in THIS process, keyed by (adapter, symbol) and holding the approval id
+# that owns the slot (22-REVIEW WR-02). Gate 5f2 widened the window between the same-symbol check
+# of gate 5e and the consume from one REST call to several, and nothing arbitrated two different
+# approvals of one symbol in that window. There is no await between the check and the claim below,
+# so on one event loop the claim is atomic; a DB-level arbiter would need a migration and is not
+# part of this fix.
+_PLACEMENTS_IN_FLIGHT: dict[tuple[int, str], str] = {}
+
+
+def _in_flight_slot(kwargs: Mapping[str, Any]) -> tuple[tuple[int, str], str] | None:
+    """(slot key, approval id) of a call, or None when they cannot be read (the call then runs
+    unserialized and the gates inside refuse whatever is malformed)."""
+    try:
+        symbol = kwargs["live_context"].signal.symbol  # the symbol gate 1c binds the plan to
+        approval_id = kwargs["approval"].approval_id
+        adapter = kwargs["adapter"]
+    except (KeyError, AttributeError, TypeError):
+        return None
+    if not isinstance(symbol, str) or not isinstance(approval_id, str):
+        return None
+    return (id(adapter), symbol), approval_id
+
+
+def _one_placement_per_symbol[**P](
+    fn: Callable[P, Awaitable[ExecutionOutcome]],
+) -> Callable[P, Awaitable[ExecutionOutcome]]:
+    """Refuse a SECOND approval of a symbol while another approval is placing it (WR-02).
+
+    The same approval arriving again (an at-least-once Telegram callback replay) is not refused:
+    it passes through to the stored-outcome replay and the consume race exactly as before, and it
+    never takes or frees the slot of the call that owns it. The refusal is the existing
+    SYMBOL_HAS_OPEN_ORDER: an order for the symbol is in flight.
+    """
+
+    @functools.wraps(fn)
+    async def serialized(*args: P.args, **kwargs: P.kwargs) -> ExecutionOutcome:
+        slot = _in_flight_slot(kwargs) if not args else None
+        if slot is None:
+            return await fn(*args, **kwargs)
+        key, approval_id = slot
+        owner = _PLACEMENTS_IN_FLIGHT.get(key)
+        if owner is not None:
+            if owner == approval_id:
+                return await fn(*args, **kwargs)
+            return ExecutionOutcome(is_no_trade=True, reason_code=SYMBOL_HAS_OPEN_ORDER)
+        _PLACEMENTS_IN_FLIGHT[key] = approval_id
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _PLACEMENTS_IN_FLIGHT.pop(key, None)
+
+    return serialized
+
+
 # --------------------------------------------------------------------------- #
 # Public entry point — execute_approved_plan.
 # --------------------------------------------------------------------------- #
 
 
+@_one_placement_per_symbol
 async def execute_approved_plan(
     *,
     callback: Any,
@@ -467,6 +570,9 @@ async def execute_approved_plan(
     live_context: LivePlacementContext,
 ) -> ExecutionOutcome:
     """Run the fixed-order pipeline: binding → enablement → SAFE_MODE → gates → risk → place.
+
+    A SECOND approval of a symbol that another approval is placing in this process is refused
+    with SYMBOL_HAS_OPEN_ORDER before any gate (22-REVIEW WR-02, `_one_placement_per_symbol`).
 
     Per D-01/D-03/D-04/D-05: the manager is a pure function of inputs
     plus injected `now_utc`. It never reads the wall clock, never
@@ -519,6 +625,17 @@ async def execute_approved_plan(
           D-11).
       5f. Position mode (D-02, D-14): an unreadable mode is UNCERTAIN_ACCOUNT_STATE and a
           Hedge account is HEDGE_MODE_UNSUPPORTED, both before anything is consumed.
+      5f2. Margin guard (Phase 22, D-05, D-15, amendments A7, A8): `live_context.margin_guard`
+          verifies ISOLATED margin and the leverage, the liquidation distance and the available
+          margin for exactly the order that will be sent. A NO_TRADE verdict returns its code
+          (a guard that raises, or a request that cannot be built, is UNCERTAIN_ACCOUNT_STATE),
+          before anything is consumed. A pass completes the in-memory plan snapshot.
+      5f3. Equity comparison (Phase 21 review WR-03): the sizing equity may not exceed the live
+          equity the guard read.
+      5f4. Clock-dependent recheck (22-REVIEW WR-02; named 5f3 until 2026-10-25): the guard
+          takes several REST calls, so the pure pre-placement evaluation of gate 5e runs again
+          with a clock read after it (mark and last price age, remaining validity); the
+          readings are unchanged.
       7. Consume the approval (ENTRY intent), then place the GTD LIMIT entry and hand it to the
          protection registry (plan 19-15, D-10). No protective order is placed here: the stop
          is placed after the first fill by `src/execution/protection.py`.
@@ -640,6 +757,9 @@ async def execute_approved_plan(
     except PersistenceError:
         return _reconciliation_required()
     if stored_entry is not None:
+        _alert_duplicate_execution(
+            live_context, stored_entry, reason=_DUPLICATE_STORED_OUTCOME_REPLAY, now_utc=now_utc
+        )
         return _stored_entry_outcome(stored_entry)
 
     # Gate 1: full approval binding (identity again plus the expiry gate).
@@ -701,7 +821,7 @@ async def execute_approved_plan(
 
     # Gate 2: enablement guard (LIVE_ORDERS_DISABLED → DISABLED).
     enablement_verdict = enablement.guard_placement(
-        plan_hash=approval.trade_plan_id,
+        plan_hash=bound.plan_hash,
     )
     if enablement_verdict.is_no_trade:
         return ExecutionOutcome(
@@ -900,7 +1020,7 @@ async def execute_approved_plan(
     # "not available" and refuses. The same single reading measures the last-price age.
     mark_checked_at_utc = _clock_or_none(live_context.clock)
     pre_placement_reason = evaluate_pre_placement(
-        PrePlacementInputs(
+        pre_placement_inputs := PrePlacementInputs(
             side=bound.side,
             plan_status=_plan_status(trade_plan),
             signal_invalidated=live_context.signal.invalidated_at_utc is not None,
@@ -951,11 +1071,114 @@ async def execute_approved_plan(
         return ExecutionOutcome(is_no_trade=True, reason_code=position_mode_reason)
     order_position_side = "BOTH"  # One-way is the only supported mode past gate 5f.
 
+    # Gate 5f2 (Phase 22, plan 22-15; D-05, D-15, amendments A7, A8, A9): the margin guard. It sits
+    # after gates 2, 2b and 3 (it may POST an account configuration, so it is never reached while
+    # live placement is disabled, a limit is unset or SAFE_MODE is on) and after the position mode,
+    # and BEFORE the hand-off record and the consume: a refusal costs nothing and the approval can
+    # be retried. The request carries exactly what will be placed. Any failure to build the
+    # request, to call the guard or to read its answer is NO_TRADE (fail closed); a BaseException
+    # such as a cancellation propagates.
+    try:
+        guard_mark_price = _mark_price_of(mark_reading)
+        if guard_mark_price is None:
+            raise ValueError("the gate 5e mark price is not usable")
+        guard_request = MarginGuardRequest(
+            trade_plan_id=trade_plan.trade_plan_id,
+            symbol=bound.symbol,
+            side=bound.side,
+            quantity=quantity,
+            limit_price=limit_price,
+            stop_price=sl_trigger_price,
+            mark_price=guard_mark_price,
+            fee_rate_entry=cost_rates.fee_rate_entry,
+            fee_rate_exit=cost_rates.fee_rate_exit,
+            symbol_is_flat=_symbol_is_flat(
+                bound.symbol,
+                _position_symbols(
+                    bound.symbol,
+                    positions,
+                    frozenset(p.symbol for p in risk_kwargs["open_positions"]),
+                ),
+                _open_order_symbols(bound.symbol, (normal_orders, algo_orders)),
+            ),
+        )
+        guard_verdict = await live_context.margin_guard.evaluate(guard_request)
+        if not isinstance(guard_verdict, MarginGuardVerdict):
+            raise TypeError("margin guard answered something that is not a verdict")
+    except Exception:  # noqa: BLE001 — an unusable guard is a refusal, never a pass
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
+        )
+    if guard_verdict.config_changed:
+        _journal_margin_config_changed(
+            journal,
+            trade_plan=trade_plan,
+            symbol=bound.symbol,
+            verdict=guard_verdict,
+            now_utc=now_utc,
+        )
+    if guard_verdict.alert_reason is not None:
+        _alert_margin_divergence(
+            live_context,
+            symbol=bound.symbol,
+            plan_hash=trade_plan.plan_hash,
+            reason=guard_verdict.alert_reason,
+            now_utc=now_utc,
+        )
+    if guard_verdict.is_no_trade:
+        return ExecutionOutcome(is_no_trade=True, reason_code=guard_verdict.reason_code)
+    # Gate 5f3 (Phase 21 review WR-03; RISK-01): the quantity was sized (gate 4b) from the
+    # caller's `account_state.equity`; the guard just read the live equity (fresh, age-checked,
+    # `equity_basis`). A caller figure larger than the live one (stale, cached or a constant)
+    # sized a bigger quantity than the exchange equity allows and the margin check, which
+    # looks at free margin and not at risk per trade, would not catch it: refuse before the
+    # hand-off record and the consume. A smaller caller figure sized smaller (conservative).
+    sizing_equity = risk_kwargs["account_state"].equity
+    live_equity = guard_verdict.equity_used
+    if (
+        not isinstance(live_equity, Decimal)
+        or not live_equity.is_finite()
+        or not isinstance(sizing_equity, Decimal)
+        or sizing_equity > live_equity
+    ):
+        return ExecutionOutcome(
+            is_no_trade=True, reason_code=RejectionReason.UNCERTAIN_ACCOUNT_STATE.value
+        )
+
+    # Gate 5f4 (22-REVIEW WR-02): the guard takes several REST calls, so the clock-dependent part
+    # of gate 5e is judged AGAIN at an instant read after it: the mark and last price ages
+    # (`max_mark_price_age_ms`, `max_last_price_age_ms`) and the remaining validity before the
+    # exchange's goodTillDate floor are measured when the order is about to be consumed and sent,
+    # not before the guard. The readings themselves are unchanged (the same pure evaluation with a
+    # fresh instant, so it can only tighten); an unreadable clock refuses like gate 5e. Nothing is
+    # consumed yet.
+    recheck_at_utc = _clock_or_none(live_context.clock)
+    recheck_reason = evaluate_pre_placement(
+        replace(
+            pre_placement_inputs,
+            now_utc=now_utc if recheck_at_utc is None else max(now_utc, recheck_at_utc),
+            mark_checked_at_utc=recheck_at_utc,
+            last_checked_at_utc=recheck_at_utc,
+        )
+    )
+    if recheck_reason is not None:
+        return ExecutionOutcome(is_no_trade=True, reason_code=recheck_reason)
+
     # Gate 5g (plan 19-15, D-10): build the hand-off record BEFORE anything is consumed or sent.
     # A plan the protection coordinator would refuse by construction (for example a TP1 share of
     # the whole position) must not reach the exchange only to be cancelled afterwards. Pure: no
     # adapter call, nothing consumed.
     try:
+        # Amendment A8 (D-05, G4-039): the margin type, leverage and equity the exchange verified
+        # complete the IN-MEMORY snapshot handed to protection; the persisted write-once row and
+        # `live_context.plan_constraint_snapshot` itself are not touched. An invalid verified value
+        # is PROTECTION_INPUTS_INVALID below.
+        verified_snapshot = replace(
+            live_context.plan_constraint_snapshot,
+            margin_type=guard_verdict.margin_type,
+            leverage=guard_verdict.leverage,
+            equity_used=guard_verdict.equity_used,
+        )
         good_till_ms = good_till_date_ms(trade_plan.expiry_utc)
         resting_entry = RestingEntry(
             approval_id=approval.approval_id,
@@ -973,7 +1196,7 @@ async def execute_approved_plan(
             tp1_quantity_fraction=live_context.tp1_quantity_fraction,
             working_type=live_context.plan_constraint_snapshot.working_type,
             position_mode=position_mode,
-            plan_constraint_snapshot=live_context.plan_constraint_snapshot,
+            plan_constraint_snapshot=verified_snapshot,
             snapshot_ttl=risk_kwargs["ttl"],
             registered_at_utc=now_utc,
             # The `goodTillDate` the entry is sent with (19-REVIEW WR-05: the coordinator measures
@@ -1040,7 +1263,23 @@ async def execute_approved_plan(
             return _reconciliation_required()
         if existing_entry is None:  # lost the race yet nothing stored: fail closed
             return _reconciliation_required()
+        _alert_duplicate_execution(
+            live_context, existing_entry, reason=_DUPLICATE_CONSUME_RACE_LOST, now_utc=now_utc
+        )
         return _stored_entry_outcome(existing_entry)
+
+    # Plan constraint snapshot (plan 24-37, finding F3; D095): the VERIFIED snapshot (the A8
+    # margin type, leverage and equity the guard just read) is made durable here, once, after the
+    # approval was consumed and BEFORE `mark_sent`, so that nothing is ever sent for a plan whose
+    # snapshot a restart could not read back (`restored_plans_builder` raises RestoreSourceMissing
+    # for a live ENTRY row without it). It sits after the consume on purpose: a replay of this
+    # CONFIRM never gets here (the consume reports it), so the write-once row cannot meet a second,
+    # different snapshot of the same plan. Like a failing `mark_sent`, a store failure leaves the
+    # INTENDED row unresolved and nothing was sent. The recorder is required by the context.
+    try:
+        live_context.snapshot_recorder(verified_snapshot)
+    except PersistenceError:
+        return _reconciliation_required()
 
     # Post-consume store handling. Before `place_entry` a store failure only stops the
     # placement; once the entry may exist a store failure enters SAFE_MODE(DB_FAILURE)
@@ -1151,6 +1390,9 @@ async def execute_approved_plan(
     if entry_state == _ENTRY_STATE_REFUSED:
         # Nothing was sent (a PreSendRefusal): no probe, no SAFE_MODE, nothing to hand off.
         # The ENTRY intent was SENT before the call, so it is closed as REJECTED.
+        _journal_entry_refused(
+            journal, trade_plan=trade_plan, refusal=entry_placement.refusal, now_utc=now_utc
+        )
         _store_write(
             lambda: intent_store.record_result(
                 approval_id=approval.approval_id,
@@ -1327,11 +1569,163 @@ def _position_symbols(symbol: str, rows: Any, reconciled: frozenset[str]) -> fro
     return frozenset(symbols)
 
 
+def _symbol_is_flat(
+    symbol: str,
+    position_symbols: frozenset[str] | None,
+    open_order_symbols: frozenset[str] | None,
+) -> bool:
+    """True only when both gate 5e reads were usable and `symbol` has no position or order."""
+    if position_symbols is None or open_order_symbols is None:
+        return False
+    return symbol not in position_symbols and symbol not in open_order_symbols
+
+
+def _journal_entry_refused(
+    journal: Any, *, trade_plan: Any, refusal: str | None, now_utc: datetime
+) -> None:
+    """Journal WHY a placement was refused before anything was sent. Best-effort evidence.
+
+    The outcome carries only `ENTRY_REFUSED_BEFORE_SEND`; the first Demo rehearsal could not tell
+    the REST gate from the clock-drift guard. The text is the refusal's class name and its
+    project-fixed message. A journal that raises never changes the outcome.
+    """
+    try:
+        body = json.dumps(
+            {"refusal": refusal, "trade_plan_id": trade_plan.trade_plan_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        journal.record(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="enrf",
+                    event_type=EVENT_ENTRY_REFUSED_BEFORE_SEND,
+                    entity_id=trade_plan.plan_hash,
+                    occurred_at_utc=now_utc,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now_utc,
+                event_type=EVENT_ENTRY_REFUSED_BEFORE_SEND,
+                entity_type="TradePlan",
+                entity_id=trade_plan.plan_hash,
+                correlation_id=f"execution_entry_refused_{trade_plan.plan_hash}",
+                trade_plan_id=trade_plan.trade_plan_id,
+                payload_json=body,
+            )
+        )
+    except Exception:  # noqa: BLE001, S110 - evidence is best effort; the outcome stands
+        pass
+
+
+def _journal_margin_config_changed(
+    journal: Any,
+    *,
+    trade_plan: Any,
+    symbol: str,
+    verdict: MarginGuardVerdict,
+    now_utc: datetime,
+) -> None:
+    """Journal that the guard SENT a margin configuration POST (Pitfall 9). Best-effort.
+
+    Evidence only, never an automatic restore: the payload names the symbol, the trade plan and
+    the previous and the verified margin type and leverage (configuration words and numbers; no
+    balance, no equity, no exception text). A journal that raises never changes the outcome.
+    """
+    try:
+        body = json.dumps(
+            {
+                "previous_leverage": verdict.previous_leverage,
+                "previous_margin_type": verdict.previous_margin_type,
+                "symbol": symbol,
+                "trade_plan_id": trade_plan.trade_plan_id,
+                "verified_leverage": verdict.leverage,
+                "verified_margin_type": verdict.margin_type,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        journal.record(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="mgcc",
+                    event_type=EVENT_MARGIN_CONFIG_CHANGED,
+                    entity_id=trade_plan.plan_hash,
+                    occurred_at_utc=now_utc,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now_utc,
+                event_type=EVENT_MARGIN_CONFIG_CHANGED,
+                entity_type="TradePlan",
+                entity_id=trade_plan.plan_hash,
+                correlation_id=f"execution_margin_guard_{trade_plan.plan_hash}",
+                trade_plan_id=trade_plan.trade_plan_id,
+                payload_json=body,
+            )
+        )
+    except Exception:  # noqa: BLE001, S110 - evidence is best effort; the guard verdict stands
+        pass
+
+
+def _alert_margin_divergence(
+    live_context: LivePlacementContext,
+    *,
+    symbol: str,
+    plan_hash: str,
+    reason: str,
+    now_utc: datetime,
+) -> None:
+    """Alert an unverifiable margin configuration (amendment A9). Best-effort, fixed code only.
+
+    The event is the existing OPS-05 DIVERGENCE; the reason is the guard's fixed alert reason and
+    nothing else (no amount, no balance, no exception text) reaches the sink. No sink, or a sink
+    that raises, never changes the outcome.
+    """
+    sink = live_context.alert_sink
+    if sink is None:
+        return
+    try:
+        sink.alert(
+            event=ALERT_DIVERGENCE,
+            subject=plan_hash,
+            reason=reason,
+            now_utc=now_utc,
+            plan_hash=plan_hash,
+            symbol=symbol,
+        )
+    except Exception:  # noqa: BLE001, S110 - the refusal is the answer, not the alert
+        pass
+
+
 def _reconciliation_required() -> ExecutionOutcome:
     """The fail-closed outcome for an unreadable or unwritable store (D-04, D034)."""
     return ExecutionOutcome(
         is_no_trade=True, reason_code=RejectionReason.RECONCILIATION_REQUIRED.value
     )
+
+
+def _alert_duplicate_execution(
+    live_context: LivePlacementContext, record: IntentRecord, *, reason: str, now_utc: datetime
+) -> None:
+    """Alert a duplicate execution attempt (D-23, T-05). Best-effort and send-nothing.
+
+    Only fixed codes and the stored plan hash and symbol reach the sink. The sink's dedupe window
+    keeps a redelivered callback to one message. A missing or failing sink never changes the
+    stored outcome the caller gets back, and nothing is re-sent to the exchange.
+    """
+    sink = live_context.alert_sink
+    if sink is None:
+        return
+    try:
+        sink.alert(
+            event=ALERT_DUPLICATE_EXECUTION_ATTEMPT,
+            subject=record.plan_hash,
+            reason=reason,
+            now_utc=now_utc,
+            plan_hash=record.plan_hash,
+            symbol=record.symbol,
+        )
+    except Exception:  # noqa: BLE001, S110 - the stored outcome is the answer, not the alert
+        pass
 
 
 def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
@@ -1361,11 +1755,16 @@ def _stored_entry_outcome(record: IntentRecord) -> ExecutionOutcome:
 # supersedes D-02: the automatic close is src/execution/emergency_close.py.
 # --------------------------------------------------------------------------- #
 
+_CONFIRM_REREADS = 3
+_CONFIRM_REREAD_DELAY_SECONDS = 0.5
+
 _REQUIRED_PROTECTIVE_ROLES: frozenset[str] = frozenset(
     {OrderRole.STOP_LOSS.value, OrderRole.TAKE_PROFIT_1.value, OrderRole.TAKE_PROFIT_2.value}
 )
 
-_ENTRY_WITHOUT_PROTECTIVE: str = "ENTRY_WITHOUT_PROTECTIVE"
+# Phase 20 D-10: the code comes from the promoted RejectionReason member; the string value is
+# unchanged, so every journal row and SAFE_MODE reason keeps its bytes.
+_ENTRY_WITHOUT_PROTECTIVE: str = RejectionReason.ENTRY_WITHOUT_PROTECTIVE.value
 
 # Plain NO_TRADE reason when the hand-off record cannot be built from the approved plan (gate 5g).
 PROTECTION_INPUTS_INVALID: str = "PROTECTION_INPUTS_INVALID"
@@ -1569,15 +1968,73 @@ async def _confirm_leg_by_rest(
     """REST-confirm one leg (D-11): `(failure_detail, algo_status)`; ACTIVE class only.
 
     A placement response, HTTP success or an ALGO_UPDATE alone never counts as protection.
+
+    The leg was accepted a moment ago and Demo did not always answer a query by client id at
+    once (first Demo run, 2026-11-01: TAKE_PROFIT_2 was on the exchange and not confirmed). A
+    query that answers "not found" or a status that is not ACTIVE yet is therefore read again,
+    at most `_CONFIRM_REREADS` times; an unreadable answer, an unknown shape and a terminal
+    failure are never read again, and the leg stays unconfirmed when the last read does not
+    confirm it. Reads only: nothing is placed or cancelled here.
     """
-    try:
-        probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
-    except Exception as exc:  # noqa: BLE001 — an unreadable leg is unconfirmed
-        return (f"{role}: confirm probe {type(exc).__name__}", None)
-    status = _get_attr_or_key(probe, "algo_status")
-    if _get_attr_or_key(probe, "found") is True and is_protection_confirmed(status):
-        return (None, None if status is None else str(status))
-    return (f"{role}: not confirmed by REST", None)
+    detail = f"{role}: not confirmed by REST"
+    for attempt in range(1 + _CONFIRM_REREADS):
+        try:
+            probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
+        except Exception as exc:  # noqa: BLE001 — an unreadable leg is unconfirmed
+            return (f"{role}: confirm probe {type(exc).__name__}", None)
+        found = _get_attr_or_key(probe, "found")
+        status = _get_attr_or_key(probe, "algo_status")
+        if found is True and is_protection_confirmed(status):
+            return (None, None if status is None else str(status))
+        detail = f"{role}: not confirmed by REST (found={found!r}, status={status!r})"
+        terminal = classify_algo_status(status) is AlgoStatusClass.TERMINAL_FAILED
+        if found is None or terminal or attempt == _CONFIRM_REREADS:
+            break
+        await asyncio.sleep(_CONFIRM_REREAD_DELAY_SECONDS)
+    return (detail, None)
+
+
+async def _read_stop_by_rest(*, adapter: ExecutionAdapter, client_algo_id: str) -> str | None:
+    """Read the stop of the take-profit step by its id: None when it is ACTIVE, else the detail.
+
+    Step 2 of `attach_protectives_to_fill` (D-11, D-17). Binance Demo did not always answer a
+    query by client id at once for an order that rested (2026-10-22, plan 20-27; 2026-11-01,
+    `_confirm_leg_by_rest`; and, as the LEADING explanation and not proven, 2026-11-15, when
+    this step held a stop that the Demo UI showed). An answer "not found" and a status that is
+    neither ACTIVE nor TERMINAL_FAILED are therefore read again, at most `_CONFIRM_REREADS`
+    times, `_CONFIRM_REREAD_DELAY_SECONDS` apart: the same two constants and the same wait as
+    `_confirm_leg_by_rest`, no new number (D-12). An exception on any read, an answer whose
+    `found` is neither True nor False, and a status of class TERMINAL_FAILED are never read again
+    and hold at once. When the last read still does not show an ACTIVE stop, the detail of that
+    read is returned (`STOP_LOSS: not found` or `STOP_LOSS: existing leg status ...`).
+
+    Reads only: it never places, re-places or cancels the stop or any order (D-17, T-19-42).
+    D113. Not `_confirm_leg_by_rest` itself: that helper words its detail for a placed take-profit
+    leg and rereads on a non-boolean `found`, which this step holds at once.
+    """
+    role = OrderRole.STOP_LOSS.value
+    detail = f"{role}: not found"
+    for attempt in range(1 + _CONFIRM_REREADS):
+        try:
+            probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
+        except Exception as exc:  # noqa: BLE001 — an unreadable stop is not a confirmed stop
+            return f"{role}: probe {type(exc).__name__}"
+        found = _get_attr_or_key(probe, "found")
+        if found is not True and found is not False:
+            return f"{role}: probe outcome unknown"
+        terminal = False
+        if found is True:
+            status = _get_attr_or_key(probe, "algo_status")
+            if is_protection_confirmed(status):
+                return None
+            detail = f"{role}: existing leg status {status!r}"
+            terminal = classify_algo_status(status) is AlgoStatusClass.TERMINAL_FAILED
+        else:
+            detail = f"{role}: not found"
+        if terminal or attempt == _CONFIRM_REREADS:
+            break
+        await asyncio.sleep(_CONFIRM_REREAD_DELAY_SECONDS)
+    return detail
 
 
 @dataclass(frozen=True)
@@ -1652,7 +2109,11 @@ async def attach_protectives_to_fill(
       1. Bind check, `position_quantity` check, position-mode check (One-way only, D-14).
       2. The stop: `query_algo_order_by_client` must answer class ACTIVE (D-11). This function
          NEVER places or cancels a stop (D-17, T-19-42); an absent, non-active or unreadable
-         stop holds `ENTRY_WITHOUT_PROTECTIVE` + SAFE_MODE and places no take profit.
+         stop holds `ENTRY_WITHOUT_PROTECTIVE` + SAFE_MODE and places no take profit. An
+         answer "not found" or a status that is not ACTIVE yet (and not terminal) is read again,
+         at most `_CONFIRM_REREADS` times, `_CONFIRM_REREAD_DELAY_SECONDS` apart, because Demo
+         lags on queries by client id (`_read_stop_by_rest`, D113); an exception, an unknown
+         answer and a terminal status hold at once.
       3. The plan snapshot must be valid for live (`snapshot_is_valid_for_live`, D-20). A stale
          but COMPLETE snapshot is re-sized with `live_lot_filters` (the live exchangeInfo read of
          the caller); an INCOMPLETE one, or a stale one without live filters, is refused. With
@@ -1734,24 +2195,21 @@ async def attach_protectives_to_fill(
     ):
         return hold("entry, plan snapshot and filters disagree", reason_code=PLAN_SYMBOL_MISMATCH)
     if position_quantity <= Decimal("0"):
-        return AttachOutcome(is_no_trade=True, reason_code="NO_FILL", sized=None, placed_legs=())
+        return AttachOutcome(
+            is_no_trade=True,
+            reason_code=RejectionReason.NO_FILL.value,
+            sized=None,
+            placed_legs=(),
+        )
     if entry.position_mode != _ONE_WAY_MODE:
         return hold(f"position mode {entry.position_mode} is not supported")
 
     # 2. D-11 / D-17: the stop must be ACTIVE by REST; it is adopted, never placed here.
+    #    D113: read again (bounded, reads only) while Demo may still lag; every hold is as before.
     stop_id = derive_algo_client_id(plan_hash=entry.plan_hash, role=OrderRole.STOP_LOSS.value)
-    try:
-        stop_probe = await adapter.query_algo_order_by_client(client_algo_id=stop_id)
-    except Exception as exc:  # noqa: BLE001 — an unreadable stop is not a confirmed stop
-        return hold(f"{OrderRole.STOP_LOSS.value}: probe {type(exc).__name__}")
-    stop_found = _get_attr_or_key(stop_probe, "found")
-    if stop_found is False:
-        return hold(f"{OrderRole.STOP_LOSS.value}: not found")
-    if stop_found is not True:
-        return hold(f"{OrderRole.STOP_LOSS.value}: probe outcome unknown")
-    stop_status = _get_attr_or_key(stop_probe, "algo_status")
-    if not is_protection_confirmed(stop_status):
-        return hold(f"{OrderRole.STOP_LOSS.value}: existing leg status {stop_status!r}")
+    stop_detail = await _read_stop_by_rest(adapter=adapter, client_algo_id=stop_id)
+    if stop_detail is not None:
+        return hold(stop_detail)
     confirmed_roles: list[str] = [OrderRole.STOP_LOSS.value]
 
     # 3. D-20 / G4-038: snapshot validity, stale-but-complete re-size, incomplete refusal.
@@ -1910,6 +2368,8 @@ _EXPIRY_TRIGGERS: frozenset[str] = frozenset(
         # Plan 19-15 (D-10, T-19-39): the entry was acknowledged but could not be handed to
         # the protection coordinator — nobody would watch it, so it is canceled fail-closed.
         "protection_handoff_failed",
+        # Phase 21 (D-12, D033): DAILY_STOP cancels resting entries; stops are kept.
+        "daily_stop",
     }
 )
 
@@ -1924,6 +2384,8 @@ def _build_cancel_event(
     phase: str,
     now_utc: datetime,
     error_type: str | None = None,
+    verdict: str | None = None,
+    observed_status: str | None = None,
 ) -> JournalEvent:
     """Build one pre/post-cancel JournalEvent (journal-first pattern).
 
@@ -1932,6 +2394,12 @@ def _build_cancel_event(
     cancel call, THEN journals the post-image twin (or a
     `cancel_failed` twin carrying the exception TYPE — never its message,
     which may carry request material).
+
+    Phase 20 plan 20-11 (D-17): a cancel that was not shown CANCELED by a query afterwards
+    is journaled as phase `cancel_unverified` with the observed `verdict` (a `CancelVerdict`
+    value), Binance's `observed_status` when one came back, and the query's exception CLASS
+    in `error_type` when it raised. The keys are added only when set, so the ids of the
+    older phases do not change.
     """
     payload: dict[str, str] = {
         "symbol": symbol,
@@ -1941,6 +2409,10 @@ def _build_cancel_event(
     }
     if error_type is not None:
         payload["error_type"] = error_type
+    if verdict is not None:
+        payload["verdict"] = verdict
+    if observed_status is not None:
+        payload["observed_status"] = observed_status
     payload_json = json.dumps(payload, separators=(",", ":"))
     return JournalEvent(
         # 09-REVIEW WR-09: content-hash id (no same-millisecond PK collision).
@@ -1960,6 +2432,99 @@ def _build_cancel_event(
     )
 
 
+async def _cancel_then_audit(
+    *,
+    action: Callable[[], Awaitable[None]],
+    spill: LocalSpill | None,
+    journal: Any,
+    event_type: str,
+    entity_type: str,
+    identifier: str,
+    symbol: str,
+    trigger_reason: str,
+    now_utc: datetime,
+    verify: Callable[[CancelDetail], Awaitable[CancelVerdict]] | None = None,
+) -> CancelVerdict | None:
+    """Run one exchange cancel FIRST, then record its pre-image and post-image (D-16, F-702).
+
+    The pre-image is the write-ahead record: it goes to the local spill before the cancel
+    and to the journal after it (`act_then_record`). The journal is never awaited before the
+    exchange call. A failing cancel records the `cancel_failed` twin (exception TYPE only) and
+    re-raises the cancel's own exception; a lost audit record is attached to it as a note.
+    When the cancel succeeded but an audit record could not reach the journal or the spill,
+    `AuditRecordLost` is raised after the post-image attempt.
+
+    Plan 20-11 (D-17, F-502): when `verify` is given it runs right after the cancel returned
+    (also when the cancel answered absent, which the adapter maps to None) and its verdict
+    decides the twin. `post_cancel` is recorded only for `CANCELED`; every other verdict
+    records phase `cancel_unverified` with the verdict, the observed Binance status and the
+    query's exception class (never its text). The verdict is returned (None without `verify`,
+    where the twin stays `post_cancel` as before). `verify` must not raise an `Exception`.
+    """
+
+    def event(
+        phase: str,
+        error_type: str | None = None,
+        verdict: str | None = None,
+        observed_status: str | None = None,
+    ) -> JournalEvent:
+        return _build_cancel_event(
+            event_type=event_type,
+            entity_type=entity_type,
+            identifier=identifier,
+            symbol=symbol,
+            trigger_reason=trigger_reason,
+            phase=phase,
+            now_utc=now_utc,
+            error_type=error_type,
+            verdict=verdict,
+            observed_status=observed_status,
+        )
+
+    detail = CancelDetail()
+    verdict: CancelVerdict | None = None
+
+    async def cancel_then_verify() -> None:
+        nonlocal verdict
+        await action()
+        if verify is not None:
+            verdict = await verify(detail)
+
+    lost: AuditRecordLost | None = None
+    try:
+        await act_then_record(
+            spill=spill, journal=journal, event=event("pre_cancel"), action=cancel_then_verify
+        )
+    except AuditRecordLost as pre_lost:
+        lost = pre_lost  # the cancel itself succeeded
+    except Exception as exc:
+        try:
+            record_after(
+                spill=spill,
+                journal=journal,
+                event=event("cancel_failed", type(exc).__name__),
+            )
+        except AuditRecordLost as failed_lost:
+            exc.add_note(type(failed_lost).__name__)
+        raise
+    try:
+        if verdict is None or verdict is CancelVerdict.CANCELED:
+            twin = event("post_cancel")
+        else:
+            twin = event(
+                "cancel_unverified",
+                error_type=detail.error_type,
+                verdict=verdict.value,
+                observed_status=detail.observed_status,
+            )
+        record_after(spill=spill, journal=journal, event=twin)
+    except AuditRecordLost as post_lost:
+        lost = lost or post_lost
+    if lost is not None:
+        raise lost
+    return verdict
+
+
 async def expire_pending_entry(
     *,
     plan_hash: str,
@@ -1968,20 +2533,30 @@ async def expire_pending_entry(
     journal: Any,
     now_utc: datetime,
     trigger_reason: str,
-) -> None:
+    spill: LocalSpill | None = None,
+) -> CancelVerdict:
     """Cancel a stale pending LIMIT entry via its deterministic `x-` id.
 
     Per EXECUTION_SPEC §4: an unfilled entry must be canceled on any of
     five triggers — expiry time, invalidation, superseded plan, mode
-    change, or operator close. Journals the pre-image BEFORE the cancel
-    call and the post-image AFTER (journal-first pattern, D-05
-    extended). A failing cancel journals a `cancel_failed` event and
-    re-raises (never silently swallowed).
+    change, or operator close; since Phase 21 also `daily_stop` (D033: a latched DAILY_STOP
+    cancels the resting entries and keeps the protective stops). Risk-reducing, so it ACTS
+    FIRST (Phase 20
+    plan 20-08, D-16, F-702): the cancel is issued without waiting for the
+    journal, then the pre-image and the post-image are recorded (through the
+    local `spill` when the journal is down). A failing cancel records a
+    `cancel_failed` event and re-raises (never silently swallowed).
 
     The cancel goes through the adapter's real
     `cancel_normal_order(*, symbol, orig_client_order_id)` surface
-    (09-REVIEW CR-10), which already treats "already canceled" as
-    success.
+    (09-REVIEW CR-10), which maps "already canceled" and an absent order
+    (-2011) to the same `None`. Neither counts as a cancel (Phase 20 plan 20-11,
+    D-17, F-502): the entry is queried by its client id afterwards and the result
+    is the returned `CancelVerdict`. `post_cancel` is journaled only for CANCELED;
+    FILLED_OR_PARTIAL (the entry filled; the protection coordinator owns that
+    exposure), STILL_OPEN, GONE_NOT_CANCELED and UNKNOWN (including "not found")
+    journal `cancel_unverified` with the verdict instead. Callers that ignored the
+    old `None` return keep working.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -1992,11 +2567,18 @@ async def expire_pending_entry(
         now_utc: The current UTC-aware datetime (injected).
         trigger_reason: One of the five canonical EXECUTION_SPEC §4
             triggers.
+        spill: Optional local spill that keeps the audit records while the
+            journal is down.
+
+    Returns:
+        The verdict of the query after the cancel (never raises for the query).
 
     Raises:
         ValueError: `symbol` is not in the live-5 universe, or
             `trigger_reason` is not a canonical trigger.
-        Exception: the adapter cancel error (after journaling it).
+        Exception: the adapter cancel error (after recording it).
+        AuditRecordLost: the cancel succeeded but neither the journal nor the
+            spill took an audit record.
     """
     _require_live5_symbol(symbol)
     if trigger_reason not in _EXPIRY_TRIGGERS:
@@ -2006,44 +2588,27 @@ async def expire_pending_entry(
         )
     client_order_id = derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value)
 
-    journal.record(
-        _build_cancel_event(
-            event_type="ENTRY_EXPIRY",
-            entity_type="Order",
-            identifier=client_order_id,
-            symbol=symbol,
-            trigger_reason=trigger_reason,
-            phase="pre_cancel",
-            now_utc=now_utc,
-        )
-    )
-    try:
+    async def cancel() -> None:
         await adapter.cancel_normal_order(symbol=symbol, orig_client_order_id=client_order_id)
-    except Exception as exc:
-        journal.record(
-            _build_cancel_event(
-                event_type="ENTRY_EXPIRY",
-                entity_type="Order",
-                identifier=client_order_id,
-                symbol=symbol,
-                trigger_reason=trigger_reason,
-                phase="cancel_failed",
-                now_utc=now_utc,
-                error_type=type(exc).__name__,
-            )
+
+    async def verify(detail: CancelDetail) -> CancelVerdict:
+        return await confirm_entry_cancel(
+            adapter, symbol=symbol, client_order_id=client_order_id, detail=detail
         )
-        raise
-    journal.record(
-        _build_cancel_event(
-            event_type="ENTRY_EXPIRY",
-            entity_type="Order",
-            identifier=client_order_id,
-            symbol=symbol,
-            trigger_reason=trigger_reason,
-            phase="post_cancel",
-            now_utc=now_utc,
-        )
+
+    verdict = await _cancel_then_audit(
+        action=cancel,
+        spill=spill,
+        journal=journal,
+        event_type="ENTRY_EXPIRY",
+        entity_type="Order",
+        identifier=client_order_id,
+        symbol=symbol,
+        trigger_reason=trigger_reason,
+        now_utc=now_utc,
+        verify=verify,
     )
+    return CancelVerdict.UNKNOWN if verdict is None else verdict
 
 
 async def cancel_untriggered_protectives(
@@ -2053,18 +2618,32 @@ async def cancel_untriggered_protectives(
     adapter: ExecutionAdapter,
     journal: Any,
     now_utc: datetime,
-) -> None:
+    spill: LocalSpill | None = None,
+) -> dict[str, CancelVerdict]:
     """Cancel the SL/TP1/TP2 algo legs via their deterministic `xa-` ids.
 
     Per EXECUTION_SPEC §11 (manual emergency controls) + §4: cancels
     every protective leg by its deterministic algo client id, one at a
-    time in SL → TP1 → TP2 order, journaling the pre-image BEFORE and
-    the post-image AFTER each cancel call (journal-first pattern).
+    time in SL → TP1 → TP2 order. Risk-reducing, so it ACTS FIRST (Phase 20
+    plan 20-08, D-16, F-702): each cancel is issued without waiting for the
+    journal, then its pre-image and post-image are recorded (through the local
+    `spill` when the journal is down).
 
     Per-leg isolation (09-REVIEW CR-10): one failing cancel never leaves
     the remaining legs live — every leg is attempted, each failure is
-    journaled as `cancel_failed`, and all failures are raised together
-    as an `ExceptionGroup` after the last leg.
+    recorded as `cancel_failed`, and all failures (and any lost audit
+    record, `AuditRecordLost`) are raised together as an `ExceptionGroup`
+    after the last leg.
+
+    Plan 20-11 (D-17): each leg is queried by its algo client id after its cancel
+    and the result is returned as `{role: CancelVerdict}` (roles are the `OrderRole`
+    values STOP_LOSS, TAKE_PROFIT_1, TAKE_PROFIT_2). `post_cancel` is journaled only
+    for CANCELED; any other verdict journals `cancel_unverified` with that verdict.
+    A STOP_LOSS verdict of GONE_NOT_CANCELED, FILLED-like or UNKNOWN is the caller's
+    signal that the stop did not rest where it was expected: the caller decides
+    (the coordinator sweep logs it), this function only reports. Callers that ignored
+    the old `None` return keep working. If a leg raises, no map is returned (the group
+    is).
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -2073,60 +2652,54 @@ async def cancel_untriggered_protectives(
         adapter: The Protocol-typed adapter surface.
         journal: The journal layer (duck-typed `.record(event)`).
         now_utc: The current UTC-aware datetime (injected).
+        spill: Optional local spill that keeps the audit records while the
+            journal is down.
+
+    Returns:
+        The verdict of every leg, keyed by role.
 
     Raises:
-        ExceptionGroup: one or more leg cancels failed (all legs were
-            still attempted).
+        ExceptionGroup: one or more leg cancels failed or lost an audit record
+            (all legs were still attempted).
     """
     _require_live5_symbol(symbol)
     errors: list[Exception] = []
+    verdicts: dict[str, CancelVerdict] = {}
     for role in (
         OrderRole.STOP_LOSS.value,
         OrderRole.TAKE_PROFIT_1.value,
         OrderRole.TAKE_PROFIT_2.value,
     ):
         client_algo_id = derive_algo_client_id(plan_hash=plan_hash, role=role)
-        journal.record(
-            _build_cancel_event(
-                event_type="PROTECTIVE_CANCEL",
-                entity_type="OpenAlgoOrder",
-                identifier=client_algo_id,
-                symbol=symbol,
-                trigger_reason=role,
-                phase="pre_cancel",
-                now_utc=now_utc,
-            )
-        )
-        try:
+
+        async def cancel(client_algo_id: str = client_algo_id) -> None:
             await adapter.cancel_algo_order(symbol=symbol, client_algo_id=client_algo_id)
-        except Exception as exc:  # noqa: BLE001 — isolate, journal, raise as group
-            errors.append(exc)
-            journal.record(
-                _build_cancel_event(
-                    event_type="PROTECTIVE_CANCEL",
-                    entity_type="OpenAlgoOrder",
-                    identifier=client_algo_id,
-                    symbol=symbol,
-                    trigger_reason=role,
-                    phase="cancel_failed",
-                    now_utc=now_utc,
-                    error_type=type(exc).__name__,
-                )
-            )
-            continue
-        journal.record(
-            _build_cancel_event(
+
+        async def verify(
+            detail: CancelDetail, client_algo_id: str = client_algo_id
+        ) -> CancelVerdict:
+            return await confirm_algo_cancel(adapter, client_algo_id=client_algo_id, detail=detail)
+
+        try:
+            verdict = await _cancel_then_audit(
+                action=cancel,
+                spill=spill,
+                journal=journal,
                 event_type="PROTECTIVE_CANCEL",
                 entity_type="OpenAlgoOrder",
                 identifier=client_algo_id,
                 symbol=symbol,
                 trigger_reason=role,
-                phase="post_cancel",
                 now_utc=now_utc,
+                verify=verify,
             )
-        )
+        except Exception as exc:  # noqa: BLE001 — isolate, record, raise as group
+            errors.append(exc)
+        else:
+            verdicts[role] = CancelVerdict.UNKNOWN if verdict is None else verdict
     if errors:
         raise ExceptionGroup("cancel_untriggered_protectives: cancel incomplete", errors)
+    return verdicts
 
 
 # --------------------------------------------------------------------------- #
@@ -2144,6 +2717,112 @@ def safe_mode_freeze(*, safe_mode_controller: Any, reason: str, now_utc: datetim
     safe_mode_controller.enter_safe_mode(reason=reason, now_utc=now_utc)
 
 
+_PROTECTIVE_ROLES: tuple[str, ...] = (
+    OrderRole.STOP_LOSS.value,
+    OrderRole.TAKE_PROFIT_1.value,
+    OrderRole.TAKE_PROFIT_2.value,
+)
+
+# PROTECTIVES_KEPT reason codes (Phase 20 plan 20-11, D-09).
+KEEP_FIRST_READ_NONZERO = "FIRST_READ_NONZERO"
+KEEP_SECOND_READ_NONZERO = "SECOND_READ_NONZERO"
+KEEP_READ_FAILED = "READ_FAILED"
+KEEP_ENTRY_NOT_TERMINAL = "ENTRY_NOT_TERMINAL"
+# Plan 20-27 (20-REVIEW WR-A3): the entry is PARTIALLY_FILLED and can still fill; a FILLED entry
+# is terminal and no longer keeps the legs.
+KEEP_ENTRY_PARTIALLY_FILLED = "ENTRY_PARTIALLY_FILLED"
+
+
+async def _read_symbol_exposure(adapter: ExecutionAdapter, symbol: str) -> Decimal | None:
+    """The absolute open position of `symbol` from ONE fresh REST read; None if unreadable.
+
+    Every row for the symbol must carry a `Decimal` `position_amt`; a failed call, a result that
+    is not iterable, a row with a missing or non-Decimal amount are all "unreadable" (fail
+    closed). Hedge-mode rows (LONG and SHORT) add up: any non-zero row is exposure.
+    """
+    try:
+        rows = await adapter.snapshot_positions(symbol=symbol)
+        total = Decimal(0)
+        for row in rows:
+            if getattr(row, "symbol", None) != symbol:
+                continue
+            amount = getattr(row, "position_amt", None)
+            if not isinstance(amount, Decimal):
+                return None
+            total += abs(amount)
+    except Exception:  # noqa: BLE001 - any failure of the read means "unreadable", fail closed
+        return None
+    return total
+
+
+async def _protectives_keep_reason(
+    adapter: ExecutionAdapter,
+    symbol: str,
+    entry_verdict: CancelVerdict | None,
+    entry_client_order_id: str,
+) -> str | None:
+    """None only when the protective legs may be cancelled; otherwise the reason code (D-09).
+
+    Two independent fresh position reads, in sequence, must both be zero, and the entry must be
+    terminal: its post-cancel verdict is CANCELED or GONE_NOT_CANCELED, or it FILLED. The second
+    read is not made once the first one already refuses.
+
+    A FILLED entry is terminal (WR-07 ordering rule; 20-REVIEW WR-A3). Its verdict is
+    FILLED_OR_PARTIAL, which also covers PARTIALLY_FILLED, an entry that can still fill, so the
+    status is read once more after the two flat reads: only an exact FILLED (or an entry that is
+    gone by now) lets the legs go. A failed or unreadable query keeps them (ENTRY_NOT_TERMINAL).
+    """
+    first = await _read_symbol_exposure(adapter, symbol)
+    if first is None:
+        return KEEP_READ_FAILED
+    if first != 0:
+        return KEEP_FIRST_READ_NONZERO
+    second = await _read_symbol_exposure(adapter, symbol)
+    if second is None:
+        return KEEP_READ_FAILED
+    if second != 0:
+        return KEEP_SECOND_READ_NONZERO
+    if entry_verdict in PROVEN_GONE:
+        return None
+    if entry_verdict is CancelVerdict.FILLED_OR_PARTIAL:
+        detail = CancelDetail()
+        again = await confirm_entry_cancel(
+            adapter, symbol=symbol, client_order_id=entry_client_order_id, detail=detail
+        )
+        if again in PROVEN_GONE or (
+            again is CancelVerdict.FILLED_OR_PARTIAL and detail.observed_status == "FILLED"
+        ):
+            return None
+        if again is CancelVerdict.FILLED_OR_PARTIAL:
+            return KEEP_ENTRY_PARTIALLY_FILLED
+    return KEEP_ENTRY_NOT_TERMINAL
+
+
+def _build_manual_close_event(
+    *, event_type: str, plan_hash: str, payload: dict[str, Any], now_utc: datetime
+) -> JournalEvent:
+    """One manual-close audit event (PROTECTIVES_KEPT, MANUAL_CLOSE_ORPHAN_UNVERIFIED).
+
+    The payload carries codes, verdict values and the symbol only; no exception text.
+    """
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return JournalEvent(
+        journal_event_id=content_hash_event_id(
+            prefix=event_type.lower(),
+            event_type=event_type,
+            entity_id=plan_hash,
+            occurred_at_utc=now_utc,
+            payload_json=payload_json,
+        ),
+        occurred_at_utc=now_utc,
+        event_type=event_type,
+        entity_type="TradePlan",
+        entity_id=plan_hash,
+        correlation_id="execution_manual_close",
+        payload_json=payload_json,
+    )
+
+
 async def emergency_manual_close(
     *,
     plan_hash: str,
@@ -2154,37 +2833,50 @@ async def emergency_manual_close(
     safe_mode_controller: Any,
     operator_id: str,
     now_utc: datetime,
+    spill: LocalSpill | None = None,
+    alert_sink: Any | None = None,
 ) -> None:
     """Run the EXECUTION_SPEC §11 manual emergency control sequence.
 
     Per EXECUTION_SPEC §11, the tool must provide a safe way to: cancel
     pending strategy orders, disable new live orders, close strategy-
     generated positions per explicit operator action, and switch to
-    SAFE_MODE. This function runs all four, in fixed order (never
-    reordered) — BLOCKING FIRST (09-REVIEW CR-10), so no cancel failure
+    SAFE_MODE. EXECUTION_SPEC §11 also says that cancelling a protective stop is never
+    part of any of these controls. This function therefore never removes the stop
+    of a position that is, or may still be, open (Phase 20 plan 20-11, D-09, RISK-03,
+    EXEC-06). Fixed order, BLOCKING FIRST (09-REVIEW CR-10), so no cancel failure
     can ever leave new entries enabled:
 
       1. `enablement.disable(...)` — flip `LIVE_ORDERS_DISABLED` back
-         to true (journal-first, per `LiveEnablementController`).
+         to true (acts first, journals afterwards, per `LiveEnablementController`).
       2. `safe_mode_freeze(...)` — enter SAFE_MODE so monitoring and
          reconciliation continue while entries stay blocked.
       3. `expire_pending_entry` (trigger_reason="operator_close") —
-         cancel the pending LIMIT entry, if any.
-      4. `cancel_untriggered_protectives` — cancel the SL/TP1/TP2 algo
-         legs, if any.
+         cancel the pending LIMIT entry, if any, and keep its post-cancel verdict (D-17).
+      4. Two independent fresh `snapshot_positions(symbol=...)` reads, in sequence.
+      5. ONLY when both reads succeeded with a zero amount AND the entry is terminal (the
+         verdict is CANCELED or GONE_NOT_CANCELED, or the entry FILLED, which a further status
+         read confirms; a PARTIALLY_FILLED entry is not terminal):
+         `cancel_untriggered_protectives` (each leg verified), then each leg is queried again.
+         A leg that is not CANCELED or GONE_NOT_CANCELED journals
+         `MANUAL_CLOSE_ORPHAN_UNVERIFIED`; SAFE_MODE stays in force.
+      6. Otherwise no protective leg is cancelled and `PROTECTIVES_KEPT` is journaled with
+         a reason code (FIRST_READ_NONZERO, SECOND_READ_NONZERO, READ_FAILED,
+         ENTRY_PARTIALLY_FILLED or ENTRY_NOT_TERMINAL).
 
     Every step is isolated: a failure in any step never prevents the
     later steps from running. All failures are raised together as one
     `ExceptionGroup` after the full sequence ran (each cancel failure is
-    also journaled by the step itself).
+    also journaled by the step itself). This control never leaves SAFE_MODE and never
+    changes the status of a TradePlan: an executed plan stays APPROVED (D-09, G4-036).
 
-    Closing the strategy-generated POSITION itself (vs. its pending
-    orders) is an operator-directed exchange action outside this
-    function's adapter surface (`ExecutionAdapter` has no
-    close-position method) — the operator closes the position through
-    the exchange UI/API directly; this function's job is to make that
-    safe by cancelling every order that could otherwise fight the
-    manual close.
+    Closing the strategy-generated POSITION itself is an operator-directed exchange action
+    outside this function's adapter surface (`ExecutionAdapter` has no close-position method):
+    the operator closes it with `operator_close_position` (plan 20-17) or on the exchange,
+    and the legs are removed afterwards by the reconciler's orphan sweeper or by a second call
+    of this control once the position is flat (two fresh zero reads and a FILLED or otherwise
+    terminal entry; plan 20-27 made that second call work for a filled plan). This control never
+    cancels a protecting stop.
 
     Args:
         plan_hash: The 64-char SHA-256 plan hash.
@@ -2199,6 +2891,12 @@ async def emergency_manual_close(
         operator_id: The operator id performing the manual close
             (audit-trail discipline — never empty).
         now_utc: The current UTC-aware datetime (injected).
+        spill: Optional local spill passed to the cancel steps and the two audit events (the
+            enablement controller holds its own). None of the steps waits for the journal
+            (D-16, F-702).
+        alert_sink: Optional operator-alert sink (`.alert(...)` call shape). When the legs could
+            not be proven gone it alerts `MANUAL_CLOSE_ORPHAN_UNVERIFIED` (D-09); best-effort,
+            a failing sink never changes the sequence.
 
     Raises:
         ExceptionGroup: one or more steps failed (every step was still
@@ -2221,35 +2919,143 @@ async def emergency_manual_close(
     except Exception as exc:  # noqa: BLE001 — isolate; cancels must still run
         errors.append(exc)
 
-    # Steps 3-4: cancel pending strategy orders, each step isolated.
+    def record_event(event_type: str, payload: dict[str, Any]) -> None:
+        try:
+            record_after(
+                spill=spill,
+                journal=journal,
+                event=_build_manual_close_event(
+                    event_type=event_type, plan_hash=plan_hash, payload=payload, now_utc=now_utc
+                ),
+            )
+        except AuditRecordLost as lost:
+            errors.append(lost)
+
+    # Step 3: cancel the pending entry and keep what the exchange shows afterwards.
+    entry_verdict: CancelVerdict | None = None
     try:
-        await expire_pending_entry(
+        entry_verdict = await expire_pending_entry(
             plan_hash=plan_hash,
             symbol=symbol,
             adapter=adapter,
             journal=journal,
             now_utc=now_utc,
             trigger_reason="operator_close",
+            spill=spill,
         )
-    except Exception as exc:  # noqa: BLE001 — isolate; protectives must still be canceled
-        errors.append(exc)
-    try:
-        await cancel_untriggered_protectives(
-            plan_hash=plan_hash,
+    except AuditRecordLost as lost:
+        # The cancel succeeded and was verified, but its audit record could not be kept, which
+        # discarded the verdict with the exception. The exchange decides, not the journal: ask
+        # again (D-16, D-17) rather than keep the legs only because the journal is down.
+        errors.append(lost)
+        entry_verdict = await confirm_entry_cancel(
+            adapter,
             symbol=symbol,
-            adapter=adapter,
-            journal=journal,
-            now_utc=now_utc,
+            client_order_id=derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value),
         )
-    except Exception as exc:  # noqa: BLE001 — collected below
+    except Exception as exc:  # noqa: BLE001 — isolate; the position reads must still run
         errors.append(exc)
+
+    # Steps 4-6: the protective legs go only with proof that nothing is left to protect.
+    keep_reason = await _protectives_keep_reason(
+        adapter,
+        symbol,
+        entry_verdict,
+        derive_client_order_id(plan_hash=plan_hash, role=OrderRole.ENTRY.value),
+    )
+    if keep_reason is not None:
+        record_event(
+            "PROTECTIVES_KEPT",
+            {
+                "symbol": symbol,
+                "reason_code": keep_reason,
+                "entry_verdict": "NONE" if entry_verdict is None else entry_verdict.value,
+            },
+        )
+    else:
+        try:
+            await cancel_untriggered_protectives(
+                plan_hash=plan_hash,
+                symbol=symbol,
+                adapter=adapter,
+                journal=journal,
+                now_utc=now_utc,
+                spill=spill,
+            )
+        except Exception as exc:  # noqa: BLE001 — collected below; the legs are re-queried anyway
+            errors.append(exc)
+        legs: dict[str, str] = {}
+        for role in _PROTECTIVE_ROLES:
+            leg_verdict = await confirm_algo_cancel(
+                adapter, client_algo_id=derive_algo_client_id(plan_hash=plan_hash, role=role)
+            )
+            legs[role] = leg_verdict.value
+        if any(CancelVerdict(v) not in PROVEN_GONE for v in legs.values()):
+            # SAFE_MODE was entered in step 2 and nothing here leaves it.
+            record_event("MANUAL_CLOSE_ORPHAN_UNVERIFIED", {"symbol": symbol, "legs": legs})
+            if alert_sink is not None:
+                try:
+                    alert_sink.alert(
+                        event=ALERT_MANUAL_CLOSE_ORPHAN_UNVERIFIED,
+                        subject=symbol,
+                        reason="LEGS_NOT_PROVEN_GONE",
+                        now_utc=now_utc,
+                        plan_hash=plan_hash,
+                        symbol=symbol,
+                    )
+                except Exception:  # noqa: BLE001, S110 - the journal row and SAFE_MODE exist
+                    pass
 
     if errors:
         raise ExceptionGroup("emergency_manual_close: sequence incomplete", errors)
 
 
+async def operator_close_position(
+    *, coordinator: ProtectionCoordinator, plan_hash: str, operator_id: str
+) -> OperatorControlResult:
+    """EXEC-06 control: close a strategy position on an explicit operator action (D-26).
+
+    A thin wrapper: the close goes through the protection coordinator's own flow (plan moves to
+    CLOSE_REQUIRED with branch OPERATOR_CLOSE; reduce-only MARKET sized by the closer from a REST
+    read; FLAT only after two zero reads with the entry terminal; protective legs swept only
+    after FLAT), so a human close follows the same rules as the automatic one (D-06, D-16).
+    This function has no adapter call of its own and never names a quantity.
+    """
+    return await coordinator.operator_close(plan_hash=plan_hash, operator_id=operator_id)
+
+
+async def operator_protect_position(
+    *, coordinator: ProtectionCoordinator, plan_hash: str, operator_id: str
+) -> OperatorControlResult:
+    """EXEC-06 control: re-place protection on an explicit operator action (D-26, D077).
+
+    A thin wrapper with NO placement of its own. The coordinator runs its own per-plan step once
+    for a plan whose stop was never confirmed (the same-id re-place at the plan stop price after
+    a definitive absence, escalation at ``max_unprotected_ms``), adopts an ACTIVE stop in a
+    confirmed state, and refuses with nothing sent after a confirmed stop was lost, in
+    CLOSE_REQUIRED / CLOSE_FAILED, on an unknown stop history and on an unreadable, zero or
+    wrong-sided position. The D077-compatible human action for the stop-lost branch is
+    ``operator_close_position``.
+    """
+    return await coordinator.operator_protect(plan_hash=plan_hash, operator_id=operator_id)
+
+
+# EXEC-06 (plan 20-17, D-26): the five manual emergency controls, control name -> dotted path of
+# the callable. One test imports each of them; a new control is added here and in that test.
+EXEC06_CONTROLS: Mapping[str, str] = MappingProxyType(
+    {
+        "cancel_pending_strategy_orders": "src.execution.manager.expire_pending_entry",
+        "disable_new_entries": "src.execution.enablement.LiveEnablementController.disable",
+        "close_strategy_positions": "src.execution.manager.operator_close_position",
+        "replace_protection": "src.execution.manager.operator_protect_position",
+        "enter_safe_mode": "src.execution.manager.safe_mode_freeze",
+    }
+)
+
+
 __all__ = [
     "APPROVED_QUANTITY_NOT_CONFIRMED",
+    "EXEC06_CONTROLS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
     "resolve_position_mode",
@@ -2265,4 +3071,6 @@ __all__ = [
     "cancel_untriggered_protectives",
     "safe_mode_freeze",
     "emergency_manual_close",
+    "operator_close_position",
+    "operator_protect_position",
 ]

@@ -1,0 +1,38 @@
+# Host freeze tick with an S3 witness (quick task 261114-12e). Owner decision 16-DEC-HOST-TICK
+# (decisions/16-DEC-HOST-TICK.md), which amends 16-DEC-O-01 with a least-privilege host
+# credential; RUNBOOK 20.10. Installed by
+# `deploy/freeze-witness.sh --install-timer --soak-env-file PATH`, which substitutes the checkout
+# directory, the credential file path, the soak env file, the schedule cron of the freeze workflow
+# and the timer minute for the tokens below.
+# One run executes `python -m src.paper.freeze --check --from-allowlist` in the image of the
+# running paper container, on a scratch copy of the pinned epoch (docker run --rm, no network, a
+# read-only root, only the scratch directory mounted), and uploads the exact line it wrote,
+# create-only, to the S3 witness prefix. Lateness is decided by the S3 server time of that object,
+# never by this host's clock: the grace of 1800 s, the slot grid and D065 item 4 are unchanged.
+# There is no catch-up on purpose: a late object is a late tick, and a failed upload is never
+# re-sent.
+# The witness credential is a secret of its own, never the export credential: it lives in a
+# root-only file, and systemd hands this unit a private copy of it as the credential
+# `freeze-witness`. It can only create objects under one witness prefix.
+# There is deliberately no link to the paper runtime or any other unit (no dependency, restart or
+# failure hook): a failed tick only fails this oneshot (`systemctl status
+# trading-soak-freeze-witness`). User must be the operator account that is in the docker group
+# (deploy/bootstrap.sh creates `trading`).
+[Unit]
+Description=Trading soak project: host freeze tick with an S3 witness
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=trading
+WorkingDirectory=@TRADING_DIR@
+LoadCredential=freeze-witness:@CREDENTIAL_FILE@
+Environment=TRADING_ENV_FILE=@SOAK_ENV_FILE@
+Environment="FREEZE_WITNESS_SCHEDULE=@SCHEDULE@"
+RuntimeDirectory=trading-freeze-witness
+RuntimeDirectoryMode=0700
+# STRUCTURAL: a hung step must not hold the oneshot forever; each docker and curl step also has its
+# own transport bound inside the script.
+TimeoutStartSec=15min
+ExecStart=/usr/bin/env bash @TRADING_DIR@/deploy/freeze-witness.sh

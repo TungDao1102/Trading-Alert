@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -58,8 +58,12 @@ from tenacity import (
 from src.adapters.telegram_notify import (
     TelegramBot,
     build_simulate_keyboard,
+    format_presentation_time,
+    render_money_block,
+    require_money_consistent,
     send_simulate,
 )
+from src.risk.money_at_stake import MoneyAtStake
 
 log = structlog.get_logger()
 
@@ -136,15 +140,21 @@ def format_simulate(
     reason_codes: list[str],
     signal_id: str,
     detected_at_utc: datetime,
+    approved_quantity: Decimal,
+    money: MoneyAtStake,
 ) -> str:
-    """Render the SIMULATE notification text with all 12 APRV-01 fields.
+    """Render the SIMULATE notification text: 12 APRV-01 fields, the quantity and the money.
 
     Per D-05 + TELEGRAM.md §4: the message carries exactly the 12
     fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
     percentage, expiry, invalidation, current exposure, reason codes).
     All Decimal values are formatted via `str()` preserving full
-    precision (D-12). Timestamps are UTC ISO with the
-    `Asia/Ho_Chi_Minh` display-edge note.
+    precision (D-12). Since Phase 23 (D-14, owner O-3 answered 2026-10-30) the two
+    times are shown as `YYYY-MM-DD HH:MM:SS +07 (YYYY-MM-DD HH:MM:SS UTC)`
+    (`format_presentation_time`), the message carries no
+    display-zone note, and it carries the `Quantity:` line and the money block
+    (`render_money_block`, D-13) exactly as the DEMO/LIVE request does. The money
+    must agree with the quantity, stop and take-profits (ValueError otherwise).
 
     The text is byte-stable: same inputs produce the same output
     (D-02 determinism). The format is a multi-line string with one
@@ -173,24 +183,35 @@ def format_simulate(
             raise TypeError(f"{field_name} must be datetime, got {type(value).__name__}")
         if value.tzinfo is None:
             raise ValueError(f"{field_name} must be UTC-aware, got naive datetime")
+    require_money_consistent(
+        money,
+        direction=direction,
+        approved_quantity=approved_quantity,
+        entry_min=entry_min,
+        entry_max=entry_max,
+        stop_loss=stop_loss,
+        take_profits=take_profits,
+    )
     tp_lines = "\n".join(
         f"  TP{idx + 1}: {price} ({fraction})" for idx, (price, fraction) in enumerate(take_profits)
     )
+    money_lines = "\n".join(render_money_block(money))
     reasons = ", ".join(reason_codes) if reason_codes else "(none)"
     return (
         f"SIMULATE {symbol} {direction} {setup}\n"
         f"Signal: {signal_id}\n"
-        f"Detected: {detected_at_utc.astimezone(UTC).isoformat()}\n"
+        f"Detected: {format_presentation_time(detected_at_utc)}\n"
         f"Entry: {entry_min}–{entry_max}\n"
+        f"Quantity: {format(approved_quantity, 'f')}\n"
+        f"{money_lines}\n"
         f"SL: {stop_loss}\n"
         f"TPs:\n{tp_lines}\n"
         f"R:R: {rr}\n"
         f"Risk: {risk_pct}\n"
-        f"Expiry: {expiry_utc.astimezone(UTC).isoformat()}\n"
+        f"Expiry: {format_presentation_time(expiry_utc)}\n"
         f"Invalidation: {invalidation}\n"
         f"Exposure: {exposure_quote} quote\n"
-        f"Reasons: {reasons}\n"
-        f"Display: Asia/Ho_Chi_Minh (UTC internally)"
+        f"Reasons: {reasons}"
     )
 
 
@@ -227,7 +248,8 @@ async def notify_simulate(
     Args:
         bot: The Telegram bot (injected; tests use a fake).
         chat_id: The authorized chat id (operator-provisioned).
-        payload: The 12-field payload dict (see `format_simulate`).
+        payload: The 12-field payload dict plus `approved_quantity` and `money` (see
+            `format_simulate`); a payload without them is a FAILED outcome, attempts 0.
         on_outcome: Callback invoked with the NotifyOutcome after
             the send completes (success or failure).
 
@@ -252,6 +274,8 @@ async def notify_simulate(
             reason_codes=payload["reason_codes"],
             signal_id=payload["signal_id"],
             detected_at_utc=payload["detected_at_utc"],
+            approved_quantity=payload["approved_quantity"],
+            money=payload["money"],
         )
         keyboard = build_simulate_keyboard(payload["signal_id"])
         signal_id = payload["signal_id"]

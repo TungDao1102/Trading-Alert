@@ -1,0 +1,13 @@
+{
+  "case_id": "isolated_position_liquidation_price",
+  "index": 2,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_algo_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

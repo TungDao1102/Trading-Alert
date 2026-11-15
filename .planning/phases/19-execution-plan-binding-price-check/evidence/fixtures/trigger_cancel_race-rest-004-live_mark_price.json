@@ -1,0 +1,15 @@
+{
+  "case_id": "trigger_cancel_race",
+  "index": 4,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "live_mark_price",
+    "summary": {
+      "exchange_time_utc": "2026-10-23T14:07:40+00:00",
+      "mark_price": "81870.27903986",
+      "symbol": "BTCUSDT"
+    }
+  }
+}

@@ -52,6 +52,7 @@ from src.paper.market_inputs import ConstraintProvider, make_context_factory
 from src.paper.pipeline import BarPipeline, PipelineResult
 from src.paper.replay_inputs import (
     HistoryEntry,
+    ReplayInputsError,
     context_digest,
     context_from_inputs,
     rebuild_context,
@@ -76,6 +77,7 @@ from src.paper.vocabulary import RuntimeEventType, SourceTag, TaggedBar
 from src.persistence.engine import make_sync_engine
 from src.persistence.paper_runtime_state import PgRuntimeState
 from src.persistence.uow import OperationalDatabase
+from src.risk.portfolio import RATE_THRESHOLD_KEYS, resolve_absolute_thresholds
 from src.risk.types import OpenPosition
 
 from tests.test_paper_decision_surface import (
@@ -109,10 +111,27 @@ class RiskDouble:
     """The in-test risk-inputs port: fixed positions and daily loss, never a default in src."""
 
     def __init__(
-        self, positions: Sequence[OpenPosition] = (), daily_loss: Decimal | None = Decimal("0")
+        self,
+        positions: Sequence[OpenPosition] = (),
+        daily_loss: Decimal | None = Decimal("0"),
+        *,
+        equity: Decimal | None = None,
+        threshold_equity: Decimal | None = None,
     ) -> None:
         self.positions = tuple(positions)
         self.daily_loss = daily_loss
+        self.equity = equity
+        self.threshold_equity = threshold_equity
+        # `World` attaches the parameter set and the fixture equity once it has loaded them.
+        self.params: Mapping[str, Any] | None = None
+        self.fixture_equity: Decimal | None = None
+
+    def equity_and_thresholds(self, at_utc: datetime) -> tuple[Decimal, dict[str, Any]]:
+        """The sizing equity and the absolute thresholds (the ledger's view at the close)."""
+        assert self.params is not None and self.fixture_equity is not None
+        equity = self.fixture_equity if self.equity is None else self.equity
+        base = equity if self.threshold_equity is None else self.threshold_equity
+        return equity, resolve_absolute_thresholds(parameter_set=self.params, equity=base)
 
     def open_positions(self, at_utc: datetime) -> Sequence[OpenPosition]:
         return self.positions
@@ -177,6 +196,8 @@ class World:
         self.case = self.fx.case
         self.parameter_set: ParameterSet = self.fx.parameter_set
         self.risk = risk or RiskDouble()
+        self.risk.params = self.parameter_set.params
+        self.risk.fixture_equity = Decimal(self.case["account_state"]["equity"])
         self.state = state or InMemoryRuntimeState()
         self.started_at = self.fx.now - timedelta(minutes=1)
         observed = self.fx.setup[0].open_time_utc
@@ -354,7 +375,7 @@ def test_the_replay_inputs_record_carries_what_the_risk_stage_read() -> None:
     assert runtime_event_id(inputs) != runtime_event_id(heartbeat)
 
     payload = json.loads(inputs.payload_json)
-    assert payload["schema"] == "paper-replay-inputs/1"
+    assert payload["schema"] == "paper-replay-inputs/2"
     assert set(payload) >= {
         "schema",
         "strategy_version",
@@ -362,6 +383,7 @@ def test_the_replay_inputs_record_carries_what_the_risk_stage_read() -> None:
         "cost_model_hash",
         "constraint_snapshot",
         "account_state",
+        "absolute_thresholds",
         "open_positions",
         "daily_loss_quote",
         "ttl_seconds",
@@ -372,6 +394,11 @@ def test_the_replay_inputs_record_carries_what_the_risk_stage_read() -> None:
     }
     assert payload["parameter_set_hash"] == world.parameter_set.parameter_set_hash
     assert payload["account_state"] == {"equity": "10000.00", "risk_rate": "0.005"}
+    resolved = resolve_absolute_thresholds(
+        parameter_set=world.parameter_set.params, equity=Decimal("10000.00")
+    )
+    assert payload["absolute_thresholds"] == {k: str(resolved[k]) for k in RATE_THRESHOLD_KEYS}
+    assert set(payload["absolute_thresholds"]) == set(RATE_THRESHOLD_KEYS)
     assert payload["constraint_snapshot"]["min_notional"] == "50"
     assert payload["constraint_snapshot"]["symbol"] == SYMBOL
     assert payload["open_positions"] == [
@@ -489,6 +516,71 @@ def test_context_from_inputs_rebuilds_the_live_context_exactly() -> None:
     )
     assert context_digest(context) == json.loads(inputs.payload_json)["context_digest"]
     assert context.ttl == timedelta(seconds=30 * ONE_DAY)
+
+
+def test_a_sizing_equity_off_the_day_start_base_replays_with_zero_differences(
+    tmp_path: Path,
+) -> None:
+    """16-DEC-EQUITY-BASE: the sizing equity is the current ledger equity, the thresholds are
+    the day-start ones; the record carries both so the replay rebuilds the live digest."""
+    world = World(risk=RiskDouble(equity=Decimal("9990.00"), threshold_equity=Decimal("10000.00")))
+    world.run_tracer_session()
+    [inputs] = world.records(RuntimeEventType.PAPER_REPLAY_INPUTS)
+    payload = json.loads(inputs.payload_json)
+
+    criterion = world.parity(world.bundle(tmp_path / "bundle"))
+    assert criterion.passed, criterion.evidence
+    assert payload["account_state"]["equity"] == "9990.00"
+    cap_rate = Decimal(str(world.parameter_set.params["cluster_cap"]))
+    assert payload["absolute_thresholds"]["cluster_cap"] == str(cap_rate * Decimal("10000.00"))
+    context = context_from_inputs(payload, symbol=SYMBOL, parameter_set=world.parameter_set)
+    assert context_digest(context) == payload["context_digest"]
+
+
+def test_a_schema_1_record_still_rebuilds_with_the_derivation_that_wrote_it() -> None:
+    world = World()
+    world.run_tracer_session()
+    [inputs] = world.records(RuntimeEventType.PAPER_REPLAY_INPUTS)
+    payload = json.loads(inputs.payload_json)
+    legacy = {k: v for k, v in payload.items() if k != "absolute_thresholds"}
+    legacy["schema"] = "paper-replay-inputs/1"
+
+    context = context_from_inputs(legacy, symbol=SYMBOL, parameter_set=world.parameter_set)
+
+    assert context_digest(context) == payload["context_digest"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p.pop("absolute_thresholds"),
+        lambda p: p["absolute_thresholds"].pop("cluster_cap"),
+        lambda p: p["absolute_thresholds"].update({"extra": "1"}),
+        lambda p: p.update({"absolute_thresholds": "10"}),
+    ],
+    ids=["missing-group", "missing-key", "extra-key", "not-an-object"],
+)
+def test_a_schema_2_record_with_a_malformed_threshold_group_is_refused(
+    mutate: Callable[[dict[str, Any]], object],
+) -> None:
+    world = World()
+    world.run_tracer_session()
+    [inputs] = world.records(RuntimeEventType.PAPER_REPLAY_INPUTS)
+    payload = json.loads(inputs.payload_json)
+    mutate(payload)
+
+    with pytest.raises(ReplayInputsError, match="absolute_thresholds"):
+        context_from_inputs(payload, symbol=SYMBOL, parameter_set=world.parameter_set)
+
+
+def test_any_other_replay_inputs_schema_is_refused() -> None:
+    world = World()
+    world.run_tracer_session()
+    [inputs] = world.records(RuntimeEventType.PAPER_REPLAY_INPUTS)
+    payload = {**json.loads(inputs.payload_json), "schema": "paper-replay-inputs/3"}
+
+    with pytest.raises(ReplayInputsError, match="schema"):
+        context_from_inputs(payload, symbol=SYMBOL, parameter_set=world.parameter_set)
 
 
 def test_decision_surface_is_unchanged_and_the_context_is_resolved_after_the_gates() -> None:

@@ -25,8 +25,18 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_streams import (
 
 from tests.paper_ws_fakes import FakeSdkWsClient, FakeStreamHandle
 
-_CLIENT_COROUTINES = ("create_connection", "kline_candlestick_streams", "close_connection")
-_CLIENT_SIGNATURES = ("kline_candlestick_streams", "close_connection", "on_connection")
+_CLIENT_COROUTINES = (
+    "create_connection",
+    "kline_candlestick_streams",
+    "close_connection",
+    "send_message",
+)
+_CLIENT_SIGNATURES = (
+    "kline_candlestick_streams",
+    "close_connection",
+    "on_connection",
+    "send_message",
+)
 
 
 def _params(fn: Any) -> list[str]:

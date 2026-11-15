@@ -178,7 +178,7 @@ Tệp này sẽ trở thành `/opt/trading/.env` (quyền 0600, chủ là user `
 - Mọi giá trị chứa chữ `change_me` bị từ chối. `.env.example` có chữ này ở `POSTGRES_PASSWORD` và `DATABASE_URL`, nên bạn phải thay mật khẩu và sửa hoặc bỏ dòng `DATABASE_URL`. Compose tự dựng `DATABASE_URL` cho các service từ các biến `POSTGRES_*` (ghi chú ở đầu khối `x-database-env` trong `docker-compose.yml`); việc bỏ dòng đó đã được đọc từ file, chưa chạy thật `[CHƯA XÁC MINH]`.
 - `POSTGRES_PASSWORD` chỉ gồm chữ, số và các ký tự `.` `_` `~` `-` (an toàn trong URL), dài tối thiểu 16 ký tự. RUNBOOK nói "ví dụ chuỗi hex"; script mới là nơi quy tắc được thực thi. Hãy để trình quản lý mật khẩu sinh chuỗi này.
 - Tệp phải dùng LF; ký tự CR bị từ chối.
-- Nhóm `BACKUP_*` được điền sau khi bucket tồn tại (mục 6.1). Ví dụ phần đầu của tệp:
+- Nhóm `BACKUP_*` không nằm trong tệp này mà trong tệp `.env.backup` riêng (mẫu `.env.backup.example`, quyền 0600), điền sau khi bucket tồn tại (mục 6.1); tên Telegram của bot SHADOW nằm trong `.env.paper` (mẫu `.env.paper.example`). Ví dụ phần đầu của tệp `.env`:
 
 ```text
 POSTGRES_USER=trading
@@ -188,7 +188,7 @@ OI_POLL_INTERVAL_SECONDS=300
 IMAGE_TAG=dev
 ```
 
-Tuyệt đối không đặt `BINANCE_LIVE_*` vào tệp của máy paper/soak này (OPS-06). Khóa Binance Demo nếu có dùng tên `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET`, và tách thành tệp riêng cho máy khác.
+Tuyệt đối không đặt `BINANCE_*` (cả `BINANCE_LIVE_*` lẫn `BINANCE_DEMO_*`) vào `.env` này (OPS-06, D-29). Khóa Binance Demo, tên `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET`, nằm trong tệp `.env.live` riêng (mẫu `.env.live.example`, quyền 0600, đổi đường dẫn bằng `TRADING_LIVE_ENV_FILE`); chỉ service `live` đọc tệp đó, còn runtime paper từ chối khởi động nếu thấy một tên `BINANCE_`.
 
 #### Bước 2.6 Quyền truy cập repository [THỦ CÔNG] [CHƯA XÁC MINH]
 
@@ -214,7 +214,7 @@ Bạn cần (tạo ở mục 3.6 và 6.1): một bucket S3 riêng tư, mới và
 rclone obscure -
 ```
 
-Giữ chuỗi gốc ở trình quản lý mật khẩu cộng một bản ngoại tuyến thứ hai. Mất cụm mật khẩu thì mọi bản sao lưu không thể phục hồi (RUNBOOK 11, mục "Key custody"). Giá trị trong `.env` là kết quả `rclone obscure`, thứ có thể đảo ngược và không phải mã hóa.
+Giữ chuỗi gốc ở trình quản lý mật khẩu cộng một bản ngoại tuyến thứ hai. Mất cụm mật khẩu thì mọi bản sao lưu không thể phục hồi (RUNBOOK 11, mục "Key custody"). Giá trị trong `.env.backup` là kết quả `rclone obscure`, thứ có thể đảo ngược và không phải mã hóa.
 
 Nguồn: `docs/operations/RUNBOOK.md`, `deploy/bootstrap.sh`, `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md`, `.planning/phases/16-paper-runtime-composition/16-14-PLAN.md`
 
@@ -530,7 +530,7 @@ Bootstrap in danh sách này ở cuối. Bằng lời đơn giản:
 3. Cụm mật khẩu mã hóa sao lưu phải được giữ ngoài VPS; mất nó thì mọi bản sao lưu không thể phục hồi (mục 6).
 4. Thử phiên SSH thứ hai, kể cả `sudo -v`, trước khi đóng phiên đầu.
 5. Mã hóa ổ đĩa của nhà cung cấp phải bật hoặc được xác nhận bật.
-6. Đặt các biến `BACKUP_*` trong `/opt/trading/.env` và chạy `deploy/backup.sh --init-remote` bằng user `trading` (mục 6). Root không còn đăng nhập SSH; `trading` ở nhóm `sudo` và sudo hỏi mật khẩu. Sau đó cài timer bằng `sudo /opt/trading/deploy/backup.sh --install-timer` (lệnh cài không đọc `.env`) và dùng `sudo` cho mọi thay đổi apt, ufw hay systemctl về sau.
+6. Đặt các biến `BACKUP_*` trong `/opt/trading/.env.backup` và chạy `deploy/backup.sh --init-remote` bằng user `trading` (mục 6). Root không còn đăng nhập SSH; `trading` ở nhóm `sudo` và sudo hỏi mật khẩu. Sau đó cài timer bằng `sudo /opt/trading/deploy/backup.sh --install-timer` (lệnh cài không đọc `.env`) và dùng `sudo` cho mọi thay đổi apt, ufw hay systemctl về sau.
 7. Nhóm `docker` tương đương root: chỉ giữ một tài khoản vận hành. ufw không điều khiển các cổng do Docker công bố; chỉ công bố các cổng `127.0.0.1`.
 8. Xóa tệp bí mật đã chép khỏi máy khi `.env` đã được kiểm tra (bước 4.8).
 
@@ -856,7 +856,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `deploy/migrate.sh`, `docker-compose.yml`
 
 1. Tạo bucket mới và trống cùng một khóa truy cập chỉ có quyền trên nó (bước 3.6).
 2. Chọn một cụm mật khẩu dài và một cụm thứ hai (muối). Trên máy trạm của bạn, không bao giờ trên VPS, đổi từng cụm sang dạng obscured bằng `rclone obscure -` (đọc từ stdin để tránh lịch sử shell). rclone từ chối cụm mật khẩu thô.
-3. Đặt các biến sau vào `/opt/trading/.env` (mode 0600) bằng user `trading`. Một biến thiếu làm lệnh dừng và nêu TÊN biến, không bao giờ nêu giá trị:
+3. Đặt các biến sau vào `/opt/trading/.env.backup` (mode 0600, mẫu `.env.backup.example`) bằng user `trading`; chỉ service `backup`/`ops` và `deploy/backup.sh` đọc tệp này, collector không bao giờ thấy chúng (D-29). Một biến thiếu làm lệnh dừng và nêu TÊN biến, không bao giờ nêu giá trị:
 
 ```text
 BACKUP_S3_PROVIDER=AWS
@@ -929,7 +929,7 @@ Thứ tự: dump cơ sở dữ liệu, sao lưu Parquet, kiểm bundle với man
 
 **Chạy ở:** `[MÁY EC2]` bằng user `trading`
 
-Điều kiện: máy đã bootstrap, `.env` có cùng các giá trị `BACKUP_*` (các cụm mật khẩu obscured suy ra từ cụm thô bạn giữ ngoài VPS), và checkout ở phiên bản bạn muốn. Hãy đọc kế hoạch trước, rồi dùng `--no-start` để xem dữ liệu đã khôi phục trước khi collector chạy:
+Điều kiện: máy đã bootstrap, `.env.backup` có cùng các giá trị `BACKUP_*` (các cụm mật khẩu obscured suy ra từ cụm thô bạn giữ ngoài VPS), và checkout ở phiên bản bạn muốn. Hãy đọc kế hoạch trước, rồi dùng `--no-start` để xem dữ liệu đã khôi phục trước khi collector chạy:
 
 ```bash
 deploy/restore.sh --dry-run
@@ -1023,7 +1023,7 @@ sudo deploy/backup.sh --install-timer
 sudo deploy/backup.sh --install-soak-timer --soak-env-file /home/trading/soak.env
 ```
 
-Cờ: `--init-remote` (khởi tạo remote), `--install-timer` (cài hai unit và bật timer), `--install-soak-timer` cùng `--soak-env-file` (cài cặp unit sao lưu của project soak, kế hoạch 16-55; tệp env soak phải có `BACKUP_S3_BUCKET` riêng, khác bucket của `trading-backup`), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--init-remote` và `--install-timer` không dùng chung được. Biến môi trường `COMPOSE_PROJECT_NAME` và `TRADING_ENV_FILE` được tôn trọng.
+Cờ: `--init-remote` (khởi tạo remote), `--install-timer` (cài hai unit và bật timer), `--install-soak-timer` cùng `--soak-env-file` (cài cặp unit sao lưu của project soak, kế hoạch 16-55; tệp env soak phải có `BACKUP_S3_BUCKET` riêng, khác bucket của `trading-backup`), `--dry-run` (in kế hoạch), `-h`/`--help`. Hai cờ `--init-remote` và `--install-timer` không dùng chung được. Biến môi trường `COMPOSE_PROJECT_NAME` và `TRADING_ENV_FILE` được tôn trọng; tệp chứa các biến `BACKUP_*` là `TRADING_BACKUP_ENV_FILE` (mặc định `.env.backup` trong checkout; nếu chỉ đặt `TRADING_ENV_FILE` thì tệp đó cũng là tệp backup).
 
 **Chạy thử:** mỗi chế độ có `--dry-run` riêng, in lệnh sẽ chạy mà không chạy:
 
@@ -1121,9 +1121,9 @@ systemctl list-timers trading-backup.timer
 > - **Giải quyết vấn đề gì:** Unit `trading-backup` không đặt project nên chỉ sao lưu project `trading`; volume `trading-soak_pgdata` sẽ không được sao lưu nếu thiếu unit này (review B2-WR-07).
 > - **Mức quan trọng:** **BẮT BUỘC** trước soak dài (RUNBOOK 20.5; D061 hosts: có sao lưu trước soak dài). Bucket riêng của soak do chủ dự án tạo trước kế hoạch 16-43.
 
-**Mục đích:** unit oneshot gọi `deploy/backup.sh` với `COMPOSE_PROJECT_NAME=trading-soak` và `TRADING_ENV_FILE` là tệp env soak. Remote sao lưu không có tên project trong đường dẫn, nên project soak phải dùng một bucket riêng với mật khẩu crypt riêng; dùng chung một bucket thì hai project thành một chuỗi snapshot và quy tắc giữ lại sẽ xóa bản sao lưu hằng ngày của một trong hai.
+**Mục đích:** unit oneshot gọi `deploy/backup.sh` với `COMPOSE_PROJECT_NAME=trading-soak` và `TRADING_ENV_FILE` cùng `TRADING_BACKUP_ENV_FILE` là tệp env soak. Remote sao lưu không có tên project trong đường dẫn, nên project soak phải dùng một bucket riêng với mật khẩu crypt riêng; dùng chung một bucket thì hai project thành một chuỗi snapshot và quy tắc giữ lại sẽ xóa bản sao lưu hằng ngày của một trong hai.
 
-**Khi nào chạy:** không chạy tay. Cài một lần bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file <đường dẫn tuyệt đối>`, sau khi bucket riêng đã được khởi tạo bằng `--init-remote` cho project soak (RUNBOOK 20.5). Lệnh cài từ chối khi `BACKUP_S3_BUCKET` của tệp env soak rỗng hoặc trùng bucket của tệp `.env` của `trading-backup`, và chỉ in tên biến, không in giá trị.
+**Khi nào chạy:** không chạy tay. Cài một lần bằng `sudo deploy/backup.sh --install-soak-timer --soak-env-file <đường dẫn tuyệt đối>`, sau khi bucket riêng đã được khởi tạo bằng `--init-remote` cho project soak (RUNBOOK 20.5). Lệnh cài từ chối khi `BACKUP_S3_BUCKET` của tệp env soak rỗng hoặc trùng bucket của tệp `.env.backup` của `trading-backup`, và chỉ in tên biến, không in giá trị.
 
 **Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
 
@@ -1436,7 +1436,7 @@ Kế hoạch 16-53 thêm script bọc cho buổi diễn tập trước soak (m�
 
 **Khi nào chạy:** thay cho `docker compose` trong mọi thao tác trên máy soak (khởi động, xem trạng thái, xem nhật ký, dừng).
 
-**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; biến `TRADING_ENV_FILE` chọn tệp môi trường soak (tạo từ `deploy/soak.env.example`, đặt ngoài checkout, quyền 0600).
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout; biến `TRADING_ENV_FILE` chọn tệp môi trường soak (tạo từ `deploy/soak.env.example`, đặt ngoài checkout, quyền 0600); script này cũng trỏ `TRADING_PAPER_ENV_FILE` và `TRADING_BACKUP_ENV_FILE` vào chính tệp đó, nên soak không đọc `.env.paper` hay `.env.backup` của checkout (kế hoạch 24-36).
 
 **Lệnh:**
 
@@ -1528,6 +1528,116 @@ Mọi đối số sau đó được chuyển nguyên cho compose của project d
 
 **Không bao giờ:** dùng tệp môi trường soak cho buổi diễn tập; đặt giá trị khóa giao dịch hay token vào tệp diễn tập đưa vào git; chạy buổi diễn tập trên cơ sở dữ liệu của project soak.
 
+### Thẻ lệnh: deploy/freeze-witness.sh
+
+> - **Để làm gì:** Chạy một nhịp kiểm tra đóng băng (freeze) mỗi giờ ngay trên máy soak rồi tải đúng dòng kết quả lên S3 theo kiểu chỉ-tạo-mới, để mỗi ô giờ có thêm một nguồn thứ hai ngoài tick của GitHub.
+> - **Giải quyết vấn đề gì:** 7 trong 9 khoảng trống của trial đầu đến từ việc GitHub chạy trễ hoặc bỏ tick, và phút 17 chưa được chứng minh; nhịp của máy soak có đối tượng S3 do nhà cung cấp đóng dấu giờ máy chủ của họ, nên độ trễ không bao giờ dựa vào đồng hồ do chính máy soak tự khai.
+> - **Mức quan trọng:** **NÊN LÀM** trước lần ghim epoch kế tiếp (quyết định của chủ dự án `16-DEC-HOST-TICK`, sửa O-01 theo hướng quyền tối thiểu, ghi thành D109; RUNBOOK 20.10; mức này là đánh giá của hướng dẫn: không bắt buộc về kỹ thuật vì tick của GitHub vẫn chạy).
+
+**Mục đích:** một lần chạy lấy image của container `paper` đang chạy, chép epoch đã ghim ra thư mục tạm, rồi chạy cùng lệnh kiểm tra đóng băng của runtime trong image đó (container tạm, không có mạng, hệ thống tệp chỉ-đọc, chỉ gắn thư mục tạm). Dòng kết quả phải mang nguồn `host`, mã nhịp của lần này và lịch cron; nó được tải lên đúng nguyên byte, chỉ-tạo-mới (tiêu đề `If-None-Match: *`, băm SHA-256 của nội dung được ký), thành đối tượng `<tiền tố witness>/<epoch_id>/<ô giờ>-<mã nhịp>.jsonl`. Tiền tố witness, URL bucket và credential chỉ nằm trong credential systemd `freeze-witness`; chúng đến curl qua cấu hình trên đầu vào chuẩn, không bao giờ qua đối số, biến môi trường hay container. Script ba chế độ: một nhịp (mặc định), `--set-credential` (cất credential, chạy bằng root) và `--install-timer --soak-env-file PATH` (cài hai unit, chạy bằng root). Độ trễ của một nhịp chỉ do giờ máy chủ S3 của đối tượng quyết định; thời gian ân hạn 1800 giây, lưới ô giờ và tiêu chí không đổi.
+
+**Khi nào chạy:** nhịp chạy tự động dưới systemd (xem thẻ của hai unit), không chạy tay hằng giờ. Chạy `--set-credential` và `--install-timer` một lần, sau khi chủ dự án đã tạo credential chỉ-tạo-mới và chính sách bucket theo RUNBOOK 20.10, và trước lần ghim epoch kế tiếp. Điều kiện trước: image dựng từ một commit đã có kế hoạch A của tác vụ 261114-12e; với image cũ hơn, nhịp thoát mã 5 và không tải gì lên.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, trong checkout, user `trading` thuộc nhóm docker (nhịp) hoặc root (`--set-credential`, `--install-timer`). Cần soak đang chạy với service `paper`.
+
+**Lệnh:** cất credential (năm dòng `khóa=giá trị` nhập qua đầu vào chuẩn, không hiện lên màn hình; tên năm khóa nằm ở RUNBOOK 20.10), xem trước rồi cài timer, và kiểm tra lịch:
+
+```bash
+sudo deploy/freeze-witness.sh --set-credential
+```
+
+```bash
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run
+```
+
+```bash
+sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env
+```
+
+```bash
+systemctl list-timers trading-soak-freeze-witness.timer
+```
+
+Muốn thử một nhịp thật bằng tay, chạy unit rồi đọc nhật ký (do chủ dự án làm, vì cần credential và mạng):
+
+```bash
+sudo systemctl start trading-soak-freeze-witness.service
+```
+
+```bash
+journalctl -u trading-soak-freeze-witness
+```
+
+**Chạy thử:** `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run` in hai tệp unit sẽ ghi và các lệnh `systemctl`, không ghi gì; cờ `--dry-run` cũng dùng được với `--set-credential` (kiểm tra đầu vào, không ghi tệp) và với một nhịp (in kế hoạch, không gọi docker hay curl, nhưng vẫn kiểm tra credential và lịch).
+
+**Dấu hiệu thành công:** nhật ký có dòng `witness: created <epoch_id>/<ô giờ>-<mã nhịp>.jsonl (clean)` và không chứa URL, khóa hay giá trị nào của credential; `SKIPPED` hoặc `REGISTRY_DIFF` ở cuối dòng là kết quả hợp lệ của nhịp đó. Việc đối tượng thật sự xuất hiện trong bucket và được bộ xuất đọc lại chỉ máy thật mới chứng minh được: `[ĐÃ XÂY]` `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** 0 đã tải lên, kết quả `clean` hoặc `SKIPPED` (hoặc chạy thử). 1 nhịp không chạy được: không có container paper, không có epoch ghim hoặc không có dòng kết quả. 2 sai cách dùng, lịch `FREEZE_WITNESS_SCHEDULE` không phải cron mỗi giờ, hoặc đang chạy dưới xtrace. 3 đã tải lên một dòng `REGISTRY_DIFF`. 4 credential thiếu hoặc không hợp lệ. 5 dòng không mang danh tính host (image cũ hơn kế hoạch A). 6 tải lên bị từ chối hoặc lỗi (HTTP 412 nghĩa là đã có đối tượng ở khóa đó và không có gì bị ghi đè).
+
+**Khi lỗi:** mã 4: chạy lại `sudo deploy/freeze-witness.sh --set-credential` (thông báo không bao giờ in giá trị); mã 5: dựng lại image từ commit mới hơn (RUNBOOK 20.6) trước khi bật timer; mã 6: nhịp đó không được tính và không bao giờ gửi lại, tick của GitHub vẫn có thể phủ ô giờ; xem RUNBOOK 20.10 mục "When the remote is down".
+
+**Không bao giờ:** đặt credential vào đối số, vào tệp env của soak, vào container hoặc vào cuộc chat; thêm cơ chế chạy bù (một đối tượng tải lên trễ là một nhịp trễ); gửi lại một nhịp đã lỗi; dùng credential này để đọc, liệt kê hoặc xóa đối tượng; dùng nó chung với credential xuất bằng chứng; dừng, khởi động lại hay ghi vào runtime paper.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-freeze-witness.service
+
+> - **Để làm gì:** Đơn vị systemd chạy `deploy/freeze-witness.sh` một lần mỗi khi timer kích hoạt: một nhịp kiểm tra đóng băng của máy soak, tải lên S3 theo kiểu chỉ-tạo-mới.
+> - **Giải quyết vấn đề gì:** Tách nhịp của máy soak khỏi runtime paper và khỏi mọi unit khác: một nhịp lỗi chỉ làm lỗi chính oneshot này, và credential chỉ-tạo-mới được systemd trao dưới dạng bản sao riêng thay vì nằm trong môi trường hay container.
+> - **Mức quan trọng:** **NÊN LÀM** trước lần ghim epoch kế tiếp (quyết định của chủ dự án `16-DEC-HOST-TICK`; RUNBOOK 20.10; mức này là đánh giá của hướng dẫn).
+
+**Mục đích:** unit oneshot chạy `deploy/freeze-witness.sh` bằng user `trading` với `LoadCredential=freeze-witness:/etc/trading/freeze-witness.conf`, `FREEZE_WITNESS_SCHEDULE` lấy từ cron của workflow lúc cài, một thư mục chạy riêng `trading-freeze-witness` quyền 0700, `TimeoutStartSec=15min` làm giới hạn cấu trúc, và `TRADING_ENV_FILE` là tệp env soak cho `deploy/compose-soak.sh`. Chỉ có `Wants` và `After` tới `network-online.target` và `docker.service`; không có phụ thuộc, khởi động lại hay móc lỗi nào tới runtime paper hay unit khác.
+
+**Khi nào chạy:** không chạy tay thường xuyên. Cài một lần bằng `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env`; timer kích hoạt mỗi giờ. Cài lại khi phút của cron trong workflow đổi.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** chạy một nhịp bằng tay (chủ dự án) rồi xem nhật ký:
+
+```bash
+sudo systemctl start trading-soak-freeze-witness.service
+```
+
+```bash
+journalctl -u trading-soak-freeze-witness
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước việc cài bằng `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `journalctl -u trading-soak-freeze-witness` có dòng `witness: created ...` và không chứa URL hay khóa nào; việc unit chạy đúng dưới systemd với credential chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** như `deploy/freeze-witness.sh`: 0 đã tải lên (`clean` hoặc `SKIPPED`), 1 nhịp không chạy được, 2 lỗi cách dùng hoặc lịch, 3 đã tải lên `REGISTRY_DIFF`, 4 credential thiếu hoặc sai, 5 dòng không mang danh tính host, 6 tải lên bị từ chối hoặc lỗi.
+
+**Khi lỗi:** đọc nhật ký và RUNBOOK 20.10; mã 5 nghĩa là image paper cũ hơn kế hoạch A, mã 6 nghĩa là nhịp đó không được tính và không gửi lại. Một nhịp lỗi không ảnh hưởng tới paper.
+
+**Không bao giờ:** thêm `Requires`, `BindsTo`, `PartOf`, `Restart` hay `OnFailure` tới unit khác; sửa tay bản đã cài trong `/etc/systemd/system`; đặt credential vào tệp unit hay biến `Environment`.
+
+### Thẻ lệnh: deploy/systemd/trading-soak-freeze-witness.timer
+
+> - **Để làm gì:** Hẹn giờ gọi `trading-soak-freeze-witness.service` mỗi giờ vào đúng phút của cron trong workflow freeze (hiện là phút 17, giờ UTC).
+> - **Giải quyết vấn đề gì:** Nhịp của máy soak phủ cùng ô giờ với tick của GitHub; không chạy bù và không trễ ngẫu nhiên, vì một nhịp tải lên trễ vẫn bị tính là trễ và chạy bù chỉ che đi khoảng trống thật.
+> - **Mức quan trọng:** **NÊN LÀM** trước lần ghim epoch kế tiếp (`16-DEC-HOST-TICK`; RUNBOOK 20.10; mức này là đánh giá của hướng dẫn).
+
+**Mục đích:** timer kích hoạt `trading-soak-freeze-witness.service` bằng `OnCalendar=*-*-* *:MM:00 UTC`, trong đó MM là phút của cron duy nhất trong workflow, đọc lúc cài. `Persistent=false`, không trễ ngẫu nhiên, `AccuracySec=1s`.
+
+**Khi nào chạy:** không chạy tay; được cài và bật bởi `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env`. Cố ý không có `Persistent=true` và không có `RandomizedDelaySec`.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:**
+
+```bash
+systemctl list-timers trading-soak-freeze-witness.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-soak-freeze-witness.timer` liệt kê timer với thời điểm kích hoạt kế tiếp ở phút của workflow; việc timer kích hoạt đúng giờ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Nếu phút của cron trong workflow đổi, chạy lại lệnh cài để timer đổi theo.
+
+**Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đổi phút khác cron của workflow bằng cách sửa tay timer đã cài.
+
 #### Bước 7.6 Chuỗi đóng (closure chain) và ai quyết định từng bước [THỦ CÔNG] [CHƯA XÂY]
 
 > - **Để làm gì:** Chuỗi bước và ai quyết định từng bước để Phase 16 đóng: giả thuyết, lưới tham số, lệnh cho chạy nghiên cứu, ứng viên, băm trong allowlist, trial soak.
@@ -1592,7 +1702,7 @@ Hai việc, đều chưa xây và đều blocking-human. Lần smoke trực ti�
 
 Làm được hôm nay: hoàn thành mục 2 đến 6; chuẩn bị bot Telegram riêng (mục 8.1). Phải chờ: quyết định O-12 để tạo máy; mọi thứ từ 16-15 đến 16-50. Không có tiến trình paper để khởi động, không có epoch để ghim và không có trial để đo.
 
-Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak.env.example`
+Nguồn: `.planning/ROADMAP.md`, `.planning/phases/16-paper-runtime-composition/16-CONTEXT.md`, `docker-compose.yml`, `docs/DECISIONS.md`, `.planning/phases/16-paper-runtime-composition/16-22-PLAN.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak.env.example`, `deploy/freeze-witness.sh`, `deploy/systemd/trading-soak-freeze-witness.service`, `deploy/systemd/trading-soak-freeze-witness.timer`
 
 ## 8. Telegram, Binance và giám sát bên ngoài
 
@@ -1613,6 +1723,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Tạo bot: bạn tự làm trong ứng dụng Telegram bằng BotFather (nơi `.env.example` ghi là nguồn cấp token). Các lệnh và câu hỏi của BotFather không nằm trong repository nên hướng dẫn này không liệt kê chúng `[CHƯA XÁC MINH]`.
 - Token chỉ nằm ở trình quản lý mật khẩu và trong tệp bí mật ngoài VPS, dưới tên biến `TELEGRAM_BOT_TOKEN`. Không bao giờ dán token vào một dòng lệnh terminal, chat, issue hay tài liệu này. Mã bot cho hệ thống thấy token đó, nhưng agent và người viết kế hoạch không bao giờ cần nhìn thấy nó.
 - Thêm biến `TELEGRAM_AUTHORIZED_CHAT_ID`: số nguyên của cuộc trò chuyện riêng được phép nhận thông báo SIMULATE (có thể âm đối với nhóm).
+- Thêm biến `TELEGRAM_AUTHORIZED_USER_IDS`: danh sách mã người dùng Telegram được phép bấm nút, là các số nguyên dương phân cách bằng dấu phẩy. Chủ sở hữu tự đặt giá trị trong `.env.paper` trên máy chạy (mặc định chỉ một mã, là mã Telegram của bạn); không ghi mã nào vào repository, tài liệu này hay chat. Từ Phase 23 (đã xây ở mức thư viện), nếu Telegram đã được cấu hình (có token và mã chat) mà thiếu biến này thì runtime từ chối khởi động; danh sách rỗng không bao giờ có nghĩa là cho phép tất cả.
 - Cẩn thận: `.env.example` gợi ý lấy mã chat bằng một URL `getUpdates` có nhúng chính token. Một URL như vậy nằm trong lịch sử shell, nhật ký proxy và có thể bị chụp màn hình. Cách an toàn để biết mã chat chưa được kế hoạch 16-34 hay 16-40 nêu, nên nó là `[CHƯA XÁC MINH]`; hỏi trong phiên lập kế hoạch trước khi tự chế một cách.
 - Thu hồi hay tạo lại token trong BotFather nếu nghi bị lộ: việc đó nằm ngoài repository và là `[CHƯA XÁC MINH]`.
 - Hành vi dự kiến của thông báo: mọi thông báo SHADOW mang nhãn "SHADOW — no real order" và nhấn APPROVE chỉ chuyển thông báo thành thẻ xác nhận (D041); chỉ nút CONFIRM, mã CONFIRM riêng, dùng một lần, hiệu lực mặc định 60 giây, mới được ghi nhận. Các mô-đun cho phần này đã xây ở mức đồ giả (16-04, 16-11) nhưng chưa nối vào một tiến trình chạy được (16-31), nên `[CHƯA XÂY]` ở cấp vận hành.
@@ -1620,7 +1731,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 > **Hỏi nhanh về bot Telegram (đáp bằng lời thường)**
 >
 > 1. **Tạo bot riêng được không?** Được: tạo bằng BotFather như một bot thứ hai, tách hẳn: lệnh `/newbot`, tên riêng, username riêng, token riêng (`16-DEC-Q-L`). Token không dán vào đâu cả (mục 8.1). Hai token không bao giờ được hai tiến trình cùng polling một lúc. Các bước và câu hỏi chi tiết của BotFather `[CHƯA XÁC MINH]`.
-> 2. **Có cần tạo group không?** Không. Chat riêng (private) với từng bot là đủ. Cổng `authorized_chat_gate` trong `src/adapters/telegram_callbacks.py` chỉ so mã chat của cú bấm với `TELEGRAM_AUTHORIZED_CHAT_ID`. Với chat riêng, mã này nhiều khả năng chính là mã Telegram của bạn `[CHƯA XÁC MINH]` (repository không nói). Dùng group thì Telegram cho phép, nhưng repository chưa thử, và ai trong group cũng bấm được nút vì việc kiểm theo mã người dùng là Phase 23, chưa xây (docstring `src/paper/shadow.py`). Hành vi trong group `[CHƯA XÁC MINH]`. Khuyến nghị: chat riêng.
+> 2. **Có cần tạo group không?** Không. Chat riêng (private) với từng bot là đủ. Cổng `authorized_chat_gate` trong `src/adapters/telegram_callbacks.py` chỉ so mã chat của cú bấm với `TELEGRAM_AUTHORIZED_CHAT_ID`. Với chat riêng, mã này nhiều khả năng chính là mã Telegram của bạn `[CHƯA XÁC MINH]` (repository không nói). Group không được chấp nhận: từ Phase 23 (đã xây ở mức thư viện) có cổng thứ hai `authorized_user_gate`, kiểm mã người dùng của cú bấm với `TELEGRAM_AUTHORIZED_USER_IDS` và chỉ nhận chat có loại đúng bằng `private`, nên cú bấm từ group bị từ chối ngay cả khi mã chat của group đúng là mã đã cấu hình. Việc thử thật bằng tài khoản thứ hai hoặc từ một group là việc của chủ sở hữu và chưa chạy (kiểm tra G2-014), nên hành vi thật `[CHƯA XÁC MINH]`. Khuyến nghị: chat riêng.
 > 3. **Người lạ tìm ra username bot rồi bấm /start thì sao?** Telegram không chặn được việc đó. Trong `src/` không có xử lý lệnh `/start` hay lệnh nào khác (chỉ có bộ xử lý cú bấm nút), tin nhắn của hệ thống chỉ gửi tới mã chat đã cấu hình, và cú bấm từ mã chat khác bị cổng từ chối. Nên: chọn username khó đoán; bạn là người đầu tiên bấm Start; nếu nghi lộ token thì thu hồi trong BotFather (lệnh và các bước chính xác `[CHƯA XÁC MINH]`, xem tài liệu BotFather).
 > 4. **healthchecks.io báo về Telegram bằng gì?** Bằng tích hợp (bot) của chính họ, bạn nối với chat của bạn ngay trên trang healthchecks.io `[CHƯA XÁC MINH]`, hãy đọc tài liệu của họ. Nó độc lập với các bot của dự án này, và token của dự án không bao giờ đưa cho họ.
 
@@ -1635,7 +1746,7 @@ Quyết định `16-DEC-Q-L` (ngày 2026-10-09) là "separate-bot": máy soak d�
 - Soak SHADOW chỉ dùng dữ liệu thị trường công khai và KHÔNG cần khóa nào.
 - Giai đoạn DEMO về sau dùng khóa Demo, tên biến `BINANCE_DEMO_API_KEY` và `BINANCE_DEMO_API_SECRET` (người dùng là Phase 18).
 - Giai đoạn CANARY dùng một khóa mainnet CHỈ-ĐỌC (không giao dịch, không rút tiền, giới hạn theo IP của VPS theo D042). Tên biến cho khóa này chưa được repository định nghĩa `[CHƯA XÂY]`.
-- `BINANCE_LIVE_*` chỉ được phép nằm trong tệp env riêng của một triển khai live, không bao giờ trên máy paper/soak (OPS-06). Việc tách `env_file` theo từng service (WR-06) phải làm xong TRƯỚC khi bất kỳ khóa live nào vào `.env` (D061 hosts).
+- `BINANCE_LIVE_*` chỉ được phép nằm trong tệp env riêng của một triển khai live, không bao giờ trên máy paper/soak (OPS-06). Việc tách `env_file` theo từng service (WR-06) đã làm xong ở các kế hoạch 24-30 và 24-36: khóa Binance chỉ nằm trong `.env.live`, tên Telegram SHADOW trong `.env.paper`, nhóm `BACKUP_*` trong `.env.backup`, nên không khóa hay bí mật sao lưu nào đi vào `.env` (D061 hosts).
 - Quy tắc IP whitelist: mỗi khóa Binance bị giới hạn ở đúng Elastic IP của máy, quyền rút tiền tắt, và danh sách IP được cập nhật sau mỗi lần cutover hay khi địa chỉ đổi (D042 điều kiện 4; RUNBOOK 13.5 mục 1 và 15.6). Giao diện Binance để làm việc đó không được repository mô tả; việc này là `[THỦ CÔNG]` và chưa được kiểm chứng.
 - Phép ping vùng ở bước 3.7 vẫn là phép thử đầu tiên: Binance phải chấp nhận địa chỉ của máy.
 
@@ -1867,6 +1978,74 @@ systemctl list-timers trading-soak-paper-heartbeat.timer
 **Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Việc timer kích hoạt đúng chu kỳ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
 
 **Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đổi chu kỳ khác giá trị đã ghi trong `16-DEC-HUNG-RUNTIME` mà không có quyết định mới của chủ dự án.
+
+### Thẻ lệnh: deploy/systemd/trading-live-heartbeat.service
+
+> - **Để làm gì:** Đơn vị systemd chạy `deploy/heartbeat.sh --target live` một lần mỗi khi timer kích hoạt: dò độ sống của tiến trình live trong stack chính rồi gửi một ping tới check riêng của live.
+> - **Giải quyết vấn đề gì:** Một tiến trình live bị giữ sau từ chối, một vòng lặp sự kiện treo hay một dấu thời gian độ sống quá cũ phải làm check riêng im đi, tách khỏi heartbeat của collector và của paper.
+> - **Mức quan trọng:** **BẮT BUỘC** trước khi chạy live thật (kế hoạch 24-24, câu trả lời Q11: mỗi tiến trình một check bên ngoài; RUNBOOK 11.9).
+
+**Mục đích:** unit oneshot chạy `deploy/heartbeat.sh --target live` bằng user `trading`. Một lần chạy gọi đầu dò chỉ-đọc `python -m src.live.runtime --liveness` trong service `live` của stack chính, rồi chỉ gửi ping thành công khi đầu dò thoát 0. URL ping của live là bí mật riêng, không bao giờ là URL của collector hay của paper: tệp root-only riêng, credential systemd `heartbeat-live-url`. Unit không phụ thuộc, không khởi động lại và không chạm vào tiến trình live.
+
+**Khi nào chạy:** không chạy tay. Cài một lần sau khi đã cất URL, với chu kỳ 60 giây (check 60 giây và thời gian ân hạn 120 giây đặt trong bảng điều khiển của healthchecks.io, không đặt trong repository).
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:** cất URL, cài, rồi xem trạng thái và nhật ký:
+
+```bash
+sudo deploy/heartbeat.sh --target live --set-url
+```
+
+```bash
+sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60
+```
+
+```bash
+systemctl status trading-live-heartbeat
+```
+
+```bash
+journalctl -u trading-live-heartbeat
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước việc cài bằng `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run`.
+
+**Dấu hiệu thành công:** `journalctl -u trading-live-heartbeat` có dòng `heartbeat: success ping delivered` và không chứa URL nào; check của live trong bảng điều khiển ghi ping `[CHƯA XÁC MINH]`.
+
+**Mã thoát:** như `deploy/heartbeat.sh`: 0 đầu dò qua và ping đã gửi, 1 đầu dò không qua (live bị giữ hoặc dấu độ sống cũ), 2 lỗi cách dùng, 3 đầu dò qua nhưng ping không tới, 4 nguồn URL thiếu hoặc sai.
+
+**Khi lỗi:** mã 1: đọc nhật ký của service `live`; mã 4: chạy lại `sudo deploy/heartbeat.sh --target live --set-url`. Trên máy thật có thể cần `--profile live` hoặc `COMPOSE_PROFILES=live` `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** dùng chung URL ping với collector hay paper; sửa tay bản đã cài trong `/etc/systemd/system`; đưa URL vào repository, nhật ký hay cuộc trò chuyện (URL đi vào qua stdin).
+
+### Thẻ lệnh: deploy/systemd/trading-live-heartbeat.timer
+
+> - **Để làm gì:** Hẹn giờ gọi `trading-live-heartbeat.service` theo chu kỳ bạn đặt khi cài, tính từ lúc máy khởi động và từ lần chạy trước.
+> - **Giải quyết vấn đề gì:** Tín hiệu đều đặn để check riêng của live phát hiện khi tiến trình live ngừng sống; không chạy bù và không trễ ngẫu nhiên nên một lần tắt máy không bị che bằng một ping bù.
+> - **Mức quan trọng:** **BẮT BUỘC** trước khi chạy live thật (kế hoạch 24-24; RUNBOOK 11.9).
+
+**Mục đích:** timer kích hoạt `trading-live-heartbeat.service` sau mỗi chu kỳ đã truyền cho `--interval-seconds` (đề xuất 60 giây), kể từ lúc khởi động (`OnBootSec`) và kể từ lần chạy trước (`OnUnitActiveSec`).
+
+**Khi nào chạy:** không chạy tay; được cài và bật bởi `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60`. Cố ý không có `Persistent` và không có `RandomizedDelaySec`.
+
+**Chạy ở máy nào:** `[MÁY EC2]`, dưới systemd.
+
+**Lệnh:**
+
+```bash
+systemctl list-timers trading-live-heartbeat.timer
+```
+
+**Chạy thử:** Không áp dụng cho chính tệp unit. Xem trước bằng `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run`.
+
+**Dấu hiệu thành công:** `systemctl list-timers trading-live-heartbeat.timer` liệt kê timer với thời điểm kích hoạt kế tiếp.
+
+**Mã thoát:** timer không có mã thoát; kết quả nằm ở unit service mà nó kích hoạt.
+
+**Khi lỗi:** timer không xuất hiện: chạy lại lệnh cài và đọc đầu ra. Việc timer kích hoạt đúng chu kỳ chỉ máy thật mới chứng minh được `[CHƯA XÁC MINH]`.
+
+**Không bao giờ:** thêm `Persistent=true` hay trễ ngẫu nhiên; đặt chu kỳ ping dài hơn chu kỳ của check ở dịch vụ bên ngoài.
 
 Nguồn: `.env.example`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-Q-L.md`, `.planning/phases/16-paper-runtime-composition/16-RESEARCH.md`, `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `deploy/systemd/trading-soak-paper-heartbeat.service`, `deploy/systemd/trading-soak-paper-heartbeat.timer`, `.planning/phases/16-paper-runtime-composition/decisions/16-DEC-HUNG-RUNTIME.md`
 
@@ -2205,7 +2384,7 @@ deploy/update.sh --ref <commit-sha> --dry-run
 deploy/update.sh --ref <commit-sha>
 ```
 
-Thứ tự theo phần đầu của script: từ chối nếu cây bẩn; ghi commit hiện tại và ID của hai image vào `.deploy/last-good.env` (bản ghi cũ giữ lại thành `last-good.env.prev`); chạy `deploy/backup.sh` (một bản sao lưu lỗi dừng cập nhật); gắn thẻ `:rollback` cho hai image; `git fetch --tags origin`; `git checkout --detach` tới ref; `docker compose --profile ops build`; `docker compose up -d`. Cờ `--skip-backup` bỏ qua bản sao lưu và là một rủi ro bạn tự nhận, đặc biệt khi cập nhật có migration.
+Thứ tự theo phần đầu của script: từ chối nếu cây bẩn; ghi commit hiện tại và ID của hai image vào `.deploy/last-good.env` (bản ghi cũ giữ lại thành `last-good.env.prev`); chạy `deploy/backup.sh` (một bản sao lưu lỗi dừng cập nhật); gắn thẻ `:rollback` cho hai image; `git fetch --tags origin`; `git checkout --detach` tới ref; `docker compose --profile ops build`; `docker compose up -d`. Cờ `--skip-backup` bỏ qua bản sao lưu và là một rủi ro bạn tự nhận, đặc biệt khi cập nhật có migration. Trước mọi bước, script từ chối chạy (cả `--ref` lẫn `--rollback`) nếu dịch vụ compose `live` đang chạy hoặc nếu không xác định được, vì một lệnh entry đang chờ có thể khớp mà chưa có stop khi tiến trình khởi động lại; hãy dừng nó trước theo RUNBOOK 22.5. Cờ `--force-live` chấp nhận khoảng hở đó và chỉ cảnh báo.
 
 #### Bước 11.3 Kiểm tra sau cập nhật [ĐÃ XÂY] [CHƯA XÁC MINH]
 
@@ -2268,7 +2447,7 @@ deploy/update.sh --ref <commit-sha> --skip-backup
 deploy/update.sh --rollback
 ```
 
-Hai chế độ. Chế độ cập nhật: `--ref REF` (bắt buộc, không được bắt đầu bằng dấu gạch), tùy chọn `--skip-backup` (chỉ dùng với `--ref`) và `--dry-run`. Chế độ quay lại: `--rollback` (kèm `--dry-run` nếu muốn), không dùng chung với `--ref` và `--skip-backup`. `-h`/`--help` in cách dùng. Các biến môi trường `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` và `IMAGE_TAG` (mặc định `dev`) được tôn trọng.
+Hai chế độ. Chế độ cập nhật: `--ref REF` (bắt buộc, không được bắt đầu bằng dấu gạch), tùy chọn `--skip-backup` (chỉ dùng với `--ref`), `--force-live` (bỏ qua việc từ chối khi dịch vụ `live` đang chạy, chỉ cảnh báo) và `--dry-run`. Chế độ quay lại: `--rollback` (kèm `--force-live` hoặc `--dry-run` nếu muốn), không dùng chung với `--ref` và `--skip-backup`. `-h`/`--help` in cách dùng. Các biến môi trường `COMPOSE_PROJECT_NAME`, `TRADING_ENV_FILE` và `IMAGE_TAG` (mặc định `dev`) được tôn trọng.
 
 Tệp trạng thái: `.deploy/last-good.env` (quyền 0600, bị gitignore, được phân tích chứ không bao giờ `source`) chứa `GIT_SHA`, `APP_IMAGE_ID` và `OPS_IMAGE_ID`; bản trước là `last-good.env.prev`. Khi chạy lại một cập nhật dở (checkout đã ở REF và có bản ghi hợp lệ), script giữ nguyên bản ghi và các thẻ `:rollback` để quay lại vẫn về bản tốt cuối.
 
@@ -2284,7 +2463,7 @@ deploy/update.sh --rollback --dry-run
 
 **Dấu hiệu thành công:** cập nhật in "updated to <REF>; undo with: deploy/update.sh --rollback". Quay lại kết thúc bằng `docker compose up -d --no-build` và một cảnh báo rằng migration không bị hoàn tác.
 
-**Mã thoát:** 0 khi thành công và với `-h`. 2 khi lỗi cờ (`usage_error`): không đưa `--ref` hay `--rollback`, dùng chung `--ref` với `--rollback`, `--skip-backup` cùng `--rollback`, hoặc ref bắt đầu bằng dấu gạch. 1 cho mọi lỗi `die`: cây làm việc có thay đổi chưa commit, hai image không tồn tại cục bộ để quay lại, không có trạng thái quay lại ("no rollback state"), tệp trạng thái hỏng, hoặc ID image không khớp với bản ghi. Một lệnh con lỗi (build, up) làm script thoát với mã của lệnh đó, suy ra từ `set -e` `[CHƯA XÁC MINH]`.
+**Mã thoát:** 0 khi thành công và với `-h`. 2 khi lỗi cờ (`usage_error`): không đưa `--ref` hay `--rollback`, dùng chung `--ref` với `--rollback`, `--skip-backup` cùng `--rollback`, hoặc ref bắt đầu bằng dấu gạch. 1 cho mọi lỗi `die`: dịch vụ `live` đang chạy hoặc không xác định được (không có `--force-live`), cây làm việc có thay đổi chưa commit, hai image không tồn tại cục bộ để quay lại, không có trạng thái quay lại ("no rollback state"), tệp trạng thái hỏng, hoặc ID image không khớp với bản ghi. Một lệnh con lỗi (build, up) làm script thoát với mã của lệnh đó, suy ra từ `set -e` `[CHƯA XÁC MINH]`.
 
 **Khi lỗi:** "the working tree has uncommitted changes": commit hoặc bỏ thay đổi. "images ... must exist locally": dựng bằng `docker compose --profile ops build` (bước 4.9). "image ... is ..., recorded was ...; refusing to roll back": thẻ `:rollback` không còn trỏ vào image đã ghi nên script dừng trước khi đổi gì; lúc này hãy khôi phục từ bản sao lưu (mục 6.5). "no rollback state ...": máy chưa từng cập nhật bằng `--ref`, không có gì để quay về.
 
@@ -2381,7 +2560,7 @@ Nguồn: `docs/operations/RUNBOOK.md`, `docs/DECISIONS.md`, `docker-compose.yml`
 | `migrate.sh` thoát 3 | khoảng trống Open Interest vượt `--max-gap-minutes` | đây là dữ liệu, không phải lỗi cần thử lại; quyết định khoảng trống có quan trọng hay không | RUNBOOK 15.4 |
 | `migrate.sh` từ chối vì `data/backup/cutover/pg.dump` đã tồn tại | còn sót từ một lần thử trước | kiểm tra rồi tự tay xóa ở bên báo | RUNBOOK 15.3 |
 | `migrate.sh` hoặc ssh báo lỗi kiểm tra khóa máy chủ | máy cũ không có trong `known_hosts` của thư mục khóa | thêm khóa máy chủ lấy từ kênh tin cậy (bước 5.4) | RUNBOOK 15.1 |
-| backup báo thiếu một biến `BACKUP_...` | chưa đặt biến trong `.env` | thêm biến (bước 6.1); thông báo chỉ nêu tên | RUNBOOK 11.1 |
+| backup báo thiếu một biến `BACKUP_...` | chưa đặt biến trong `.env.backup` | thêm biến (bước 6.1); thông báo chỉ nêu tên | RUNBOOK 11.1 |
 | `parquet push refused`, `parquet verification failed`, `manifest verification failed`, `rclone ... failed (exit N)` | các nhóm lỗi đẩy Parquet | dùng bảng ở bước 6.8 | RUNBOOK 11.8 |
 | restore từ chối đích không trống | cơ sở dữ liệu hay thư mục Parquet đích đã có dữ liệu | dùng máy trống; chỉ dùng `--force` khi hiểu rõ, và nó vẫn không ghi đè | RUNBOOK 11.5 |
 | diễn tập lỗi ở phép so sánh | collector vừa thêm một hàng symbol mới | chạy lại diễn tập | RUNBOOK 11.6 |
@@ -2413,7 +2592,7 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | bootstrap, chạy thử | `[MÁY EC2]` | `sudo deploy/bootstrap.sh --dry-run --secrets-file /root/secrets.env --repo git@example.com:me/trading.git --ref <commit-sha> --authorized-keys /root/authorized_keys` | 4.3 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | bootstrap, chạy thật với mọi cờ (`--secrets-file`, `--repo`, `--ref`, `--authorized-keys`, `--dir`, `--user`, `--deploy-key`, `--max-drift-ms`) | `[MÁY EC2]` | `sudo deploy/bootstrap.sh --secrets-file /root/secrets.env --repo git@example.com:me/trading.git --ref <commit-sha> --authorized-keys /root/authorized_keys --dir /opt/trading --user trading --deploy-key /root/deploy_key --max-drift-ms 100` | 4.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | thư viện hàm dùng chung `lib.sh` (`die`, `run`, `DRY_RUN`) | không chạy | được `source` bởi các script khác, không có cờ và không bao giờ chạy trực tiếp | thẻ `deploy/bootstrap.sh` | `[ĐÃ XÂY]` |
-| update, cập nhật (`--ref`, `--skip-backup`, `--dry-run`) | `[MÁY EC2]` | `deploy/update.sh --ref <commit-sha> --skip-backup --dry-run` | 11.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| update, cập nhật (`--ref`, `--skip-backup`, `--force-live`, `--dry-run`) | `[MÁY EC2]` | `deploy/update.sh --ref <commit-sha> --skip-backup --dry-run` | 11.2 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | update, quay lại (`--rollback`) | `[MÁY EC2]` | `deploy/update.sh --rollback --dry-run` | 11.4 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | migrate, chạy thử (`--dry-run`) | `[MÁY EC2]` | `deploy/migrate.sh --dry-run trading@old.example local` | 5.6 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | migrate, chạy thật (`--max-gap-minutes`, `--wait-seconds`, `--key-source`) | `[MÁY EC2]` | `deploy/migrate.sh --max-gap-minutes 60 --wait-seconds 900 --key-source ~/.ssh/trading-migrate trading@old.example local` | 5.7 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
@@ -2457,6 +2636,15 @@ Mọi dòng bên dưới được chép từ các thẻ lệnh và các mục tr
 | đầu dò độ sống của paper (`--liveness`) | `[MÁY EC2]` | `deploy/heartbeat.sh --target paper --dry-run` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-soak-paper-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-soak-paper-heartbeat` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 | unit `trading-soak-paper-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-paper-heartbeat.timer` | thẻ `deploy/systemd/trading-soak-paper-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| host tick của freeze, cất credential S3 witness (`--set-credential`) | `[MÁY EC2]` | `sudo deploy/freeze-witness.sh --set-credential` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| host tick của freeze, cài timer (`--install-timer`, `--soak-env-file`, `--dry-run`) | `[MÁY EC2]` | `sudo deploy/freeze-witness.sh --install-timer --soak-env-file /home/trading/soak.env --dry-run` | 7.5 | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-freeze-witness.service`: chạy một nhịp bằng tay | `[MÁY EC2]` | `sudo systemctl start trading-soak-freeze-witness.service` | thẻ `deploy/systemd/trading-soak-freeze-witness.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-freeze-witness.service`: xem nhật ký | `[MÁY EC2]` | `journalctl -u trading-soak-freeze-witness` | thẻ `deploy/systemd/trading-soak-freeze-witness.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-soak-freeze-witness.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-soak-freeze-witness.timer` | thẻ `deploy/systemd/trading-soak-freeze-witness.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat riêng của live, cất URL (`--target live`, `--set-url`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target live --set-url` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| heartbeat riêng của live, cài timer (`--target live`, `--install-timer`, `--interval-seconds`) | `[MÁY EC2]` | `sudo deploy/heartbeat.sh --target live --install-timer --interval-seconds 60 --dry-run` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-live-heartbeat.service`: xem trạng thái | `[MÁY EC2]` | `systemctl status trading-live-heartbeat` | thẻ `deploy/systemd/trading-live-heartbeat.service` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
+| unit `trading-live-heartbeat.timer`: xem lịch | `[MÁY EC2]` | `systemctl list-timers trading-live-heartbeat.timer` | thẻ `deploy/systemd/trading-live-heartbeat.timer` | `[ĐÃ XÂY]` `[CHƯA XÁC MINH]` |
 
 ### Nghiệm thu và kiểm tra hồ sơ
 
@@ -2496,7 +2684,7 @@ Tám service: `postgres`, `db-upgrade`, `collector`, `paper` (profile `paper`, t
 | điểm vào của tiến trình paper | `[MÁY EC2]` | chưa có lệnh chạy được (xem bước 7.4); tên dự kiến `python -m src.paper.runtime` | 7.4 | `[CHƯA XÂY]` |
 | các giai đoạn DEMO, CANARY, LIVE | `[MÁY CÓ MẠNG]` | chưa có lệnh nào | 9 | `[CHƯA XÂY]` |
 
-Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak-image.sh`
+Nguồn: `deploy/bootstrap.sh`, `deploy/lib.sh`, `deploy/update.sh`, `deploy/migrate.sh`, `deploy/refresh-pins.sh`, `deploy/backup.sh`, `deploy/restore.sh`, `deploy/backup-drill.sh`, `deploy/systemd/trading-backup.service`, `deploy/systemd/trading-backup.timer`, `deploy/heartbeat.sh`, `deploy/systemd/trading-heartbeat.service`, `deploy/systemd/trading-heartbeat.timer`, `scripts/soak_host_acceptance.py`, `scripts/backup-drill.ps1`, `docker-compose.yml`, `docs/operations/RUNBOOK.md`, `deploy/compose-soak.sh`, `deploy/compose-rehearsal.sh`, `deploy/soak-image.sh`, `deploy/freeze-witness.sh`, `deploy/systemd/trading-soak-freeze-witness.service`, `deploy/systemd/trading-soak-freeze-witness.timer`
 
 ## 15. Danh sách kiểm tra cuối cùng
 
@@ -2542,7 +2730,7 @@ Mỗi mục dẫn tới phần giải thích. Các mục chưa thể làm vì ch
 
 ### Sao lưu
 
-- [ ] Các biến `BACKUP_*` đã nằm trong `/opt/trading/.env` (mục 6.1)
+- [ ] Các biến `BACKUP_*` đã nằm trong `/opt/trading/.env.backup` (mục 6.1)
 - [ ] `deploy/backup.sh --init-remote` đã chạy đúng một lần trên bucket trống (mục 6.2)
 - [ ] Timer đã cài và `systemctl list-timers trading-backup.timer` liệt kê nó (mục 6.3)
 - [ ] Một lần diễn tập `deploy/backup-drill.sh` đã thành công (mục 6.6)

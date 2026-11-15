@@ -1,16 +1,19 @@
-# Execution protection and pre-placement limits
+# Execution protection, pre-placement and reconcile limits
 
-This directory holds the seven safety limits of the Phase 19 execution path (D-07, D-13, the
-owner's 19-REVIEW WR-05 and WR-03 decisions and the last-price check of quick task 261020-l4p)
-that the owner has not chosen yet. The values file
-`execution-limits-v1.toml` holds only the word `NOT_CONFIGURED` for every key until the owner fills the numbers in, after the Demo probes
+This directory holds the nineteen safety limits of the execution path, eighteen required and one
+alert-only (the owner has chosen the number of four of them: the equity age of Phase 21, D084, and the three margin keys of Phase 22, D085): the seven of Phase 19 (D-07, D-13, the owner's
+19-REVIEW WR-05 and WR-03 decisions and the last-price check of quick task 261020-l4p), the eight
+of Phase 20 (plan 20-01; D-25, D-11, D-21, D-23, T-H; plan 20-28 added the alert-only
+`reconcile.entry_stale_grace_ms`) the one of Phase 21 (plan 21-02; D-03) and the three of Phase 22 (plan 22-02; D-10, D-11, D-13).
+The values file
+`execution-limits-v1.toml` holds the word `NOT_CONFIGURED` for every key until the owner fills the number in (four are filled), after the Demo probes
 listed in `19-NOTES.md` (OWNER-OPEN O-04 and O-05).
 **This README lists the required keys and what they mean. It carries no value, and the code
 carries no default for any of them.** `tests/test_no_unratified_defaults.py` scans `src/` and
 `scripts/` so that no key name below is ever given a number in code.
 
 The loader is `load_execution_limits(path)` in `src/execution/execution_limits.py`. It returns
-an `ExecutionLimits` whose seven fields are `None` while the file says `NOT_CONFIGURED`.
+an `ExecutionLimits` whose nineteen fields are `None` while the file says `NOT_CONFIGURED`.
 `ExecutionLimits.require_live_ready()` raises `ExecutionLimitsNotConfigured` naming the unset
 keys, so the live path refuses while any key is `NOT_CONFIGURED` (the manager gate and the
 coordinator check that call it are wired by later Phase 19 plans). The loader refuses to load,
@@ -22,17 +25,23 @@ only, never a value or a path.
 ## Separation from the Binance limits file
 
 `config/binance/binance-limits-v1.toml` is ratified and pinned by sha256 in the DECISIONS row
-of Phase 18, and its loader and README tests demand exactly the keys of that file. The seven keys
+of Phase 18, and its loader and README tests demand exactly the keys of that file. The nineteen keys
 here therefore live in a separate file with a separate loader; the Binance file and its README
 are not edited.
 
 ## File format
 
-- Exactly the sections `[protection]`, `[pre_placement]` and `[provenance]`.
-- Exactly the seven keys below, each written once; nothing else is accepted.
+- Exactly the sections `[protection]`, `[pre_placement]`, `[reconcile]`, `[stale_feed]`,
+  `[alerts]`, `[account]`, `[margin]`, `[rest_gate]`, `[scheduler]` and `[provenance]`.
+- Exactly the nineteen keys below, each written once; nothing else is accepted.
 - Every value is a TOML integer that is not a boolean, strictly positive (a float, a boolean,
   zero or a negative number is refused), or exactly the TOML string `"NOT_CONFIGURED"`, which
   loads as `None` and means "the owner has not chosen yet". No other string is accepted.
+- The `ExecutionLimits` field of a Phase 19 key is the key text (`max_unprotected_ms`); the field
+  of a Phase 20, Phase 21 or Phase 22 key is `<section>_<key>` (`reconcile_tick_interval_ms`,
+  `account_max_equity_age_ms`, `margin_headroom_bps`), because
+  `stale_feed.max_mark_price_age_ms` shares its key text with `pre_placement.max_mark_price_age_ms`.
+  `EXECUTION_LIMIT_FIELDS` in the loader is the only place that mapping lives.
 - The key `entry_terminal_timeout_ms` carries the `_ms` suffix for unit clarity; D-13 names the
   concept as the entry terminal timeout and keeps `max_unprotected_ms` verbatim.
 
@@ -62,3 +71,87 @@ One key per line, so the checks of plan 19-01 can parse the list.
 - `pre_placement.min_remaining_validity_seconds` - the minimum remaining validity a plan must still have at placement time, otherwise the placement is refused (seconds).
 - `pre_placement.max_mark_price_age_ms` - the maximum age of the mark price the pre-placement price check may use, otherwise the check fails closed (milliseconds).
 - `pre_placement.max_last_price_age_ms` - the maximum age of the last price (the `time` of the Symbol Price Ticker answer) the pre-placement last-price check may use, otherwise the check fails closed; a separate number from `pre_placement.max_mark_price_age_ms` because the last price only moves on a trade (milliseconds).
+
+### `[reconcile]` (Phase 20; D-25 for the tick, D-11 for the probes, D-21 for the lot filters)
+
+- `reconcile.tick_interval_ms` - the cadence of the reconcile loop that replaces the hard-coded SAFE_MODE tick; it must be strictly below `protection.max_unprotected_ms`, which `check_reconcile_cadence` enforces once both are set (milliseconds).
+- `reconcile.entry_unknown_probe_count` - how many consecutive clean not-found probes by client order id an `UNKNOWN` entry needs before reconciliation may close it (D-11, used by plan 20-10; a count).
+- `reconcile.entry_unknown_probe_interval_ms` - the spacing between those probes (D-11, used by plan 20-10; milliseconds).
+- `reconcile.lot_filter_refresh_interval_ms` - how often the lot-size filters used for quantization are refreshed from exchange information (D-21, used by plan 20-21; milliseconds).
+- `reconcile.entry_stale_grace_ms` - ALERT ONLY (plan 20-28, owner request 2026-10-23): how long past the `goodTillDate` of a resting entry the reconcile loop waits before it raises the `STALE_ENTRY_ORDER` alert for an entry order that is still `NEW`; Binance Demo did not cancel a GTD order 780 s and 1500 s after `goodTillDate`. It enters no SAFE_MODE, cancels nothing and changes no state. Unlike the fifteen required keys it does not keep the live path refused: while it is `NOT_CONFIGURED` the check is skipped, one journal row `RECONCILE_STALE_ENTRY_CHECK_SKIPPED` says so, and `ExecutionLimits.unset_alert_only_keys()` lists it (milliseconds).
+
+### `[stale_feed]` (Phase 20, D-25, D058)
+
+- `stale_feed.max_mark_price_age_ms` - the maximum age of the mark price before the market feed counts as stale and entries are blocked; a separate number from `pre_placement.max_mark_price_age_ms` (D-25, used by plan 20-16; milliseconds).
+- `stale_feed.max_user_data_silence_ms` - the maximum silence of the user-data stream before it counts as stale; it is not the paper runtime's `max_ws_message_silence_seconds` and never reuses it (D-25, used by plan 20-16; milliseconds).
+
+### `[alerts]` (Phase 20, D-23)
+
+- `alerts.dedupe_window_ms` - the window in which a repeated alert for the same event is deduplicated instead of sent again (D-23, used by plan 20-13; milliseconds).
+
+### `[account]` (Phase 21, D-03; F-012)
+
+- `account.max_equity_age_ms` - REQUIRED (it keeps the live path refused while it is `NOT_CONFIGURED`, like the other required keys): the maximum age of the account equity reading used for live sizing, for the daily-loss day-start base and for the approval reservation gate (milliseconds). The age is the injected now minus the injected clock reading taken before the REST request, so it is only over-estimated. An age greater than the value, or negative, is stale (NO_TRADE `UNCERTAIN_ACCOUNT_STATE`); an age exactly equal to the value passes. Used by plan 21-07 (`LiveEquitySource`) and plan 21-13 (the day-risk service). The owner set 15000 on 2026-10-23 (DECISIONS D084, provenance `DECISION`); the code carries no default.
+- `account.max_daily_loss_age_ms` - REQUIRED: the maximum age of a known daily loss, counted on the injected clock from the completed backfill that made it known (milliseconds). The stream path never renews it, only a completed backfill does. An age greater than the value, or negative (a stamp in the future), makes the loss unknown (NO_TRADE); an age exactly equal to the value passes. Used by `LiveDayRiskService` (`src/execution/day_risk_service.py`). The owner set 300000 (300 seconds) on 2026-10-25 (DECISIONS D087, provenance `DECISION`); the code carries no default. The Phase 24 composition must run the backfill on a schedule shorter than this value while trading is possible.
+
+### `[margin]` (Phase 22; D-10, D-11, D-13, amendment A4; OWNER-OPEN O-2, O-3)
+
+All three keys are REQUIRED (they would keep the live path refused while they are `NOT_CONFIGURED`) and are positive integers only (basis points and milliseconds). The owner set all three on 2026-10-24 (DECISIONS D085, provenance `DECISION`): 300 basis points for the liquidation buffer, 60000 milliseconds for the bracket age and 1000 basis points for the headroom. The code carries no default for any of them, and the limits gate of the manager refuses every placement before the margin guard can run while one is unset. Setting them does not open the live path: fourteen required keys stay `NOT_CONFIGURED`.
+
+- `margin.liquidation_buffer_bps` - the liquidation buffer, in basis points of the entry price; the margin guard compares it as a price distance beyond the stop (D-09, D-10, OWNER-OPEN O-2, decided by D085; used by plans 22-13 and 22-14; basis points). It stays an execution-limits key and is not a registry parameter; the owner accepted this deviation from RISK_MANAGEMENT section 9.
+- `margin.max_bracket_age_ms` - the maximum age of the cached leverage-bracket set before the margin guard refuses it as stale (D-11, OWNER-OPEN O-3, decided by D085; used by plans 22-12 and 22-14; milliseconds).
+- `margin.headroom_bps` - the headroom, in basis points of the margin the order needs, that the available balance must keep after the order (D-13, OWNER-OPEN O-3, decided by D085; used by plan 22-14; basis points).
+
+### `[rest_gate]` (Phase 24, plan 24-03; DECISIONS D083 item 4; OWNER-OPEN O-1)
+
+The one key of this section is OPTIONAL (`OPTIONAL_REFINEMENT_LIMIT_KEYS` in the loader): it refines a behaviour that already has a safe fallback, so it never keeps the live path refused. `ExecutionLimits.unset_keys()` and `require_live_ready()` leave it out, and `ExecutionLimits.unset_optional_refinement_keys()` lists it. It is `NOT_CONFIGURED` in the shipped file with provenance `NOT_CONFIGURED`; the code carries no default and no number is proposed here.
+
+- `rest_gate.ban_end_clock_margin_ms` - OPTIONAL: the clock-difference margin added to the ban end time that the REST gate may read from an HTTP 418 answer with body code -1003 (D083). Unset (the shipped state), the body time is not used and the ratified 259200 s fallback wait applies (`signed_calls.rate_limit_418_no_retry_after_wait_seconds` of the Binance limits file; `signed_calls.rate_limit_retry_after_cap_seconds` is the same 259200). Set, the gate takes the time only when it is in the future and not later than now plus 259200 s, pads it by this margin and stores it like any deadline; the restriction never ends before the padded time. The owner value comes with plan 24-06; setting it needs a DECISIONS row and the provenance label `DECISION` (milliseconds).
+
+### `[scheduler]` (quick task 261114-mp1; DECISIONS D111; quick task 261115-kra; DECISIONS D112)
+
+The first key of this section is ALERT ONLY (`ALERT_ONLY_LIMIT_KEYS` in the loader), like `reconcile.entry_stale_grace_ms`, and the second is OPTIONAL (`OPTIONAL_REFINEMENT_LIMIT_KEYS`, like `rest_gate.ban_end_clock_margin_ms`): neither ever keeps the live path refused. `ExecutionLimits.unset_keys()` and `require_live_ready()` leave both out; `ExecutionLimits.unset_alert_only_keys()` lists the first and `ExecutionLimits.unset_optional_refinement_keys()` lists the second. Both are `NOT_CONFIGURED` in the shipped file with provenance `NOT_CONFIGURED`; the code carries no default and no number is proposed here.
+
+- `scheduler.protection_stall_after_ms` - ALERT ONLY: the longest time, in milliseconds, one run of the protection task may take before the observe-only stall watchdog records a stall (a `stall` row in the journal and the `TASK_STALLED` alert, D111). Unset, the watchdog is off and nothing else changes; the shipped file sets it since D114 (owner answer 2026-11-15), so the watchdog is on. Set, the run is still never cancelled or cut short and nothing is re-sent; only the record and the alert are added. The owner measures a value in a Demo session; the method is in `.planning/quick/261114-mp1-follow-ups-to-kxu-cancel-resting-entry-o/261114-mp1-SUMMARY.md` and in D111. To fire before the unprotected deadline the value must stay below `protection.max_unprotected_ms`. Setting it needs a DECISIONS row and the provenance label `DECISION` (milliseconds).
+- `scheduler.duration_summary_interval_ms` - OPTIONAL: the window, in milliseconds, of the duration summary rows of the live scheduler tasks (D112). Every run of every scheduler task that ends is timed; the scheduler writes at most one `LIVE_TASK_DURATION` journal row per run, always when the run sets a new maximum of the process. Unset (the shipped state), only those new-maximum rows are written and nothing else changes. Set, one more row per task and window is written at the first run end at least this long after the window start (still at most one row per run, and the window then restarts). It is never an alert, it changes no task and cancels nothing, and it is not alert only because it switches no alert. Setting it needs a DECISIONS row and the provenance label `DECISION` (milliseconds); the method to read the rows is in `docs/operations/RUNBOOK.md` section 22.8.
+
+## Phase 20 notes
+
+Of the twenty keys, `reconcile.entry_stale_grace_ms` is alert only: `ExecutionLimits.unset_keys()` and
+`require_live_ready()` leave it out (`ALERT_ONLY_LIMIT_KEYS` in the loader), so the sentence below
+about the live path refusing covers the nineteen required keys, `account.max_equity_age_ms` and
+`account.max_daily_loss_age_ms` (Phase 21, D-03 and D087) among them and the three `margin` keys (Phase 22) too.
+
+`stale_feed.max_user_data_silence_ms` is not the paper runtime's `max_ws_message_silence_seconds`
+(`src/paper/coverage.py`); the two are separate keys in separate files and neither reads the other.
+A value for any of the nineteen keys is the owner's number (OWNER-OPEN O-04, decision O-G): setting
+one needs a DECISIONS row and the provenance label `DECISION`. Until then each stays
+`NOT_CONFIGURED` and the live path refuses, naming the key.
+
+## Values set by DECISIONS D089 (Phase 24, plan 24-06; OWNER-OPEN O-1)
+
+The owner answered the 24-01 limits checkpoint on 2026-10-31 ("theo recommend của bạn hết đi, nếu có chỗ nào khó quyết, hãy thông báo với tôi") and DECISIONS D089 records the numbers. Each row is the value in `execution-limits-v1.toml` with provenance `DECISION`. The code carries no default for any of them. Setting them does not enable live placement (`LIVE_ORDERS_DISABLED` stays). `tests/test_live_limits_relationships.py` fails, naming the keys, when an edit breaks a relationship between them.
+
+| Key | Value | Unit | Row |
+|---|---|---|---|
+| `protection.max_unprotected_ms` | 180000 | ms | D089 |
+| `protection.entry_terminal_timeout_ms` | 900000 | ms | D089 |
+| `protection.entry_unknown_grace_ms` | 1800000 | ms | D089 |
+| `protection.emergency_close_poll_timeout_ms` | 30000 | ms | D089 |
+| `pre_placement.min_remaining_validity_seconds` | 900 | s | D089 |
+| `pre_placement.max_mark_price_age_ms` | 5000 | ms | D089 |
+| `pre_placement.max_last_price_age_ms` | 30000 | ms | D096 |
+| `reconcile.tick_interval_ms` | 15000 | ms | D089 |
+| `reconcile.entry_unknown_probe_count` | 3 | count | D089 |
+| `reconcile.entry_unknown_probe_interval_ms` | 5000 | ms | D089 |
+| `reconcile.lot_filter_refresh_interval_ms` | 3600000 | ms | D089 |
+| `reconcile.entry_stale_grace_ms` (alert only) | 900000 | ms | D089 |
+| `stale_feed.max_mark_price_age_ms` | 60000 | ms | D089 |
+| `alerts.dedupe_window_ms` | 300000 | ms | D089 |
+| `scheduler.protection_stall_after_ms` (alert only) | 60000 | ms | D114 |
+
+Still `NOT_CONFIGURED`, on purpose:
+
+- The key `stale_feed.max_user_data_silence_ms` is REQUIRED and not answered. The official user-data-streams page states no server ping interval, so no recommendation and no number exist; the owner chooses it from the ping and pong times a Demo run observes. The live path keeps refusing, naming this key, until then.
+- The key `rest_gate.ban_end_clock_margin_ms` is optional (D083 item 4); the owner left it unset until a real Futures 418 body has been seen.
+- The key `scheduler.duration_summary_interval_ms` is optional (D112); it stays unset until the owner chooses a window, and while it is unset only the new-maximum duration rows of the scheduler are written.

@@ -1,0 +1,14 @@
+{
+  "case_id": "income_history_read",
+  "index": 1,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "server_time",
+    "summary": {
+      "server_time_ms": "1792764462327",
+      "server_time_utc": "2026-10-23T14:07:42.327000+00:00"
+    }
+  }
+}

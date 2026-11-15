@@ -32,7 +32,6 @@ from .compare import (
     compare,
 )
 from .safe_mode import (
-    SAFE_MODE_TICK_SECONDS,
     SafeModeController,
     SafeModeVerdict,
 )
@@ -55,5 +54,4 @@ __all__ = [
     # safe_mode
     "SafeModeController",
     "SafeModeVerdict",
-    "SAFE_MODE_TICK_SECONDS",
 ]

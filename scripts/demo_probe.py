@@ -25,6 +25,54 @@ passes one shared bound first (``order_bound_refusal``: never above the owner's 
 quantity or notional cap; the owner-approved ``market_lot_probe_quantity`` of the optional
 MARKET_LOT_SIZE case is the single exception). The live run is plan 18-20 (blocking-human).
 
+Quick task 261021-sj0 adds ten owner opt-in evidence cases (``CAPTURE_CASES``), each enabled by
+its own key in the owner's probe limits file (the Phase 18 file enables none, so its run is
+unchanged). They record raw, scrubbed Binance Demo answers and user-data frames as evidence and
+fixtures for Phases 19 to 25. In an executed run with ``--fixtures-dir`` the REST answers of
+these cases are written as ``<case_id>-rest-<NNN>-<operation>.json`` beside the raw frames and
+listed in ``provenance.md``; a dry run writes none. An ``--only`` run of a few cases leaves
+``acceptance.overall`` at FAIL because the required set did not run: by design, read the
+per-case verdicts. The owner runbook is ``.planning/DEMO-EVIDENCE-PLAN.md``.
+
+Quick task 261022-sj1 adds five more owner opt-in cases on the same framework (``SJ1_CASES``):
+``exchange_info_read_for_close`` (A10), ``gtd_min_lifetime_boundary`` (A1: goodTillDate at the
+public server time plus 599 s and plus 601 s), ``partial_fill_attempt`` (P3, best effort),
+``entry_cancel_fill_race`` (P7, best effort, ``race_repeats`` place-and-cancel pairs) and
+``stream_loss_during_case`` (P5, the ``stream_gap_during_case`` drop around an entry and stop
+cycle). Three of them can stay NOT_OBSERVED on Demo for ever (the partial fill, the race, and
+the stream comparison when the stream does not return). The runbook section "One session: all
+cases" lists every case id in run order.
+
+Quick task 261023-sj2 adds eight more owner opt-in cases (``SJ2_CASES``):
+``reduce_only_market_on_flat``
+(A4), ``reduce_only_market_larger_than_position`` (A8), ``non_reduce_only_below_min_notional``
+(-4164), ``insufficient_margin_order`` (-2019), ``stop_rejected_after_acceptance`` (P5, best
+effort), ``trigger_cancel_race`` (P7 trigger part, best effort), ``timestamp_outside_recv_window``
+(-1021, one read-only signed GET with a stale timestamp) and ``income_history_read``. Seven obey
+the approved quantity and ``max_notional_quote``; ``insufficient_margin_order`` alone sends the
+owner's own ``insufficient_margin_quantity`` (a far LIMIT BUY that can only rest) and is bound by
+``margin_order_refusal`` instead: no other case may exceed a cap.
+
+Phase 22 plan 22-05 adds the first owner opt-in case that CHANGES the symbol configuration
+(``SJ3_CASES``): ``symbol_config_change_to_isolated`` (D-18). On a flat symbol it reads the
+configuration, requests ISOLATED, requests the owner's ``order.config_target_leverage``, reads the
+configuration back and records every answer (demo-observed, not mainnet: D-19). It never restores
+the previous configuration; it records it so the owner can. Both changes are mutating port
+operations (``change_margin_type``, ``change_initial_leverage``): a dry run plans them and sends
+nothing. No agent runs this case; the owner does.
+
+Phase 22 plan 22-09 adds the other five SJ3 cases, each with its own flag in the owner's file:
+``margin_type_change_with_resting_order`` (one far resting BUY, then one margin-type change
+request), ``leverage_above_bracket_maximum`` (one request of the bracket-1 maximum plus one),
+``margin_insufficient_at_target_leverage`` (the ``insufficient_margin_order`` flow on a symbol that
+already reads ISOLATED at ``config_target_leverage``; the owner's ``insufficient_margin_quantity``,
+bound by ``margin_order_refusal`` with its own flag), ``available_balance_with_resting_order``
+(account figures before and after one far resting BUY; assumption A1) and
+``isolated_position_liquidation_price`` (one entry of the approved quantity, then the exchange's
+liquidationPrice with every input of the local formula; assumption A3; nothing is computed here).
+A configuration change the exchange accepted by surprise is undone once, by the case that made it,
+and recorded; no case restores anything else. Every result is demo-observed, not mainnet (D-19).
+
 Safety posture (read before running anything):
 
 * Dry run is the default. Without ``--execute`` every registered handler runs against
@@ -77,7 +125,7 @@ import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -110,6 +158,7 @@ from src.adapters.binance_limits import (  # noqa: E402
     load_binance_limits,
 )
 from src.adapters.binance_probe import (  # noqa: E402
+    ORDER_BOOK_LIMIT,
     BinanceProbeAdapter,
     ErrorObservation,
     ProbeBanned,
@@ -139,7 +188,10 @@ from src.adapters.binance_userdata_supervisor import (  # noqa: E402
     TrustedEvent,
     UserDataSupervisor,
 )
+from src.backtest.semantics import TP1_QUANTITY_FRACTION  # noqa: E402
 from src.domain.exchange_errors import CallKind, classify  # noqa: E402
+from src.domain.lot_filters import LotFilters  # noqa: E402
+from src.execution.lot_split import quantize_to_lot  # noqa: E402
 from src.ops.operator_evidence import (  # noqa: E402
     EXIT_ABORTED,
     EXIT_FAILED,
@@ -261,9 +313,89 @@ OPTIONAL_CASES: Mapping[str, str] = MappingProxyType(
         "explicit_time_in_force": "explicit_time_in_force_variant",
         "stream_gap": "stream_gap_during_case",
         "market_lot_size_out_of_range": "market_lot_size_out_of_range",
+        # Quick task 261021-sj0: the ten owner opt-in evidence-capture cases (CAPTURE_CASES).
+        "account_capture": "account_read_only_capture",
+        "algo_query_timing": "algo_query_timing_after_new",
+        "close_position_with_position": "close_position_stop_with_position",
+        "stop_trigger_after_fill": "stop_would_trigger_after_fill",
+        "stop_absent_same_id": "stop_query_absent_then_same_id",
+        "manual_close_open_legs": "manual_close_with_open_legs",
+        "commission_realized_pnl": "commission_vs_realized_pnl",
+        "triggered_bracket": "triggered_close_position_bracket",
+        "tp1_from_fill": "tp1_quantity_from_fill",
+        # Quick task 261022-sj1: five more (SJ1_CASES); gtd_expiry, the only case that waits
+        # more than ten minutes, stays last.
+        "exchange_info_read": "exchange_info_read_for_close",
+        "gtd_min_lifetime": "gtd_min_lifetime_boundary",
+        "partial_fill_attempt": "partial_fill_attempt",
+        "cancel_fill_race": "entry_cancel_fill_race",
+        "stream_loss": "stream_loss_during_case",
+        # Quick task 261023-sj2: eight more (SJ2_CASES), still before gtd_expiry.
+        "reduce_only_flat": "reduce_only_market_on_flat",
+        "reduce_only_oversize": "reduce_only_market_larger_than_position",
+        "min_notional_entry": "non_reduce_only_below_min_notional",
+        "insufficient_margin": "insufficient_margin_order",
+        "stop_reject_after_accept": "stop_rejected_after_acceptance",
+        "trigger_cancel_race": "trigger_cancel_race",
+        "recv_window_error": "timestamp_outside_recv_window",
+        "income_history": "income_history_read",
+        # Phase 22 plans 22-05 and 22-09: the six owner-run symbol-configuration and margin
+        # cases (SJ3_CASES), before the gtd case.
+        "symbol_config_change": "symbol_config_change_to_isolated",
+        "margin_type_resting_order": "margin_type_change_with_resting_order",
+        "leverage_above_max": "leverage_above_bracket_maximum",
+        "margin_insufficient_target": "margin_insufficient_at_target_leverage",
+        "available_balance_resting": "available_balance_with_resting_order",
+        "isolated_liquidation": "isolated_position_liquidation_price",
+        "gtd_expiry": "gtd_entry_expiry_status",
     }
 )
 CASE_ORDER: tuple[str, ...] = (*REQUIRED_CASES, *OPTIONAL_CASES.values())
+# The ten cases of quick task 261021-sj0, in CASE_ORDER order. In an executed run with
+# `--fixtures-dir` each REST answer of these cases is also written as a scrubbed fixture file.
+CAPTURE_CASES: tuple[str, ...] = (
+    "account_read_only_capture",
+    "algo_query_timing_after_new",
+    "close_position_stop_with_position",
+    "stop_would_trigger_after_fill",
+    "stop_query_absent_then_same_id",
+    "manual_close_with_open_legs",
+    "commission_vs_realized_pnl",
+    "triggered_close_position_bracket",
+    "tp1_quantity_from_fill",
+    "gtd_entry_expiry_status",
+)
+# The five cases of quick task 261022-sj1, in CASE_ORDER order (before gtd_entry_expiry_status).
+SJ1_CASES: tuple[str, ...] = (
+    "exchange_info_read_for_close",
+    "gtd_min_lifetime_boundary",
+    "partial_fill_attempt",
+    "entry_cancel_fill_race",
+    "stream_loss_during_case",
+)
+# The eight cases of quick task 261023-sj2, in CASE_ORDER order (before gtd_entry_expiry_status).
+SJ2_CASES: tuple[str, ...] = (
+    "reduce_only_market_on_flat",
+    "reduce_only_market_larger_than_position",
+    "non_reduce_only_below_min_notional",
+    "insufficient_margin_order",
+    "stop_rejected_after_acceptance",
+    "trigger_cancel_race",
+    "timestamp_outside_recv_window",
+    "income_history_read",
+)
+# Phase 22 (D-18): the owner-run symbol-configuration cases, in CASE_ORDER order (before
+# gtd_entry_expiry_status). Plan 22-05 added the first; plan 22-09 appended five.
+SJ3_CASES: tuple[str, ...] = (
+    "symbol_config_change_to_isolated",
+    "margin_type_change_with_resting_order",
+    "leverage_above_bracket_maximum",
+    "margin_insufficient_at_target_leverage",
+    "available_balance_with_resting_order",
+    "isolated_position_liquidation_price",
+)
+# The cases whose REST answers are also written as fixture files in an executed run.
+FIXTURE_CASES: tuple[str, ...] = (*CAPTURE_CASES, *SJ1_CASES, *SJ2_CASES, *SJ3_CASES)
 
 # Client ids of the probe: the exchange's documented id shape (at most 36 characters).
 CLIENT_ID_PREFIX = "dprobe-"
@@ -284,6 +416,10 @@ MUTATING_OPERATIONS: frozenset[str] = frozenset(
         "cancel_algo_order",
         "cancel_all_open_orders",
         "cancel_all_algo_open_orders",
+        "new_gtd_limit_order",
+        # Phase 22 plan 22-05: the two symbol-configuration changes (owner-run only).
+        "change_margin_type",
+        "change_initial_leverage",
     }
 )
 
@@ -580,6 +716,54 @@ class ProbePort(Protocol):
 
     async def position_mode(self) -> ProbeObservation: ...
 
+    # Quick task 261021-sj0: the evidence-capture operations of the owner opt-in cases.
+
+    async def account_information(self) -> ProbeObservation: ...
+
+    async def account_balance_all(self) -> ProbeObservation: ...
+
+    async def account_config(self) -> ProbeObservation: ...
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation: ...
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation: ...
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation: ...
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation: ...
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation: ...
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation: ...
+
+    # Quick task 261022-sj1: the exchange clock and the depth of the book (unsigned reads).
+
+    async def server_time(self) -> ProbeObservation: ...
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation: ...
+
+    # Quick task 261023-sj2: one read-only signed GET with a deliberately stale timestamp.
+
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation: ...
+
+    # Phase 22 plan 22-05: the two symbol-configuration changes (mutating, sent once each).
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation: ...
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation: ...
+
     def marker(self) -> int: ...
 
     def frames_since(self, marker: int) -> list[dict[str, str]]: ...
@@ -778,6 +962,11 @@ class ProbeRecorder:
                 "market_lot_probe_quantity": order.market_lot_probe_quantity,
                 "case_timeout_seconds": order.case_timeout_seconds,
                 "cleanup_timeout_seconds": order.cleanup_timeout_seconds,
+                "near_trigger_fraction": order.near_trigger_fraction,
+                "gtd_lifetime_seconds": order.gtd_lifetime_seconds,
+                "gtd_expiry_wait_seconds": order.gtd_expiry_wait_seconds,
+                "race_repeats": order.race_repeats,
+                "insufficient_margin_quantity": order.insufficient_margin_quantity,
                 "optional_cases": dict(order.optional_cases),
                 "only": list(config.only) if config.only is not None else None,
             },
@@ -1070,6 +1259,34 @@ REASON_NO_PARTIAL = "every marketable entry filled completely at the approved si
 REASON_NO_ENTRY_FILLED = "no marketable entry of this run filled"
 REASON_NO_STREAM = "no stream running"
 REASON_NOT_TRIGGERED = "the trigger was not reached within case_timeout_seconds"
+# Quick task 261021-sj0.
+REASON_CLOSE_LEGS_REJECTED = "neither closePosition leg was accepted"
+REASON_NO_POSITION_HELD = "no open position to work on: the position read shows none"
+REASON_LOT_FILTERS_UNREADABLE = (
+    "a LOT_SIZE or MARKET_LOT_SIZE filter value is unreadable: TP1 cannot be sized"
+)
+REASON_TP1_ZERO = "the TP1 quantity is zero after quantization to the lot grid"
+REASON_GTD_NOT_TERMINAL = "not terminal within gtd_expiry_wait_seconds"
+REASON_NO_PARTIAL_PRODUCED = "no partial fill produced"
+REASON_STREAM_NOT_RECOVERED = (
+    "the stream did not return to LIVE within case_timeout_seconds: the later deliveries "
+    "cannot be compared with what REST said during the gap"
+)
+# The two points of `gtd_min_lifetime_boundary`: goodTillDate = public server time + this many
+# seconds, one just below and one just above the exchange's documented floor of 600 seconds
+# (assumption A1). Tool vocabulary of the probe, not a trading threshold.
+GTD_BOUNDARY_MARGINS_SECONDS: tuple[int, int] = (599, 601)
+RACE_NOTE = (
+    "this case does not reproduce a deterministic race: each repeat places a BUY LIMIT at the "
+    "best ask and cancels it as soon as the placement answer arrives; the exchange timing "
+    "decides whether the cancel meets a NEW, FILLED or CANCELED order, so the outcomes below are "
+    "samples of the exchange answers (for example -2011 or FILLED), not a proof of their order"
+)
+# Order statuses that end an order (the GTD case waits for one of them).
+ORDER_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {"FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"}
+)
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # The case whose leg the dependent D055 cases need, and the cases that open an entry.
 PREPLACED_CASE = "preplaced_stop_reduce_only_flat"
@@ -1128,6 +1345,49 @@ def order_bound_refusal(
     notional = quantity * price
     if notional > cap:
         return f"notional {notional} is above the approved cap {cap}"
+    return None
+
+
+# The owner keys of the two cases that may send the owner's own insufficient_margin_quantity.
+MARGIN_ORDER_FLAGS: tuple[str, ...] = ("insufficient_margin", "margin_insufficient_target")
+
+
+def margin_order_refusal(
+    limits: DemoOrderLimits,
+    *,
+    quantity: Decimal | None,
+    price: Decimal,
+    ceiling_price: Decimal,
+    step: Decimal | None,
+    flag: str = "insufficient_margin",
+) -> str | None:
+    """Why the `insufficient_margin_order` order may not be sent, or None (quick task sj2).
+
+    Plan 22-09: `flag` is the owner key of the case that sends it, `insufficient_margin` or
+    `margin_insufficient_target` (the second case sends the same kind of order, bound the same way).
+
+    This is NOT `order_bound_refusal`: the owner's `max_notional_quote` and approved `quantity`
+    are deliberately not applied to this one order, which has to be larger than the available
+    margin. What stays: the case is enabled, the quantity is exactly the owner's own
+    `insufficient_margin_quantity` (never another number), it is positive and on the step grid,
+    and the price is positive and not above `ceiling_price` (the far price inside the owner
+    `far_price_fraction` band), so the order can only rest.
+    """
+    approved = limits.insufficient_margin_quantity
+    if flag not in MARGIN_ORDER_FLAGS:
+        return f"{flag} is not a case that may send the owner's insufficient_margin_quantity"
+    if limits.optional_cases.get(flag) is not True or approved is None:
+        return f"{flag} is not enabled with an owner insufficient_margin_quantity"
+    if quantity != approved:
+        return "the quantity is not the owner's insufficient_margin_quantity"
+    if not approved.is_finite() or approved <= 0:
+        return f"quantity {approved} is not positive"
+    if step is not None and approved % step != 0:
+        return f"quantity {approved} is not on the step grid {step}"
+    if not price.is_finite() or price <= 0:
+        return f"the price {price} is not positive"
+    if price > ceiling_price:
+        return f"the price {price} is above the far price {ceiling_price} of the owner band"
     return None
 
 
@@ -1273,6 +1533,46 @@ class _WriteCase:
         return value
 
     @property
+    def near_trigger_fraction(self) -> Decimal:
+        """The owner's `near_trigger_fraction` (quick task 261021-sj0): trigger closeness."""
+        value = self.limits.near_trigger_fraction
+        if value is None:
+            raise ValueError("near_trigger_fraction is not set in the probe limits file")
+        return value
+
+    @property
+    def gtd_lifetime_seconds(self) -> int:
+        """The owner's GTD lifetime (quick task 261021-sj0)."""
+        value = self.limits.gtd_lifetime_seconds
+        if value is None:
+            raise ValueError("gtd_lifetime_seconds is not set in the probe limits file")
+        return value
+
+    @property
+    def gtd_expiry_wait_seconds(self) -> int:
+        """The owner's wait for the GTD order to end (longer than its lifetime)."""
+        value = self.limits.gtd_expiry_wait_seconds
+        if value is None:
+            raise ValueError("gtd_expiry_wait_seconds is not set in the probe limits file")
+        return value
+
+    @property
+    def race_repeats(self) -> int:
+        """The owner's `race_repeats` (quick task 261022-sj1): place-and-cancel pairs."""
+        value = self.limits.race_repeats
+        if value is None:
+            raise ValueError("race_repeats is not set in the probe limits file")
+        return value
+
+    @property
+    def config_target_leverage(self) -> int:
+        """The owner's `config_target_leverage` (Phase 22 plan 22-05): the leverage to request."""
+        value = self.limits.config_target_leverage
+        if value is None:
+            raise ValueError("config_target_leverage is not set in the probe limits file")
+        return value
+
+    @property
     def hedge_mode(self) -> bool:
         return self.context.recorder.dual_side is True
 
@@ -1366,20 +1666,47 @@ class _WriteCase:
         side: str,
         price: Decimal,
         long: bool = True,
+        quantity: Decimal | None = None,
     ) -> ProbeObservation:
-        """A GTC LIMIT of the approved quantity (bound-checked again just before sending)."""
-        self.check_bounds([(self.quantity, price)])
+        """A GTC LIMIT, by default of the approved quantity; `quantity` may only be a smaller one.
+
+        Bound-checked again just before sending (`order_bound_refusal`: never above the approved
+        quantity and never above `max_notional_quote`).
+        """
+        amount = self.quantity if quantity is None else quantity
+        self.check_bounds([(amount, price)])
         answer = await self.ask(
             label,
             self.port.new_limit_order(
                 symbol=self.symbol,
                 side=side,
-                quantity=self.quantity,
+                quantity=amount,
                 price=price,
                 client_order_id=client_id,
                 position_side=self.position_side(long=long),
                 time_in_force=TIME_IN_FORCE_GTC,
                 reduce_only=None,
+            ),
+        )
+        if answer.ok and answer.summary.get("status") != ORDER_STATUS_FILLED:
+            self.open_orders.append(client_id)
+        return answer
+
+    async def gtd_limit(
+        self, label: str, *, client_id: str, price: Decimal, good_till_date_ms: int
+    ) -> ProbeObservation:
+        """A GTD LIMIT BUY of the approved quantity (bound-checked again just before sending)."""
+        self.check_bounds([(self.quantity, price)])
+        answer = await self.ask(
+            label,
+            self.port.new_gtd_limit_order(
+                symbol=self.symbol,
+                side=SIDE_BUY,
+                quantity=self.quantity,
+                price=price,
+                client_order_id=client_id,
+                position_side=self.position_side(long=True),
+                good_till_date_ms=good_till_date_ms,
             ),
         )
         if answer.ok and answer.summary.get("status") != ORDER_STATUS_FILLED:
@@ -1454,8 +1781,152 @@ class _WriteCase:
         error = answer.error
         return ALGO_ABSENT if error is not None and error.category == CATEGORY_ORDER_ABSENT else ""
 
-    async def open_long(self, market: _Market, tag: str) -> tuple[ProbeObservation, str]:
-        """A marketable BUY LIMIT of the approved quantity; one wait for FILLED.
+    async def algo_status_by_id(self, label: str, algo_id: int) -> str:
+        """Like `algo_status`, but by the exchange's algo id (quick task 261021-sj0)."""
+        answer = await self.ask(label, self.port.query_algo_order_by_algo_id(algo_id=algo_id))
+        if answer.ok:
+            return answer.summary.get("algo_status", "")
+        error = answer.error
+        return ALGO_ABSENT if error is not None and error.category == CATEGORY_ORDER_ABSENT else ""
+
+    def elapsed_ms(self, since: datetime) -> int:
+        """Whole milliseconds on the rig clock since `since` (integer arithmetic only)."""
+        return (_checked_now(self.rig) - since) // timedelta(milliseconds=1)
+
+    async def live_mark(self) -> Decimal:
+        """The live premiumIndex mark (recorded); `_StopCase` when it cannot be read."""
+        answer = await self.ask(
+            "live_mark_price_read", self.port.live_mark_price(symbol=self.symbol)
+        )
+        value = _positive_decimal(answer.summary, "mark_price") if answer.ok else None
+        if value is None:
+            raise _StopCase(f"the live mark price is unreadable: {_class_code(answer)}")
+        self.detail("live_mark_price", format(value, "f"))
+        return value
+
+    async def held_quantity(self, label: str) -> Decimal:
+        """The summed signed position amount of the symbol (one read); `_StopCase` if unreadable."""
+        answer = await self.ask(label, self.port.positions(symbol=self.symbol))
+        rows = _position_rows(answer)
+        if rows is None:
+            raise _StopCase("the position is unreadable")
+        return sum((Decimal(row["position_amt"]) for row in rows), Decimal(0))
+
+    async def observe_state(self, prefix: str) -> dict[str, ProbeObservation]:
+        """Record open orders, open algo orders, the position and the algo ids as observed facts.
+
+        Nothing is compared with an expectation (unlike `reconcile`): these are plain facts.
+        """
+        summary, answers = await _read_state(self.port, self.symbol)
+        self.observations.extend(answers.values())
+        readable = summary["readable"] is True
+        held = sum((Decimal(row["position_amt"]) for row in summary["positions"]), Decimal(0))
+        self.detail(f"{prefix}_open_orders", _count_text(summary["open_orders"]))
+        self.detail(f"{prefix}_open_algo_orders", _count_text(summary["open_algo_orders"]))
+        self.detail(f"{prefix}_position", format(held, "f") if readable else "unreadable")
+        algo = answers["open_algo_orders"]
+        ids = [algo.summary.get(f"row_{i}_client_algo_id", "") for i in range(_count(algo) or 0)]
+        self.detail(f"{prefix}_open_algo_ids", ",".join(ids) or "none")
+        return answers
+
+    async def market_close(
+        self, label: str, quantity: Decimal, bound_price: Decimal, tag: str
+    ) -> tuple[ProbeObservation, str]:
+        """One reduce-only MARKET SELL (position side BOTH) of `quantity`, bound-checked first.
+
+        `bound_price` is an upper bound of the fill price (the notional check). Returns the
+        answer and the client id sent.
+        """
+        self.check_bounds([(quantity, bound_price)])
+        client_id = self.client_id(tag)
+        answer = await self.ask(
+            label,
+            self.port.new_market_order(
+                symbol=self.symbol,
+                side=SIDE_SELL,
+                quantity=quantity,
+                client_order_id=client_id,
+                position_side=POSITION_SIDE_ONE_WAY,
+                reduce_only=True,
+            ),
+        )
+        return answer, client_id
+
+    async def flatten(
+        self, label: str, held: Decimal, bound_price: Decimal, tag: str
+    ) -> tuple[ProbeObservation, str]:
+        """One reduce-only MARKET order that closes the signed position `held` (quick task sj2).
+
+        SELL for a long, BUY for a short; position side BOTH. Bound-checked first like every
+        capped order: the absolute amount is never above the approved quantity.
+        """
+        quantity = abs(held)
+        self.check_bounds([(quantity, bound_price)])
+        client_id = self.client_id(tag)
+        answer = await self.ask(
+            label,
+            self.port.new_market_order(
+                symbol=self.symbol,
+                side=SIDE_SELL if held > 0 else SIDE_BUY,
+                quantity=quantity,
+                client_order_id=client_id,
+                position_side=POSITION_SIDE_ONE_WAY,
+                reduce_only=True,
+            ),
+        )
+        return answer, client_id
+
+    async def margin_limit(
+        self,
+        label: str,
+        *,
+        client_id: str,
+        price: Decimal,
+        ceiling_price: Decimal,
+        flag: str = "insufficient_margin",
+    ) -> ProbeObservation:
+        """The ONE order that is not held to the approved quantity and `max_notional_quote`.
+
+        Only `insufficient_margin_order` calls this (a test pins it). It sends exactly the
+        owner's own `insufficient_margin_quantity` as a GTC LIMIT BUY that can only rest: the
+        owner notional cap is deliberately NOT applied (the order has to be larger than the
+        margin allows to provoke -2019), so this method does the checks that remain: the key is
+        enabled, the quantity is the owner's one and is on the step grid, the price is positive
+        and not above `ceiling_price` (the far price inside the owner far_price_fraction band,
+        always below the mark).
+        """
+        quantity = self.limits.insufficient_margin_quantity
+        refusal = margin_order_refusal(
+            self.limits,
+            quantity=quantity,
+            price=price,
+            ceiling_price=ceiling_price,
+            step=self.step,
+            flag=flag,
+        )
+        if refusal is not None or quantity is None:
+            raise OrderBoundRefused(refusal or "insufficient_margin_quantity is not set")
+        answer = await self.ask(
+            label,
+            self.port.new_limit_order(
+                symbol=self.symbol,
+                side=SIDE_BUY,
+                quantity=quantity,
+                price=price,
+                client_order_id=client_id,
+                position_side=self.position_side(long=True),
+                time_in_force=TIME_IN_FORCE_GTC,
+                reduce_only=None,
+            ),
+        )
+        if answer.ok and answer.summary.get("status") != ORDER_STATUS_FILLED:
+            self.open_orders.append(client_id)
+        return answer
+
+    async def open_long(
+        self, market: _Market, tag: str, quantity: Decimal | None = None
+    ) -> tuple[ProbeObservation, str]:
+        """A marketable BUY LIMIT (default: the approved quantity; else a smaller one); one wait.
 
         Returns the placement answer and the last status seen ('' when rejected or
         unreadable). Every status seen is in `details["entry_statuses"]`, so a dependent case
@@ -1465,7 +1936,11 @@ class _WriteCase:
         self.detail("entry_client_id", client_id)
         self.entry_sent = True
         placed = await self.limit(
-            "entry", client_id=client_id, side=SIDE_BUY, price=market.marketable_buy()
+            "entry",
+            client_id=client_id,
+            side=SIDE_BUY,
+            price=market.marketable_buy(),
+            quantity=quantity,
         )
         if not placed.ok:
             return placed, ""
@@ -2309,6 +2784,2725 @@ async def case_id_reuse_after_filled(context: CaseContext) -> CaseResult:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Quick task 261021-sj0: the owner opt-in evidence-capture cases (`CAPTURE_CASES`).
+#
+# Facts only: each case records what the exchange answered (and the frames it produced) and
+# decides nothing; D055 stays OPEN and no parameter is chosen (D-17). They run only when the
+# owner enables their key in the probe limits file, go through `run_write_case` (so the
+# one-way, bound and cleanup rules apply) and never retry a request.
+# --------------------------------------------------------------------------- #
+
+
+def _positive_int_text(summary: Mapping[str, str], key: str) -> int | None:
+    text = summary.get(key, "")
+    if not (text.isascii() and text.isdigit()):
+        return None
+    value = int(text)
+    return value if value > 0 else None
+
+
+def _algo_id_of(answer: ProbeObservation) -> int | None:
+    """The exchange's algo id of an accepted answer (ASCII digits, positive), else None."""
+    return _positive_int_text(answer.summary, "algo_id") if answer.ok else None
+
+
+def _order_id_of(answer: ProbeObservation) -> int | None:
+    """The exchange's order id of an accepted answer (ASCII digits, positive), else None."""
+    return _positive_int_text(answer.summary, "order_id") if answer.ok else None
+
+
+def _field_set(summary: Mapping[str, str]) -> str:
+    """The sorted unique field names of a flat summary, list positions shown as ``*``."""
+    names = {
+        ".".join("*" if part.isascii() and part.isdigit() else part for part in key.split("."))
+        for key in summary
+    }
+    return ",".join(sorted(names))
+
+
+async def _account_read_only_capture(case: _WriteCase) -> CaseResult:
+    port = case.port
+    symbol = case.symbol
+    steps: tuple[tuple[str, Callable[[], Awaitable[ProbeObservation]]], ...] = (
+        ("account_information", lambda: port.account_information()),
+        ("account_balance_all", lambda: port.account_balance_all()),
+        ("account_config", lambda: port.account_config()),
+        ("symbol_config", lambda: port.symbol_config(symbol=symbol)),
+        ("leverage_brackets", lambda: port.leverage_brackets(symbol=symbol)),
+        ("position_mode", lambda: port.position_mode()),
+    )
+    for label, call in steps:
+        answer = await case.ask(label, call())
+        if not answer.ok:
+            continue
+        case.detail(f"{label}_fields", _field_set(answer.summary))
+        case.detail(f"{label}_field_count", str(len(answer.summary)))
+        if answer.summary.get("truncated") == _TRUE:
+            case.detail(f"{label}_truncated", _TRUE)
+    return case.observed()
+
+
+async def _timing_variant(
+    case: _WriteCase, prefix: str, leg_id: str, placed: ProbeObservation
+) -> None:
+    """Query a just-placed algo leg by client id and by algo id, wait once, cancel, query."""
+    placed_at = _checked_now(case.rig)
+    algo_id = _algo_id_of(placed)
+    if algo_id is None:
+        case.detail(
+            f"{prefix}_algo_id",
+            "NOT_OBSERVED: the placement answer carried no algo id; "
+            "no query by algo id was sent for this leg",
+        )
+    else:
+        case.detail(f"{prefix}_algo_id", str(algo_id))
+    attempts = 0
+
+    async def query_both(phase: str) -> bool:
+        """One query by client id and, when the id is known, one by algo id; all answered OK?"""
+        answers = []
+        elapsed = case.elapsed_ms(placed_at)
+        by_client = await case.ask(
+            f"{prefix}_{phase}_by_client_id", case.port.query_algo_order(client_algo_id=leg_id)
+        )
+        case.detail(f"{prefix}_{phase}_by_client_id_elapsed_ms", str(elapsed))
+        answers.append(by_client)
+        if algo_id is not None:
+            elapsed = case.elapsed_ms(placed_at)
+            by_id = await case.ask(
+                f"{prefix}_{phase}_by_algo_id",
+                case.port.query_algo_order_by_algo_id(algo_id=algo_id),
+            )
+            case.detail(f"{prefix}_{phase}_by_algo_id_elapsed_ms", str(elapsed))
+            answers.append(by_id)
+        return all(answer.ok for answer in answers)
+
+    async def found() -> bool:
+        nonlocal attempts
+        attempts += 1
+        return await query_both(f"query{attempts}")
+
+    await wait_up_to(case.rig, found, case.case_timeout_seconds)
+    case.detail(f"{prefix}_queries_before_all_ok", str(attempts))
+    listed = await case.ask(
+        f"{prefix}_open_algo_orders", case.port.open_algo_orders(symbol=case.symbol)
+    )
+    row = _row_values(listed, "client_algo_id", leg_id)
+    case.detail(
+        f"{prefix}_listed_in_open_algo_orders",
+        _flag_text(row is not None) if _count(listed) is not None else "unknown",
+    )
+    await case.cancel_algo(f"{prefix}_cancel", leg_id)
+    await query_both("after_cancel")
+
+
+async def _algo_query_timing_after_new(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    trigger = market.far_below(case.fraction)
+    carrier_trigger = market.far_above(case.fraction)
+    case.check_bounds([(case.quantity, trigger), (case.quantity, carrier_trigger)])
+    for prefix, tag in (("ro", "aqr"), ("carrier", "aqc")):
+        leg_id = case.client_id(tag)
+        case.detail(f"{prefix}_client_algo_id", leg_id)
+        if prefix == "ro":
+            placed = await _place_flat_leg(
+                case, f"{prefix}_place", leg_id, trigger, time_in_force=None
+            )
+        else:
+            placed = await _place_carrier(case, market, f"{prefix}_place", leg_id)
+        case.detail(f"{prefix}_placement_accepted", _flag_text(placed.ok))
+        if not placed.ok:
+            continue
+        await _timing_variant(case, prefix, leg_id, placed)
+    return case.observed()
+
+
+def _count_text(value: object) -> str:
+    return str(value) if isinstance(value, int) else "unreadable"
+
+
+def _near_triggers(mark: Decimal, tick: Decimal, fraction: Decimal) -> tuple[Decimal, Decimal]:
+    """A trigger just below and one just above the live `mark`, on the tick grid.
+
+    below = min(floor(mark x fraction), the highest tick strictly below the mark);
+    above = max(ceil(mark x (2 - fraction)), the lowest tick strictly above the mark). The tick
+    rule keeps both on the right side of the mark for a fraction very close to 1.
+    """
+    units = mark / tick
+    highest_below = (units.to_integral_value(rounding=ROUND_CEILING) - 1) * tick
+    lowest_above = (units.to_integral_value(rounding=ROUND_FLOOR) + 1) * tick
+    near_below = (mark * fraction / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
+    far = mark * (Decimal(2) - fraction)
+    near_above = (far / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+    return min(near_below, highest_below), max(near_above, lowest_above)
+
+
+_PROGRESSED_STATUSES: frozenset[str] = ALGO_LIFECYCLE_STATUSES | ALGO_ENDED_STATUSES
+_CANCEL_STATUSES: frozenset[str] = frozenset({"CANCELED", "REJECTED", "EXPIRED"})
+WIRE_ALGO_UPDATE = "ALGO_UPDATE"
+WIRE_ORDER_UPDATE = "ORDER_TRADE_UPDATE"
+_TRADE_KEYS: tuple[str, ...] = (
+    "trade_id",
+    "side",
+    "price",
+    "qty",
+    "quote_qty",
+    "commission",
+    "commission_asset",
+    "realized_pnl",
+    "maker",
+    "time_ms",
+)
+_INCOME_KEYS: tuple[str, ...] = (
+    "income_type",
+    "income",
+    "asset",
+    "trade_id",
+    "tran_id",
+    "time_ms",
+)
+NOT_OBSERVED_ORDER_ID = "NOT_OBSERVED: the answer carried no order id"
+
+
+@dataclass
+class _Leg:
+    """One algo leg a capture case placed: its label prefix, client algo id, REST statuses."""
+
+    prefix: str
+    leg_id: str
+    rest: list[str] = field(default_factory=list)
+
+
+def _leg_statuses(case: _WriteCase, leg: _Leg) -> list[str]:
+    """Every status seen for the leg: the REST answers, then the typed ALGO_UPDATE frames."""
+    streamed = [frame.get("algo_status", "") for frame in _algo_frames(case.frames(), leg.leg_id)]
+    return [*leg.rest, *streamed]
+
+
+def _progressed(statuses: Sequence[str]) -> bool:
+    """A status after NEW (lifecycle or ended); an ORDER_ABSENT answer never counts."""
+    return any(status in _PROGRESSED_STATUSES for status in statuses)
+
+
+def _ended(statuses: Sequence[str]) -> bool:
+    return any(status in ALGO_ENDED_STATUSES for status in statuses)
+
+
+def _triggered(statuses: Sequence[str]) -> bool:
+    return any(status in ALGO_LIFECYCLE_STATUSES for status in statuses)
+
+
+def _auto_cancelled(leg: _Leg, statuses: Sequence[str]) -> str:
+    """true: a cancel-type end was seen; false: still NEW at the last query; else unknown."""
+    if any(status in _CANCEL_STATUSES for status in statuses):
+        return _TRUE
+    if leg.rest and leg.rest[-1] == ALGO_STATUS_NEW:
+        return _FALSE
+    return "unknown"
+
+
+def _raw_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return _TRUE if value else _FALSE
+    return str(value)
+
+
+def _distinct(values: Sequence[str]) -> list[str]:
+    seen: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _raw_algo_updates(case: _WriteCase, leg_id: str) -> list[Mapping[str, Any]]:
+    """The raw ALGO_UPDATE payloads of one leg since the case started, in delivery order."""
+    updates: list[Mapping[str, Any]] = []
+    for raw in case.port.raw_frames_since(case.marker):
+        if not isinstance(raw, Mapping) or raw.get("e") != WIRE_ALGO_UPDATE:
+            continue
+        body = raw.get("o")
+        if isinstance(body, Mapping) and body.get("caid") == leg_id:
+            updates.append(raw)
+    return updates
+
+
+def _last_raw_field(updates: Sequence[Mapping[str, Any]], wire: str) -> str:
+    values = [_raw_text(update["o"].get(wire)) for update in updates]
+    return next((value for value in reversed(values) if value), "")
+
+
+def _last_field(frames: Sequence[Mapping[str, str]], name: str) -> str | None:
+    return next((frame[name] for frame in reversed(frames) if frame.get(name)), None)
+
+
+def _leg_actual_order_id(case: _WriteCase, leg: _Leg) -> str:
+    """The matching-engine order id (`ai`) of the leg: typed frames first, else the raw ones."""
+    typed = _last_field(_algo_frames(case.frames(), leg.leg_id), "actual_order_id")
+    return typed or _last_raw_field(_raw_algo_updates(case, leg.leg_id), "ai")
+
+
+def _record_leg_lifecycle(case: _WriteCase, leg: _Leg) -> None:
+    """REST and typed-frame statuses of the leg, and its `ai`, `aq`, `rm` (facts only)."""
+    prefix = leg.prefix
+    frames = _algo_frames(case.frames(), leg.leg_id)
+    updates = _raw_algo_updates(case, leg.leg_id)
+    case.detail(
+        f"{prefix}_statuses_rest", ",".join(status or "unreadable" for status in leg.rest) or "none"
+    )
+    case.detail(
+        f"{prefix}_statuses_frames",
+        ",".join(frame.get("algo_status", "") for frame in frames) or "none",
+    )
+    for name, typed_key, wire in (
+        ("ai", "actual_order_id", "ai"),
+        ("aq", "executed_quantity", "aq"),
+        ("rm", "reject_reason", "rm"),
+    ):
+        value = _last_field(frames, typed_key) or _last_raw_field(updates, wire)
+        case.detail(
+            f"{prefix}_{name}", value or f"NOT_OBSERVED: no ALGO_UPDATE frame carried {name}"
+        )
+
+
+def _record_algo_update_sequence(case: _WriteCase, leg: _Leg) -> None:
+    """The full raw ALGO_UPDATE sequence of one leg and its raw child ORDER_TRADE_UPDATE.
+
+    Every delivery in delivery order (`X|ia|ai|aq|rm|E|T`, values verbatim as text), the
+    statuses delivered more than once, the statuses beyond NEW and CANCELED, the distinct
+    `ia`, `ai` and `aq` values, and for each distinct non-empty `ai` the raw child frames
+    (`c|X|x|ot|z|ap|n|N|rp|T`). Facts only; it decides nothing (owner audit addition b).
+    """
+    prefix = leg.prefix
+    raws = case.port.raw_frames_since(case.marker)
+    updates = _raw_algo_updates(case, leg.leg_id)
+    if not updates:
+        case.detail(
+            f"{prefix}_algo_update_sequence", "NOT_OBSERVED: no raw ALGO_UPDATE frame for this leg"
+        )
+        return
+    bodies = [update["o"] for update in updates]
+    items = [
+        "|".join(
+            _raw_text(value)
+            for value in (
+                body.get("X"),
+                body.get("ia"),
+                body.get("ai"),
+                body.get("aq"),
+                body.get("rm"),
+                update.get("E"),
+                update.get("T"),
+            )
+        )
+        for update, body in zip(updates, bodies, strict=True)
+    ]
+    statuses = [_raw_text(body.get("X")) for body in bodies]
+    repeated = [f"{status} x{statuses.count(status)}" for status in _distinct(statuses)]
+    repeated = [item for item in repeated if not item.endswith(" x1")]
+    beyond = sorted({status for status in statuses if status not in ("NEW", "CANCELED")})
+    case.detail(f"{prefix}_algo_update_count", str(len(updates)))
+    case.detail(f"{prefix}_algo_update_sequence", ";".join(items))
+    case.detail(f"{prefix}_repeated_statuses", ", ".join(repeated) or "none")
+    case.detail(f"{prefix}_statuses_beyond_new_canceled", ",".join(beyond) or "none")
+    for key, wire in (("ia", "ia"), ("ai", "ai"), ("aq", "aq")):
+        values = _distinct([_raw_text(body.get(wire)) for body in bodies])
+        case.detail(f"{prefix}_{key}_values", ",".join(value or "(empty)" for value in values))
+    child = 0
+    for actual in [value for value in _distinct([_raw_text(b.get("ai")) for b in bodies]) if value]:
+        found = False
+        for raw in raws:
+            order = raw.get("o") if isinstance(raw, Mapping) else None
+            if (
+                isinstance(raw, Mapping)
+                and raw.get("e") == WIRE_ORDER_UPDATE
+                and isinstance(order, Mapping)
+                and _raw_text(order.get("i")) == actual
+            ):
+                child += 1
+                found = True
+                case.detail(
+                    f"{prefix}_child_{child}",
+                    "|".join(
+                        _raw_text(value)
+                        for value in (
+                            order.get("c"),
+                            order.get("X"),
+                            order.get("x"),
+                            order.get("ot"),
+                            order.get("z"),
+                            order.get("ap"),
+                            order.get("n"),
+                            order.get("N"),
+                            order.get("rp"),
+                            order.get("T"),
+                        )
+                    ),
+                )
+        if not found:
+            case.detail(
+                f"{prefix}_child_of_ai_{actual}",
+                "NOT_OBSERVED: no raw ORDER_TRADE_UPDATE frame with this order id",
+            )
+
+
+async def _wait_for_progress(case: _WriteCase, legs: Sequence[_Leg]) -> bool:
+    """One wait of the owner timeout until some leg shows a status after NEW (REST or frames).
+
+    An ORDER_ABSENT answer (-2013) is recorded but never counts as ended or progressed: the
+    Demo answers it right after a NEW placement, which ended the wait of the Phase 18 case
+    `triggered_market_exit_lifecycle` at once (the 20261021T132718Z run).
+    """
+
+    async def any_progressed() -> bool:
+        for leg in legs:
+            leg.rest.append(await case.algo_status(f"{leg.prefix}_wait_query", leg.leg_id))
+        return any(_progressed(_leg_statuses(case, leg)) for leg in legs)
+
+    return await wait_up_to(case.rig, any_progressed, case.case_timeout_seconds)
+
+
+async def _open_position(
+    case: _WriteCase, market: _Market, tag: str, quantity: Decimal | None = None
+) -> tuple[CaseResult | None, ProbeObservation]:
+    """The marketable entry of a capture case; a NOT_OBSERVED result when it did not fill.
+
+    `quantity` (quick task 261023-sj2) may be a smaller quantity than the approved one.
+    """
+    placed, status = await case.open_long(market, tag, quantity)
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}"), placed
+    if status != ORDER_STATUS_FILLED:
+        reason = f"the entry did not fill: status {status or 'unreadable'}"
+        return case.not_observed(reason), placed
+    return None, placed
+
+
+async def _place_close_position_legs(
+    case: _WriteCase, *, below: Decimal, above: Decimal, stop_tag: str, tp_tag: str
+) -> tuple[list[_Leg], str]:
+    """A closePosition STOP_MARKET SELL at `below` and TAKE_PROFIT_MARKET SELL at `above`.
+
+    Returns the accepted legs (prefixes ``stop`` and ``tp``) and the codes of the rejected.
+    """
+    legs: list[_Leg] = []
+    codes: list[str] = []
+    for prefix, tag, order_type, trigger in (
+        ("stop", stop_tag, ORDER_TYPE_STOP_MARKET, below),
+        ("tp", tp_tag, ORDER_TYPE_TAKE_PROFIT_MARKET, above),
+    ):
+        leg_id = case.client_id(tag)
+        case.detail(f"{prefix}_client_algo_id", leg_id)
+        answer = await case.conditional(
+            f"{prefix}_leg",
+            client_id=leg_id,
+            side=SIDE_SELL,
+            order_type=order_type,
+            trigger=trigger,
+            quantity=None,
+            close_position=True,
+        )
+        case.detail(f"{prefix}_leg_accepted", _flag_text(answer.ok))
+        if answer.ok:
+            legs.append(_Leg(prefix, leg_id))
+        else:
+            codes.append(f"{prefix} {_class_code(answer)}")
+    return legs, ", ".join(codes)
+
+
+async def _close_position_stop_with_position(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    below = market.far_below(case.fraction)
+    above = market.far_above(case.fraction)
+    case.check_bounds([(case.quantity, market.marketable_buy()), (None, below), (None, above)])
+    refusal, _ = await _open_position(case, market, "cpe")
+    if refusal is not None:
+        return refusal
+    legs: list[_Leg] = []
+    for prefix, label, tag, order_type, trigger in (
+        ("stop", "close_position_stop", "cps", ORDER_TYPE_STOP_MARKET, below),
+        ("tp", "close_position_tp", "cpt", ORDER_TYPE_TAKE_PROFIT_MARKET, above),
+    ):
+        leg_id = case.client_id(tag)
+        answer = await case.conditional(
+            label,
+            client_id=leg_id,
+            side=SIDE_SELL,
+            order_type=order_type,
+            trigger=trigger,
+            quantity=None,
+            close_position=True,
+        )
+        case.detail(f"{label}_accepted", _flag_text(answer.ok))
+        if answer.ok:
+            legs.append(_Leg(prefix, leg_id))
+    for leg in legs:
+        await case.algo_status(f"{leg.prefix}_status", leg.leg_id)
+    if legs:
+        answers = await case.observe_state("with_legs")
+        for leg in legs:
+            row = _row_values(answers["open_algo_orders"], "client_algo_id", leg.leg_id)
+            for key, value in (row or {}).items():
+                case.detail(f"{leg.prefix}_listed_{key}", value)
+        for leg in legs:
+            await case.cancel_algo(f"{leg.prefix}_cancel", leg.leg_id)
+    return case.observed()
+
+
+async def _stop_would_trigger_after_fill(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    above = market.far_above(case.fraction)
+    case.check_bounds([(case.quantity, market.marketable_buy()), (None, above)])
+    refusal, _ = await _open_position(case, market, "wte")
+    if refusal is not None:
+        return refusal
+    leg_id = case.client_id("wts")
+    case.detail("client_algo_id", leg_id)
+    answer = await case.conditional(
+        "would_trigger_stop",
+        client_id=leg_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=above,
+        quantity=None,
+        close_position=True,
+    )
+    case.detail("would_trigger_accepted", _flag_text(answer.ok))
+    if answer.ok:
+        case.notes.append(
+            "the wrong-side stop was accepted and may trigger at once; "
+            "the runner cleanup flattens the position"
+        )
+        await case.algo_status("would_trigger_status", leg_id)
+        await case.observe_state("after")
+    return case.observed()
+
+
+async def _stop_query_absent_then_same_id(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    below = market.far_below(case.fraction)
+    case.check_bounds(
+        [(case.quantity, market.marketable_buy()), (None, below), (case.quantity, below)]
+    )
+    refusal, _ = await _open_position(case, market, "sae")
+    if refusal is not None:
+        return refusal
+    sid = case.client_id("sas")
+    case.detail("client_algo_id", sid)
+    await case.algo_status("query_before_place", sid)
+    await case.conditional(
+        "first_place",
+        client_id=sid,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=below,
+        quantity=None,
+        close_position=True,
+    )
+    placed_at = _checked_now(case.rig)
+    case.detail("query_right_after_place_elapsed_ms", str(case.elapsed_ms(placed_at)))
+    await case.algo_status("query_right_after_place", sid)
+    # The deliberate same-id re-placements of the owner request (Q5): not a retry of a failure.
+    await case.conditional(
+        "same_id_replace_close_position",
+        client_id=sid,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=below,
+        quantity=None,
+        close_position=True,
+    )
+    await case.conditional(
+        "same_id_replace_reduce_only",
+        client_id=sid,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=below,
+        quantity=case.quantity,
+        reduce_only=True,
+    )
+    listing = await case.ask(
+        "open_algo_orders_listing", case.port.open_algo_orders(symbol=case.symbol)
+    )
+    total = _count(listing)
+    with_id = sum(
+        1 for i in range(total or 0) if listing.summary.get(f"row_{i}_client_algo_id") == sid
+    )
+    case.detail("legs_listed_with_id", str(with_id) if total is not None else "unreadable")
+    case.detail("legs_listed_total", str(total) if total is not None else "unreadable")
+    await case.cancel_algo("cancel_once", sid)
+    await case.algo_status("query_after_cancel", sid)
+    return case.observed()
+
+
+async def _manual_close_with_open_legs(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    below = market.far_below(case.fraction)
+    above = market.far_above(case.fraction)
+    case.check_bounds([(case.quantity, market.marketable_buy()), (None, below), (None, above)])
+    refusal, _ = await _open_position(case, market, "mce")
+    if refusal is not None:
+        return refusal
+    legs, codes = await _place_close_position_legs(
+        case, below=below, above=above, stop_tag="mcs", tp_tag="mct"
+    )
+    if not legs:
+        return case.not_observed(f"{REASON_CLOSE_LEGS_REJECTED}: {codes}")
+    held = await case.held_quantity("position_before_close")
+    case.detail("held_quantity", format(held, "f"))
+    if held <= 0:
+        return case.not_observed(REASON_NO_POSITION_HELD)
+    closed, close_id = await case.market_close("manual_close", held, market.marketable_buy(), "mcx")
+    case.detail("manual_close_client_id", close_id)
+    case.detail(
+        "manual_close_status",
+        closed.summary.get("status", "NOT_OBSERVED: no status")
+        if closed.ok
+        else f"rejected {_class_code(closed)}",
+    )
+    case.detail(
+        "manual_close_executed_qty",
+        closed.summary.get("executed_qty", "NOT_OBSERVED: not answered"),
+    )
+
+    async def legs_ended() -> bool:
+        for leg in legs:
+            leg.rest.append(await case.algo_status(f"{leg.prefix}_wait_query", leg.leg_id))
+        return all(_ended(_leg_statuses(case, leg)) for leg in legs)
+
+    await wait_up_to(case.rig, legs_ended, case.case_timeout_seconds)
+    verdicts: dict[str, str] = {}
+    for leg in legs:
+        _record_leg_lifecycle(case, leg)
+        _record_algo_update_sequence(case, leg)
+        verdicts[leg.leg_id] = _auto_cancelled(leg, _leg_statuses(case, leg))
+        case.detail(f"{leg.prefix}_auto_cancelled", verdicts[leg.leg_id])
+    await case.observe_state("after_close")
+    for leg in legs:
+        if verdicts[leg.leg_id] != _TRUE:
+            await case.cancel_algo(f"{leg.prefix}_cancel", leg.leg_id)
+    return case.observed()
+
+
+def _trade_rows(answer: ProbeObservation) -> list[dict[str, str]]:
+    return [
+        {key: answer.summary.get(f"row_{i}_{key}", "") for key in _TRADE_KEYS}
+        for i in range(_count(answer) or 0)
+    ]
+
+
+def _income_rows(answer: ProbeObservation) -> list[dict[str, str]]:
+    return [
+        {key: answer.summary.get(f"row_{i}_{key}", "") for key in _INCOME_KEYS}
+        for i in range(_count(answer) or 0)
+    ]
+
+
+def _decimal_or_none(text: str) -> Decimal | None:
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() else None
+
+
+def _decimal_sum(texts: Sequence[str]) -> Decimal | None:
+    """The exact sum, or None when there is no value or one is not a finite decimal."""
+    values = [_decimal_or_none(text) for text in texts]
+    if not values or any(value is None for value in values):
+        return None
+    return sum((value for value in values if value is not None), Decimal(0))
+
+
+async def _commission_vs_realized_pnl(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    case.check_bounds([(case.quantity, market.marketable_buy())])
+    refusal, entry = await _open_position(case, market, "cre")
+    if refusal is not None:
+        return refusal
+    entry_id = _order_id_of(entry)
+    case.detail("entry_order_id", str(entry_id) if entry_id is not None else NOT_OBSERVED_ORDER_ID)
+    held = await case.held_quantity("position_before_close")
+    case.detail("held_quantity", format(held, "f"))
+    if held <= 0:
+        return case.not_observed(REASON_NO_POSITION_HELD)
+    closed, close_client_id = await case.market_close("close", held, market.marketable_buy(), "crx")
+    close_id = _order_id_of(closed)
+    case.detail("close_client_id", close_client_id)
+    case.detail("close_order_id", str(close_id) if close_id is not None else NOT_OBSERVED_ORDER_ID)
+    without = "the answer carried no order id: queried without order_id (all recent trades)"
+    if close_id is None:
+        case.detail("close_trades_query_note", without)
+    last_close: list[ProbeObservation] = []
+
+    async def close_trades_seen() -> bool:
+        answer = await case.ask(
+            "close_trades_query", case.port.user_trades(symbol=case.symbol, order_id=close_id)
+        )
+        last_close[:] = [answer]
+        return (_count(answer) or 0) >= 1
+
+    await wait_up_to(case.rig, close_trades_seen, case.case_timeout_seconds)
+    if entry_id is None:
+        case.detail("entry_trades_query_note", without)
+    entry_trades = await case.ask(
+        "entry_trades_query", case.port.user_trades(symbol=case.symbol, order_id=entry_id)
+    )
+    close_rows = _trade_rows(last_close[0]) if last_close else []
+    entry_rows = _trade_rows(entry_trades)
+    for prefix, rows in (("close", close_rows), ("entry", entry_rows)):
+        for number, row in enumerate(rows, start=1):
+            case.detail(f"{prefix}_trade_{number}", "|".join(row[key] for key in _TRADE_KEYS))
+    unique: dict[str, dict[str, str]] = {}
+    for row in [*close_rows, *entry_rows]:
+        unique.setdefault(row["trade_id"], row)
+    times = [int(row["time_ms"]) for row in unique.values() if row["time_ms"].isdigit()]
+    income: list[dict[str, str]] = []
+    if not times:
+        case.detail("income_history", "NOT_OBSERVED: no trade time to start the income read from")
+    else:
+        start_ms = min(times)  # the exchange clock of the earliest trade
+
+        async def income_seen() -> bool:
+            answer = await case.ask(
+                "income_history_query",
+                case.port.income_history(symbol=case.symbol, start_time_ms=start_ms),
+            )
+            income[:] = [row for row in _income_rows(answer) if row["trade_id"] in unique]
+            return bool(income)
+
+        await wait_up_to(case.rig, income_seen, case.case_timeout_seconds)
+    for number, row in enumerate(income, start=1):
+        case.detail(f"income_{number}", "|".join(row[key] for key in _INCOME_KEYS))
+    _record_derived_sums(case, list(unique.values()), income)
+    return case.observed()
+
+
+def _record_derived_sums(
+    case: _WriteCase, trades: Sequence[Mapping[str, str]], income: Sequence[Mapping[str, str]]
+) -> None:
+    """Exact Decimal sums of the recorded rows, named ``derived_`` (arithmetic, no verdict).
+
+    Whether realizedPnl includes the commission is the owner decision
+    `LIVE_NET_PNL_SEMANTICS_VERIFIED`; nothing here answers it.
+    """
+    quotes: list[Decimal] = []
+    for row in trades:
+        value = _decimal_or_none(row["quote_qty"])
+        if value is None or row["side"] not in (SIDE_BUY, SIDE_SELL):
+            quotes = []
+            break
+        quotes.append(value if row["side"] == SIDE_SELL else -value)
+    case.detail(
+        "derived_sell_quote_minus_buy_quote",
+        format(sum(quotes, Decimal(0)), "f") if quotes else "NOT_OBSERVED: no usable quote_qty",
+    )
+    realized = _decimal_sum([row["realized_pnl"] for row in trades])
+    case.detail(
+        "derived_sum_realized_pnl_trades",
+        format(realized, "f") if realized is not None else "NOT_OBSERVED: no usable realized_pnl",
+    )
+    assets = {row["commission_asset"] for row in trades}
+    case.detail("commission_assets", ",".join(sorted(assets)) or "none")
+    commission = _decimal_sum([row["commission"] for row in trades])
+    if len(assets) == 1 and commission is not None:
+        case.detail("derived_sum_commission_trades", format(commission, "f"))
+    for key, income_type in (
+        ("derived_income_realized_pnl_sum", "REALIZED_PNL"),
+        ("derived_income_commission_sum", "COMMISSION"),
+    ):
+        total = _decimal_sum([row["income"] for row in income if row["income_type"] == income_type])
+        case.detail(
+            key, format(total, "f") if total is not None else "NOT_OBSERVED: no matching income row"
+        )
+
+
+async def _triggered_close_position_bracket(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    case.check_bounds(
+        [
+            (case.quantity, market.marketable_buy()),
+            (None, market.far_below(case.fraction)),
+            (None, market.far_above(case.fraction)),
+        ]
+    )
+    refusal, _ = await _open_position(case, market, "tbe")
+    if refusal is not None:
+        return refusal
+    live = await case.live_mark()
+    below, above = _near_triggers(live, market.tick, case.near_trigger_fraction)
+    case.detail("stop_trigger_price", format(below, "f"))
+    case.detail("tp_trigger_price", format(above, "f"))
+    case.check_bounds([(None, below), (None, above)])
+    legs, codes = await _place_close_position_legs(
+        case, below=below, above=above, stop_tag="tbs", tp_tag="tbt"
+    )
+    if not legs:
+        return case.not_observed(f"{REASON_CLOSE_LEGS_REJECTED}: {codes}")
+    if not await _wait_for_progress(case, legs):
+        for leg in legs:
+            _record_leg_lifecycle(case, leg)
+            _record_algo_update_sequence(case, leg)
+        await case.observe_state("not_triggered")
+        return case.not_observed(REASON_NOT_TRIGGERED)
+    triggered = [leg for leg in legs if _triggered(_leg_statuses(case, leg))]
+    if len(triggered) == len(legs) and len(legs) == 2:
+        case.detail("triggered_leg", "both")
+    else:
+        case.detail("triggered_leg", triggered[0].prefix if triggered else "unknown")
+    others = [leg for leg in legs if leg not in triggered]
+
+    async def settled() -> bool:
+        held = await case.held_quantity("settle_position")
+        for leg in others:
+            leg.rest.append(await case.algo_status(f"{leg.prefix}_settle_query", leg.leg_id))
+        return held == 0 and all(_ended(_leg_statuses(case, leg)) for leg in others)
+
+    await wait_up_to(case.rig, settled, case.case_timeout_seconds)
+    for leg in legs:
+        _record_leg_lifecycle(case, leg)
+        _record_algo_update_sequence(case, leg)
+    for leg in others:
+        case.detail(f"{leg.prefix}_auto_cancelled", _auto_cancelled(leg, _leg_statuses(case, leg)))
+    await case.observe_state("after_trigger")
+    if triggered:
+        child = _leg_actual_order_id(case, triggered[0])
+        if child.isascii() and child.isdigit():
+            await case.ask(
+                "child_trades_query", case.port.user_trades(symbol=case.symbol, order_id=int(child))
+            )
+    return case.observed()
+
+
+def _lot_filters(symbol: str, market: _Market) -> LotFilters | None:
+    """The exchange lot filters of the case market as `LotFilters`, None when one is unreadable."""
+    filters = market.filters
+    try:
+        return LotFilters(
+            symbol=symbol,
+            price_tick_size=Decimal(filters["tick_size"]),
+            lot_min_quantity=Decimal(filters["min_quantity"]),
+            lot_max_quantity=Decimal(filters["max_quantity"]),
+            lot_step_size=Decimal(filters["step_size"]),
+            market_lot_min_quantity=Decimal(filters["market_lot_min_quantity"]),
+            market_lot_max_quantity=Decimal(filters["market_lot_max_quantity"]),
+            market_lot_step_size=Decimal(filters["market_lot_step_size"]),
+            min_notional=Decimal(filters["min_notional"]),
+        )
+    except (KeyError, InvalidOperation, ValueError, TypeError):
+        return None
+
+
+async def _tp1_quantity_from_fill(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    case.check_bounds([(case.quantity, market.marketable_buy())])
+    refusal, _ = await _open_position(case, market, "tpe")
+    if refusal is not None:
+        return refusal
+    held = await case.held_quantity("position_after_fill")
+    case.detail("held_quantity", format(held, "f"))
+    if held <= 0:
+        return case.not_observed(REASON_NO_POSITION_HELD)
+    lot_filters = _lot_filters(case.symbol, market)
+    if lot_filters is None:
+        return case.not_observed(REASON_LOT_FILTERS_UNREADABLE)
+    wanted = held * TP1_QUANTITY_FRACTION
+    tp1 = min(quantize_to_lot(quantity=wanted, filters=lot_filters, market_exit=True), held)
+    case.detail("tp1_quantity", format(tp1, "f"))
+    case.detail(
+        "tp1_quantity_lot_size_only",
+        format(quantize_to_lot(quantity=wanted, filters=lot_filters, market_exit=False), "f"),
+    )
+    case.detail(
+        "tp1_fraction_source",
+        f"src.backtest.semantics.TP1_QUANTITY_FRACTION = {TP1_QUANTITY_FRACTION}",
+    )
+    if tp1 <= 0:
+        return case.not_observed(REASON_TP1_ZERO)
+    live = await case.live_mark()
+    _, above = _near_triggers(live, market.tick, case.near_trigger_fraction)
+    case.detail("tp_trigger_price", format(above, "f"))
+    case.check_bounds([(tp1, above)])
+    tp_id = case.client_id("tp1")
+    case.detail("client_algo_id", tp_id)
+    leg_answer = await case.conditional(
+        "tp1_leg",
+        client_id=tp_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_TAKE_PROFIT_MARKET,
+        trigger=above,
+        quantity=tp1,
+        reduce_only=True,
+    )
+    case.detail("tp1_leg_accepted", _flag_text(leg_answer.ok))
+    if not leg_answer.ok:
+        return case.not_observed(f"the TP1 leg was not accepted: {_class_code(leg_answer)}")
+    case.detail("tp1_notional_at_trigger", format(tp1 * above, "f"))
+    case.detail(
+        "min_notional",
+        format(market.min_notional, "f") if market.min_notional is not None else "not listed",
+    )
+    leg = _Leg("tp1", tp_id)
+    progressed = await _wait_for_progress(case, [leg])
+    _record_leg_lifecycle(case, leg)
+    _record_algo_update_sequence(case, leg)
+    await case.observe_state("after_tp1")
+    if not progressed:
+        return case.not_observed(REASON_NOT_TRIGGERED)
+    return case.observed()
+
+
+def _order_frames(
+    frames: Sequence[Mapping[str, str]], client_order_id: str
+) -> list[Mapping[str, str]]:
+    return [
+        frame
+        for frame in frames
+        if frame.get("event_type") == EVENT_ORDER_UPDATE
+        and frame.get("client_order_id") == client_order_id
+    ]
+
+
+def _raw_order_updates(case: _WriteCase, client_order_id: str) -> list[str]:
+    """``X|x|T`` of every raw ORDER_TRADE_UPDATE of one client order id, in delivery order."""
+    items: list[str] = []
+    for raw in case.port.raw_frames_since(case.marker):
+        if not isinstance(raw, Mapping) or raw.get("e") != WIRE_ORDER_UPDATE:
+            continue
+        order = raw.get("o")
+        if isinstance(order, Mapping) and order.get("c") == client_order_id:
+            items.append("|".join(_raw_text(order.get(key)) for key in ("X", "x", "T")))
+    return items
+
+
+async def _gtd_entry_expiry_status(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price)])
+    client_id = case.client_id("gtd")
+    case.detail("client_order_id", client_id)
+    placed_at = _checked_now(case.rig)
+    lifetime = case.gtd_lifetime_seconds
+    # Whole epoch seconds of the rig clock plus the owner lifetime, in milliseconds: integer
+    # timedelta floor division only (no float).
+    good_till_date_ms = ((placed_at - _EPOCH) // timedelta(seconds=1) + lifetime) * 1000
+    case.detail("placed_at_utc", placed_at.isoformat())
+    case.detail("good_till_date_lifetime_seconds", str(lifetime))
+    case.detail("good_till_date_ms", str(good_till_date_ms))
+    placed = await case.gtd_limit(
+        "gtd_limit", client_id=client_id, price=price, good_till_date_ms=good_till_date_ms
+    )
+    echoed = placed.summary.get("good_till_date") if placed.ok else None
+    if echoed:
+        case.detail("good_till_date_echoed", echoed)
+    if not placed.ok:
+        return case.observed()  # the exchange answer to this GTD is the A1 fact itself
+    rest: list[str] = []
+
+    def frame_terminal() -> list[str]:
+        return [
+            frame.get("order_status", "")
+            for frame in _order_frames(case.frames(), client_id)
+            if frame.get("order_status", "") in ORDER_TERMINAL_STATUSES
+        ]
+
+    async def terminal() -> bool:
+        # An ORDER_ABSENT answer is recorded ('' in `rest`) but never ends the wait.
+        rest.append(await case.order_status("order_status_query", client_id))
+        return rest[-1] in ORDER_TERMINAL_STATUSES or bool(frame_terminal())
+
+    ended = await wait_up_to(case.rig, terminal, case.gtd_expiry_wait_seconds)
+    streamed = _order_frames(case.frames(), client_id)
+    case.detail("rest_statuses", ",".join(status or "unreadable" for status in rest))
+    case.detail(
+        "frame_statuses",
+        ";".join(
+            f"{frame.get('order_status', '')}/{frame.get('execution_type', '')}/"
+            f"{frame.get('expire_reason', '')}"
+            for frame in streamed
+        )
+        or "none",
+    )
+    raw_updates = _raw_order_updates(case, client_id)
+    case.detail(
+        "raw_order_updates", ";".join(raw_updates) or "NOT_OBSERVED: no raw ORDER_TRADE_UPDATE"
+    )
+    if rest[-1] in ORDER_TERMINAL_STATUSES:
+        terminal_status = rest[-1]
+    else:
+        terminal_status = (frame_terminal() or ["none"])[-1]
+    case.detail("terminal_status", terminal_status)
+    if ended:
+        elapsed = (_checked_now(case.rig) - placed_at) // timedelta(seconds=1)
+        case.detail("seconds_to_terminal", str(elapsed))
+        return case.observed()
+    await case.cancel("gtd_cancel", client_id)
+    return case.not_observed(REASON_GTD_NOT_TERMINAL)
+
+
+# ----- quick task 261022-sj1: five more owner opt-in cases ------------------------------- #
+
+# The four exchangeInfo filters the emergency close fallback depends on (A10, Q3):
+# (filter, detail suffix, key of the `symbol_filters` summary).
+_EXCHANGE_INFO_FILTERS: tuple[tuple[str, str, str], ...] = (
+    ("LOT_SIZE", "min_qty", "min_quantity"),
+    ("LOT_SIZE", "max_qty", "max_quantity"),
+    ("LOT_SIZE", "step_size", "step_size"),
+    ("MARKET_LOT_SIZE", "min_qty", "market_lot_min_quantity"),
+    ("MARKET_LOT_SIZE", "max_qty", "market_lot_max_quantity"),
+    ("MARKET_LOT_SIZE", "step_size", "market_lot_step_size"),
+    ("PRICE_FILTER", "tick_size", "tick_size"),
+    ("MIN_NOTIONAL", "notional", "min_notional"),
+)
+# The summary keys compared with the filters the run read at its start.
+_SNAPSHOT_COMPARED: tuple[str, ...] = (
+    "status",
+    "tick_size",
+    "step_size",
+    "min_quantity",
+    "max_quantity",
+    "min_notional",
+    "market_lot_min_quantity",
+    "market_lot_max_quantity",
+    "market_lot_step_size",
+)
+_RACE_FILLED_STATUSES: frozenset[str] = frozenset(
+    {ORDER_STATUS_FILLED, ORDER_STATUS_PARTIALLY_FILLED}
+)
+
+
+def _ms_of(moment: datetime) -> int:
+    """Whole epoch milliseconds of an aware datetime (integer arithmetic only)."""
+    return (moment - _EPOCH) // timedelta(milliseconds=1)
+
+
+def _code_text(answer: ProbeObservation) -> str:
+    """The exact error code of an answer as text: ``accepted``, the int, or ``none``."""
+    error = answer.error
+    if answer.ok or error is None:
+        return "accepted"
+    return "none" if error.code is None else str(error.code)
+
+
+def _book_side(book: ProbeObservation, side: str) -> list[tuple[Decimal, Decimal]] | None:
+    """The (price, quantity) levels of one side of an `order_book` answer, best first.
+
+    None when the answer is not OK or its count is unreadable; a level whose price or quantity
+    is unreadable ends the list (nothing is guessed).
+    """
+    if not book.ok:
+        return None
+    count_text = book.summary.get(f"{side}_count", "")
+    if not (count_text.isascii() and count_text.isdigit()):
+        return None
+    levels: list[tuple[Decimal, Decimal]] = []
+    for index in range(int(count_text)):
+        price = _positive_decimal(book.summary, f"{side}_{index}_price")
+        quantity = _positive_decimal(book.summary, f"{side}_{index}_quantity")
+        if price is None or quantity is None:
+            break
+        levels.append((price, quantity))
+    return levels
+
+
+async def _exchange_info_read_for_close(case: _WriteCase) -> CaseResult:
+    started = _checked_now(case.rig)
+    answer = await case.ask("symbol_filters_read", case.port.symbol_filters(symbol=case.symbol))
+    case.detail("read_elapsed_ms", str(case.elapsed_ms(started)))
+    case.detail(
+        "read_endpoint",
+        "GET /fapi/v1/exchangeInfo through BinancePublicMarketData.exchange_info",
+    )
+    if not answer.ok:
+        return case.not_observed(f"the exchangeInfo read failed: {_class_code(answer)}")
+    if answer.summary.get("found") != _TRUE:
+        return case.not_observed("the symbol is not listed in the exchangeInfo answer")
+    for name, suffix, key in _EXCHANGE_INFO_FILTERS:
+        case.detail(f"filter_{name}_{suffix}", answer.summary.get(key, "not listed"))
+    case.detail("symbol_status", answer.summary.get("status", "not listed"))
+    case.detail(
+        "price_filter_min_price_max_price",
+        "NOT_OBSERVED: the project port reads the tick size of PRICE_FILTER only",
+    )
+    snapshot = case.context.recorder.market.get("symbol_filters")
+    if isinstance(snapshot, ProbeObservation) and snapshot.ok:
+        differing = [
+            key
+            for key in _SNAPSHOT_COMPARED
+            if snapshot.summary.get(key) != answer.summary.get(key)
+        ]
+        case.detail("matches_run_start_snapshot", _flag_text(not differing))
+        case.detail("snapshot_differences", ",".join(differing) or "none")
+    else:
+        case.detail("matches_run_start_snapshot", "unknown")
+        case.detail("snapshot_differences", "unknown: no run-start snapshot")
+    return case.observed()
+
+
+async def _gtd_min_lifetime_boundary(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    price = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, price)])
+    case.detail("far_price", format(price, "f"))
+    sent_any = False
+    for margin in GTD_BOUNDARY_MARGINS_SECONDS:
+        prefix = f"plus_{margin}s"
+        local_before = _checked_now(case.rig)
+        clock = await case.ask(f"{prefix}_server_time", case.port.server_time())
+        local_after = _checked_now(case.rig)
+        server_ms = _positive_int_text(clock.summary, "server_time_ms") if clock.ok else None
+        if server_ms is None:
+            case.detail(
+                f"{prefix}_skipped",
+                "NOT_OBSERVED: the server time was unreadable: nothing was sent for this point",
+            )
+            continue
+        good_till_date_ms = server_ms + margin * 1000
+        local_ms = _ms_of(local_after)
+        case.detail(f"{prefix}_margin_seconds", str(margin))
+        case.detail(f"{prefix}_server_time_ms", str(server_ms))
+        case.detail(f"{prefix}_local_clock_before_utc", local_before.isoformat())
+        case.detail(f"{prefix}_local_clock_after_utc", local_after.isoformat())
+        case.detail(f"{prefix}_local_minus_server_ms", str(local_ms - server_ms))
+        case.detail(f"{prefix}_good_till_date_ms", str(good_till_date_ms))
+        case.detail(f"{prefix}_good_till_date_minus_server_ms", str(good_till_date_ms - server_ms))
+        case.detail(f"{prefix}_good_till_date_minus_local_ms", str(good_till_date_ms - local_ms))
+        client_id = case.client_id(f"gtd{margin}")
+        sent_any = True
+        placed = await case.gtd_limit(
+            f"{prefix}_gtd_limit",
+            client_id=client_id,
+            price=price,
+            good_till_date_ms=good_till_date_ms,
+        )
+        case.detail(f"{prefix}_accepted", _flag_text(placed.ok))
+        if placed.ok:
+            echoed = placed.summary.get("good_till_date")
+            if echoed:
+                case.detail(f"{prefix}_good_till_date_echoed", echoed)
+            canceled = await case.cancel(f"{prefix}_cancel", client_id)
+            case.detail(f"{prefix}_cancel_accepted", _flag_text(canceled.ok))
+            continue
+        error = placed.error
+        case.detail(f"{prefix}_error_code", _code_text(placed))
+        if error is not None:
+            case.detail(f"{prefix}_error_class", error.http_class)
+            case.detail(f"{prefix}_error_category", error.category)
+            case.detail(f"{prefix}_error_message", error.message)
+    if not sent_any:
+        return case.not_observed("the server time was unreadable: no order was sent")
+    return case.observed()
+
+
+def _is_partial(summary: Mapping[str, str]) -> bool:
+    """PARTIALLY_FILLED, or an executed quantity strictly between zero and the original."""
+    if summary.get("status") == ORDER_STATUS_PARTIALLY_FILLED:
+        return True
+    executed = _decimal_or_none(summary.get("executed_qty", ""))
+    original = _decimal_or_none(summary.get("orig_qty", ""))
+    return executed is not None and original is not None and 0 < executed < original
+
+
+def _record_numbers(case: _WriteCase, prefix: str, answer: ProbeObservation) -> None:
+    """The raw status and quantities of one order answer (text as the exchange gave it)."""
+    for key in ("status", "orig_qty", "executed_qty", "avg_price"):
+        case.detail(f"{prefix}{key}", answer.summary.get(key, "NOT_OBSERVED: not answered"))
+
+
+async def _partial_fill_attempt(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    cap = case.limits.max_notional_quote
+    if cap is None:
+        raise _StopCase("max_notional_quote is not approved in the probe limits file")
+    # As far as the owner bound allows: the highest tick-grid price under the notional cap,
+    # but never past the price a marketable entry already uses (halfway to the PERCENT_PRICE
+    # edge, the first live probe having met -4016 at the edge).
+    cap_price = market.floor(cap / case.quantity)
+    limit_price = min(market.marketable_buy(), cap_price)
+    case.check_bounds([(case.quantity, limit_price)])
+    case.detail("approved_quantity", format(case.quantity, "f"))
+    case.detail("notional_cap", format(cap, "f"))
+    case.detail("cap_price", format(cap_price, "f"))
+    case.detail("band_price", format(market.marketable_buy(), "f"))
+    case.detail("limit_price", format(limit_price, "f"))
+    book = await case.ask("order_book_read", case.port.order_book(symbol=case.symbol))
+    asks = _book_side(book, "ask")
+    bids = _book_side(book, "bid")
+    expects = "unknown"
+    if asks:
+        within = sum((qty for price, qty in asks if price <= limit_price), Decimal(0))
+        case.detail("best_ask", format(asks[0][0], "f"))
+        case.detail("ask_levels_read", str(len(asks)))
+        case.detail("ask_quantity_within_limit_price", format(within, "f"))
+        if within >= case.quantity:
+            expects = _FALSE
+        elif len(asks) < ORDER_BOOK_LIMIT:
+            expects = _TRUE
+    if bids:
+        case.detail("best_bid", format(bids[0][0], "f"))
+    case.detail("depth_expects_partial", expects)
+    if asks and asks[0][0] > limit_price:
+        case.detail(
+            "not_sent",
+            f"the limit price {format(limit_price, 'f')} does not reach the best ask "
+            f"{format(asks[0][0], 'f')}: the owner notional cap stops the order short of the book",
+        )
+        return case.not_observed(REASON_NO_PARTIAL_PRODUCED)
+    client_id = case.client_id("pfa")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit("limit_order", client_id=client_id, side=SIDE_BUY, price=limit_price)
+    case.detail("placement_accepted", _flag_text(placed.ok))
+    if not placed.ok:
+        return case.not_observed(REASON_NO_PARTIAL_PRODUCED)
+    _record_numbers(case, "", placed)
+    case.detail("placement_status", placed.summary.get("status", "NOT_OBSERVED: not answered"))
+    seen_in: list[str] = []
+    rest_partial = _is_partial(placed.summary)
+    queried = await case.ask(
+        "order_query", case.port.query_order(symbol=case.symbol, client_order_id=client_id)
+    )
+    if queried.ok:
+        case.detail("query_status", queried.summary.get("status", "unreadable"))
+        case.detail("query_executed_qty", queried.summary.get("executed_qty", "not answered"))
+        rest_partial = rest_partial or _is_partial(queried.summary)
+    if client_id in case.open_orders and not (
+        queried.ok and queried.summary.get("status") == ORDER_STATUS_FILLED
+    ):
+        await case.cancel("remainder_cancel", client_id)
+        final = await case.ask(
+            "final_query", case.port.query_order(symbol=case.symbol, client_order_id=client_id)
+        )
+        if final.ok:
+            case.detail("final_status", final.summary.get("status", "unreadable"))
+            case.detail("final_executed_qty", final.summary.get("executed_qty", "not answered"))
+            rest_partial = rest_partial or _is_partial(final.summary)
+    frame_partial = any(
+        frame.get("order_status") == ORDER_STATUS_PARTIALLY_FILLED
+        for frame in _order_frames(case.frames(), client_id)
+    )
+    if rest_partial:
+        seen_in.append("rest")
+    if frame_partial:
+        seen_in.append("frames")
+    case.detail("partial_fill_seen", _flag_text(bool(seen_in)))
+    if seen_in:
+        case.detail("partial_seen_in", ",".join(seen_in))
+    try:
+        held = await case.held_quantity("position_after")
+    except _StopCase as stop:
+        held = Decimal(0)
+        case.detail("flatten", f"skipped: {stop.reason}")
+    if held > 0:
+        case.detail("flatten_quantity", format(held, "f"))
+        await case.market_close("flatten", held, limit_price, "pff")
+    if seen_in:
+        return case.observed()
+    return case.not_observed(REASON_NO_PARTIAL_PRODUCED)
+
+
+async def _entry_cancel_fill_race(case: _WriteCase) -> CaseResult:
+    repeats = case.race_repeats
+    case.detail("race_repeats", str(repeats))
+    case.detail("note", RACE_NOTE)
+    case.detail("touch_price_side", "best ask (the price a BUY LIMIT executes against)")
+    market = await case.market()
+    lower = market.far_below(case.fraction)
+    upper = market.far_above(case.fraction)
+    tally = {"canceled_in_time": 0, "cancel_rejected": 0, "filled": 0}
+    completed = 0
+    for number in range(1, repeats + 1):
+        prefix = f"r{number}"
+        book = await case.ask(f"{prefix}_order_book", case.port.order_book(symbol=case.symbol))
+        asks = _book_side(book, "ask")
+        if not asks:
+            case.detail("stopped", f"{prefix}: the best ask is unreadable")
+            break
+        touch = asks[0][0]
+        if not lower <= touch <= upper:
+            case.detail(
+                "stopped",
+                f"{prefix}: the best ask {format(touch, 'f')} is outside the far_price_fraction "
+                f"band {format(lower, 'f')} to {format(upper, 'f')}",
+            )
+            break
+        client_id = case.client_id(f"rc{number}")
+        placed = await case.limit(
+            f"{prefix}_place", client_id=client_id, side=SIDE_BUY, price=touch
+        )
+        if not placed.ok:
+            case.detail("stopped", f"{prefix}: placement rejected {_class_code(placed)}")
+            break
+        place_status = placed.summary.get("status", "")
+        case.detail(f"{prefix}_touch_price", format(touch, "f"))
+        case.detail(f"{prefix}_place_status", place_status or "unreadable")
+        case.detail(
+            f"{prefix}_place_executed_qty", placed.summary.get("executed_qty", "not answered")
+        )
+        canceled = await case.cancel(f"{prefix}_cancel", client_id)
+        case.detail(f"{prefix}_cancel_code", _code_text(canceled))
+        final = await case.ask(
+            f"{prefix}_final_query",
+            case.port.query_order(symbol=case.symbol, client_order_id=client_id),
+        )
+        final_status = final.summary.get("status", "") if final.ok else ""
+        case.detail(f"{prefix}_final_status", final_status or "unreadable")
+        if place_status in _RACE_FILLED_STATUSES or final_status in _RACE_FILLED_STATUSES:
+            filled = _TRUE
+        elif place_status and final_status:
+            filled = _FALSE
+        else:
+            filled = "unknown"
+        case.detail(f"{prefix}_filled", filled)
+        cancel_text = (
+            "canceled in time" if canceled.ok else f"cancel rejected {_code_text(canceled)}"
+        )
+        case.detail(f"{prefix}_outcome", f"{cancel_text}; final {final_status or 'unreadable'}")
+        tally["canceled_in_time" if canceled.ok else "cancel_rejected"] += 1
+        completed += 1
+        if filled == _TRUE:
+            tally["filled"] += 1
+            try:
+                held = await case.held_quantity(f"{prefix}_position")
+            except _StopCase as stop:
+                case.detail("stopped", f"{prefix}: cannot flatten: {stop.reason}")
+                break
+            if held > 0:
+                await case.market_close(f"{prefix}_flatten", held, touch, f"rf{number}")
+    case.detail("repeats_completed", str(completed))
+    for name, count in tally.items():
+        case.detail(f"outcome_{name}", str(count))
+    if completed == 0:
+        stopped = case.details.get("stopped", "no repeat ran")
+        return case.not_observed(f"no place-and-cancel pair was completed: {stopped}")
+    return case.observed()
+
+
+def _frame_texts(frames: Sequence[Mapping[str, str]], *fields: str) -> str:
+    """``a/b`` per frame (the named fields, in order), ``;``-joined, or ``none``."""
+    return ";".join("/".join(frame.get(name, "") for name in fields) for frame in frames) or "none"
+
+
+async def _stream_loss_during_case(case: _WriteCase) -> CaseResult:
+    if not case.stream_started():
+        return case.not_observed(REASON_NO_STREAM)
+    market = await case.market()
+    below = market.far_below(case.fraction)
+    case.check_bounds([(case.quantity, market.marketable_buy()), (None, below)])
+    gap_marker = case.port.marker()
+    # The existing stream-gap mechanism (stream_gap_during_case): close the private connection
+    # first, so nothing is placed when the port cannot drop it.
+    dropped = await case.port.drop_stream_transport()
+    case.detail("transport_dropped", _flag_text(dropped))
+    if not dropped:
+        return case.not_observed(REASON_NO_STREAM)
+    case.detail(
+        "stream_states_at_entry_send", ",".join(case.port.stream_states_since(gap_marker)) or "none"
+    )
+    placed, status = await case.open_long(market, "slg")
+    entry_id = case.details.get("entry_client_id", "")
+    if not placed.ok:
+        return case.not_observed(f"entry rejected: {_class_code(placed)}")
+    if status != ORDER_STATUS_FILLED:
+        if entry_id in case.open_orders:
+            await case.cancel("entry_cancel", entry_id)
+        return case.not_observed(f"the entry did not fill: status {status or 'unreadable'}")
+    case.detail("rest_entry_status_during_gap", status)
+    stop_id = case.client_id("slx")
+    case.detail("client_algo_id", stop_id)
+    stop = await case.conditional(
+        "stop",
+        client_id=stop_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=below,
+        quantity=None,
+        close_position=True,
+    )
+    case.detail("stop_accepted", _flag_text(stop.ok))
+    rest_stop = "not placed"
+    if stop.ok:
+        rest_stop = await case.algo_status("rest_stop_query", stop_id) or "unreadable"
+        case.detail("rest_stop_status_during_gap", rest_stop)
+    case.detail(
+        "stream_states_when_stop_answered",
+        ",".join(case.port.stream_states_since(gap_marker)) or "none",
+    )
+
+    async def recovered() -> bool:
+        return StreamState.LIVE.value in case.port.stream_states_since(gap_marker)
+
+    back = await wait_up_to(case.rig, recovered, case.case_timeout_seconds)
+    states = case.port.stream_states_since(gap_marker)
+    case.detail("stream_states_after_drop", ",".join(states) or "none")
+    case.detail("stream_recovered_live", _flag_text(back))
+    after = case.port.frames_since(gap_marker)
+    case.detail("frames_before_drop_count", str(len(case.frames()) - len(after)))
+    entry_frames = _order_frames(after, entry_id)
+    stop_frames = _algo_frames(after, stop_id)
+    entry_text = _frame_texts(entry_frames, "order_status", "execution_type")
+    stop_text = _frame_texts(stop_frames, "algo_status")
+    case.detail("frames_after_drop_entry", entry_text)
+    case.detail("frames_after_drop_stop", stop_text)
+    case.detail(
+        "entry_fill_frame_delivered",
+        _flag_text(any(f.get("order_status") == ORDER_STATUS_FILLED for f in entry_frames)),
+    )
+    case.detail("stop_frame_delivered", _flag_text(bool(stop_frames)))
+    case.detail("comparison_entry", f"rest={status}; stream_after_drop={entry_text}")
+    case.detail("comparison_stop", f"rest={rest_stop}; stream_after_drop={stop_text}")
+    if stop.ok:
+        await case.cancel_algo("stop_cancel", stop_id)
+    await case.observe_state("end")
+    if not back:
+        return case.not_observed(REASON_STREAM_NOT_RECOVERED)
+    return case.observed()
+
+
+# ----- quick task 261023-sj2: eight more owner opt-in cases ------------------------------ #
+#
+# Facts only, like the sj0 and sj1 cases: each records what the exchange answered (a rejection
+# code IS an answer), never retries a request and ends with a clean account (the runner cleanup
+# cancels and flattens after the case). Seven of them obey the owner caps (the approved
+# quantity and `max_notional_quote`, through `check_bounds`). `insufficient_margin_order` is the
+# one exception, with its own owner quantity and its own bound (`margin_order_refusal`).
+
+REASON_NOT_FLAT_CASE = "the symbol is not flat before the case: {state}; nothing was sent"
+REASON_STOP_NO_UPDATE = (
+    "the stop was accepted but no ALGO_UPDATE status beyond NEW was seen within "
+    "case_timeout_seconds (the acceptance itself is recorded in details)"
+)
+REASON_STALE_CLOCK_NOT_HONOURED = (
+    "the SDK did not ask the stale clock (clock_calls is 0): the request carried the real "
+    "timestamp, so no conclusion about the recvWindow can be drawn"
+)
+REASON_NOT_AT_TARGET = (
+    "the symbol does not read ISOLATED at the owner's config_target_leverage {leverage}: run "
+    "symbol_config_change_to_isolated first (nothing was changed here and nothing was sent)"
+)
+REASON_MARGIN_ACCEPTED = (
+    "the order was accepted (it rests): the quantity did not exceed the available margin, so "
+    "-2019 was not observed; the margin figures before and after are recorded"
+)
+RACE_NOTE_TRIGGER = (
+    "this case is not a deterministic race: each repeat places a closePosition STOP_MARKET near "
+    "the live mark and cancels it as soon as the placement answer arrives; whether the exchange "
+    "triggers it before the cancel lands is up to its timing, so the outcomes are samples of the "
+    "exchange answers, not a proof of their order"
+)
+_MARGIN_FIGURES: tuple[tuple[str, str], ...] = (
+    ("availableBalance", "available_balance"),
+    ("totalWalletBalance", "total_wallet_balance"),
+    ("totalInitialMargin", "total_initial_margin"),
+    ("totalOpenOrderInitialMargin", "total_open_order_initial_margin"),
+)
+
+
+def _record_order_answer(
+    case: _WriteCase, answer: ProbeObservation, prefix: str = "order_"
+) -> None:
+    """The exact answer of one order: accepted, its fields, or HTTP class, code, category, text."""
+    case.detail(f"{prefix}accepted", _flag_text(answer.ok))
+    if answer.ok:
+        for key in ("status", "orig_qty", "executed_qty", "avg_price"):
+            if key in answer.summary:
+                case.detail(f"{prefix}{key}", answer.summary[key])
+        return
+    error = answer.error
+    case.detail(f"{prefix}error_code", _code_text(answer))
+    if error is not None:
+        case.detail(f"{prefix}error_class", error.http_class)
+        case.detail(f"{prefix}error_category", error.category)
+        case.detail(f"{prefix}error_message", error.message)
+
+
+def _half_quantity(case: _WriteCase, market: _Market) -> tuple[Decimal | None, str | None]:
+    """About half of the approved quantity, floored to the step; (None, reason) if unusable."""
+    steps = (case.quantity / 2 / market.step).to_integral_value(rounding=ROUND_FLOOR)
+    half = steps * market.step
+    case.detail("half_quantity", format(half, "f"))
+    if half <= 0 or half < market.min_quantity:
+        return None, (
+            f"half of the approved quantity ({format(half, 'f')} after flooring to the step) is "
+            f"below the exchange minimum quantity {format(market.min_quantity, 'f')}"
+        )
+    return half, None
+
+
+async def _require_flat(case: _WriteCase, prefix: str) -> str | None:
+    """Read open orders, open algo orders and the position; None if flat, else the state text."""
+    summary, answers = await _read_state(case.port, case.symbol)
+    case.observations.extend(answers.values())
+    state = (
+        f"open_orders={summary['open_orders']} open_algo_orders={summary['open_algo_orders']} "
+        f"positions={len(summary['positions'])} readable={_flag_text(summary['readable'] is True)}"
+    )
+    case.detail(f"{prefix}_state", state)
+    return None if _is_flat(summary) else state
+
+
+async def _reduce_only_market_on_flat(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    upper = market.marketable_buy()
+    case.check_bounds([(case.quantity, upper)])
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    answer, client_id = await case.market_close("reduce_only_market", case.quantity, upper, "rof")
+    case.detail("client_order_id", client_id)
+    _record_order_answer(case, answer)
+    held = await case.held_quantity("position_read_after")
+    case.detail("position_after", format(held, "f"))
+    flipped = held != 0
+    case.detail("flipped", _flag_text(flipped))
+    if flipped:
+        case.notes.append("a position appeared after the reduce-only order: it was flattened")
+        await case.flatten("flatten_after_flip", held, upper, "rff")
+    return case.observed()
+
+
+async def _reduce_only_market_larger_than_position(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    upper = market.marketable_buy()
+    half, reason = _half_quantity(case, market)
+    if half is None:
+        return case.not_observed(reason or "no usable half quantity")
+    case.check_bounds([(half, upper), (case.quantity, upper)])
+    refusal, _ = await _open_position(case, market, "roe", quantity=half)
+    if refusal is not None:
+        return refusal
+    held_before = await case.held_quantity("position_read_before")
+    case.detail("held_before", format(held_before, "f"))
+    if held_before <= 0:
+        return case.not_observed(REASON_NO_POSITION_HELD)
+    case.detail("oversize_quantity", format(case.quantity, "f"))
+    answer, client_id = await case.market_close("oversize_reduce_only", case.quantity, upper, "rox")
+    case.detail("client_order_id", client_id)
+    _record_order_answer(case, answer)
+    if answer.ok:
+
+        async def changed() -> bool:
+            return await case.held_quantity("position_wait_read") != held_before
+
+        await wait_up_to(case.rig, changed, case.case_timeout_seconds)
+        final = await case.ask(
+            "oversize_final_query",
+            case.port.query_order(symbol=case.symbol, client_order_id=client_id),
+        )
+        if final.ok:
+            for key in ("status", "executed_qty"):
+                case.detail(f"final_{key}", final.summary.get(key, "not answered"))
+    after = await case.held_quantity("position_read_after")
+    case.detail("position_after", format(after, "f"))
+    if not answer.ok:
+        outcome = "rejected"
+    elif after < 0:
+        outcome = "flipped"
+    elif after == 0:
+        outcome = "clipped_to_position"
+    elif after < held_before:
+        outcome = "partly_reduced"
+    else:
+        outcome = "unchanged"
+    case.detail("outcome", outcome)
+    if after != 0:
+        await case.flatten("remainder_flatten", after, upper, "rof")
+    return case.observed()
+
+
+async def _non_reduce_only_below_min_notional(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    min_notional = market.min_notional
+    if min_notional is None:
+        return case.not_observed("the MIN_NOTIONAL filter is not listed for the symbol")
+    price = market.far_below(case.fraction)
+    case.detail("min_notional_used", format(min_notional, "f"))
+    case.detail("far_price", format(price, "f"))
+    # The largest quantity on the step grid whose notional at the far price is strictly below the
+    # exchange minimum, never above the approved quantity (the tool never raises a quantity).
+    below_steps = (min_notional / price / market.step).to_integral_value(rounding=ROUND_CEILING) - 1
+    approved_steps = (case.quantity / market.step).to_integral_value(rounding=ROUND_FLOOR)
+    quantity = min(below_steps, approved_steps) * market.step
+    case.detail("sent_quantity", format(quantity, "f"))
+    if quantity <= 0 or quantity < market.min_quantity:
+        return case.not_observed(
+            f"a quantity below the minimum notional ({format(quantity, 'f')} on the step grid) "
+            f"is below the exchange minimum quantity {format(market.min_quantity, 'f')}"
+        )
+    notional = quantity * price
+    case.detail("computed_notional", format(notional, "f"))
+    if notional >= min_notional:
+        return case.not_observed("the approved quantity gives a notional at or above the minimum")
+    refusal = order_bound_refusal(case.limits, quantity=quantity, price=price, step=market.step)
+    if refusal is not None:
+        return case.not_observed(f"order bound: {refusal} (nothing was sent)")
+    client_id = case.client_id("mnl")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit(
+        "below_min_notional_limit",
+        client_id=client_id,
+        side=SIDE_BUY,
+        price=price,
+        quantity=quantity,
+    )
+    _record_order_answer(case, placed)
+    if placed.ok:
+        canceled = await case.cancel("below_min_notional_cancel", client_id)
+        case.detail("cancel_accepted", _flag_text(canceled.ok))
+    return case.observed()
+
+
+def _leverage_of(answer: ProbeObservation) -> Decimal | None:
+    """The first ``leverage`` value of a flattened symbol-configuration answer."""
+    for key, value in answer.summary.items():
+        if key.split(".")[-1] == "leverage":
+            parsed = _decimal_or_none(value)
+            return parsed if parsed is not None and parsed > 0 else None
+    return None
+
+
+def _record_margin_figures(
+    case: _WriteCase, answer: ProbeObservation, suffix: str, prefix: str = ""
+) -> Decimal | None:
+    """The account margin figures of one ``account_information`` read; returns the available."""
+    available: Decimal | None = None
+    for wire, name in _MARGIN_FIGURES:
+        text = answer.summary.get(wire) if answer.ok else None
+        case.detail(
+            f"{prefix}{name}_{suffix}", text if text is not None else "NOT_OBSERVED: not answered"
+        )
+        if wire == "availableBalance" and text is not None:
+            available = _decimal_or_none(text)
+    return available
+
+
+async def _insufficient_margin_order(
+    case: _WriteCase,
+    *,
+    flag: str = "insufficient_margin",
+    prefix: str = "",
+    require_target: bool = False,
+) -> CaseResult:
+    # Phase 22 plan 22-09: `margin_insufficient_at_target_leverage` runs this same flow under
+    # its own owner key (`flag`), its own detail prefix and one more rule (`require_target`: the
+    # symbol must already read ISOLATED at the owner's config_target_leverage, else nothing is
+    # sent and nothing is changed). The order and its bound are the same ones, so the pin that
+    # only this function reaches `margin_limit` stays true.
+    # The -2019 case. It does NOT use the max_notional_quote check or the approved quantity of
+    # the other cases (check_bounds / order_bound_refusal): the order has to be larger than the
+    # margin allows. Its own bound is `margin_order_refusal` (inside `margin_limit`): the owner's
+    # insufficient_margin_quantity exactly, on the step grid, one far LIMIT BUY at or below the
+    # far price of the owner band (below the mark: it can only rest). Kept here: the symbol,
+    # the flat precheck, the price band and the runner cleanup (which flattens anything filled).
+    quantity = case.limits.insufficient_margin_quantity
+    if quantity is None:
+        raise ValueError("insufficient_margin_quantity is not set in the probe limits file")
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    price = market.far_below(case.fraction)
+    case.detail(f"{prefix}far_price", format(price, "f"))
+    case.detail(f"{prefix}insufficient_margin_quantity", format(quantity, "f"))
+    if price >= market.mark:
+        return case.not_observed("the far price is not below the mark: the order could fill")
+    if quantity < market.min_quantity:
+        return case.not_observed(
+            "the quantity is below the exchange minimum quantity "
+            f"{format(market.min_quantity, 'f')}: the answer would be a lot-size error, not -2019"
+        )
+    maximum = _positive_decimal(market.filters, "max_quantity")
+    if maximum is not None and quantity > maximum:
+        return case.not_observed(
+            f"the quantity is above the exchange maximum quantity {format(maximum, 'f')}: "
+            "the answer would be a lot-size error, not -2019"
+        )
+    if quantity % market.step != 0:
+        return case.not_observed(
+            f"the quantity is not on the step grid {format(market.step, 'f')}: nothing was sent"
+        )
+    before = await case.ask(f"{prefix}account_information_before", case.port.account_information())
+    configuration = await case.ask(
+        f"{prefix}symbol_config_read", case.port.symbol_config(symbol=case.symbol)
+    )
+    available_before = _record_margin_figures(case, before, "before", prefix)
+    leverage = _leverage_of(configuration) if configuration.ok else None
+    case.detail(
+        f"{prefix}leverage", format(leverage, "f") if leverage is not None else "NOT_OBSERVED"
+    )
+    if require_target:
+        target = case.config_target_leverage
+        case.detail(f"{prefix}config_target_leverage", str(target))
+        if not _is_isolated_at(_reading_of(configuration), target):
+            reading = _reading_of(configuration)
+            case.detail(f"{prefix}config_margin_type", reading.margin_type or "NOT_OBSERVED")
+            case.detail(f"{prefix}config_leverage", reading.leverage or "NOT_OBSERVED")
+            return case.not_observed(REASON_NOT_AT_TARGET.format(leverage=target))
+    notional = quantity * price
+    case.detail(f"{prefix}implied_notional", format(notional, "f"))
+    if leverage is not None:
+        margin = notional / leverage
+        case.detail(f"{prefix}implied_initial_margin", format(margin, "f"))
+        if available_before is not None:
+            case.detail(
+                f"{prefix}implied_margin_exceeds_available", _flag_text(margin > available_before)
+            )
+    client_id = case.client_id("ism")
+    case.detail(f"{prefix}client_order_id", client_id)
+    placed = await case.margin_limit(
+        f"{prefix}margin_limit",
+        client_id=client_id,
+        price=price,
+        ceiling_price=market.far_below(case.fraction),
+        flag=flag,
+    )
+    _record_order_answer(case, placed, f"{prefix}order_")
+    if placed.ok:
+        canceled = await case.cancel(f"{prefix}margin_cancel", client_id)
+        case.detail(f"{prefix}cancel_accepted", _flag_text(canceled.ok))
+        final = await case.ask(
+            f"{prefix}margin_final_query",
+            case.port.query_order(symbol=case.symbol, client_order_id=client_id),
+        )
+        if final.ok:
+            case.detail(f"{prefix}final_status", final.summary.get("status", "unreadable"))
+    after = await case.ask(f"{prefix}account_information_after", case.port.account_information())
+    _record_margin_figures(case, after, "after", prefix)
+    held = await case.held_quantity(f"{prefix}position_read_after")
+    case.detail(f"{prefix}position_after", format(held, "f"))
+    if held != 0:
+        case.notes.append(
+            "a position exists after the margin order (it should not fill): the runner cleanup "
+            "flattens it (no owner cap applies to this quantity)"
+        )
+    if placed.ok:
+        return case.not_observed(REASON_MARGIN_ACCEPTED)
+    return case.observed()
+
+
+def _summary_value(answer: ProbeObservation, name: str) -> str | None:
+    """The first value of a (possibly flattened) answer whose last dotted key part is `name`."""
+    for key, value in answer.summary.items():
+        if key.split(".")[-1] == name:
+            return value
+    return None
+
+
+def _record_config_read(case: _WriteCase, answer: ProbeObservation, prefix: str) -> None:
+    """One symbol-configuration read: the figures exactly as the exchange wrote them.
+
+    The text of `marginType` keeps the exchange's casing (the Demo host's spelling of an
+    ISOLATED symbol is one of the things this case exists to observe; demo-observed, not
+    mainnet).
+    """
+    if not answer.ok:
+        _record_order_answer(case, answer, prefix)
+        return
+    case.detail(f"{prefix}accepted", _flag_text(True))
+    for wire, name in (
+        ("marginType", "margin_type"),
+        ("leverage", "leverage"),
+        ("maxNotionalValue", "max_notional_value"),
+    ):
+        value = _summary_value(answer, wire)
+        case.detail(f"{prefix}{name}", value if value is not None else "NOT_OBSERVED: absent")
+
+
+def _record_config_change(case: _WriteCase, answer: ProbeObservation, prefix: str) -> None:
+    """One configuration-change answer: accepted fields, or HTTP class, code, category, text."""
+    _record_order_answer(case, answer, prefix)
+    if answer.ok:
+        for key in ("code", "msg", "symbol", "leverage", "maxNotionalValue"):
+            if key in answer.summary:
+                case.detail(f"{prefix}{key}", answer.summary[key])
+
+
+@dataclass(frozen=True)
+class _ConfigReading:
+    """One symbol-configuration read: the answer and the two texts the SJ3 cases act on."""
+
+    answer: ProbeObservation
+    margin_type: str | None
+    leverage: str | None
+
+
+async def _read_symbol_config(case: _WriteCase, label: str, prefix: str) -> _ConfigReading:
+    """Read the symbol configuration once, record it as read, parse marginType and leverage."""
+    answer = await case.ask(label, case.port.symbol_config(symbol=case.symbol))
+    _record_config_read(case, answer, prefix)
+    return _reading_of(answer)
+
+
+def _reading_of(answer: ProbeObservation) -> _ConfigReading:
+    """The marginType and leverage texts of a symbol-configuration answer (None if refused)."""
+    if not answer.ok:
+        return _ConfigReading(answer, None, None)
+    return _ConfigReading(
+        answer, _summary_value(answer, "marginType"), _summary_value(answer, "leverage")
+    )
+
+
+def _is_isolated_at(reading: _ConfigReading, leverage: int) -> bool:
+    """The configuration reads ISOLATED (any casing) at exactly `leverage`."""
+    return (
+        reading.answer.ok
+        and reading.margin_type is not None
+        and reading.margin_type.upper() == "ISOLATED"
+        and reading.leverage == str(leverage)
+    )
+
+
+async def _symbol_config_change_to_isolated(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18): change the symbol from its account default (Demo, 2026-10-04: BTCUSDT was
+    # x20 CROSSED) to ISOLATED and the owner's leverage, then read the configuration back. Every
+    # answer is the evidence, an error included. The owner's leverage is read first (a missing
+    # value is a ValueError before anything is sent). Nothing is changed unless the symbol is
+    # flat and its previous configuration was read; nothing is restored afterwards (the owner
+    # decides, 22-RESEARCH Open Question 8). Observed on Demo only, never mainnet (D-19).
+    leverage = case.config_target_leverage
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    case.detail("requested_margin_type", "ISOLATED")
+    case.detail("requested_leverage", str(leverage))
+    before = await _read_symbol_config(case, "config_before_read", "config_before_")
+    if not before.answer.ok:
+        return case.not_observed(
+            f"the previous configuration could not be read ({_class_code(before.answer)}): "
+            "nothing was changed, so the owner could not restore it"
+        )
+    previous_margin = before.margin_type
+    previous_leverage = before.leverage
+    case.detail("previous_margin_type", previous_margin or "NOT_OBSERVED: absent")
+    case.detail("previous_leverage", previous_leverage or "NOT_OBSERVED: absent")
+    already = (
+        previous_margin is not None
+        and previous_margin.upper() == "ISOLATED"
+        and previous_leverage == str(leverage)
+    )
+    case.detail("already_at_target", _flag_text(already))
+    margin = await case.ask(
+        "margin_type_change",
+        case.port.change_margin_type(symbol=case.symbol, margin_type="ISOLATED"),
+    )
+    _record_config_change(case, margin, "margin_type_answer_")
+    changed = await case.ask(
+        "leverage_change",
+        case.port.change_initial_leverage(symbol=case.symbol, leverage=leverage),
+    )
+    _record_config_change(case, changed, "leverage_answer_")
+    after = await case.ask("config_after_read", case.port.symbol_config(symbol=case.symbol))
+    _record_config_read(case, after, "config_after_")
+    if after.ok:
+        text = _summary_value(after, "marginType")
+        case.detail("config_after_margin_type_equals_ISOLATED", _flag_text(text == "ISOLATED"))
+    case.notes.append(
+        "the previous configuration "
+        f"(marginType={previous_margin}, leverage={previous_leverage}) was NOT restored: "
+        "the owner decides"
+    )
+    return case.observed()
+
+
+def _margin_type_request(text: str | None) -> str | None:
+    """The request value (ISOLATED or CROSSED) for the exchange's own marginType text, or None."""
+    if text is None:
+        return None
+    upper = text.upper()
+    if upper == "ISOLATED":
+        return "ISOLATED"
+    if upper in ("CROSSED", "CROSS"):
+        return "CROSSED"
+    return None
+
+
+def _whole_leverage(text: str | None) -> int | None:
+    """A leverage text as a whole number of at least 1, or None."""
+    value = _decimal_or_none(text) if text is not None else None
+    if value is None or value < 1 or value != value.to_integral_value():
+        return None
+    return int(value)
+
+
+def _bracket_one_leverage(answer: ProbeObservation) -> int | None:
+    """``initialLeverage`` of bracket 1 in a flattened leverageBracket answer, or None."""
+    if not answer.ok:
+        return None
+    for key, value in answer.summary.items():
+        parts = key.split(".")
+        if len(parts) < 3 or parts[-1] != "bracket" or parts[-3] != "brackets":
+            continue
+        if _decimal_or_none(value) != 1:
+            continue
+        leverage = _whole_leverage(answer.summary.get(".".join([*parts[:-1], "initialLeverage"])))
+        if leverage is not None:
+            return leverage
+    return None
+
+
+async def _margin_type_change_with_resting_order(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, D-04 evidence): the exchange's answer to a margin-type change while an order
+    # rests (the guard relies on -4047 / -4048; the case does not assume them). One far resting
+    # BUY LIMIT inside the owner caps, then ONE change request to the OPPOSITE margin type. The
+    # answer is the evidence. An accepted change is undone once (this case's own change only).
+    # Never touches the leverage. Observed on Demo only, never mainnet (D-19).
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    price = market.far_below(case.fraction)
+    case.detail("far_price", format(price, "f"))
+    if price >= market.mark:
+        return case.not_observed("the far price is not below the mark: the order could fill")
+    case.check_bounds([(case.quantity, price)])  # refused here, before anything is sent
+    before = await _read_symbol_config(case, "config_before_read", "config_before_")
+    original = _margin_type_request(before.margin_type) if before.answer.ok else None
+    if original is None:
+        return case.not_observed(
+            "the current margin type could not be read as ISOLATED or CROSSED "
+            f"({_class_code(before.answer)}): nothing was sent"
+        )
+    requested = "CROSSED" if original == "ISOLATED" else "ISOLATED"
+    case.detail("previous_margin_type", before.margin_type or "NOT_OBSERVED")
+    case.detail("requested_margin_type", requested)
+    client_id = case.client_id("mtr")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit("resting_limit", client_id=client_id, side=SIDE_BUY, price=price)
+    _record_order_answer(case, placed)
+    if not placed.ok:
+        return case.not_observed(
+            "the resting order was not accepted: no margin-type change was sent"
+        )
+    if placed.summary.get("status") in (ORDER_STATUS_FILLED, ORDER_STATUS_PARTIALLY_FILLED):
+        return case.not_observed(
+            "the order did not rest (it filled): no margin-type change was sent; the runner "
+            "cleanup flattens the position"
+        )
+    changed = await case.ask(
+        "margin_type_change",
+        case.port.change_margin_type(symbol=case.symbol, margin_type=requested),
+    )
+    _record_config_change(case, changed, "change_")
+    canceled = await case.cancel("resting_cancel", client_id)
+    case.detail("cancel_accepted", _flag_text(canceled.ok))
+    await _read_symbol_config(case, "config_after_read", "config_after_")
+    if changed.ok:
+        # An accepted change is a surprise: undo THIS case's own change once, record it.
+        restored = await case.ask(
+            "margin_type_restore",
+            case.port.change_margin_type(symbol=case.symbol, margin_type=original),
+        )
+        _record_config_change(case, restored, "restore_")
+        case.detail("restore_accepted", _flag_text(restored.ok))
+        await _read_symbol_config(case, "config_restored_read", "config_restored_")
+    return case.observed()
+
+
+async def _leverage_above_bracket_maximum(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, assumption A6): the code the exchange answers to a leverage one above the
+    # maximum of bracket 1 (-4028 or -4209, unobserved). The maximum is read from the exchange's
+    # own bracket answer, never assumed. One request; an accepted change is undone once.
+    # Observed on Demo only, never mainnet (D-19).
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    brackets = await case.ask(
+        "leverage_brackets_read", case.port.leverage_brackets(symbol=case.symbol)
+    )
+    maximum = _bracket_one_leverage(brackets)
+    case.detail(
+        "bracket_one_initial_leverage",
+        str(maximum) if maximum is not None else "NOT_OBSERVED: not readable",
+    )
+    before = await _read_symbol_config(case, "config_before_read", "config_before_")
+    current = _whole_leverage(before.leverage) if before.answer.ok else None
+    case.detail("previous_leverage", str(current) if current is not None else "NOT_OBSERVED")
+    if maximum is None:
+        return case.not_observed(
+            "the maximum leverage (initialLeverage of bracket 1) could not be read from the "
+            f"bracket answer ({_class_code(brackets)}): nothing was sent"
+        )
+    if current is None:
+        return case.not_observed(
+            "the current leverage could not be read, so it could not be restored: nothing was sent"
+        )
+    requested = maximum + 1
+    case.detail("requested_leverage", str(requested))
+    changed = await case.ask(
+        "leverage_change",
+        case.port.change_initial_leverage(symbol=case.symbol, leverage=requested),
+    )
+    _record_config_change(case, changed, "change_")
+    if changed.ok:
+        await _read_symbol_config(case, "config_after_change_read", "config_after_change_")
+        # An accepted change is a surprise: undo THIS case's own change once, record it.
+        restored = await case.ask(
+            "leverage_restore",
+            case.port.change_initial_leverage(symbol=case.symbol, leverage=current),
+        )
+        _record_config_change(case, restored, "restore_")
+        case.detail("restore_accepted", _flag_text(restored.ok))
+    await _read_symbol_config(case, "config_after_read", "config_after_")
+    return case.observed()
+
+
+async def _margin_insufficient_at_target_leverage(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, criterion 3 shape): the flow of `insufficient_margin_order` on a symbol
+    # that already reads ISOLATED at the owner's config_target_leverage. Nothing is changed here;
+    # the order, its bound (the owner's own insufficient_margin_quantity) and the margin figures
+    # are those of the neighbour, under this case's own key and detail prefix.
+    return await _insufficient_margin_order(
+        case, flag="margin_insufficient_target", prefix="target_", require_target=True
+    )
+
+
+# The position-row fields the positions answer carries (names as the probe summary writes them).
+_LIQUIDATION_ROW_FIELDS: tuple[str, ...] = (
+    "position_side",
+    "position_amt",
+    "entry_price",
+    "mark_price",
+    "liquidation_price",
+    "break_even_price",
+    "unrealized_profit",
+    "notional",
+    "margin_asset",
+)
+# The account-answer position figures the local formula could need (wire names).
+_ACCOUNT_POSITION_FIGURES: tuple[str, ...] = (
+    "isolatedMargin",
+    "isolatedWallet",
+    "maintMargin",
+    "initialMargin",
+    "positionInitialMargin",
+    "openOrderInitialMargin",
+    "notional",
+    "positionAmt",
+    "unrealizedProfit",
+    "leverage",
+)
+_ACCOUNT_TOTAL_FIGURES: tuple[tuple[str, str], ...] = (
+    ("totalMaintMargin", "total_maint_margin"),
+    ("totalInitialMargin", "total_initial_margin"),
+    ("totalPositionInitialMargin", "total_position_initial_margin"),
+    ("totalOpenOrderInitialMargin", "total_open_order_initial_margin"),
+    ("totalMarginBalance", "total_margin_balance"),
+    ("availableBalance", "available_balance"),
+)
+_QUOTE_ROW_FIGURES: tuple[str, ...] = (
+    "walletBalance",
+    "marginBalance",
+    "maintMargin",
+    "positionInitialMargin",
+    "openOrderInitialMargin",
+    "availableBalance",
+)
+
+
+def _account_position_index(answer: ProbeObservation, symbol: str) -> str | None:
+    """The list position of the symbol's row in ``positions.<i>.*`` of an account answer."""
+    for key, value in answer.summary.items():
+        parts = key.split(".")
+        if len(parts) == 3 and parts[0] == "positions" and parts[2] == "symbol" and value == symbol:
+            return parts[1]
+    return None
+
+
+def _record_liquidation_inputs(
+    case: _WriteCase, positions: ProbeObservation, account: ProbeObservation
+) -> bool:
+    """Record every input of the local formula as read; False if the row has no liquidationPrice."""
+    for name in _LIQUIDATION_ROW_FIELDS:
+        text = positions.summary.get(f"row_0_{name}")
+        case.detail(f"position_{name}", text if text is not None else "NOT_OBSERVED: absent")
+    if not account.ok:
+        _record_order_answer(case, account, "account_")
+        return positions.summary.get("row_0_liquidation_price") is not None
+    for wire, name in _ACCOUNT_TOTAL_FIGURES:
+        text = account.summary.get(wire)
+        case.detail(f"account_{name}", text if text is not None else "NOT_OBSERVED: absent")
+    index = _account_position_index(account, case.symbol)
+    for wire in _ACCOUNT_POSITION_FIGURES:
+        text = account.summary.get(f"positions.{index}.{wire}") if index is not None else None
+        case.detail(
+            f"account_position_{wire}", text if text is not None else "NOT_OBSERVED: absent"
+        )
+    asset, _ = _quote_asset_figure(account, case.symbol, "asset")
+    case.detail("quote_asset", asset if asset is not None else "NOT_OBSERVED: no matching row")
+    for wire in _QUOTE_ROW_FIGURES:
+        _, text = _quote_asset_figure(account, case.symbol, wire)
+        case.detail(f"quote_row_{wire}", text if text is not None else "NOT_OBSERVED: absent")
+    return positions.summary.get("row_0_liquidation_price") is not None
+
+
+async def _isolated_position_liquidation_price(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, assumption A3): the exchange's own liquidation price for an isolated
+    # position, with every input of the local formula, in one run (the only way to obtain the
+    # missing isolated golden). The symbol must already read ISOLATED at the owner's
+    # config_target_leverage and be flat; ONE marketable entry of the approved quantity opens the
+    # position; the runner cleanup closes it with one reduce-only MARKET order. The probe computes
+    # nothing and imports no risk module: the comparison is offline, by the owner. Observed on
+    # Demo only, never mainnet (D-19).
+    leverage = case.config_target_leverage
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    configured = await _read_symbol_config(case, "config_before_read", "config_before_")
+    if not _is_isolated_at(configured, leverage):
+        return case.not_observed(REASON_NOT_AT_TARGET.format(leverage=leverage))
+    case.detail("config_target_leverage", str(leverage))
+    case.check_bounds([(case.quantity, market.marketable_buy())])
+    refused, _entry = await _open_position(case, market, "ilq")
+    if refused is not None:
+        return refused
+    positions = await case.ask("positions_read", case.port.positions(symbol=case.symbol))
+    brackets = await case.ask(
+        "leverage_brackets_read", case.port.leverage_brackets(symbol=case.symbol)
+    )
+    if brackets.ok:
+        for key, value in brackets.summary.items():
+            case.detail(f"bracket_{key}", value)
+    else:
+        _record_order_answer(case, brackets, "brackets_")
+    await _read_symbol_config(case, "config_at_position_read", "config_at_position_")
+    account = await case.ask("account_information_read", case.port.account_information())
+    rows = _position_rows(positions)
+    if not rows:
+        return case.not_observed("the position row was not readable after the entry")
+    has_price = _record_liquidation_inputs(case, positions, account)
+    case.notes.append(
+        "nothing is computed here: compare liquidationPrice with src/risk/liquidation.py offline "
+        "from the recorded inputs (demo-observed, not mainnet)"
+    )
+    if not has_price:
+        return case.not_observed(
+            "the positions answer carries no liquidationPrice; every other figure is recorded"
+        )
+    return case.observed()
+
+
+def _account_figure(answer: ProbeObservation, wire: str) -> Decimal | None:
+    """A top-level figure of an ``account_information`` answer as a Decimal; None if unreadable."""
+    text = answer.summary.get(wire) if answer.ok else None
+    return _decimal_or_none(text) if text is not None else None
+
+
+def _quote_asset_figure(
+    answer: ProbeObservation, symbol: str, wire: str
+) -> tuple[str | None, str | None]:
+    """(asset, text) of `wire` in the account asset row whose asset ends the symbol name.
+
+    The quote asset is not guessed: of the ``assets.<i>.asset`` rows the symbol name ends with,
+    the longest asset name wins (BTCUSDT: the USDT row). (None, None) when no row matches.
+    """
+    best: tuple[str, str] | None = None
+    for key, value in answer.summary.items():
+        parts = key.split(".")
+        if len(parts) != 3 or parts[0] != "assets" or parts[2] != "asset":
+            continue
+        if symbol.endswith(value) and (best is None or len(value) > len(best[0])):
+            best = (value, parts[1])
+    if best is None:
+        return None, None
+    return best[0], answer.summary.get(f"assets.{best[1]}.{wire}")
+
+
+def _record_quote_row(case: _WriteCase, answer: ProbeObservation, suffix: str) -> Decimal | None:
+    """The quote-asset row's open-order initial margin of one account read (None if unread)."""
+    asset, text = (None, None)
+    if answer.ok:
+        asset, text = _quote_asset_figure(answer, case.symbol, "openOrderInitialMargin")
+    case.detail(
+        f"quote_asset_{suffix}", asset if asset is not None else "NOT_OBSERVED: no matching row"
+    )
+    case.detail(
+        f"quote_row_open_order_initial_margin_{suffix}",
+        text if text is not None else "NOT_OBSERVED: not answered",
+    )
+    return _decimal_or_none(text) if text is not None else None
+
+
+def _record_delta(
+    case: _WriteCase, name: str, before: Decimal | None, after: Decimal | None
+) -> Decimal | None:
+    """The exact difference after minus before; "NOT_OBSERVED" (never zero) if either is unread."""
+    if before is None or after is None:
+        case.detail(name, "NOT_OBSERVED: a figure was not read")
+        return None
+    delta = after - before
+    case.detail(name, format(delta, "f"))
+    return delta
+
+
+async def _available_balance_with_resting_order(case: _WriteCase) -> CaseResult:
+    # Phase 22 (D-18, assumption A1): what does `availableBalance` do while an order rests? The
+    # API reference does not say; the support-center text says the initial margin of resting orders
+    # is deducted. The case records the account figures before and after ONE far resting BUY
+    # LIMIT of the owner's approved quantity (owner caps apply), the symbol configuration at that
+    # time and the exact deltas. It draws NO conclusion and invents no threshold: the owner decides
+    # whether AVAILABLE_BALANCE_NETS_RESTING_ORDERS_VERIFIED changes (a DECISIONS row). Observed on
+    # Demo only, never mainnet (D-19).
+    market = await case.market()
+    state = await _require_flat(case, "precheck")
+    if state is not None:
+        return case.not_observed(REASON_NOT_FLAT_CASE.format(state=state))
+    price = market.far_below(case.fraction)
+    quantity = case.quantity
+    case.detail("far_price", format(price, "f"))
+    case.detail("approved_quantity", format(quantity, "f"))
+    if price >= market.mark:
+        return case.not_observed("the far price is not below the mark: the order could fill")
+    case.check_bounds([(quantity, price)])  # refused here, before anything is sent
+    configuration = await _read_symbol_config(case, "symbol_config_read", "config_")
+    leverage = _leverage_of(configuration.answer) if configuration.answer.ok else None
+    notional = quantity * price
+    case.detail("implied_notional", format(notional, "f"))
+    if leverage is not None:
+        case.detail("implied_initial_margin", format(notional / leverage, "f"))
+    else:
+        case.detail("implied_initial_margin", "NOT_OBSERVED: the leverage is unknown")
+    before = await case.ask("account_information_before", case.port.account_information())
+    available_before = _record_margin_figures(case, before, "before")
+    quote_before = _record_quote_row(case, before, "before")
+    client_id = case.client_id("abr")
+    case.detail("client_order_id", client_id)
+    placed = await case.limit("resting_limit", client_id=client_id, side=SIDE_BUY, price=price)
+    _record_order_answer(case, placed)
+    after = await case.ask("account_information_after", case.port.account_information())
+    available_after = _record_margin_figures(case, after, "after")
+    quote_after = _record_quote_row(case, after, "after")
+    if placed.ok:
+        canceled = await case.cancel("resting_cancel", client_id)
+        case.detail("cancel_accepted", _flag_text(canceled.ok))
+    available_delta = _record_delta(
+        case, "available_balance_delta", available_before, available_after
+    )
+    order_margin_delta = _record_delta(
+        case,
+        "open_order_margin_delta",
+        _account_figure(before, "totalOpenOrderInitialMargin"),
+        _account_figure(after, "totalOpenOrderInitialMargin"),
+    )
+    _record_delta(case, "quote_row_open_order_margin_delta", quote_before, quote_after)
+    case.detail(
+        "available_decreased",
+        _flag_text(available_delta < 0) if available_delta is not None else "NOT_OBSERVED",
+    )
+    case.detail(
+        "open_order_margin_increased",
+        _flag_text(order_margin_delta > 0) if order_margin_delta is not None else "NOT_OBSERVED",
+    )
+    held = await case.held_quantity("position_read_after")
+    case.detail("position_after", format(held, "f"))
+    case.notes.append(
+        "no conclusion is drawn here: run the case twice, once at the account's current "
+        "configuration and once after symbol_config_change_to_isolated, because the "
+        "open-order term can differ with the margin type (22-RESEARCH 2.6)"
+    )
+    return case.observed()
+
+
+async def _stop_rejected_after_acceptance(case: _WriteCase) -> CaseResult:
+    market = await case.market()
+    upper = market.marketable_buy()
+    half, reason = _half_quantity(case, market)
+    if half is None:
+        return case.not_observed(reason or "no usable half quantity")
+    case.check_bounds([(half, upper), (case.quantity, upper)])
+    refusal, _ = await _open_position(case, market, "sre", quantity=half)
+    if refusal is not None:
+        return refusal
+    held = await case.held_quantity("position_read_before")
+    case.detail("held_before", format(held, "f"))
+    if held <= 0:
+        return case.not_observed(REASON_NO_POSITION_HELD)
+    live = await case.live_mark()
+    below, _ = _near_triggers(live, market.tick, case.near_trigger_fraction)
+    case.detail("stop_trigger_price", format(below, "f"))
+    case.detail("stop_quantity", format(case.quantity, "f"))
+    leg_id = case.client_id("srs")
+    case.detail("client_algo_id", leg_id)
+    # reduce-only, NOT closePosition, quantity larger than the position: the approved quantity
+    # against a position of about half of it (never above the approved quantity).
+    placed = await case.conditional(
+        "stop_leg",
+        client_id=leg_id,
+        side=SIDE_SELL,
+        order_type=ORDER_TYPE_STOP_MARKET,
+        trigger=below,
+        quantity=case.quantity,
+        reduce_only=True,
+    )
+    case.detail("placement_accepted", _flag_text(placed.ok))
+    if not placed.ok:
+        _record_order_answer(case, placed, "stop_leg_")
+        return case.observed()  # the rejection code is the answer
+    leg = _Leg("stop", leg_id)
+
+    async def ended() -> bool:
+        leg.rest.append(await case.algo_status("stop_wait_query", leg_id))
+        return _ended(_leg_statuses(case, leg))
+
+    await wait_up_to(case.rig, ended, case.case_timeout_seconds)
+    _record_leg_lifecycle(case, leg)
+    _record_algo_update_sequence(case, leg)
+    statuses = _leg_statuses(case, leg)
+    await case.observe_state("after")
+    if not _ended(statuses):
+        await case.cancel_algo("stop_cancel", leg_id)
+    if _progressed(statuses):
+        return case.observed()
+    return case.not_observed(REASON_STOP_NO_UPDATE)
+
+
+async def _trigger_cancel_race(case: _WriteCase) -> CaseResult:
+    repeats = case.race_repeats
+    case.detail("race_repeats", str(repeats))
+    case.detail("note", RACE_NOTE_TRIGGER)
+    market = await case.market()
+    upper = market.marketable_buy()
+    case.check_bounds([(case.quantity, upper)])
+    tally = {"triggered": 0, "not_triggered": 0, "cancel_rejected": 0, "placement_rejected": 0}
+    completed = 0
+    for number in range(1, repeats + 1):
+        prefix = f"r{number}"
+        held = await case.held_quantity(f"{prefix}_position_read_before")
+        if held <= 0:
+            refusal, _ = await _open_position(case, market, f"tr{number}")
+            if refusal is not None:
+                case.detail("stopped", f"{prefix}: no position could be opened: {refusal.reason}")
+                break
+        live = await case.live_mark()
+        below, _ = _near_triggers(live, market.tick, case.near_trigger_fraction)
+        case.check_bounds([(None, below)])
+        case.detail(f"{prefix}_stop_trigger_price", format(below, "f"))
+        leg_id = case.client_id(f"tc{number}")
+        placed = await case.conditional(
+            f"{prefix}_stop",
+            client_id=leg_id,
+            side=SIDE_SELL,
+            order_type=ORDER_TYPE_STOP_MARKET,
+            trigger=below,
+            quantity=None,
+            close_position=True,
+        )
+        case.detail(f"{prefix}_placement_accepted", _flag_text(placed.ok))
+        if not placed.ok:
+            _record_order_answer(case, placed, f"{prefix}_placement_")
+            tally["placement_rejected"] += 1
+            continue
+        canceled = await case.cancel_algo(f"{prefix}_cancel", leg_id)
+        case.detail(f"{prefix}_cancel_code", _code_text(canceled))
+        final_status = await case.algo_status(f"{prefix}_final_algo_query", leg_id)
+        case.detail(f"{prefix}_final_algo_status", final_status or "unreadable")
+        streamed = [f.get("algo_status", "") for f in _algo_frames(case.frames(), leg_id)]
+        after = await case.held_quantity(f"{prefix}_position_read_after")
+        closed = after <= 0
+        triggered = _triggered([final_status, *streamed]) or closed
+        case.detail(f"{prefix}_position_closed", _flag_text(closed))
+        case.detail(f"{prefix}_triggered", _flag_text(triggered))
+        outcome = "canceled in time" if canceled.ok else f"cancel rejected {_code_text(canceled)}"
+        case.detail(
+            f"{prefix}_outcome",
+            f"{outcome}; final {final_status or 'unreadable'}; "
+            f"position {'closed' if closed else 'open'}",
+        )
+        tally["triggered" if triggered else "not_triggered"] += 1
+        if not canceled.ok:
+            tally["cancel_rejected"] += 1
+        completed += 1
+    case.detail("repeats_completed", str(completed))
+    for name, count in tally.items():
+        case.detail(f"outcome_{name}", str(count))
+    if completed == 0:
+        stopped = case.details.get("stopped", "every placement was rejected or none was tried")
+        return case.not_observed(f"no stop was placed and cancelled: {stopped}")
+    return case.observed()
+
+
+async def _timestamp_outside_recv_window(case: _WriteCase) -> CaseResult:
+    window = case.context.config.limits.signed.recv_window_ms
+    local_before = _checked_now(case.rig)
+    clock = await case.ask("server_time_read", case.port.server_time())
+    local_after = _checked_now(case.rig)
+    server_ms = _positive_int_text(clock.summary, "server_time_ms") if clock.ok else None
+    if server_ms is None:
+        return case.not_observed("the server time was unreadable: no stale read was sent")
+    local_ms = _ms_of(local_after)
+    offset = local_ms - server_ms
+    # The request is stale relative to the EXCHANGE clock: twice the window behind the server
+    # time, whatever the local clock reads. The SDK stamps the real local clock, so the offset
+    # between the two clocks is added to what is taken away.
+    behind = 2 * window + offset
+    case.detail("recv_window_ms", str(window))
+    case.detail(
+        "recv_window_note", "the ratified signed_calls.recv_window_ms of the Binance limits file"
+    )
+    case.detail("server_time_ms", str(server_ms))
+    case.detail("local_clock_before_utc", local_before.isoformat())
+    case.detail("local_clock_after_utc", local_after.isoformat())
+    case.detail("local_minus_server_ms", str(offset))
+    case.detail("timestamp_behind_server_ms_target", str(2 * window))
+    case.detail("timestamp_behind_local_ms", str(behind))
+    if behind <= 0:
+        return case.not_observed(
+            "the clock offset between the tool and the exchange swallows the stale offset: "
+            "no stale read was sent"
+        )
+    answer = await case.ask(
+        "stale_signed_read",
+        case.port.stale_timestamp_read(
+            symbol=case.symbol, recv_window_ms=window, timestamp_behind_ms=behind
+        ),
+    )
+    for key in ("clock_calls", "timestamp_sent_ms", "real_clock_ms"):
+        if key in answer.summary:
+            case.detail(key, answer.summary[key])
+    if answer.summary.get("clock_calls", "0") == "0":
+        return case.not_observed(REASON_STALE_CLOCK_NOT_HONOURED)
+    sent_ms = _positive_int_text(answer.summary, "timestamp_sent_ms")
+    if sent_ms is not None:
+        case.detail("timestamp_sent_minus_server_read_ms", str(sent_ms - server_ms))
+    _record_order_answer(case, answer, "")
+    return case.observed()
+
+
+async def _income_history_read(case: _WriteCase) -> CaseResult:
+    started = case.context.recorder.started_utc
+    if started is None:
+        raise ValueError("the run has not started")
+    local_before = _checked_now(case.rig)
+    clock = await case.ask("server_time_read", case.port.server_time())
+    local_after = _checked_now(case.rig)
+    server_ms = _positive_int_text(clock.summary, "server_time_ms") if clock.ok else None
+    start_ms = _ms_of(started)
+    if server_ms is None:
+        case.detail("window_note", "server time unreadable: the local run start is used")
+    else:
+        offset = _ms_of(local_after) - server_ms
+        start_ms -= offset  # the run start on the exchange clock
+        case.detail("local_clock_before_utc", local_before.isoformat())
+        case.detail("local_clock_after_utc", local_after.isoformat())
+        case.detail("local_minus_server_ms", str(offset))
+        case.detail("window_note", "the run start converted to the exchange clock")
+    case.detail("window_start_ms", str(start_ms))
+    if start_ms <= 0:
+        return case.not_observed("the run window start is not a positive time")
+    answer = await case.ask(
+        "income_history_read",
+        case.port.income_history(symbol=case.symbol, start_time_ms=start_ms),
+    )
+    if not answer.ok:
+        return case.not_observed(f"the income history read failed: {_class_code(answer)}")
+    count = _count(answer) or 0
+    case.detail("row_count", str(count))
+    if count == 0:
+        return case.not_observed("no income row in the run window (nothing was charged or paid)")
+    fields = sorted(
+        {re.sub(r"^row_\d+_", "", key) for key in answer.summary if key.startswith("row_")}
+    )
+    case.detail("row_fields", ",".join(fields))
+    rows = _income_rows(answer)
+    types = sorted({row["income_type"] or "UNKNOWN" for row in rows})
+    case.detail("row_types", ",".join(types))
+    for income_type in types:
+        selected = [row for row in rows if (row["income_type"] or "UNKNOWN") == income_type]
+        case.detail(f"row_count_{income_type}", str(len(selected)))
+        for asset in sorted({row["asset"] or "UNKNOWN" for row in selected}):
+            total = _decimal_sum(
+                [row["income"] for row in selected if (row["asset"] or "UNKNOWN") == asset]
+            )
+            case.detail(
+                f"derived_sum_{income_type}_{asset}",
+                format(total, "f")
+                if total is not None
+                else "NOT_OBSERVED: an income was unreadable",
+            )
+    times = [int(row["time_ms"]) for row in rows if row["time_ms"].isdigit()]
+    if times:
+        case.detail("first_row_time_ms", str(min(times)))
+        case.detail("last_row_time_ms", str(max(times)))
+    return case.observed()
+
+
+async def case_reduce_only_market_on_flat(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A4): ONE reduce-only MARKET order on a flat account."""
+    return await run_write_case(
+        context,
+        _reduce_only_market_on_flat,
+        case_id="reduce_only_market_on_flat",
+        reduce_only=True,
+    )
+
+
+async def case_reduce_only_market_larger_than_position(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A8): a reduce-only MARKET of the full quantity against half a position."""
+    return await run_write_case(
+        context,
+        _reduce_only_market_larger_than_position,
+        case_id="reduce_only_market_larger_than_position",
+        reduce_only=True,
+    )
+
+
+async def case_non_reduce_only_below_min_notional(context: CaseContext) -> CaseResult:
+    """Owner opt-in (-4164): a far LIMIT BUY whose notional is below the exchange minimum."""
+    return await run_write_case(
+        context,
+        _non_reduce_only_below_min_notional,
+        case_id="non_reduce_only_below_min_notional",
+        reduce_only=True,
+    )
+
+
+async def case_insufficient_margin_order(context: CaseContext) -> CaseResult:
+    """Owner opt-in (-2019): ONE far LIMIT BUY of the owner's own insufficient_margin_quantity."""
+    return await run_write_case(
+        context,
+        _insufficient_margin_order,
+        case_id="insufficient_margin_order",
+        reduce_only=True,
+    )
+
+
+async def case_stop_rejected_after_acceptance(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P5 remainder, ALGO_UPDATE.o.rm): an oversize reduce-only stop, watched."""
+    return await run_write_case(
+        context,
+        _stop_rejected_after_acceptance,
+        case_id="stop_rejected_after_acceptance",
+        reduce_only=True,
+    )
+
+
+async def case_trigger_cancel_race(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P7 trigger part): place and cancel a near stop, `race_repeats` times."""
+    return await run_write_case(
+        context, _trigger_cancel_race, case_id="trigger_cancel_race", reduce_only=True
+    )
+
+
+async def case_timestamp_outside_recv_window(context: CaseContext) -> CaseResult:
+    """Owner opt-in (-1021): ONE read-only signed GET with a timestamp 2x the window behind."""
+    return await run_write_case(
+        context,
+        _timestamp_outside_recv_window,
+        case_id="timestamp_outside_recv_window",
+        reduce_only=False,
+    )
+
+
+async def case_income_history_read(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 21): the income history of the run window, read-only."""
+    return await run_write_case(
+        context, _income_history_read, case_id="income_history_read", reduce_only=False
+    )
+
+
+async def case_symbol_config_change_to_isolated(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, D-18): a flat symbol to ISOLATED and the owner's leverage."""
+    return await run_write_case(
+        context,
+        _symbol_config_change_to_isolated,
+        case_id="symbol_config_change_to_isolated",
+        reduce_only=True,
+    )
+
+
+async def case_available_balance_with_resting_order(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, A1): availableBalance before and after ONE far resting BUY."""
+    return await run_write_case(
+        context,
+        _available_balance_with_resting_order,
+        case_id="available_balance_with_resting_order",
+        reduce_only=True,
+    )
+
+
+async def case_margin_type_change_with_resting_order(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, D-04): a margin-type change while ONE far order rests."""
+    return await run_write_case(
+        context,
+        _margin_type_change_with_resting_order,
+        case_id="margin_type_change_with_resting_order",
+        reduce_only=True,
+    )
+
+
+async def case_leverage_above_bracket_maximum(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, A6): a leverage one above the maximum of bracket 1."""
+    return await run_write_case(
+        context,
+        _leverage_above_bracket_maximum,
+        case_id="leverage_above_bracket_maximum",
+        reduce_only=True,
+    )
+
+
+async def case_margin_insufficient_at_target_leverage(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22): the owner's own insufficient_margin_quantity at the target."""
+    return await run_write_case(
+        context,
+        _margin_insufficient_at_target_leverage,
+        case_id="margin_insufficient_at_target_leverage",
+        reduce_only=True,
+    )
+
+
+async def case_isolated_position_liquidation_price(context: CaseContext) -> CaseResult:
+    """Owner opt-in (Phase 22, A3): the exchange's liquidation price of an isolated position."""
+    return await run_write_case(
+        context,
+        _isolated_position_liquidation_price,
+        case_id="isolated_position_liquidation_price",
+        reduce_only=True,
+    )
+
+
+async def case_exchange_info_read_for_close(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A10, Q3): the live exchangeInfo filters and the read time; no order."""
+    return await run_write_case(
+        context,
+        _exchange_info_read_for_close,
+        case_id="exchange_info_read_for_close",
+        reduce_only=False,
+    )
+
+
+async def case_gtd_min_lifetime_boundary(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A1): GTD entries at server time + 599 s and + 601 s."""
+    return await run_write_case(
+        context,
+        _gtd_min_lifetime_boundary,
+        case_id="gtd_min_lifetime_boundary",
+        reduce_only=True,
+    )
+
+
+async def case_partial_fill_attempt(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P3, A5): one best-effort limit order priced to cross; may stay NOT_OBSERVED."""
+    return await run_write_case(
+        context, _partial_fill_attempt, case_id="partial_fill_attempt", reduce_only=True
+    )
+
+
+async def case_entry_cancel_fill_race(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P7): place at the touch and cancel at once, `race_repeats` times."""
+    return await run_write_case(
+        context, _entry_cancel_fill_race, case_id="entry_cancel_fill_race", reduce_only=True
+    )
+
+
+async def case_stream_loss_during_case(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P5): one entry and stop cycle across a dropped user-data stream."""
+    return await run_write_case(
+        context, _stream_loss_during_case, case_id="stream_loss_during_case", reduce_only=True
+    )
+
+
+async def case_account_read_only_capture(context: CaseContext) -> CaseResult:
+    """Owner opt-in (O-05, G2-042, Phase 21 SC1, Phase 22): the six read-only account answers."""
+    return await run_write_case(
+        context,
+        _account_read_only_capture,
+        case_id="account_read_only_capture",
+        reduce_only=False,
+    )
+
+
+async def case_algo_query_timing_after_new(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P5, P11): an algo leg queried at once, after one wait, by both ids."""
+    return await run_write_case(
+        context,
+        _algo_query_timing_after_new,
+        case_id="algo_query_timing_after_new",
+        reduce_only=True,
+    )
+
+
+async def case_close_position_stop_with_position(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P1, A6): closePosition STOP and TP legs with an open position."""
+    return await run_write_case(
+        context,
+        _close_position_stop_with_position,
+        case_id="close_position_stop_with_position",
+        reduce_only=True,
+    )
+
+
+async def case_stop_would_trigger_after_fill(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P8, B5): a closePosition stop on the wrong side after the fill."""
+    return await run_write_case(
+        context,
+        _stop_would_trigger_after_fill,
+        case_id="stop_would_trigger_after_fill",
+        reduce_only=True,
+    )
+
+
+async def case_stop_query_absent_then_same_id(context: CaseContext) -> CaseResult:
+    """Owner opt-in (B2, B3, Q5): a stop queried, placed and re-placed with the same id."""
+    return await run_write_case(
+        context,
+        _stop_query_absent_then_same_id,
+        case_id="stop_query_absent_then_same_id",
+        reduce_only=True,
+    )
+
+
+async def case_manual_close_with_open_legs(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P6, P9, A3, G4-035): a reduce-only MARKET close with two legs open."""
+    return await run_write_case(
+        context,
+        _manual_close_with_open_legs,
+        case_id="manual_close_with_open_legs",
+        reduce_only=True,
+    )
+
+
+async def case_commission_vs_realized_pnl(context: CaseContext) -> CaseResult:
+    """Owner opt-in (G2-042, A9): trades, income rows and derived sums of a round trip."""
+    return await run_write_case(
+        context,
+        _commission_vs_realized_pnl,
+        case_id="commission_vs_realized_pnl",
+        reduce_only=True,
+    )
+
+
+async def case_triggered_close_position_bracket(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P2, P11, A3): a near-mark closePosition bracket and its ALGO_UPDATEs."""
+    return await run_write_case(
+        context,
+        _triggered_close_position_bracket,
+        case_id="triggered_close_position_bracket",
+        reduce_only=True,
+    )
+
+
+async def case_gtd_entry_expiry_status(context: CaseContext) -> CaseResult:
+    """Owner opt-in (A2, P4, part of A1): a far GTD entry and the status it ends with."""
+    return await run_write_case(
+        context,
+        _gtd_entry_expiry_status,
+        case_id="gtd_entry_expiry_status",
+        reduce_only=True,
+    )
+
+
+async def case_tp1_quantity_from_fill(context: CaseContext) -> CaseResult:
+    """Owner opt-in (P10, A7, O-03): a TP1 sized from the fill, triggered near the mark."""
+    return await run_write_case(
+        context,
+        _tp1_quantity_from_fill,
+        case_id="tp1_quantity_from_fill",
+        reduce_only=True,
+    )
+
+
 # The registry the runner walks in CASE_ORDER. A handler never raises for an exchange answer
 # (answers are data); `ProbeBanned` propagates on purpose (the run stops) and any other
 # exception is a bug the runner records as ERROR.
@@ -2332,6 +5526,35 @@ CASE_HANDLERS: dict[str, CaseHandler] = {
     "explicit_time_in_force_variant": case_explicit_time_in_force_variant,
     "stream_gap_during_case": case_stream_gap_during_case,
     "market_lot_size_out_of_range": case_market_lot_size_out_of_range,
+    "account_read_only_capture": case_account_read_only_capture,
+    "algo_query_timing_after_new": case_algo_query_timing_after_new,
+    "close_position_stop_with_position": case_close_position_stop_with_position,
+    "stop_would_trigger_after_fill": case_stop_would_trigger_after_fill,
+    "stop_query_absent_then_same_id": case_stop_query_absent_then_same_id,
+    "manual_close_with_open_legs": case_manual_close_with_open_legs,
+    "commission_vs_realized_pnl": case_commission_vs_realized_pnl,
+    "triggered_close_position_bracket": case_triggered_close_position_bracket,
+    "tp1_quantity_from_fill": case_tp1_quantity_from_fill,
+    "exchange_info_read_for_close": case_exchange_info_read_for_close,
+    "gtd_min_lifetime_boundary": case_gtd_min_lifetime_boundary,
+    "partial_fill_attempt": case_partial_fill_attempt,
+    "entry_cancel_fill_race": case_entry_cancel_fill_race,
+    "stream_loss_during_case": case_stream_loss_during_case,
+    "reduce_only_market_on_flat": case_reduce_only_market_on_flat,
+    "reduce_only_market_larger_than_position": case_reduce_only_market_larger_than_position,
+    "non_reduce_only_below_min_notional": case_non_reduce_only_below_min_notional,
+    "insufficient_margin_order": case_insufficient_margin_order,
+    "stop_rejected_after_acceptance": case_stop_rejected_after_acceptance,
+    "trigger_cancel_race": case_trigger_cancel_race,
+    "timestamp_outside_recv_window": case_timestamp_outside_recv_window,
+    "income_history_read": case_income_history_read,
+    "symbol_config_change_to_isolated": case_symbol_config_change_to_isolated,
+    "margin_type_change_with_resting_order": case_margin_type_change_with_resting_order,
+    "leverage_above_bracket_maximum": case_leverage_above_bracket_maximum,
+    "margin_insufficient_at_target_leverage": case_margin_insufficient_at_target_leverage,
+    "available_balance_with_resting_order": case_available_balance_with_resting_order,
+    "isolated_position_liquidation_price": case_isolated_position_liquidation_price,
+    "gtd_entry_expiry_status": case_gtd_entry_expiry_status,
 }
 
 
@@ -2491,6 +5714,7 @@ class _ProbeRun:
         planned: list[dict[str, Any]],
         cleanup: Mapping[str, Any],
         frames: Mapping[str, Any],
+        rest_fixtures: Sequence[str] = (),
     ) -> None:
         self.recorder.results[case_id] = result
         self.recorder.records[case_id] = {
@@ -2507,6 +5731,31 @@ class _ProbeRun:
             "cleanup": dict(cleanup),
             "frames": dict(frames),
         }
+        if rest_fixtures:
+            self.recorder.records[case_id]["rest_fixtures"] = list(rest_fixtures)
+
+    def _rest_fixtures(self, case_id: str, result: CaseResult) -> list[str]:
+        """Write each REST answer of a capture case as a scrubbed fixture (executed runs only).
+
+        One file per observation, `<case_id>-rest-<NNN>-<operation>.json`, beside the raw frame
+        fixtures; the names go to `recorder.fixtures` (so `provenance.md` lists them). Only the
+        cases of `FIXTURE_CASES` (the sj0 ten and the sj1 five) write them; dry runs write none.
+        """
+        directory = self.config.fixtures_dir
+        if case_id not in FIXTURE_CASES or self.dry_run or directory is None:
+            return []
+        names: list[str] = []
+        for index, observation in enumerate(result.observations, start=1):
+            document = {
+                "label": FIXTURE_LABEL_EXECUTE,
+                "case_id": case_id,
+                "index": index,
+                "observation": observation,
+            }
+            stem = f"{case_id}-rest-{index:03d}-{_FIXTURE_EVENT_RE.sub('_', observation.operation)}"
+            names.append(write_evidence_atomic(directory, stem, document, self.redactor).name)
+        self.recorder.fixtures.extend(names)
+        return names
 
     def _record_not_run(self, case_id: str, reason: str) -> None:
         moment = self.now()
@@ -2588,6 +5837,7 @@ class _ProbeRun:
             planned=planned,
             cleanup=cleanup,
             frames=self._frames(case_id, marker),
+            rest_fixtures=self._rest_fixtures(case_id, result),
         )
 
     async def _final(self) -> None:
@@ -3050,6 +6300,106 @@ class GuardedProbePort:
     async def symbol_filters(self, *, symbol: str) -> ProbeObservation:
         self._enter("symbol_filters")
         result: ProbeObservation = await self._adapter.symbol_filters(symbol=symbol)
+        return result
+
+    # ----- quick task 261021-sj0: the capture operations ---------------------- #
+
+    async def account_information(self) -> ProbeObservation:
+        self._enter("account_information")
+        result: ProbeObservation = await self._adapter.account_information()
+        return result
+
+    async def account_balance_all(self) -> ProbeObservation:
+        self._enter("account_balance_all")
+        result: ProbeObservation = await self._adapter.account_balance_all()
+        return result
+
+    async def account_config(self) -> ProbeObservation:
+        self._enter("account_config")
+        result: ProbeObservation = await self._adapter.account_config()
+        return result
+
+    async def symbol_config(self, *, symbol: str) -> ProbeObservation:
+        self._enter("symbol_config")
+        result: ProbeObservation = await self._adapter.symbol_config(symbol=symbol)
+        return result
+
+    async def leverage_brackets(self, *, symbol: str) -> ProbeObservation:
+        self._enter("leverage_brackets")
+        result: ProbeObservation = await self._adapter.leverage_brackets(symbol=symbol)
+        return result
+
+    async def income_history(self, *, symbol: str, start_time_ms: int) -> ProbeObservation:
+        self._enter("income_history")
+        result: ProbeObservation = await self._adapter.income_history(
+            symbol=symbol, start_time_ms=start_time_ms
+        )
+        return result
+
+    async def query_algo_order_by_algo_id(self, *, algo_id: int) -> ProbeObservation:
+        self._enter("query_algo_order_by_algo_id")
+        result: ProbeObservation = await self._adapter.query_algo_order_by_algo_id(algo_id=algo_id)
+        return result
+
+    async def new_gtd_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        client_order_id: str,
+        position_side: str,
+        good_till_date_ms: int,
+    ) -> ProbeObservation:
+        self._enter("new_gtd_limit_order")
+        result: ProbeObservation = await self._adapter.new_gtd_limit_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            client_order_id=client_order_id,
+            position_side=position_side,
+            good_till_date_ms=good_till_date_ms,
+        )
+        return result
+
+    async def live_mark_price(self, *, symbol: str) -> ProbeObservation:
+        self._enter("live_mark_price")
+        result: ProbeObservation = await self._adapter.live_mark_price(symbol=symbol)
+        return result
+
+    async def server_time(self) -> ProbeObservation:
+        self._enter("server_time")
+        result: ProbeObservation = await self._adapter.server_time()
+        return result
+
+    async def order_book(self, *, symbol: str) -> ProbeObservation:
+        self._enter("order_book")
+        result: ProbeObservation = await self._adapter.order_book(symbol=symbol)
+        return result
+
+    async def stale_timestamp_read(
+        self, *, symbol: str, recv_window_ms: int, timestamp_behind_ms: int
+    ) -> ProbeObservation:
+        self._enter("stale_timestamp_read")
+        result: ProbeObservation = await self._adapter.stale_timestamp_read(
+            symbol=symbol, recv_window_ms=recv_window_ms, timestamp_behind_ms=timestamp_behind_ms
+        )
+        return result
+
+    async def change_margin_type(self, *, symbol: str, margin_type: str) -> ProbeObservation:
+        self._enter("change_margin_type")
+        result: ProbeObservation = await self._adapter.change_margin_type(
+            symbol=symbol, margin_type=margin_type
+        )
+        return result
+
+    async def change_initial_leverage(self, *, symbol: str, leverage: int) -> ProbeObservation:
+        self._enter("change_initial_leverage")
+        result: ProbeObservation = await self._adapter.change_initial_leverage(
+            symbol=symbol, leverage=leverage
+        )
         return result
 
     async def position_mode(self) -> ProbeObservation:

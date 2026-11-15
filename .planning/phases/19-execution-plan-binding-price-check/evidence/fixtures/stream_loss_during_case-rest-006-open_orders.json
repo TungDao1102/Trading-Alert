@@ -1,0 +1,13 @@
+{
+  "case_id": "stream_loss_during_case",
+  "index": 6,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

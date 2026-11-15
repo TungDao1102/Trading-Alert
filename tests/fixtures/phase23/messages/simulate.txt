@@ -1,0 +1,21 @@
+SIMULATE BTCUSDT LONG TREND_PULLBACK_LONG
+Signal: sig-0001
+Detected: 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC)
+Entry: 50000–50100
+Quantity: 0.08
+Notional: 4008.00 USDT
+Margin: 801.60 USDT at 5x leverage (PLAN_CONSTRAINT_SNAPSHOT:verified_leverage)
+Loss at SL: 48.00 USDT gross, 53.5776 USDT net of modeled costs
+Profit at TP1 (0.5 of quantity): 36.000 USDT gross, 33.1692000 USDT net of modeled costs
+Profit at TP2 (0.5 of quantity): 76.000 USDT gross, 73.1412000 USDT net of modeled costs
+Equity used: 800 USDT (ACCOUNT_LIVE:min(totalWalletBalance,totalMarginBalance), observed 2026-10-09 10:00:00 +07 (2026-10-09 03:00:00 UTC))
+SL: 49500
+TPs:
+  TP1: 51000 (0.5)
+  TP2: 52000 (0.5)
+R:R: 2.0
+Risk: 0.005
+Expiry: 2026-10-09 14:00:00 +07 (2026-10-09 07:00:00 UTC)
+Invalidation: CANDLE_CLOSE < 49500
+Exposure: 0 quote
+Reasons: SETUP_DETECTED

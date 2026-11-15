@@ -1,0 +1,67 @@
+# Owner probe limits for the Phase 19 Demo evidence session (quick tasks 261021-sj0 and 261022-sj1).
+#
+# STATUS: PROPOSED BY THE ASSISTANT, NOT APPROVED. The owner reads every value below, changes what
+# they want and records the approval in a decision note of their own. Nothing in this file is a
+# trading parameter: every number only bounds how much the Demo probe may send (D-17).
+#
+# Values marked "from Phase 18" are copied from the owner-approved 18-probe-limits.toml.
+# Values marked "proposed" are new and have no earlier approval.
+#
+# Used with:
+#   uv run python -m scripts.demo_probe --environment DEMO --probe-limits-file \
+#     .planning/phases/19-execution-plan-binding-price-check/decisions/19-probe-limits.toml \
+#     --evidence-dir <dir> --fixtures-dir <dir>              (add --execute to send; owner only)
+
+[order]
+# The Demo symbol. One-way mode only. (from Phase 18)
+symbol = "BTCUSDT"
+# The largest quantity any single probe order may have; the tool never sends more. (from Phase 18)
+quantity = "0.0008"
+# The largest order notional in USDT; an order above it is refused before it is sent. (from Phase 18)
+max_notional_quote = "100"
+# How far from the live price the "resting" orders sit: 0.96 means 4 percent away. Strictly
+# between 0 and 1. (from Phase 18)
+far_price_fraction = "0.96"
+# Needed because triggered_bracket and tp1_from_fill are on. Strictly between 0 and 1. How close
+# to the live mark the stop and take-profit triggers are placed: 0.9999 means about 0.01 percent,
+# a few dozen ticks at most, so a normal price move can reach one of them. Closer to 1 = closer.
+# (proposed)
+near_trigger_fraction = "0.9999"
+# Needed because gtd_expiry is on. Whole seconds the GTD entry lives. Binance requires
+# goodTillDate greater than now + 600 s, so this must be above 600. (proposed)
+gtd_lifetime_seconds = 660
+# Needed because cancel_fill_race is on. How many times the race is tried; at most 5. (proposed)
+race_repeats = 2
+
+[waits]
+# The longest one case waits for an event (a trigger, a fill, the stream coming back). The Phase 18
+# value was 30; the trigger cases need a price move, so this proposes more. (proposed)
+case_timeout_seconds = 90
+# The longest the cleanup (cancel everything, flatten, verify flat) may take. (from Phase 18)
+cleanup_timeout_seconds = 60
+# Needed because gtd_expiry is on. How long the GTD case waits for the expiry; must be greater than
+# gtd_lifetime_seconds. (proposed)
+gtd_expiry_wait_seconds = 780
+
+[optional_cases]
+# Phase 18 optional cases, left off as before.
+explicit_time_in_force = false
+stream_gap = false
+market_lot_size_out_of_range = false
+# Evidence cases of quick task 261021-sj0. All on: narrow a run with --only <ids> when you want to.
+account_capture = true            # read-only: account v3, balance, symbolConfig, brackets (Phase 21/22)
+algo_query_timing = true          # the -2013 right after an algo order is NEW
+close_position_with_position = true   # P1: closePosition STOP_MARKET with an open position
+stop_trigger_after_fill = true    # P8: -2021
+stop_absent_same_id = true        # B2/B3: same-id re-place
+manual_close_open_legs = true     # P6/A3: close by hand with legs open
+commission_realized_pnl = true    # G2-042
+triggered_bracket = true          # P2/A3 with the full ALGO_UPDATE sequence
+tp1_from_fill = true              # P10
+gtd_expiry = true                 # A2: waits more than 10 minutes, runs last
+# Evidence cases of quick task 261022-sj1.
+exchange_info_read = true         # read-only: filters at close time
+gtd_min_lifetime = true           # A1: goodTillDate 599 s and 601 s boundary
+partial_fill_attempt = true       # P3: best effort, may stay NOT_OBSERVED
+cancel_fill_race = true           # P7: best effort, a sample only
+stream_loss = true                # P5: drops the user-data stream during a case

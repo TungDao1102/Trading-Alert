@@ -54,10 +54,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 17: Operational Persistence Layer** - PostgreSQL journal/approval/execution stores, integrity constraints, durable approval consumption, write-ahead intent (completed 2026-10-07)
 - [x] **Phase 18: Binance User-Data Stream + Exchange Error Taxonomy** - listenKey + ORDER/ALGO/ACCOUNT events, error-code mapping, demo/testnet switch, clock checks (completed 2026-10-18; verification human_needed; D055 stays OPEN; Demo-observed, not mainnet)
 - [ ] **Phase 19: Execution Plan Binding + Pre-Placement Checks** - Symbol/side/qty bound to the approved plan, live-price check, SL-reject fallback (absorbs old Phase 15)
-- [ ] **Phase 20: Reconcile + SAFE_MODE Hardening + Alerts** - No blind spots, pending-entry SL kept, auto SL re-place (D034), durable SAFE_MODE, operational alerts
+- [ ] **Phase 20: Reconcile + SAFE_MODE Hardening + Alerts** - No blind spots, the protective of a resting entry is never an orphan, a never-confirmed stop is re-placed or the exposure closed, a confirmed-then-lost stop is closed (D034, D077), durable SAFE_MODE, operational alerts
 - [ ] **Phase 21: Account Equity + Daily Loss from Binance** - Binance-canonical equity and D033 daily-loss state (was Phase 12)
 - [ ] **Phase 22: Leverage, Margin + Liquidation Guard** - ISOLATED, 5x cap, liquidation beyond SL, available margin incl. resting entries (was Phases 13 + 14)
-- [ ] **Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts** - User-id auth, working SKIP, APPROVE→CONFIRM card (D041), keyboard removal, $ amounts (was Phase 16)
+- [x] **Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts** - User-id auth, working SKIP, APPROVE→CONFIRM card (D041), keyboard removal, $ amounts (was Phase 16) (executed 2026-10-30; verification passed with R-1 override; owner live checks A1, G2-014, A2 open; library level, composed in Phase 24)
 - [ ] **Phase 24: Live Runtime Composition + Demo Rehearsal** - Wire APPROVE→execute, bot runner, schedulers, live risk inputs; end-to-end on Binance Demo Trading
 - [ ] **Phase 25: Binance Demo Integration Test Campaign** - Automated failure-scenario suite on Binance Demo, APPROVE+CONFIRM→demo orders, multi-week demo soak (D040)
 - [ ] **Phase 26: Go-Live Readiness Gate** - Affirmative enablement gate, verification closure, real backups, CI, mainnet read-only check + small canary (D040)
@@ -946,25 +946,25 @@ This absorbs former Phase 15 (live-price check).
 **Requirements**: APRV-01, APRV-02, EXEC-01, EXEC-02, RISK-04, EXEC-07
 
 **Success Criteria**:
-1. `execute_approved_plan` / `attach_protectives_to_fill` derive symbol and side from the hashed plan, not from the caller, and assert SL/entry geometry. The placement quantity may only be ≤ the approved quantity; otherwise the plan is rejected, never up-sized (F-302, F-203).
+1. `execute_approved_plan` / `attach_protectives_to_fill` derive symbol and side from the hashed plan, not from the caller, and assert SL/entry geometry. The placement quantity may only be ≤ the approved quantity; otherwise the plan is rejected, never up-sized (F-302, F-203). (D079, 2026-10-22: execution model (a) is the only V1 model: the protective stop is STOP_MARKET `closePosition=true`, placed after the first fill with positive quantity, confirmed by REST query.)
 2. The placement is refused when:
    - mark or last price has crossed the SL or left the zone;
    - remaining validity is below a minimum;
    - another plan or position already exists on the same symbol;
    - TradePlan.status or the invalidation rule says the plan is invalid.
    GTD is used as the exchange-side expiry backstop (F-007, F-016, F-303, F-304, F-959).
-3. If the SL is rejected or not acknowledged within N seconds after a fill, the system does a reduce-only close, alerts, and enters SAFE_MODE (F-007, D034).
+3. If the SL is rejected or not acknowledged within N seconds after a fill, the system does a reduce-only close, alerts, and enters SAFE_MODE (F-007, D034). (D079, 2026-10-22: a stop not confirmed before `max_unprotected_ms`, or an entry not terminal before `entry_terminal_timeout`, leads to CLOSE_REQUIRED and an automatic reduce-only MARKET close; both deadlines are `NOT_CONFIGURED`.)
 4. `workingType = MARK_PRICE` is recorded on the plan (D037, F-507). TP legs are quantized to the filters read from exchangeInfo (LOT_SIZE; MARKET_LOT_SIZE for a triggered market exit, which the Demo probe did not observe). A reduce-only STOP_MARKET below MIN_NOTIONAL was accepted at placement on Demo (demo-observed, not mainnet; the probe did not observe it trigger or execute and did not test a take-profit leg), so the system does not rely on a MIN_NOTIONAL exemption for reduce-only legs and treats a rejection of such a leg as a possible failure. The system falls back to a single TP when a leg is below minQty (F-208, F-307, F-056).
 
 **Audit refs**: F-302, F-203, F-007, F-016, F-303, F-304, F-959, F-507, F-208, F-307
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
-- [D055] `execute_approved_plan` still places the protective stop right after the entry (`src/execution/manager.py` gate 6 near line 613 and the SL intent near line 818), which Demo rejects with -4509 while no position exists; criteria 1, 3 and 4 are NOT amended here and depend on the D055 outcome (the Phase 18 probe, then a user decision) (source: docs/DECISIONS.md D055, .planning/phases/09-live-execution-rollout/09-DEMO-REHEARSAL-FINDINGS.md; decision: D055, execution model is an open user decision)
+- [D055] `execute_approved_plan` still places the protective stop right after the entry (`src/execution/manager.py` gate 6 near line 613 and the SL intent near line 818), which Demo rejects with -4509 while no position exists; criteria 1, 3 and 4 are NOT amended here and depend on the D055 outcome (the Phase 18 probe, then a user decision) (source: docs/DECISIONS.md D055, .planning/phases/09-live-execution-rollout/09-DEMO-REHEARSAL-FINDINGS.md; decision: D055, execution model is an open user decision) Update 2026-10-22: the execution model is decided by D079 (model (a), the protective stop placed after the first fill); since Phase 19 `execute_approved_plan` places a GTD LIMIT entry with no entry-time stop (plans 19-11, 19-15), and criteria 1 and 3 carry a D079 note.
 - [D059-1,2] The TP1 far-half-of-zone rejection rule stays deferred to Backlog 999.1, and maker or post-only entries are deferred; neither is part of this phase's execution scope (source: docs/DECISIONS.md D059 items 1 and 2; decision: D059)
 - [T-04] EXEC-07 is listed in this phase's requirements but no criterion names it: the TP1 split fraction, the TP2 rule and the time in force as versioned registry parameters, while D052 item (c) keeps `TP1_QUANTITY_FRACTION` a code constant; the two have to be reconciled (source: .planning/REQUIREMENTS.md:69,152, docs/DECISIONS.md D052 item (c); decision: open user decision)
 - [G4-006] The live producer of the TP1 quantity and exit ladder (F-103) has no phase number ("a later phase" in D052); it must use the backtest fraction and `size_protectives_to_filled_qty` (source: docs/DECISIONS.md D052 item (c), .planning/phases/14-backtest-causality-rewrite/14-VERIFICATION.md:255; decision: D052)
 - [G4-007] The criterion 4 single-TP fallback differs from the backtest rule D-27 (an un-sizeable TP1 is NO_TRADE); the backtest and the live fallback must change together so the parity test stays green (source: .planning/phases/14-backtest-causality-rewrite/14-VERIFICATION.md:255; decision: none required, the two must move together)
-- [G2-032] TP1 is not resized when later partial fills arrive (cancel-then-replace with a versioned role id); decide and implement it, or document that SL and TP2 close-all suffice (source: .planning/phases/09-live-execution-rollout/09-REVIEW-FIX.md:88-90; decision: open user decision)
+- [G2-032] TP1 is not resized when later partial fills arrive (cancel-then-replace with a versioned role id); decide and implement it, or document that SL and TP2 close-all suffice (source: .planning/phases/09-live-execution-rollout/09-REVIEW-FIX.md:88-90; decision: open user decision) Update 2026-10-22: D079 item 5 settles it for the normal flow: no continuous TP1 resizing; TP legs are placed after the entry is terminal and the position is reconciled.
 - [G4-038] Write TP legs ahead with `record_protective_intent`, and check `snapshot_is_valid_for_live` before placement, re-sizing or refusing on a stale snapshot (source: .planning/phases/17-operational-persistence-layer/17-11-SUMMARY.md:198-201, src/execution/constraint_snapshot.py:394; decision: none required)
 - [G4-008] `realized_risk` is not persisted for live fills, so live R stays INCOMPLETE (NO_RISK_VALUE); persist it with the fill record (the audit allowed Phase 19 or 20, placed here) (source: docs/DECISIONS.md D052 item (f); decision: D052)
 - [G4-017] INVALIDATED now carries two meanings (planner D-07 reject versus approval and binding invalidation); distinguish them when criterion 2 invalidation is built (source: .planning/phases/15-strategy-geometry-correction/15-REVIEW.md:106-110, .planning/phases/15-strategy-geometry-correction/15-REVIEW-DISPOSITION.md:45; decision: none required)
@@ -1002,7 +1002,7 @@ Plans:
 
 **Success Criteria**:
 1. The compare runs a reverse pass over exchange orders, compares signed amounts per position, and requires a STOP on the exchange for every open position. A doubled position, a sign-flipped position, a foreign order or a TP-only position is a divergence (F-701).
-2. The entry-time SL of a resting entry is never classified as an orphan (F-401). When an SL is missing, the system re-places it automatically, or closes the position if re-placement fails (D034, F-952). Expiry and emergency-close follow the WR-07 ordering rules.
+2. A protective of a plan whose entry is still resting or partially filled is never classified as an orphan (F-401). Every positive fill leads to the protection flow within `protection.max_unprotected_ms`, and no new entry opens while any unprotected exposure exists. Missing protection is handled in four separate cases, each with its own basis (D034, D077, F-952). (1) A stop never confirmed ACTIVE that this step's own REST query by its deterministic id proved absent is placed again under the same client id from the plan stop-loss, never a wider one: at most one attempt per coordinator step, bounded by the `max_unprotected_ms` deadline and not by a count, and the step that reaches the deadline still makes its attempt before it escalates (D034 clause (1)). (2) A stop that is rejected definitively (for example -2021) or not acknowledged is never resent: CLOSE_REQUIRED, a reduce-only close, then an alert (D034 clause (2)). (3) A stop that was confirmed ACTIVE and is later lost is never re-placed, neither automatically nor by an operator action: exposure means CLOSE_REQUIRED and a reduce-only MARKET close, an unreadable position or a flat position with the entry still open means UNPROTECTED, escalating to CLOSE_REQUIRED at `max_unprotected_ms` from the first detection of the loss (D077). (4) A stop still unconfirmed at `max_unprotected_ms` after a positive fill enters CLOSE_REQUIRED (SAFE_MODE and a critical alert) and the emergency closer reads the position itself: exposure is closed by a reduce-only MARKET order; when two consecutive fresh position reads are zero it sends no order for a position that does not exist, and the plan ends FLAT only with the entry terminal as well. Expiry and emergency close follow the WR-07 ordering rules defined in Phase 20 D-09: a plan's protective legs are cancelled only with zero fills or after the position is confirmed flat by two consecutive fresh reads with the entry terminal.
 3. SAFE_MODE is persisted and needs an operator id to exit (F-711, F-127). Risk-reducing actions execute first and are journaled afterwards, with a fallback (F-702). The -2011 cancel result is verified by a post-cancel query (F-502).
 4. Alerts go out for:
    - an unprotected position;
@@ -1019,7 +1019,7 @@ Plans:
 Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
-- [D055] Criterion 2 presumes an entry-time SL on a resting entry, which Demo rejects with -4509; it is NOT amended here and depends on the D055 outcome (the Phase 18 probe, then a user decision), with the invariant that no new entry opens while any position is unprotected (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
+- [D055] Criterion 2 presumes an entry-time SL on a resting entry, which Demo rejects with -4509; it is NOT amended here and depends on the D055 outcome (the Phase 18 probe, then a user decision), with the invariant that no new entry opens while any position is unprotected (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision) Update 2026-10-22: the execution model is decided by D079; criterion 2 already states the fill-driven flow in the owner-accepted wording of plan 20-26 (O-A) and is not edited here.
 - [D058] Stale-feed handling: execution fails closed when the mark-price data needed for risk or protection is missing or stale; this phase detects and handles the stale feed, and Phase 24 owns the enablement gate (source: docs/DECISIONS.md D058; decision: D058)
 - [G2-026] The "WR-07 ordering rules" in criterion 2 are defined only as a skipped review item: expiry would cancel a plan's protective legs only with zero fills, which needs an agreed fill-state source; the emergency close needs either a reduce-only MARKET order or a flat-confirmation contract (source: .planning/phases/09-live-execution-rollout/09-REVIEW-FIX.md:266-277; decision: open user decision, premise also depends on D055)
 - [G4-035] Manual close outside the system: whether the closePosition protective legs auto-cancel or orphan decides what the sweeper and reconcile do; re-read the live Binance pages and prove it on Demo (Phase 25 scenario) before relying on either answer (source: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md:5-12; decision: none required, verification task)
@@ -1032,10 +1032,59 @@ Input: .planning/phases/20-reconcile-safe-mode-hardening/20-NOTES.md
 - [T-06] The reconcile cadence, stale-feed threshold and WS-silence threshold have no values ("configured freshness threshold"); they must be registry parameters with provenance labels (source: docs/operations/RUNBOOK.md:113-115, .planning/audits/2026-09-29-deep-audit/DEEP_AUDIT_REPORT.md:636 (F-026); decision: open user decision, the values)
 - [G3-005] Promote `ENTRY_WITHOUT_PROTECTIVE` into the RejectionReason enum and update GLOSSARY 9.3 (source: docs/GLOSSARY.md:206, docs/DECISIONS.md D044 item (1); decision: D044)
 
-**Plans:** 0 plans
+**Plans:** 31/31 plans executed (26 planned + 5 gap-closure) (9 waves; owner checkpoints O-A..O-F inside plans 20-07, 20-10, 20-20, 20-21, 20-25, 20-26)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 20 to break down)
+**Wave 1**
+- [x] 20-01-PLAN.md - Execution-limit keys for reconcile, stale feed and alerts, all NOT_CONFIGURED; cadence check (T-H, D-25)
+- [x] 20-02-PLAN.md - Protection transition guard, clearing evidence and replay validator (T-A, D-29, D077)
+- [x] 20-03-PLAN.md - Reconciliation-finalization API and resolution_reason_code, migration 0007 (T-B)
+- [x] 20-04-PLAN.md - Compare v2: reverse pass, bound check, STOP required, entry-aware orphan, duplicate ids (D-01..D-03, D-05)
+- [x] 20-05-PLAN.md - ENTRY_WITHOUT_PROTECTIVE promoted into RejectionReason, GLOSSARY 9.1/9.3 (D-10, G3-005)
+- [x] 20-06-PLAN.md - Durable SAFE_MODE: persisted on enter, fail-closed load (D-14)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 20-07-PLAN.md - REST gate restart recovery, owner decision O-C (T-D, D-18)
+- [x] 20-08-PLAN.md - Local spill and act-first risk-reducing controls (D-16, F-702)
+- [x] 20-09-PLAN.md - Stop supervision after PROTECTED and reconcile hooks (D-07, D-06, D077)
+- [x] 20-10-PLAN.md - UNKNOWN-entry evidence protocol, owner decision O-F (T-C, D-11, D-12)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 20-11-PLAN.md - Cancel verification and the emergency_manual_close fix (D-17, D-09, D-03)
+- [x] 20-12-PLAN.md - Reconcile loop tick library (EXEC-02, D-01, D-02, D-07)
+- [x] 20-13-PLAN.md - Operational alert sender, journal first, dedupe, bounded message retry (D-22, D-23)
+- [x] 20-14-PLAN.md - Durable pending protective actions, migration 0008 (D-19, Q4)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 20-15-PLAN.md - SAFE_MODE operator exit, readiness rows 1-5 (D-15, F-711)
+- [x] 20-16-PLAN.md - Stale feed, stream divergences and auth failures in the tick (D-04, D-25, D058)
+- [x] 20-17-PLAN.md - EXEC-06 operator close and re-protect controls (D-26)
+- [x] 20-18-PLAN.md - Emergency close with stored validated lot filters, migration 0009 (D-21, Q3)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 20-19-PLAN.md - Coordinator and closer rebuild, startup recovery order (D-08, D-30)
+- [x] 20-20-PLAN.md - Symbol ownership invariant, owner decision O-D (T-F)
+- [x] 20-21-PLAN.md - Tick work order: lot-filter refresh and risk-reducing first, owner decision O-E (D-20, D-21)
+- [x] 20-25-PLAN.md - SAFE_MODE exit rows 6 and 7, owner decision O-B (T-E)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 20-22-PLAN.md - Alert producers and the OPS-05 acceptance matrix (D-23, D-24)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 20-23-PLAN.md - Old-rule tests rewritten, G2-016 drills, Phase 20 gate (D-27, D-28, F-604)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 20-24-PLAN.md - Deferred register, GLOSSARY rows and canonical docs (no owner-gated wording)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 20-26-PLAN.md - Criterion 2 / RISK-03 wording aligned with D077, owner verification O-A (D-05)
+
+**Gap closure** *(after the deep review and the Demo evidence of 2026-10-22; verification status `human_needed`)*
+- [x] 20-27-PLAN.md - Execution lane: evidence-row identity, gate refusal reaches NOT_SENT, manual close with a flat position, open-algo-orders stop confirmation, -4116, -5040
+- [x] 20-28-PLAN.md - Reconcile lane: TP1 fill is not UNSYNCED_ALGO, no SAFE_MODE re-entry rows, exit ownership and restore checks, stale resting-entry alert
+- [x] 20-29-PLAN.md - Ops lane: unreadable spill directory fails closed, gate state file hardening, bounded supervisor wait
+- [x] 20-30-PLAN.md - Future feed time is stale, implausible persisted gate deadline is untrusted
+- [x] 20-31-PLAN.md - Unfilled resting GTD entry is not ENTRY_WITHOUT_PROTECTIVE; deadline-step stop attempt test
 
 ### Phase 21: Account Equity + Daily Loss from Binance
 
@@ -1065,10 +1114,35 @@ Input: .planning/phases/21-account-equity-daily-loss/21-NOTES.md
 - [G4-039] Phases 21 and 22 replace the UNKNOWN margin type, leverage and equity in the plan constraint snapshot so that it can become COMPLETE (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 - [G2-042] Daily loss (D033) counts commissions, but whether Binance `realizedPnl` excludes commission is unverified: `LIVE_NET_PNL_SEMANTICS_VERIFIED` is False, so live R stays INCOMPLETE; the verification itself is owned by Phase 24 and this phase depends on its outcome (source: src/analytics/live_outcomes.py:77, .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 16/16 plans executed (2026-10-23); verification human_needed (21-VERIFICATION.md, no gap)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 21 to break down)
+
+**Wave 1**
+- [x] 21-02-PLAN.md - Limit key account.max_equity_age_ms, NOT_CONFIGURED and required (D-03, O-1)
+- [x] 21-03-PLAN.md - Adapter account reads v3/account, v3/balance, accountConfig and the generated Demo fixtures (D-01, D-02, D-21)
+- [x] 21-04-PLAN.md - Pure live equity resolver (totalMarginBalance, fail closed) and the D-18 snapshot test (F-012, G4-039)
+- [x] 21-05-PLAN.md - Pure D033 daily-loss fold, day-start thresholds, sticky latch and day-open rule (D-06 to D-11, D-14)
+- [x] 21-06-PLAN.md - Pure portfolio-cap inputs: reservation verdict, open positions counting resting and approved plans, release reasons for every terminal plan state (D-15, D-16)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 21-07-PLAN.md - Live equity source: REST truth, stream invalidation, owner age bound, now-after-refresh contract (D-01, D-03)
+- [x] 21-08-PLAN.md - Adapter userTrades and income reads (paged) and the recorded frames (D-09)
+- [x] 21-09-PLAN.md - Persisted day state and loss components, migration 0010 (D-07, D-14)
+- [x] 21-10-PLAN.md - DAILY_STOP cancels resting entries (trigger daily_stop), keeps stops, alert producers (D-12, D-13, F-013, F-963)
+- [x] 21-11-PLAN.md - Live risk-input builder, release-reason mappings (plan status, expiry, final refusal) and backtest parity (D-15, D-16)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 21-12-PLAN.md - Risk reservation store, migration 0011, reserve under the day-row lock, release transition table (D-16, D-17, F-407, F-955)
+- [x] 21-13-PLAN.md - Live daily-loss service core: day open (judged after the read) and rollover, REST backfill, latch persistence (D-07, D-08, D-09)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 21-01-PLAN.md - Owner decision O-2 (daily-loss counting while income rows are unobserved) and the OWNER-OPEN record of the built defaults (D-09; checkpoint; only 21-14 waits for it)
+- [x] 21-15-PLAN.md - Atomic reservation in the approval transaction, two-connection race, SKIP/EXPIRE release (D-16, D-17, F-407)
+- [x] 21-16-PLAN.md - Daily-loss stream path: fills, invalidation on ACCOUNT_UPDATE and gaps, recorded Demo SL-close proof (D-09)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 21-14-PLAN.md - Phase 21 gate, deferred register and canonical docs
 
 ### Phase 22: Leverage, Margin + Liquidation Guard
 
@@ -1094,10 +1168,37 @@ Input: .planning/phases/22-leverage-margin-liquidation-guard/22-NOTES.md
 - [G3-001] The Change-Position-Mode wording was not fetched in Phase 11 and docs/SOURCES.md still carries it unconfirmed; re-confirm it on the official page before criterion 4 relies on the one-way check (source: .planning/phases/11-decision-alignment/11-05-SUMMARY.md:125-126, docs/SOURCES.md:46; decision: D044)
 - [G4-039] Fill the UNKNOWN margin type and leverage fields of the plan constraint snapshot so it can become COMPLETE (see Phase 21) (source: .planning/phases/17-operational-persistence-layer/17-13-SUMMARY.md:208; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 16/16 plans executed (2026-10-24), verification human_needed, no blocking gap (`22-VERIFICATION.md`). Library level only: the guard is composed into no running process (Phase 24), the six owner-run Demo cases of 2026-10-24 are single samples (`22-DEMO-RESULTS.md`), criteria 1 to 3 are not Demo-proven through the guard, EXEC-01 and EXEC-02 stay Pending, owner items O-1 to O-4 are open
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 22 to break down)
+
+**Wave 1**
+- [x] 22-01-PLAN.md - Recorded-Demo fixtures and the signed symbolConfig and leverageBracket reads (D-01, D-06, D-08, D-11, F-011)
+- [x] 22-02-PLAN.md - Limit keys margin.liquidation_buffer_bps, margin.max_bracket_age_ms and margin.headroom_bps, NOT_CONFIGURED and required (D-10, D-11, D-13, O-2, O-3)
+- [x] 22-03-PLAN.md - Error taxonomy for the configuration calls and the SOURCES section that closes G3-001 (D-03, D-07)
+- [x] 22-04-PLAN.md - Pure available-margin predicate: initial margin, fees, claims, headroom (D-13, F-966)
+- [x] 22-05-PLAN.md - Owner-run probe infrastructure: configuration operations and the first SJ3 case (D-18)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 22-06-PLAN.md - Mutating adapter calls change_margin_type and change_initial_leverage, signed registry at twenty (D-01, D-03)
+- [x] 22-07-PLAN.md - Pure liquidation module: exchange brackets, tier rule, strict buffer beyond the stop (D-08, D-09, F-964)
+- [x] 22-08-PLAN.md - Migration 0012 and the reservation margin claims (D-14, F-966)
+- [x] 22-09-PLAN.md - The five remaining owner-run SJ3 cases and the evidence-plan sections (D-18)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 22-10-PLAN.md - The account reading carries availableBalance and the position and margin mode (D-07, D-13, F-965, F-020)
+- [x] 22-11-PLAN.md - Symbol configuration guard: set and verify ISOLATED and the target leverage (D-01 to D-06, F-011, F-964)
+- [x] 22-12-PLAN.md - Bounded-age leverage bracket cache (D-11)
+- [x] 22-13-PLAN.md - Post-fill liquidation watch through the existing close path, isolated (D-12, A10)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 22-14-PLAN.md - MarginGuard: mode, configuration, liquidation, margin in one fixed order (D-15, D-16)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 22-15-PLAN.md - Manager gate 5f2 and the COMPLETE in-memory plan constraint snapshot (D-05, G4-039)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 22-16-PLAN.md - Phase 22 gate, owner and deferred registers, canonical docs
 
 ### Phase 23: Telegram Approval Hardening + Two-Step Confirm + Money Amounts
 
@@ -1118,6 +1219,7 @@ This was former Phase 16.
    - estimated loss at SL and profit at each TP, gross and net of modeled costs;
    - the equity used, with its source and timestamp.
    All values come from the risk pipeline output, never recomputed (F-015).
+   Owner decision 2026-10-30 (R-1): the SHADOW approval alert is exempt from the money block (SHADOW has no order path, D040); the SHADOW money block is carried to Phase 24. DEMO, LIVE, SIMULATE and the confirmation card show it.
 3. The expiry window shown and the remaining-validity rule match Phase 19 (F-016).
 4. Two-step confirm (D041; the SHADOW form is delivered by Phase 16 criterion 5 and this phase extends it to DEMO and LIVE): APPROVE edits the message into a confirmation card (mode SHADOW/DEMO/LIVE, symbol, side, quantity, notional, estimated loss at SL, current mark price vs entry/SL, remaining validity) with CONFIRM/CANCEL. Only CONFIRM triggers placement. The confirm token is distinct, single-use, bound to the same user id and plan hash, with a short TTL (default 60 s); CANCEL/expiry places nothing and is journaled; pre-placement checks re-run at confirm time. Tests cover: double-tap, replayed CONFIRM callback, CONFIRM after TTL, CONFIRM by another user, CONFIRM after the plan expired or price crossed SL.
 5. **Findings from the live Telegram test (2026-10-04, Phase 8 behaviour):** a decided message keeps its button and the bot answers every later tap (replays are idempotent: 3 taps gave 1 transition, but the keyboard must be removed and later taps refused); `actor_id` is empty on the decided approval, so the journal does not say who decided; APPROVE moves straight to APPROVED with no CONFIRM step (D041); the application has no error handler, so callbacks queued during downtime raise `BadRequest: Query is too old` at `query.answer()` and must be handled; the messages show no money amounts and the display note says Asia/Ho_Chi_Minh while the times are UTC; SIMULATE/APPROVE/SKIP are separate keyboards, so one message carries one button (decide whether one message should carry APPROVE and SKIP together).
@@ -1130,11 +1232,36 @@ Input: .planning/phases/23-telegram-approval-hardening-money/23-NOTES.md
 - [G4-032] After a plan expires, a redelivered APPROVE is answered APPROVAL_EXPIRED even if the plan was executed; if the message should show "already executed", the composition must read the stored outcome via `PgExecutionStateStore.get_entry`, and criterion 4 tests should cover it (source: .planning/phases/17-operational-persistence-layer/17-14-SUMMARY.md:159; decision: none required)
 - [G4-042] `uq_approvals_one_decided_per_plan` conflicts with expiring sibling approval rows (a second sibling EXPIRED write violates the index); decide the expiry rule (exclude EXPIRED from the index predicate, or plan-level expiry) and record it in DATA_MODEL (source: .planning/phases/17-operational-persistence-layer/17-REVIEW.md:160; decision: open user decision)
 - [P16R-02] `ShadowConfirm._deferred_confirmed` keeps only the last adopted CONFIRM of one `expire_due` sweep, so `on_confirmed` runs once for the last of several adopted CONFIRMs (`src/paper/shadow_confirm.py:1077`, `:1215`). Harmless today because `ShadowCoordinator._on_confirmed` ignores its arguments and `_ensure_drivers` builds drivers for every reservation; it becomes a real defect the day a hook uses its arguments. Decide when the two-step confirm is reworked: keep a list, or document that the hook takes no arguments, and add a test with two adoptions in one sweep (source: review of c654524..6f73e5b, 2026-10-20, reviewer C/B/A hand-back; detail in .planning/phases/16-paper-runtime-composition/deferred-items.md; decision: none required)
+- [P20-OPS-REMOTE] Remote operator commands (owner request 2026-10-21): the owner restricts ssh to the EC2 host to one home IP and wants ssh kept for critical operations, so non-critical operator actions run through authenticated commands such as Telegram bot commands: SAFE_MODE exit (`exit_safe_mode`, plan 20-15), `python -m src.ops.rest_gate_cli status/clear` (plan 20-07, if built), and the EXEC-06 controls of plan 20-17. Reuse this phase's allow-list on `from_user.id`, the private-chat rule and the two-step confirm; commands that raise risk (SAFE_MODE exit, gate clear) need the confirm, risk-reducing ones (disable entries, close) first. Phase 24 wires it into the runtime. Proposed home chosen by the assistant, to be confirmed by the owner (source: 20-DEFERRED.md written by plan 20-24; decision: none yet)
 
-**Plans:** 0 plans
+**Plans:** 12/13 plans executed
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 23 to break down)
+
+**Wave 1**
+- [x] 23-01-PLAN.md - Allow-list and private-chat gate at the callback edge, from TELEGRAM_AUTHORIZED_USER_IDS to the journal; actor threaded into the decision (D-01, D-02, D-03, D-15)
+- [x] 23-02-PLAN.md - Money at stake: pure builder, carrier value and canonical JSON in the risk layer (D-13)
+- [x] 23-03-PLAN.md - Operator-alert wording formatters and the Phase 23 fixture generator (D-14)
+- [x] 23-04-PLAN.md - Approval row carries the decider and the money: _decide writes actor_id, migration 0013 money_json (D-03, D-13)
+- [x] 23-05-PLAN.md - CONFIRM-time pre-placement recheck adapter and prior-outcome description (D-11, D-12, G4-032)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 23-06-PLAN.md - Shared confirm core with SHADOW/DEMO/LIVE profiles, SHADOW byte-identical, P16R-02 list (D-09, D-10, D-16)
+- [x] 23-07-PLAN.md - Decided-message edge: bounded edit/send with RetryAfter, keyboard removal, finalize hook, stale-tap flag, error handling (D-06, D-07, D-08)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 23-08-PLAN.md - G4-042: migration 0014 excludes EXPIRED from the one-decided-per-plan index, owner gate O-2 (D-16) *(checkpoint: owner decision)*
+- [x] 23-09-PLAN.md - Message renderers: UTC times, money block, DEMO/LIVE request composer, SIMULATE quantity and money, one APPROVE+SKIP keyboard (D-05, D-13, D-14)
+- [x] 23-10-PLAN.md - SHADOW decided messages: keyboard removal after SKIP, CONFIRM, CANCEL and expiry, texts unchanged (D-06, D-08)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 23-11-PLAN.md - DEMO/LIVE approval desk: one message, money rows, SKIP recorded, stale taps, G4-032 replies; Demo rehearsal one-message keyboard (D-05, D-07, D-12)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 23-12-PLAN.md - DEMO/LIVE two-step confirm flow: card, recheck, on_confirmed seam, criterion-4 matrix, finals, expiry (D-09, D-10, D-11)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 23-13-PLAN.md - Canonical docs (TELEGRAM trust model F-127, GLOSSARY 9.3, DATA_MODEL, DECISIONS per O-2), Phase 23 gate, owner register (D-04, D-15, D-17)
 
 ### Phase 24: Live Runtime Composition + Demo Rehearsal
 
@@ -1170,10 +1297,13 @@ Plans:
 Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 
 **Inherited items** (owner registration, 2026-10-07; not success criteria, tracked so they are not dropped):
+
+- [P20-DEFERRED] Phase 24 inherits about 30 items registered only in `.planning/phases/20-reconcile-safe-mode-hardening/20-DEFERRED.md` (composition of ReconcileLoop with `feed_clock_skew`, scheduled cancel of unfilled entries at plan expiry, second-plan-per-symbol refusal, D028 approval chain, W8 alert for long gate skip, -1003 ban-end parsing D083, Telegram commands). Read that file when writing the Phase 24 CONTEXT (source: 20-VERIFICATION.md W3; decision: none required)
 - [D055] The -4509 finding in criterion 5 (protective legs placed after the entry fills) is a recorded observation, not a chosen execution model; criteria 1 and 2 are NOT amended and depend on the D055 outcome (the Phase 18 probe, then a user decision); no LIVE execution until D055 is closed with a verified execution policy (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
 - [D056] DEGRADED health policy: on mainnet a DEGRADED health state cannot enable any order-capable capability and, once enabled, no new entry may be created until health returns to an allowed state; Demo may run DEGRADED only in an explicit Demo or Rehearsal mode that journals the health state and can never switch to LIVE. Today `src/ops/health.py` lets DEGRADED pass and nothing under `src` produces it, so a producer, a state transition and an explicit mode are designed here together with Phase 26 (source: docs/DECISIONS.md D056, src/ops/health.py:37-39; decision: D056)
 - [D058] Live mark-price gate: execution fails closed when the mark-price data needed for risk or protection is missing or stale, and LIVE cannot be enabled in that state; a stale or degraded mark price while LIVE is enabled is an invalid state and LIVE never bypasses it. This phase owns the enablement side; Phase 20 owns stale-feed handling (source: docs/DECISIONS.md D058; decision: D058)
 - [G2-014] A tap from an unknown chat or another user has never been observed live (NOT_REHEARSED); reject it live with no state change and a journaled `chat_gate_rejected` (needs a second Telegram account or a group) (source: .planning/phases/09-live-execution-rollout/09-DEMO-REHEARSAL-FINDINGS.md:9,35; decision: none required)
+- [P23-R1] The SHADOW approval alert shows no money block (owner decision 2026-10-30, accepted as an exemption in Phase 23 criterion 2). When this phase composes the live flow, store a money block with SHADOW approvals and render it in the SHADOW alert, deliberately changing the SHADOW text pins (coordinate with the Phase 16 soak: changing the SHADOW text may affect its evidence; check first). Also: compose the Telegram path only through `on_callback` (`dispatch_callback` skips the user gate when `authorized_user_ids` is omitted). (source: .planning/phases/23-telegram-approval-hardening-money/23-VERIFICATION.md R-1, 23-OWNER-CHECKS.md; decision: owner 2026-10-30)
 - [G2-042] Verify against current Binance docs and a Demo fill whether `realizedPnl` excludes commission, record the citation, then decide whether to set `LIVE_NET_PNL_SEMANTICS_VERIFIED` (Phase 10 assigned this to Phase 24) (source: .planning/phases/10-journal-depth-kill-gate-operations/10-VERIFICATION.md:208, src/analytics/live_outcomes.py:77; decision: none required, verification task)
 - [G3-008] Live commission wiring: `resolve_live_cost_rates` has no production caller; add per-symbol commission rates to the live risk-input producer (scheduler, cache, refresh loop, fail closed), re-read the official commissionRate page first (MEDIUM confidence) and record Demo behaviour (source: .planning/phases/12-fee-cost-model-correctness/12-05-SUMMARY.md:93, .planning/phases/12-fee-cost-model-correctness/12-VERIFICATION.md:71,83; decision: D046 item 7)
 - [G3-014] Fold phase 12 review Info IN-01 (negative maker rate fails closed) and IN-05 (`assert`-based invariants) into the commission-wiring plan (source: .planning/phases/12-fee-cost-model-correctness/12-REVIEW.md:121,150; decision: none required)
@@ -1187,11 +1317,67 @@ Input: .planning/phases/24-live-runtime-composition-demo/24-NOTES.md
 - [G2-035] Phase 9 review Info IN-01 (pyproject.toml E501 ignore), IN-05 (headroom fixture 198+3), IN-06 (`plan_hash=approval.trade_plan_id` at `src/execution/manager.py:532`) and IN-07 (`src/ops/health.py:404` accepts error_count above total_count) were carried here as warnings and need triage or a won't-fix note (source: .planning/phases/09-live-execution-rollout/09-REVIEW-DISPOSITION.md:94-118,153; decision: none required)
 - [T-02] OPS-06 (separate paper and live credentials, WR-06, provider disk encryption) is Pending and mapped to closed Phase 13.1; the WR-06 half belongs here and the disk-encryption half to Phase 26 (source: .planning/REQUIREMENTS.md:79,158; decision: none required, the REQUIREMENTS re-map is a separate change)
 - [16-50] Phase 16 plan 16-50 ships the external heartbeat sender (`deploy/heartbeat.sh` with a systemd timer, service healthchecks.io, D042 condition 1) and it probes the collector only. The paper and live process probes, and the external monitor's coverage of every long-running process that criterion 4 requires, are built here (source: .planning/phases/16-paper-runtime-composition/16-50-PLAN.md; decision: the user chose healthchecks.io on 2026-10-09, recorded in .planning/phases/16-paper-runtime-composition/decisions/16-DEC-O-12.md with the interval and grace still open)
+- [P20-GATE-WIRING] Composition work that Phase 20 deliberately leaves unwired: the REST gate state store and its first-install bootstrap `FileGateStateStore.initialize` run before the first start, the alert hook of the gate, and the user-data supervisor and probe wiring that sleeps on `GateRestriction.remaining_seconds` (`binance_userdata_supervisor._await_rest_allowed`; Phase 20 only returns a 1 second hint for an unknown restriction end), plus the recovery callers of plans 20-12 and 20-19 (source: 20-DEFERRED.md written by plan 20-24, plan 20-07; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 32/36 plans executed
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 24 to break down)
+
+**Wave 1**
+- [x] 24-01-PLAN.md - Owner decision packet Q1..Q16 (one-way doors: process boundary, StoreExecutor, migration 0015) and the limits checkpoint with recommendations (D-01, D-10, D-12, D-25, O-1..O-7) *(checkpoint: owner decision)*
+- [x] 24-02-PLAN.md - G3-005 enum promotion (NO_FILL, HEALTH_CHECK_FAILED) and G2-035 triage (D-35)
+- [x] 24-03-PLAN.md - D083 ban-end parsing with the optional clock-margin key (D-15, P20-GATE-WIRING)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 24-04-PLAN.md - Tracer: CONFIRM -> one place_entry -> stream fill -> REST-confirmed stop; Q5 and import guards for src/live (D-01, D-04, D-05, D-17)
+- [x] 24-05-PLAN.md - StoreExecutor seam and the paper expire_due move (D-25, G4-040, P16R-03)
+- [x] 24-07-PLAN.md - Migration 0015: exchange event time, monotonic updates, update_position_snapshot (D-10, G4-043)
+- [x] 24-08-PLAN.md - Mode-scoped approved-approvals reader so SHADOW and DEMO share one database (OQ-6)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 24-06-PLAN.md - Owner limit values written with provenance, relationship test, DECISIONS row (D-12, T-06)
+- [x] 24-09-PLAN.md - SHADOW money block (D-19, P23-R1)
+- [x] 24-10-PLAN.md - Scheduler primitive and cadences from the limits (D-11, D-12)
+- [x] 24-11-PLAN.md - Live config, mode, refusals, CLI verbs, OPS-04 diagnostic output (D-02, D-03, D-31)
+- [x] 24-12-PLAN.md - Exchange composition: one durable REST gate, drift-guarded adapter (D-06, D-15)
+- [x] 24-13-PLAN.md - Alert path and the T-05 producers (D-07)
+- [x] 24-14-PLAN.md - Approval request sender, signal source, second-plan refusal, D028 chain (D-18, OQ-2)
+- [x] 24-15-PLAN.md - Commission refresh and Phase 12 IN-01/IN-05 (D-22, G3-008, G3-014)
+- [x] 24-16-PLAN.md - Live risk-input producer, CLOSE_POSITION liquidation watch, real-data TP placement (D-21, D-24 per D085)
+- [x] 24-17-PLAN.md - Telegram runner through on_callback, confirm and dispatch off the loop (D-17, R-2)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 24-18-PLAN.md - User-data stream to protection with the fill fan-out (D-14)
+- [x] 24-19-PLAN.md - Stream persistence, feed source, divergence queue (D-10 writers, D-14, G4-034)
+- [x] 24-20-PLAN.md - Reconcile loop, sweeper, UNKNOWN resolver composition; SAFE_MODE spill (EXEC-02)
+- [x] 24-21-PLAN.md - Scheduled cancel at plan expiry and the criterion-5 Demo findings (D-13, D-34)
+- [x] 24-22-PLAN.md - Health producers, D056 DEGRADED rows, D058 mark gate, DEMO enable and kill gate (D-26, D-27, D-28)
+- [x] 24-23-PLAN.md - Telegram operator commands and the fake-level SAFE_MODE drill (R-4, OQ-5)
+- [x] 24-24-PLAN.md - Heartbeat --target live with its own check and units (D-30)
+- [x] 24-25-PLAN.md - Image carries the limits files and a revision stamp (R-6, OPS-04)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 24-26-PLAN.md - Start sequence D-08 and restart rehydrate (OPS-03, G4-029, D-09)
+- [x] 24-30-PLAN.md - Env split, part 1: Binance and live-bot names only in the live env file (D-29, WR-06)
+- [x] 24-34-PLAN.md - RECONCILED_ABSENT notification, coordinator cancel lag rule, G2-019 proof (D-34, D-35)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 24-27-PLAN.md - LiveWiring assembly, the D-05 wiring gate, run_admitted and shutdown (D-04, D-05)
+- [x] 24-36-PLAN.md - Env split, part 2: paper and backup files, scripts, cutover and drills re-run (D-29)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 24-28-PLAN.md - Replay and restart matrix on fakes and PostgreSQL (D-09, D-20, EXEC-03)
+- [x] 24-29-PLAN.md - Demo smoke script over the composed process (D-33, D-16, D-22, D-23, D-34)
+- [x] 24-35-PLAN.md - Compose live service with probe and hold (D-01, D-03, O-2)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 24-31-PLAN.md - DECISIONS rows, RUNBOOK, TELEGRAM, DATA_MODEL, AGENTS.md (O-7)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 24-32-PLAN.md - Phase 24 gate, 24-DEFERRED register with every inherited item, validation statuses (D-35)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 24-33-PLAN.md - Owner session: VPS, Demo key IP whitelist, second bot, heartbeat, Demo smoke --execute, G2-014 (D-32, D-33) *(checkpoint: owner run)*
 
 ### Phase 25: Binance Demo Integration Test Campaign
 
@@ -1229,11 +1415,85 @@ Plans:
 - [D055] The scenarios "SL rejected after fill" and "partial fill" depend on the execution model chosen after the D055 probe; they are not amended here (source: docs/DECISIONS.md D055; decision: D055, execution model is an open user decision)
 - [D056] Demo runs in a DEGRADED state are never evidence of live readiness; the scenario suite and the soak must also run in a healthy state (source: docs/DECISIONS.md D056 item 2(d); decision: D056)
 - [G2-030] After Phase 24, fill the "Demo cross-check" lines of `09-EXCHANGE-FACTS.md` (Facts 3 and 5 and the addenda read NOT YET OBSERVED) from the recorded Demo order ids (source: .planning/phases/09-live-execution-rollout/09-EXCHANGE-FACTS.md:15,51,67; decision: none required)
+- [P20-DEMO] What only a Demo run can show, with its evidence label: A2 (does a GTD expiry end the entry with a terminal status), A3 (does Binance cancel the closePosition legs when the position closes), whether a real HTTP 418 ban outlives 259200 s, 429/418 behavior and the queue order of plan 20-21, the B2/B3 same-id stop re-place against the exchange, the user-data stream states used by SAFE_MODE exit row 7. Add the operator-command scenarios (`rest_gate_cli status/clear` after a false restriction) to the suite of criterion 1 (source: 20-DEFERRED.md section 'Needs a connected machine (Demo)' written by plan 20-24; decision: none required)
+- [P20-ERR1003] Observe the real text of the Binance error -1003 'Way too many requests; IP banned until %s' (error-code page read 2026-10-21; the format of %s is not on the page). If it carries the ban end time, reading it would replace the assumed 259200 s wait when no Retry-After header exists, but it needs an owner exception to D-10 (message text is never parsed) and a DECISIONS row (source: docs/integration/BINANCE.md D-10, plan 20-24; decision: owner, not made)
+- [R-21 / 24-REVIEW WR-03] Margin reservations never advance: `mark_placed` and `mark_open` have no production caller, so an executed plan's reservation stays RESERVED and is counted twice for any other plan (safe over-refusal, hidden while live tracks one symbol). Do this before any second symbol. Decide first, with a DECISIONS row, when `mark_placed` is stamped: 21-DEFERRED.md says before the entry POST (write-ahead), the `risk_reservations.py` docstring and 22-REVIEW WR-06 say after the exchange acknowledged. Owner-agreed recommendation (2026-11-07): at the acknowledgement, `mark_open` at the first fill, through `StoreExecutor.write`, plus a wiring-gate link and a test (source: .planning/phases/24-live-runtime-composition-demo/24-REVIEW.md WR-03, 24-DEFERRED.md R-21; decision: DECISIONS row to write)
+- [R-22 / 24-REVIEW WR-04] Cancel-on-stop for the live process: on stop, drain the execution service first, cancel every plan still AWAITING_FILL or ENTRY_UNRESOLVED through `expire_pending_entry`, run `coordinator.step()` until no plan is UNPROTECTED or a bounded deadline passes, then stop the stream. Needed before the Demo campaign restarts the process repeatedly, because protection is fill-driven (D079) and a resting entry can fill unprotected while the process is down. Touches D079 and the never-resend rule, so it needs an owner decision. Interim: RUNBOOK 22.5 stop procedure and an `update.sh` guard (source: 24-REVIEW.md WR-04, 24-DEFERRED.md R-22 and R-27; decision: owner decision, D079 and D080 apply)
+- [R-23 / 24-REVIEW WR-05] Sync database work on the event loop in `OperatorCommands` (audit rows, the rejection journal row for every message from a non-authorized chat, SAFE_MODE exit readiness reads) and in the start-time `expire_on_restart` and restore glue. Bounded by CR-01 timeouts, not removed. Candidate first step: fire-and-forget rejection journal through the executor; full fix gives `OperatorCommands` the `run_sync`/`run_read` seam and async exit-readiness providers. Same family as R-08 (source: 24-REVIEW.md WR-05, 24-DEFERRED.md R-23 and R-08; decision: none required)
+- [R-24 / 24-REVIEW-FIX] Wrap a pool-exhaustion `sqlalchemy.exc.TimeoutError` as `StoreUnavailable`, so it cannot escape the manager after the approval was consumed (source: 24-REVIEW-FIX.md, 24-DEFERRED.md R-24; decision: none required)
+- [R-25 / 24-REVIEW IN-02] The health tick writes 11 journal rows every 15 s (about 63,000 a day): reduce the cadence or write on change only before the multi-week soak (source: 24-REVIEW.md IN-02, 24-DEFERRED.md R-25; decision: none required)
+- [R-28 / 24-REVIEW IN-01, IN-03, IN-04, IN-05] Info-level review items: `xc-` close-order updates journaled as stream failures, liveness and heartbeat ignore per-task PASS/FAIL, `CommissionCache` without `record`, `heartbeat.sh --install-timer` path validation and global `LC_ALL=C` (source: 24-REVIEW.md, 24-DEFERRED.md R-28; decision: none required)
 
-**Plans:** 0 plans
+**Plans:** 18/33 plans executed
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 25 to break down)
+
+**Wave 1**
+- [x] 25-01-PLAN.md - Demo suite gating: `demo` marker, skip-by-default collection hook, env guard, marker guard, S00 preflight, docs (D-03, OPS-02)
+- [x] 25-02-PLAN.md - Test-only fault seams: FaultEdge (exchange_edge), SdkFaults (418/429 under the real adapter), StoreFaults (D-02, D-05, D-08)
+- [x] 25-03-PLAN.md - R-24 test-first: pool-exhaustion TimeoutError becomes StoreUnavailable (D-13)
+- [x] 25-04-PLAN.md - R-25 test-first: one HEALTH_VERDICT per tick, HEALTH_CHECK rows on change only (D-11, D-13)
+- [x] 25-05-PLAN.md - D-08 same-code-path AST guard: pinned src/live allow-list, none in execution or risk
+- [x] 25-06-PLAN.md - DEMO_VS_MAINNET.md with sourced labels and the G2-030 Demo cross-checks (D-07, D-12)
+- [x] 25-07-PLAN.md - Journal-based soak evaluator: registration hash, criteria, restart rule, export (D-09, D-10 as corrected)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 25-08-PLAN.md - Scenario framework and S01 tracer: catalog S01-S20, harness, labels, evidence index (D-04, D-05)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 25-09-PLAN.md - Demo env factory over the production assembly, programmatic owner, demo fixtures, S01 demo test (D-04, D-08)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 25-10-PLAN.md - Scenarios S06 replayed/concurrent presses, S02 partial fill, S05 cancel racing a fill
+- [x] 25-11-PLAN.md - Scenarios S04 stop rejected after fill, S03 crossed stop (-2021), S18 unprotected drill
+- [x] 25-12-PLAN.md - Scenario S07 restart at three cut points (D080 probe, never re-sent)
+- [x] 25-13-PLAN.md - Scenarios S08 stream loss and listenKey expiry, S17 stale feed, S09 clock skew
+- [x] 25-14-PLAN.md - Scenarios S10 injected 429/418, S19 rest_gate_cli status/clear, S11 DB outage during a close
+- [x] 25-15-PLAN.md - Scenarios S14 SAFE_MODE entry and operator exit, S12 DAILY_STOP, S13 margin and liquidation guards
+- [x] 25-16-PLAN.md - Scenarios S15 foreign order and doubled position, S16 manual close outside the system
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 25-17-PLAN.md - Phase 25 gate, scenario inventory, inherited-item register (D-14)
+- [x] 25-18-PLAN.md - Owner campaign runbook and owner decision packet Q-AB to Q-G (D-01)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 25-19-PLAN.md - Owner decisions Q-AB soak shape and Q-C healthy reading *(checkpoint: owner decision)*
+- [ ] 25-21-PLAN.md - Owner decision Q-F on R-21 stamping and its DECISIONS row *(checkpoint: owner decision)*
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 25-22-PLAN.md - Owner decisions Q-D account and Q-E soak host and restart policy *(checkpoint: owner decision)*
+- [ ] 25-23-PLAN.md - R-21 reservation stamping as the owner decided (skipped if deferred)
+- [ ] 25-26-PLAN.md - Gap Q-H: the STOP_LOSS intent of a FLAT plan is resolved by query; S07 late restart leaves SAFE_MODE by command; gate rules for owner-closed findings (25-12-F1)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 25-27-PLAN.md - Gap Q-I: coordinator rows spilled while the journal is down and replayed in process; restart sees the closed plan (25-14-F1, after R-21)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 25-28-PLAN.md - Gap Q-J: the live day-risk task enforces DAILY_STOP through enforce_daily_state (25-15-F1, after R-21)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 25-29-PLAN.md - Gap Q-K part 1: operator command /resync_stream after a halted user-data stream (25-13-F1)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [ ] 25-30-PLAN.md - Gap Q-K part 2: owner bounds of the automatic resync in a new versioned limits file, loader, guard, DECISIONS row *(checkpoint: owner decision)*
+
+**Wave 12** *(blocked on Wave 11 completion)*
+- [ ] 25-31-PLAN.md - Gap Q-K part 3: bounded automatic resync for non-ban halts in the live composition (never after a ban or a gate restriction)
+
+**Wave 13** *(blocked on Wave 12 completion)*
+- [ ] 25-32-PLAN.md - Gap Q-L: /close on CLOSE_REQUIRED or CLOSE_FAILED is an out-of-cadence retry through the emergency closer (25-11-F1)
+
+**Wave 14** *(blocked on Wave 13 completion)*
+- [ ] 25-33-PLAN.md - Gap Q-L: a plan's approval expires when its plan closes (25-16-F1); D102 DEGRADED wording docs check (25-13-F2)
+
+**Wave 15** *(blocked on Wave 14 completion)*
+- [ ] 25-20-PLAN.md - Owner Demo campaign sessions and results, defects to gap closure *(checkpoint: owner run; waits for the gap plans 25-26 to 25-33, P6)*
+
+**Wave 16** *(blocked on Wave 15 completion)*
+- [ ] 25-24-PLAN.md - Soak pre-registration, owner approval, committed SHA-256 (D-09) *(checkpoint: owner decision)*
+
+**Wave 17** *(blocked on Wave 16 completion)*
+- [ ] 25-25-PLAN.md - Owner-run Demo soak of at least 21 days and its recorded verdict *(checkpoint: owner run)*
 
 ### Phase 26: Go-Live Readiness Gate
 
@@ -1326,12 +1586,12 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 | 17. Operational Persistence Layer | 15/15 | Complete    | 2026-10-07 |
 | 18. Binance User-Data Stream + Exchange Error Taxonomy | 26/26 | Complete    | 2026-10-18 |
 | 19. Execution Plan Binding + Pre-Placement Checks | 16/17 | In Progress|  |
-| 20. Reconcile + SAFE_MODE Hardening + Alerts | 0/TBD | Not started | - |
-| 21. Account Equity + Daily Loss from Binance | 0/TBD | Not started | - |
+| 20. Reconcile + SAFE_MODE Hardening + Alerts | 31/31 | Executed, human_needed | 2026-10-23 |
+| 21. Account Equity + Daily Loss from Binance | 5/16 | In progress (wave 1 done) | - |
 | 22. Leverage, Margin + Liquidation Guard | 0/TBD | Not started | - |
-| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 0/TBD | Not started | - |
-| 24. Live Runtime Composition + Demo Rehearsal | 0/TBD | Not started | - |
-| 25. Binance Demo Integration Test Campaign | 0/TBD | Not started | - |
+| 23. Telegram Approval Hardening + Two-Step Confirm + Money Amounts | 14/14 | Complete|  2026-10-30|
+| 24. Live Runtime Composition + Demo Rehearsal | 32/36 | In Progress | - |
+| 25. Binance Demo Integration Test Campaign | 18/33 | In Progress | - |
 | 26. Go-Live Readiness Gate | 0/TBD | Not started | - |
 | 27. Configurable Quote Asset (USDC readiness) | 0/TBD | Not started | - |
 

@@ -32,11 +32,14 @@ from __future__ import annotations
 import hashlib
 import math
 import warnings
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+from src.risk.money_at_stake import MONEY_AT_STAKE_MISSING, MoneyAtStake
 
 if TYPE_CHECKING:
     from telegram import InlineKeyboardMarkup
@@ -109,6 +112,9 @@ def build_simulate_keyboard(signal_id: str) -> InlineKeyboardMarkup:
 
     `callback_data` stays within Telegram's 64-byte limit via
     `_short_signal_id` (CR-05).
+
+    Since Phase 23 no production path sends this keyboard; it stays for wire-format stability
+    (use `build_decision_keyboard`).
     """
     short = _short_signal_id(signal_id)
     sim_data = f"SIM:{short}"
@@ -189,6 +195,9 @@ def build_approve_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     the SKIP button is a separate keyboard so each callback_data
     carries a single short id and the receiver parses one prefix at
     a time.
+
+    Since Phase 23 no production path sends this single-button keyboard; the message carries
+    `build_decision_keyboard` (APPROVE and SKIP in one row). It stays for wire-format stability.
     """
     apr_data = _short_signal_id_with_prefix(signal_id, APR_PREFIX)
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -203,6 +212,9 @@ def build_skip_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     `sha256(signal_id)[:32]` (32 hex chars). The full payload is
     `SKP:` (4) + 32 hex = 36 bytes, well under Telegram's 64-byte
     limit. The keyboard carries exactly one button labeled SKIP.
+
+    Since Phase 23 no production path sends this single-button keyboard; the message carries
+    `build_decision_keyboard` (APPROVE and SKIP in one row). It stays for wire-format stability.
     """
     skp_data = _short_signal_id_with_prefix(signal_id, SKP_PREFIX)
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -210,15 +222,16 @@ def build_skip_keyboard(signal_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("SKIP", callback_data=skp_data)]])
 
 
-def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
-    """Build the SHADOW decision keyboard: one row, an APPROVE and a SKIP button.
+def build_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
+    """Build the decision keyboard: one row, an APPROVE and a SKIP button, for every mode.
 
-    Button contract (Phase 16, plan 16-04, D-16, F-961): SHADOW alerts use the live `APR:` and
-    `SKP:` prefixes ONLY. Both buttons carry the same short id (`sha256(signal_id)[:32]`), so one
-    short-id mapping backs the pair, and both are backed by a PENDING approval row. The
-    SIMULATE-only keyboard (`build_simulate_keyboard`, inert `SIM:`/`SKIP:` data that resolves to
-    SIMULATE_RECORDED and never advances an approval) is never sent by SHADOW code; it stays in
-    this module only for wire-format stability (Phase 7 D-05).
+    One message carries both buttons in SHADOW, DEMO and LIVE (Phase 23, D-05). Button contract
+    (Phase 16, plan 16-04, D-16, F-961): the live `APR:` and `SKP:` prefixes ONLY, so a SKIP press
+    is recorded as SKIPPED and never as an inert SIMULATE label (F-405). Both buttons carry the
+    same short id (`sha256(signal_id)[:32]`), so one short-id mapping backs the pair, and both are
+    backed by a PENDING approval row. The SIMULATE-only keyboard (`build_simulate_keyboard`, inert
+    `SIM:`/`SKIP:` data that resolves to SIMULATE_RECORDED and never advances an approval) stays
+    in this module only for wire-format stability (Phase 7 D-05).
 
     Each payload is `APR:`/`SKP:` (4 bytes) + 32 hex = 36 bytes, under Telegram's 64-byte limit;
     `_short_signal_id_with_prefix` re-checks the ceiling.
@@ -235,6 +248,11 @@ def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def build_shadow_decision_keyboard(signal_id: str) -> InlineKeyboardMarkup:
+    """The SHADOW decision keyboard: `build_decision_keyboard`, kept under its Phase 16 name."""
+    return build_decision_keyboard(signal_id)
 
 
 def build_confirm_keyboard(signal_id: str) -> InlineKeyboardMarkup:
@@ -276,6 +294,14 @@ class TelegramTextBot(Protocol):
         chat_id: str | int,
         message_id: int,
         text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> object: ...
+
+    async def edit_message_reply_markup(
+        self,
+        *,
+        chat_id: str | int,
+        message_id: int,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> object: ...
 
@@ -408,12 +434,224 @@ async def edit_to_confirm_card(
     return await edit_text(bot, chat_id, message_id, text, keyboard)
 
 
+async def edit_reply_markup(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    message_id: int,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> object:
+    """Edit only the keyboard of one message (same failure handling as `send_text`)."""
+    try:
+        return await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=keyboard
+        )
+    except (ValueError, KeyError, TypeError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - classified, never swallowed
+        raise TelegramSendError(classify_telegram_error(exc)) from None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 23, plan 23-07 (D-06, D-07): a decided message is made final, within a bound.
+#
+# These helpers wrap Telegram MESSAGE calls only. Nothing here, and nothing else in the Telegram
+# adapters, imports or retries a placement: a placement is never re-sent (Q5, D080). The two
+# bounds restate `NOTIFY_MAX_ATTEMPTS` and `NOTIFY_MAX_DELAY_SECONDS` of `src.paper.notify` (this
+# adapter must not import the paper package); a test pins the equality.
+# --------------------------------------------------------------------------- #
+
+EDIT_MAX_ATTEMPTS: int = 3
+TELEGRAM_RETRY_WAIT_CAP_SECONDS: int = 30
+
+SleepFn = Callable[[float], Awaitable[None]]
+
+
+def build_removed_keyboard() -> InlineKeyboardMarkup:
+    """An explicit EMPTY inline keyboard: sent as `reply_markup` it removes the buttons.
+
+    Whether an empty markup removes the keyboard on the live Bot API is research assumption A1
+    (owner-run check, plan 23-13); `finalize_decided_message` falls back once to a keyboard-only
+    edit, and the state-based stale-tap refusal is the real guarantee.
+    """
+    from telegram import InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup([])
+
+
+@dataclass(frozen=True)
+class BoundedOutcome:
+    """The end of a bounded call: its result, the attempts made and the final failure (or None).
+
+    `failure` is None on success, which includes a benign "message is not modified" (then
+    `result` is None). `failure.detail` is an exception class name, never message text.
+    """
+
+    result: object | None
+    attempts: int
+    failure: TelegramFailure | None
+
+    @property
+    def ok(self) -> bool:
+        return self.failure is None
+
+
+async def call_bounded(
+    op: Callable[[], Awaitable[object]],
+    *,
+    sleep: SleepFn,
+    max_attempts: int = EDIT_MAX_ATTEMPTS,
+    retry_after_cap_seconds: int = TELEGRAM_RETRY_WAIT_CAP_SECONDS,
+    window_seconds: float | None = None,
+) -> BoundedOutcome:
+    """Await `op()` up to `max_attempts` times, honouring the server's RetryAfter.
+
+    A failure is classified once (a `TelegramSendError` already carries its failure; a raw
+    exception goes through `classify_telegram_error`; ValueError, KeyError and TypeError are
+    programming errors and propagate). "Message is not modified" is success. RATE_LIMITED sleeps
+    the server's `retry_after` and retries, but stops WITHOUT sleeping when it exceeds
+    `retry_after_cap_seconds` or the remaining `window_seconds` (the total sleep budget, None =
+    unbounded by a window). TRANSIENT retries without a sleep. REJECTED and UNKNOWN stop: a
+    refusal is never retried. No sleep follows the last attempt. The outcome is returned, never
+    raised. For messages only: never wrap a placement in this function (Q5, D080).
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    slept = 0.0
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return BoundedOutcome(await op(), attempts, None)
+        except (ValueError, KeyError, TypeError):
+            raise
+        except TelegramSendError as exc:
+            failure = exc.failure
+        except Exception as exc:  # noqa: BLE001 - classified, reported by class name only
+            failure = classify_telegram_error(exc)
+        if failure.kind is TelegramFailureKind.MESSAGE_NOT_MODIFIED:
+            return BoundedOutcome(None, attempts, None)
+        if attempts >= max_attempts:
+            return BoundedOutcome(None, attempts, failure)
+        if failure.kind is TelegramFailureKind.RATE_LIMITED:
+            wait = failure.retry_after_seconds or 0
+            if wait > retry_after_cap_seconds:
+                return BoundedOutcome(None, attempts, failure)
+            if window_seconds is not None and wait > window_seconds - slept:
+                return BoundedOutcome(None, attempts, failure)
+            await sleep(wait)
+            slept += wait
+            continue
+        if failure.kind is TelegramFailureKind.TRANSIENT:
+            continue
+        return BoundedOutcome(None, attempts, failure)
+
+
+async def send_text_bounded(
+    bot: TelegramTextBot,
+    chat_id: str | int,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+    *,
+    sleep: SleepFn,
+    max_attempts: int = EDIT_MAX_ATTEMPTS,
+    retry_after_cap_seconds: int = TELEGRAM_RETRY_WAIT_CAP_SECONDS,
+    window_seconds: float | None = None,
+) -> BoundedOutcome:
+    """Send one text message through `call_bounded` (`result` is the sent message)."""
+    return await call_bounded(
+        lambda: send_text(bot, chat_id, text, keyboard),
+        sleep=sleep,
+        max_attempts=max_attempts,
+        retry_after_cap_seconds=retry_after_cap_seconds,
+        window_seconds=window_seconds,
+    )
+
+
+@dataclass(frozen=True)
+class FinalizeOutcome:
+    """What `finalize_decided_message` achieved: `done`, the last `method` tried, the attempts."""
+
+    done: bool
+    method: Literal["edit_text", "edit_reply_markup"]
+    attempts: int
+    failure: TelegramFailure | None
+
+
+async def finalize_decided_message(
+    bot: TelegramTextBot,
+    *,
+    chat_id: str | int,
+    message_id: int,
+    text: str | None,
+    sleep: SleepFn,
+    max_attempts: int = EDIT_MAX_ATTEMPTS,
+    retry_after_cap_seconds: int = TELEGRAM_RETRY_WAIT_CAP_SECONDS,
+    window_seconds: float | None = None,
+) -> FinalizeOutcome:
+    """Make a decided message final: its final text AND no keyboard, in one `editMessageText`.
+
+    With `text` the edit carries the empty keyboard as `reply_markup`; with `text` None (a restart
+    lost it) only the keyboard is removed. A refused text edit falls back ONCE to a keyboard-only
+    edit. The outcome is returned and never raised, so a failed removal never rolls back a
+    decision (D-06, F-509, research Pitfall 6).
+    """
+    keyboard = build_removed_keyboard()
+
+    async def _bounded(op: Callable[[], Awaitable[object]]) -> BoundedOutcome:
+        return await call_bounded(
+            op,
+            sleep=sleep,
+            max_attempts=max_attempts,
+            retry_after_cap_seconds=retry_after_cap_seconds,
+            window_seconds=window_seconds,
+        )
+
+    attempts = 0
+    if text is not None:
+        edited = await _bounded(lambda: edit_text(bot, chat_id, message_id, text, keyboard))
+        attempts += edited.attempts
+        if edited.failure is None:
+            return FinalizeOutcome(True, "edit_text", attempts, None)
+        if edited.failure.kind is not TelegramFailureKind.REJECTED:
+            return FinalizeOutcome(False, "edit_text", attempts, edited.failure)
+    removed = await _bounded(lambda: edit_reply_markup(bot, chat_id, message_id, keyboard))
+    attempts += removed.attempts
+    return FinalizeOutcome(removed.failure is None, "edit_reply_markup", attempts, removed.failure)
+
+
 # --------------------------------------------------------------------------- #
 # format_approve — PTB-free 12-field renderer (mirrors format_simulate).
 # --------------------------------------------------------------------------- #
 
 
-def format_approve(
+# Vietnam (Asia/Ho_Chi_Minh, docs/DECISIONS.md D025) has no daylight saving, so a fixed +07
+# offset is exact and no tz database is needed. The zone is used only to present an instant;
+# nothing stored or compared is ever converted to it.
+_PRESENTATION_ZONE = timezone(timedelta(hours=7))
+_PRESENTATION_SUFFIX = "+07"
+_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def format_presentation_time(instant: datetime) -> str:
+    """Show an instant as `YYYY-MM-DD HH:MM:SS +07 (YYYY-MM-DD HH:MM:SS UTC)`.
+
+    Owner decision O-3 (2026-10-30): the local Vietnam time is the main time (D025 and
+    docs/01_ENGINEERING_PRINCIPLES.md section 8: persist UTC, convert only in presentation) and
+    the UTC instant stays in brackets, the day the daily-loss rule counts in (D033). The suffixes
+    are explicit so no reader has to guess a zone. A naive instant is refused (ValueError), a
+    non-datetime is refused (TypeError); an aware one in any zone is converted. The instant is an
+    argument: this function reads no clock.
+    """
+    if not isinstance(instant, datetime):
+        raise TypeError(f"instant must be datetime, got {type(instant).__name__}")
+    if instant.tzinfo is None:
+        raise ValueError("instant must be UTC-aware, got naive datetime")
+    local = instant.astimezone(_PRESENTATION_ZONE).strftime(_TIME_FORMAT)
+    utc = instant.astimezone(UTC).strftime(_TIME_FORMAT)
+    return f"{local} {_PRESENTATION_SUFFIX} ({utc} UTC)"
+
+
+def _approve_lines(
     *,
     symbol: str,
     direction: str,
@@ -431,37 +669,15 @@ def format_approve(
     signal_id: str,
     detected_at_utc: datetime,
     approved_quantity: Decimal,
-) -> str:
-    """Render the APPROVE notification text with all 12 APRV-01 fields and the quantity.
+    mode_label: str | None = None,
+    money_lines: tuple[str, ...] = (),
+) -> list[str]:
+    """Validate the fields fail-closed and return the APPROVE text as a list of lines.
 
-    Per D-02 + TELEGRAM.md §4: the message carries exactly the 12
-    fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
-    percentage, expiry, invalidation, current exposure, reason codes).
-    All Decimal values are formatted via `str()` preserving full
-    precision (D-12). Timestamps are UTC ISO with the
-    `Asia/Ho_Chi_Minh` display-edge note.
-
-    The text is byte-stable: same inputs produce the same output
-    (D-02 determinism). The format is a multi-line string with one
-    field per line for operator readability. The text starts with
-    "APPROVE " so the operator can identify the message type at a
-    glance.
-
-    The message also carries the approved quantity (D078 item (6)) on a `Quantity:`
-    line directly after the `Entry:` line: the value stored as `approved_quantity` on the
-    approval row, written in fixed-point notation with every digit of the Decimal and
-    never rounded. `approved_quantity` is a required keyword; a value that is not a finite
-    Decimal above zero raises ValueError, so no APPROVE message renders without it.
-
-    The renderer is PTB-free: it does NOT import python-telegram-bot
-    and is safe to call from `src/paper/notify.py` (adapter-boundary
-    isolation). The keyboard builders live in this same module so
-    the Phase-8 wire format is defined in one place.
-
-    Fail-closed validation (WR-11): naive datetimes, empty TP lists,
-    inverted entry bounds, and empty symbol/direction/setup raise
-    ValueError loudly — a malformed APPROVE message must never
-    render with a wrong expiry or an empty TP section.
+    `mode_label` adds a `Mode: <label>` line directly after the first line and `money_lines`
+    are inserted directly after the `Quantity:` line (D-13). Both are empty for
+    `format_approve`, so its text is the 12-field message plus the quantity. Every validation
+    of the original `format_approve` (WR-11) lives here, unchanged.
     """
     if not symbol:
         raise ValueError("symbol must be a non-empty string")
@@ -513,26 +729,396 @@ def format_approve(
             raise TypeError(f"{ts_name} must be datetime, got {type(ts_value).__name__}")
         if ts_value.tzinfo is None:
             raise ValueError(f"{ts_name} must be UTC-aware, got naive datetime")
-    tp_lines = "\n".join(
+    tp_lines = [
         f"  TP{idx + 1}: {price} ({fraction})" for idx, (price, fraction) in enumerate(take_profits)
-    )
+    ]
     reasons = ", ".join(reason_codes) if reason_codes else "(none)"
-    return (
-        f"APPROVE {symbol} {direction} {setup}\n"
-        f"Signal: {signal_id}\n"
-        f"Detected: {detected_at_utc.astimezone(UTC).isoformat()}\n"
-        f"Entry: {entry_min}–{entry_max}\n"
-        f"Quantity: {format(approved_quantity, 'f')}\n"
-        f"SL: {stop_loss}\n"
-        f"TPs:\n{tp_lines}\n"
-        f"R:R: {rr}\n"
-        f"Risk: {risk_pct}\n"
-        f"Expiry: {expiry_utc.astimezone(UTC).isoformat()}\n"
-        f"Invalidation: {invalidation}\n"
-        f"Exposure: {exposure_quote} quote\n"
-        f"Reasons: {reasons}\n"
-        f"Display: Asia/Ho_Chi_Minh (UTC internally)"
+    mode_lines = [] if mode_label is None else [f"Mode: {mode_label}"]
+    return [
+        f"APPROVE {symbol} {direction} {setup}",
+        *mode_lines,
+        f"Signal: {signal_id}",
+        f"Detected: {format_presentation_time(detected_at_utc)}",
+        f"Entry: {entry_min}–{entry_max}",
+        f"Quantity: {format(approved_quantity, 'f')}",
+        *money_lines,
+        f"SL: {stop_loss}",
+        "TPs:",
+        *tp_lines,
+        f"R:R: {rr}",
+        f"Risk: {risk_pct}",
+        f"Expiry: {format_presentation_time(expiry_utc)}",
+        f"Invalidation: {invalidation}",
+        f"Exposure: {exposure_quote} quote",
+        f"Reasons: {reasons}",
+    ]
+
+
+def format_approve(
+    *,
+    symbol: str,
+    direction: str,
+    setup: str,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    stop_loss: Decimal,
+    take_profits: list[tuple[Decimal, Decimal]],
+    rr: Decimal,
+    risk_pct: Decimal,
+    expiry_utc: datetime,
+    invalidation: str,
+    exposure_quote: Decimal,
+    reason_codes: list[str],
+    signal_id: str,
+    detected_at_utc: datetime,
+    approved_quantity: Decimal,
+) -> str:
+    """Render the APPROVE notification text with all 12 APRV-01 fields and the quantity.
+
+    Per D-02 + TELEGRAM.md §4: the message carries exactly the 12
+    fields (symbol, direction, setup, entry, SL, TP(s), R:R, risk
+    percentage, expiry, invalidation, current exposure, reason codes).
+    All Decimal values are formatted via `str()` preserving full
+    precision (D-12). Since Phase 23 (D-14, owner O-3 answered 2026-10-30) the two
+    times are shown by `format_presentation_time` as the local time with an
+    explicit `+07` suffix and UTC in brackets
+    (`YYYY-MM-DD HH:MM:SS +07 (YYYY-MM-DD HH:MM:SS UTC)`, which satisfies
+    docs/DECISIONS.md D025), and the message carries no display-zone note. The
+    SHADOW alert strips the `Detected:` and `Expiry:` lines and shows its own
+    pairs, so SHADOW text is unchanged.
+
+    The text is byte-stable: same inputs produce the same output
+    (D-02 determinism). The format is a multi-line string with one
+    field per line for operator readability. The text starts with
+    "APPROVE " so the operator can identify the message type at a
+    glance.
+
+    The message also carries the approved quantity (D078 item (6)) on a `Quantity:`
+    line directly after the `Entry:` line: the value stored as `approved_quantity` on the
+    approval row, written in fixed-point notation with every digit of the Decimal and
+    never rounded. `approved_quantity` is a required keyword; a value that is not a finite
+    Decimal above zero raises ValueError, so no APPROVE message renders without it.
+
+    The renderer is PTB-free: it does NOT import python-telegram-bot
+    and is safe to call from `src/paper/notify.py` (adapter-boundary
+    isolation). The keyboard builders live in this same module so
+    the Phase-8 wire format is defined in one place.
+
+    Fail-closed validation (WR-11): naive datetimes, empty TP lists,
+    inverted entry bounds, and empty symbol/direction/setup raise
+    ValueError loudly — a malformed APPROVE message must never
+    render with a wrong expiry or an empty TP section.
+    """
+    return "\n".join(
+        _approve_lines(
+            symbol=symbol,
+            direction=direction,
+            setup=setup,
+            entry_min=entry_min,
+            entry_max=entry_max,
+            stop_loss=stop_loss,
+            take_profits=take_profits,
+            rr=rr,
+            risk_pct=risk_pct,
+            expiry_utc=expiry_utc,
+            invalidation=invalidation,
+            exposure_quote=exposure_quote,
+            reason_codes=reason_codes,
+            signal_id=signal_id,
+            detected_at_utc=detected_at_utc,
+            approved_quantity=approved_quantity,
+        )
     )
+
+
+# --------------------------------------------------------------------------- #
+# Money at stake (Phase 23, D-13, F-015): formatted from the STORED value, never recomputed.
+# --------------------------------------------------------------------------- #
+
+#: The two modes whose APPROVE request carries a `Mode:` line and the money block. SHADOW keeps
+#: its own envelope (`src/paper/shadow.py`).
+REQUEST_MODE_LABELS: tuple[str, ...] = ("DEMO", "LIVE")
+
+
+def _money_or_refuse(money: object) -> MoneyAtStake:
+    if not isinstance(money, MoneyAtStake):
+        raise ValueError(
+            f"{MONEY_AT_STAKE_MISSING}: money must be a MoneyAtStake, got {type(money).__name__}"
+        )
+    return money
+
+
+def render_money_block(money: MoneyAtStake) -> tuple[str, ...]:
+    """The money lines in the D-13 order: notional, margin, SL loss, one profit per TP, equity.
+
+    Every amount is the stored Decimal written with `format(value, "f")`: no multiplication, no
+    rounding, no exponent notation, no cost call. The quote asset is named on every amount and
+    the time is shown through `format_presentation_time`.
+    """
+    stored = _money_or_refuse(money)
+    asset = stored.quote_asset
+    profit_lines = tuple(
+        f"Profit at {leg.label} ({format(leg.fraction, 'f')} of quantity): "
+        f"{format(leg.profit_gross, 'f')} {asset} gross, "
+        f"{format(leg.profit_net, 'f')} {asset} net of modeled costs"
+        for leg in stored.take_profits
+    )
+    return (
+        f"Notional: {format(stored.notional, 'f')} {asset}",
+        f"Margin: {format(stored.initial_margin, 'f')} {asset} at {stored.leverage}x leverage "
+        f"({stored.leverage_source})",
+        f"Loss at SL: {format(stored.loss_at_stop_gross, 'f')} {asset} gross, "
+        f"{format(stored.loss_at_stop_net, 'f')} {asset} net of modeled costs",
+        *profit_lines,
+        f"Equity used: {format(stored.equity, 'f')} {asset} ({stored.equity_source}, "
+        f"observed {format_presentation_time(stored.equity_observed_at_utc)})",
+    )
+
+
+def require_money_consistent(
+    money: MoneyAtStake,
+    *,
+    direction: str,
+    approved_quantity: Decimal,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    stop_loss: Decimal,
+    take_profits: list[tuple[Decimal, Decimal]],
+) -> None:
+    """Refuse (ValueError naming the field) a money block that disagrees with the message.
+
+    The money block is stored with the approval; the message fields come from the same plan. A
+    difference means one of them is not the plan the operator would approve (F-015), so the
+    message is never rendered. The entry price of the block must lie inside the plan's entry zone
+    (review WR-04).
+    """
+    stored = _money_or_refuse(money)
+    if stored.side != direction:
+        raise ValueError(f"money.side {stored.side!r} differs from direction {direction!r}")
+    if not entry_min <= stored.entry_price <= entry_max:
+        raise ValueError(
+            f"money.entry_price {stored.entry_price} is outside the entry zone "
+            f"{entry_min}-{entry_max}"
+        )
+    if stored.quantity != approved_quantity:
+        raise ValueError(
+            f"money.quantity {stored.quantity} differs from approved_quantity {approved_quantity}"
+        )
+    if stored.stop_loss_price != stop_loss:
+        raise ValueError(
+            f"money.stop_loss_price {stored.stop_loss_price} differs from stop_loss {stop_loss}"
+        )
+    if len(stored.take_profits) != len(take_profits):
+        raise ValueError(
+            f"money take_profits has {len(stored.take_profits)} legs, "
+            f"the message has {len(take_profits)}"
+        )
+    for index, (leg, (price, fraction)) in enumerate(
+        zip(stored.take_profits, take_profits, strict=True), start=1
+    ):
+        if leg.price != price:
+            raise ValueError(f"money take_profits TP{index} price {leg.price} differs from {price}")
+        if leg.fraction != fraction:
+            raise ValueError(
+                f"money take_profits TP{index} fraction {leg.fraction} differs from {fraction}"
+            )
+
+
+def format_approval_request(
+    *,
+    mode_label: str,
+    symbol: str,
+    direction: str,
+    setup: str,
+    entry_min: Decimal,
+    entry_max: Decimal,
+    stop_loss: Decimal,
+    take_profits: list[tuple[Decimal, Decimal]],
+    rr: Decimal,
+    risk_pct: Decimal,
+    expiry_utc: datetime,
+    invalidation: str,
+    exposure_quote: Decimal,
+    reason_codes: list[str],
+    signal_id: str,
+    detected_at_utc: datetime,
+    approved_quantity: Decimal,
+    money: MoneyAtStake,
+) -> str:
+    """The DEMO or LIVE APPROVE request: the 12 fields, the quantity and the money block.
+
+    The text is `format_approve`'s with `Mode: <label>` after the first line and the money lines
+    (`render_money_block`) directly after `Quantity:` (D-13). `money` is required and must agree
+    with the quantity, stop, take-profit prices and fractions of the message; a missing money
+    block (`MONEY_AT_STAKE_MISSING`), a different mode label or any mismatch raises ValueError,
+    so the request is never sent.
+    """
+    if mode_label not in REQUEST_MODE_LABELS:
+        raise ValueError(f"mode_label must be DEMO or LIVE, got {mode_label!r}")
+    require_money_consistent(
+        money,
+        direction=direction,
+        approved_quantity=approved_quantity,
+        entry_min=entry_min,
+        entry_max=entry_max,
+        stop_loss=stop_loss,
+        take_profits=take_profits,
+    )
+    return "\n".join(
+        _approve_lines(
+            symbol=symbol,
+            direction=direction,
+            setup=setup,
+            entry_min=entry_min,
+            entry_max=entry_max,
+            stop_loss=stop_loss,
+            take_profits=take_profits,
+            rr=rr,
+            risk_pct=risk_pct,
+            expiry_utc=expiry_utc,
+            invalidation=invalidation,
+            exposure_quote=exposure_quote,
+            reason_codes=reason_codes,
+            signal_id=signal_id,
+            detected_at_utc=detected_at_utc,
+            approved_quantity=approved_quantity,
+            mode_label=mode_label,
+            money_lines=render_money_block(money),
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The DEMO/LIVE confirmation card (Phase 23, plan 23-12; D041, D-09, D-11, D-12, D-13).
+#
+# The card replaces the request after APPROVE: it names what CONFIRM would hand to the execution
+# step. Every amount is the STORED `MoneyAtStake` value written with `format(value, "f")`: nothing
+# is multiplied or rounded here. Times are the local +07 time with UTC in brackets (D-14, O-3). The
+# validity line carries the verdict of the placement gate's own rule, handed in as a code (None =
+# passes).
+# --------------------------------------------------------------------------- #
+
+LiveConfirmOutcome = Literal["CONFIRMED", "CANCELLED", "EXPIRED", "REFUSED"]
+_LIVE_CONFIRM_OUTCOMES: tuple[str, ...] = ("CONFIRMED", "CANCELLED", "EXPIRED", "REFUSED")
+
+
+def _one_line(value: str, field: str) -> str:
+    if not isinstance(value, str) or value == "" or "\n" in value or "\r" in value:
+        raise ValueError(f"{field} must be a non-empty single line")
+    return value
+
+
+def _live_confirm_head(
+    *, mode_label: str, symbol: str, side: str, money: MoneyAtStake
+) -> list[str]:
+    """The lines the card and every final text share: header, mode, quantity, notional, loss."""
+    if mode_label not in REQUEST_MODE_LABELS:
+        raise ValueError(f"mode_label must be DEMO or LIVE, got {mode_label!r}")
+    _one_line(symbol, "symbol")
+    stored = _money_or_refuse(money)
+    if stored.side != side:
+        raise ValueError(f"money.side {stored.side!r} differs from side {side!r}")
+    asset = stored.quote_asset
+    return [
+        f"CONFIRM {symbol} {side}",
+        f"Mode: {mode_label}",
+        f"Quantity: {format(stored.quantity, 'f')}",
+        f"Notional: {format(stored.notional, 'f')} {asset}",
+        f"Loss at SL: {format(stored.loss_at_stop_gross, 'f')} {asset} gross, "
+        f"{format(stored.loss_at_stop_net, 'f')} {asset} net of modeled costs",
+    ]
+
+
+def format_live_confirm_card(
+    *,
+    mode_label: str,
+    symbol: str,
+    side: str,
+    money: MoneyAtStake,
+    mark_price: Decimal | None,
+    plan_expiry_utc: datetime,
+    validity_verdict: str | None,
+    now_utc: datetime,
+    ttl_seconds: int,
+) -> str:
+    """The DEMO or LIVE confirmation card: mode, size, stored money, mark, validity, window.
+
+    `mark_price` None is shown as `unavailable` (never a guessed number). `validity_verdict` is
+    the code of the gate's remaining-validity rule or None when it passes; with the owner's minimum
+    not configured it is `LIMITS_NOT_CONFIGURED` and the card says so (it never invents a minimum).
+    """
+    head = _live_confirm_head(mode_label=mode_label, symbol=symbol, side=side, money=money)
+    stored = _money_or_refuse(money)
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+        raise ValueError(f"ttl_seconds must be a positive integer, got {ttl_seconds!r}")
+    expiry_text = format_presentation_time(plan_expiry_utc)
+    until_text = format_presentation_time(now_utc + timedelta(seconds=ttl_seconds))
+    if mark_price is None:
+        mark_text = "unavailable"
+    elif isinstance(mark_price, Decimal) and mark_price.is_finite():
+        mark_text = format(mark_price, "f")
+    else:
+        raise ValueError(f"mark_price must be a finite Decimal or None, got {mark_price!r}")
+    remaining = max(0, int((plan_expiry_utc - now_utc).total_seconds()))
+    check = (
+        "passes"
+        if validity_verdict is None
+        else f"refused ({_one_line(validity_verdict, 'validity_verdict')})"
+    )
+    return "\n".join(
+        [
+            *head,
+            f"Mark price: {mark_text} (entry {format(stored.entry_price, 'f')}, "
+            f"SL {format(stored.stop_loss_price, 'f')})",
+            f"Remaining validity: {remaining} s to the plan expiry {expiry_text}; "
+            f"placement check: {check}",
+            f"Confirm until {until_text} ({ttl_seconds} s window)",
+        ]
+    )
+
+
+def format_live_confirm_final(
+    *,
+    mode_label: str,
+    symbol: str,
+    side: str,
+    money: MoneyAtStake,
+    outcome: LiveConfirmOutcome,
+    at_utc: datetime,
+    user_id: int | str | None = None,
+    reason: str | None = None,
+    placement_lines: Sequence[str] = (),
+) -> str:
+    """The final text of a card that is decided: the shared head, then one outcome line.
+
+    CONFIRMED and CANCELLED name the user; EXPIRED and REFUSED name the reason code. A CONFIRMED
+    final always carries the placement lines (what the stored entry intent says, or that none is
+    recorded yet); the other outcomes say that nothing was placed.
+    """
+    if outcome not in _LIVE_CONFIRM_OUTCOMES:
+        raise ValueError(f"unknown confirm outcome {outcome!r}")
+    head = _live_confirm_head(mode_label=mode_label, symbol=symbol, side=side, money=money)
+    when = format_presentation_time(at_utc)
+    lines: list[str]
+    if outcome in ("CONFIRMED", "CANCELLED"):
+        if user_id is None or user_id == "":
+            raise ValueError(f"{outcome} needs the user id")
+        who = f"user {_one_line(str(user_id), 'user_id')}"
+        if outcome == "CONFIRMED":
+            if not placement_lines:
+                raise ValueError("a CONFIRMED text needs its placement lines")
+            lines = [f"CONFIRMED by {who} at {when}", *placement_lines]
+        else:
+            lines = [f"CANCELLED by {who} at {when}; nothing was placed"]
+    else:
+        code = _one_line(reason or "", "reason")
+        if outcome == "EXPIRED":
+            lines = [f"EXPIRED at {when}: no confirmation was taken ({code}); nothing was placed"]
+        else:
+            lines = [f"REFUSED at {when}: {code}; nothing was placed"]
+    if outcome != "CONFIRMED" and placement_lines:
+        raise ValueError("only a CONFIRMED text carries placement lines")
+    return "\n".join([*head, *lines])
 
 
 __all__ = [
@@ -543,6 +1129,8 @@ __all__ = [
     "SIM_PREFIX",
     "SKIP_PREFIX",
     "TELEGRAM_CALLBACK_DATA_MAX_BYTES",
+    "REQUEST_MODE_LABELS",
+    "LiveConfirmOutcome",
     "TelegramBot",
     "TelegramFailure",
     "TelegramFailureKind",
@@ -550,13 +1138,20 @@ __all__ = [
     "TelegramTextBot",
     "build_approve_keyboard",
     "build_confirm_keyboard",
+    "build_decision_keyboard",
     "build_shadow_decision_keyboard",
     "build_simulate_keyboard",
     "build_skip_keyboard",
     "classify_telegram_error",
     "edit_text",
     "edit_to_confirm_card",
+    "format_approval_request",
     "format_approve",
+    "format_live_confirm_card",
+    "format_live_confirm_final",
+    "format_presentation_time",
     "send_simulate",
+    "render_money_block",
+    "require_money_consistent",
     "send_text",
 ]

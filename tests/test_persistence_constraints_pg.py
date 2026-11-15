@@ -97,6 +97,73 @@ def test_second_decided_approval_for_one_plan_is_rejected(engine: Engine) -> Non
     assert info.constraint == "uq_approvals_one_decided_per_plan"
 
 
+def _decide_row(engine: Engine, approval_n: int, status: str) -> None:
+    with Session(engine) as session:
+        session.execute(
+            update(ApprovalRow)
+            .where(ApprovalRow.approval_id == hexid(0x2000 + approval_n))
+            .values(status=status, result=status)
+        )
+        session.commit()
+
+
+def test_both_pending_siblings_of_a_plan_may_be_expired(engine: Engine) -> None:
+    """G4-042 (D-16): EXPIRED rows are outside the index, so the restart sweep can expire both."""
+    insert_and_commit(
+        engine,
+        make_signal(1),
+        make_plan(1, 1),
+        make_approval(1, 1, 1),
+        make_approval(2, 1, 1),
+    )
+
+    _decide_row(engine, 1, "EXPIRED")
+    _decide_row(engine, 2, "EXPIRED")  # would violate the 0004 predicate `status <> 'PENDING'`
+
+    with Session(engine) as session:
+        statuses = (
+            session.execute(text("SELECT status FROM approvals ORDER BY approval_id"))
+            .scalars()
+            .all()
+        )
+    assert statuses == ["EXPIRED", "EXPIRED"]
+
+
+def test_the_index_still_allows_only_one_approved_or_skipped_row_per_plan(
+    engine: Engine,
+) -> None:
+    insert_and_commit(
+        engine,
+        make_signal(1),
+        make_plan(1, 1),
+        make_approval(1, 1, 1),
+        make_approval(2, 1, 1),
+        make_approval(3, 1, 1),
+    )
+    _decide_row(engine, 1, "EXPIRED")
+    _decide_row(engine, 2, "SKIPPED")  # an EXPIRED sibling does not count against the index
+
+    with expect_db_error(_UNIQUE_VIOLATION) as info:
+        _decide_row(engine, 3, "APPROVED")
+    assert info.constraint == "uq_approvals_one_decided_per_plan"
+
+
+def test_the_index_alone_does_not_refuse_an_expired_row_next_to_a_decided_one(
+    engine: Engine,
+) -> None:
+    """That refusal is the store's rule (PgApprovalStore._decide), not the index's."""
+    insert_and_commit(
+        engine,
+        make_signal(1),
+        make_plan(1, 1),
+        make_approval(1, 1, 1),
+        make_approval(2, 1, 1),
+    )
+    _decide_row(engine, 1, "APPROVED")
+
+    _decide_row(engine, 2, "EXPIRED")  # accepted by the index; the store refuses it first
+
+
 def test_decided_approvals_on_different_plans_coexist(engine: Engine) -> None:
     insert_and_commit(
         engine,

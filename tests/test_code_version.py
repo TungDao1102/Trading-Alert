@@ -15,7 +15,12 @@ from typing import Any
 
 import pytest
 from src.adapters import code_version as adapter
-from src.adapters.code_version import CodeVersionError, read_code_version
+from src.adapters.code_version import (
+    BuildRevisionError,
+    CodeVersionError,
+    read_build_revision,
+    read_code_version,
+)
 from src.backtest.experiment import CodeVersion
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -156,3 +161,36 @@ def test_the_adapter_never_uses_a_shell() -> None:
         for alias in node.names
     }
     assert "os" not in imported  # no os.system / os.popen route
+
+
+# --- the build stamp (plan 24-11, OPS-04, D-31): validation only, no subprocess ---------------
+
+
+def test_the_build_revision_is_the_stamp_when_it_is_forty_lowercase_hex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _Git()
+    _patch(monkeypatch, fake)
+    assert read_build_revision({"TRADING_APP_REVISION": COMMIT}) == COMMIT
+    assert fake.calls == []  # a stamp never starts a subprocess
+
+
+def test_an_absent_build_stamp_is_none_and_starts_no_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _Git()
+    _patch(monkeypatch, fake)
+    assert read_build_revision({}) is None
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", COMMIT.upper(), COMMIT[:-1], COMMIT + "0", f" {COMMIT}", f"{COMMIT}\n", "g" * 40],
+)
+def test_a_malformed_build_stamp_raises_without_echoing_the_value(bad: str) -> None:
+    with pytest.raises(BuildRevisionError) as caught:
+        read_build_revision({"TRADING_APP_REVISION": bad})
+    assert "TRADING_APP_REVISION" in str(caught.value)
+    if bad:
+        assert bad not in str(caught.value)

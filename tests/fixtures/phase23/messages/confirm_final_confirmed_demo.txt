@@ -1,0 +1,7 @@
+CONFIRM BTCUSDT LONG
+Mode: DEMO
+Quantity: 0.08
+Notional: 4008.00 USDT
+Loss at SL: 48.00 USDT gross, 53.5776 USDT net of modeled costs
+CONFIRMED by user 777001 at 2026-10-09 10:00:30 +07 (2026-10-09 03:00:30 UTC)
+Placement: handed to the execution step; no entry recorded yet

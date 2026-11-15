@@ -1,0 +1,13 @@
+{
+  "case_id": "stop_rejected_after_acceptance",
+  "index": 8,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "open_orders",
+    "summary": {
+      "count": "0"
+    }
+  }
+}

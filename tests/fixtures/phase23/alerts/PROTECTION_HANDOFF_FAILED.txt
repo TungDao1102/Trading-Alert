@@ -1,0 +1,8 @@
+[CRITICAL] PROTECTION_HANDOFF_FAILED
+subject: SYSTEM
+reason: PROTECTION_HANDOFF_FAILED
+at: 2026-10-09T03:00:00Z
+What happened: The entry order could not be handed to the protection step that places the stop after a fill (PROTECTION_HANDOFF_FAILED).
+Position: The entry order may still rest on the exchange. If it fills, nothing in the system watches it or places a stop.
+System already did: SAFE_MODE blocks new entries, and the system tried to cancel the entry by its client order id; the result of that cancel is in the journal.
+You must: Check the exchange now: cancel the entry if it is still open, and protect or close any position that exists.

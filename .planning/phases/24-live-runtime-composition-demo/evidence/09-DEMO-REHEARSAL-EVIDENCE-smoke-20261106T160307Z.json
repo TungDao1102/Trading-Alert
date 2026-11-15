@@ -1,0 +1,434 @@
+{
+  "attestation_map": {
+    "composed_smoke": {
+      "account_clean": "OBSERVED",
+      "approve": "OBSERVED",
+      "card": "OBSERVED",
+      "close_cleanup": "OBSERVED",
+      "confirm_entry": "OBSERVED",
+      "demo_enable": "OBSERVED",
+      "drill_reservation_released": "OBSERVED",
+      "reconcile_clean": "OBSERVED",
+      "replays_place_nothing": "OBSERVED",
+      "reservation_released_on_close": "OBSERVED",
+      "restart_rehydrate": "OBSERVED",
+      "safe_mode_drill": "OBSERVED",
+      "signal": "OBSERVED",
+      "start": "OBSERVED",
+      "stop_confirmed": "OBSERVED",
+      "stream_fill": "OBSERVED",
+      "tp_legs": "OBSERVED",
+      "wiring_check": "OBSERVED"
+    }
+  },
+  "base_url": "https://demo-fapi.binance.com",
+  "constraints": {},
+  "details": {
+    "cancel_query_lag_observations": [
+      {
+        "algo_client_id": "xa-cda74315b3b878e4e2f54f5ce37281dSL",
+        "polls": [
+          {
+            "after_seconds": "0.0",
+            "algo_status": "EXPIRED",
+            "found": true
+          },
+          {
+            "after_seconds": "0.5",
+            "algo_status": "EXPIRED",
+            "found": true
+          },
+          {
+            "after_seconds": "1.0",
+            "algo_status": "EXPIRED",
+            "found": true
+          },
+          {
+            "after_seconds": "1.5",
+            "algo_status": "EXPIRED",
+            "found": true
+          }
+        ],
+        "role": "STOP_LOSS"
+      },
+      {
+        "algo_client_id": "xa-cda74315b3b878e4e2f54f5ce37281dT1",
+        "polls": [
+          {
+            "after_seconds": "0.0",
+            "algo_status": "CANCELED",
+            "found": true
+          },
+          {
+            "after_seconds": "0.5",
+            "algo_status": "CANCELED",
+            "found": true
+          },
+          {
+            "after_seconds": "1.0",
+            "algo_status": "CANCELED",
+            "found": true
+          },
+          {
+            "after_seconds": "1.5",
+            "algo_status": "CANCELED",
+            "found": true
+          }
+        ],
+        "role": "TAKE_PROFIT_1"
+      },
+      {
+        "algo_client_id": "xa-cda74315b3b878e4e2f54f5ce37281dT2",
+        "polls": [
+          {
+            "after_seconds": "0.0",
+            "algo_status": "EXPIRED",
+            "found": true
+          },
+          {
+            "after_seconds": "0.5",
+            "algo_status": "EXPIRED",
+            "found": true
+          },
+          {
+            "after_seconds": "1.0",
+            "algo_status": "EXPIRED",
+            "found": true
+          },
+          {
+            "after_seconds": "1.5",
+            "algo_status": "EXPIRED",
+            "found": true
+          }
+        ],
+        "role": "TAKE_PROFIT_2"
+      }
+    ],
+    "commission_rates": {
+      "BTCUSDT": {
+        "maker_rate": "0.000200",
+        "taker_rate": "0.000400"
+      }
+    },
+    "entry_acked": {
+      "open_algo_orders_at_ack": 1,
+      "protection_state": "UNPROTECTED"
+    },
+    "entry_price_raw": {
+      "boundary": "adapter output after the string/Decimal conversion (24-34)",
+      "type": "Decimal",
+      "value": "75798.9"
+    },
+    "evidence_kind": "DEMO_OBSERVED",
+    "fill_pnl_sample": {
+      "commission": "0.13037410",
+      "commission_asset": "USDT",
+      "note": "evidence only, D086: LIVE_NET_PNL_SEMANTICS_VERIFIED stays False",
+      "realized_pnl": "0"
+    },
+    "first_process_shutdown_failed_steps": [],
+    "main_plan_closed_by": "DOMN-04 transition APPROVED -> EXPIRED",
+    "operator_instructions": [
+      "On the live Demo bot tap APPROVE on the card (short id 16a663e3f8470be4bb7ca67179421a32).",
+      "Tap CONFIRM on the confirm prompt that follows (short id 16a663e3f8470be4bb7ca67179421a32).",
+      "Tap APPROVE on the FIRST card again (a replay; it must place nothing).",
+      "Tap CONFIRM on the FIRST confirm prompt again (a replay; it must place nothing).",
+      "On the live Demo bot tap APPROVE on the card of the DRILL request (short id c4979c00fbcb2d8c67206f9a3d2dd37b).",
+      "SAFE_MODE was entered on purpose (the drill): tap CONFIRM now on the confirm prompt (short id c4979c00fbcb2d8c67206f9a3d2dd37b); the entry must be REFUSED and nothing placed.",
+      "Send /safemode_exit to the live Demo bot, then send the '/confirm <token>' line it answers with, within the token lifetime."
+    ],
+    "order_ids": [
+      {
+        "algo_client_ids": [],
+        "client_order_ids": [
+          "x-cda74315b3b878e4e2f54f5ce37281ddEN"
+        ],
+        "demo_order_ids": [
+          "28668586471"
+        ],
+        "step": "confirm_entry"
+      },
+      {
+        "algo_client_ids": [
+          "xa-cda74315b3b878e4e2f54f5ce37281dSL"
+        ],
+        "client_order_ids": [
+          "x-cda74315b3b878e4e2f54f5ce37281ddEN"
+        ],
+        "demo_order_ids": [
+          "28668586471"
+        ],
+        "step": "stop_confirmed"
+      },
+      {
+        "algo_client_ids": [
+          "xa-cda74315b3b878e4e2f54f5ce37281dSL",
+          "xa-cda74315b3b878e4e2f54f5ce37281dT1",
+          "xa-cda74315b3b878e4e2f54f5ce37281dT2"
+        ],
+        "client_order_ids": [
+          "x-cda74315b3b878e4e2f54f5ce37281ddEN"
+        ],
+        "demo_order_ids": [
+          "28668586471"
+        ],
+        "step": "tp_legs"
+      }
+    ],
+    "reconcile_after_fill": {
+      "agreement": true,
+      "divergences": 0
+    },
+    "start_sequences": [
+      {
+        "admitted": true,
+        "label": "start",
+        "plans_restored": 0,
+        "recovery_failed_steps": [],
+        "recovery_safe_mode_reasons": [],
+        "safe_mode_reasons": [],
+        "steps": "CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=OK, ENABLE=OK"
+      },
+      {
+        "admitted": true,
+        "label": "restart",
+        "plans_restored": 1,
+        "recovery_failed_steps": [],
+        "recovery_safe_mode_reasons": [],
+        "safe_mode_reasons": [],
+        "steps": "CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=OK, ENABLE=OK"
+      }
+    ],
+    "user_data_liveness": [
+      {
+        "last_event_at_utc": null,
+        "last_ping_at_utc": null,
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": null,
+        "last_ping_at_utc": "2026-11-06T16:03:26.081760+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:03:39.294716+00:00",
+        "last_ping_at_utc": "2026-11-06T16:03:26.081760+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:09.986930+00:00",
+        "last_ping_at_utc": "2026-11-06T16:03:26.081760+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:10.825748+00:00",
+        "last_ping_at_utc": "2026-11-06T16:03:26.081760+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": null,
+        "last_ping_at_utc": null,
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:31.223339+00:00",
+        "last_ping_at_utc": null,
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": null,
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:06:28.662038+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:09:28.772804+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:12:28.797874+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:15:28.744079+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:18:28.778681+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:21:28.619831+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:24:28.712205+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:27:28.719112+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      },
+      {
+        "last_event_at_utc": "2026-11-06T16:04:34.166619+00:00",
+        "last_ping_at_utc": "2026-11-06T16:30:28.709692+00:00",
+        "last_pong_at_utc": null,
+        "state": "LIVE"
+      }
+    ],
+    "user_data_url_form": {
+      "listen_key": "[REDACTED]",
+      "observation": "documented form recorded; the SDK owns the transport (D-16)",
+      "path_form": "/private/ws/<LISTEN_KEY_REDACTED>",
+      "stream_base": "wss://demo-fstream.binance.com/stream"
+    }
+  },
+  "exchange_orders": [],
+  "failures": [],
+  "mode": "EXECUTE",
+  "observations": [],
+  "outcome": "COMPLETE",
+  "planned_requests": [],
+  "runner_clock_utc": {
+    "finished": "2026-11-06T16:31:13.616736+00:00",
+    "started": "2026-11-06T16:03:07.653271+00:00"
+  },
+  "scenario": "smoke",
+  "schema": "demo-rehearsal-evidence/schema-1",
+  "steps": [
+    {
+      "detail": "admitted; CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=OK, ENABLE=OK",
+      "name": "start",
+      "status": "PASSED"
+    },
+    {
+      "detail": "check_wiring is empty",
+      "name": "wiring_check",
+      "status": "PASSED"
+    },
+    {
+      "detail": "entries enabled by the start sequence (DEMO), last step",
+      "name": "demo_enable",
+      "status": "PASSED"
+    },
+    {
+      "detail": "fill request queued by the Demo injector; quantity 0.0043",
+      "name": "signal",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the composed pump sent the approval card",
+      "name": "card",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the plan is APPROVED by the owner press",
+      "name": "approve",
+      "status": "PASSED"
+    },
+    {
+      "detail": "one GTD LIMIT entry acknowledged; no entry-time stop (D079)",
+      "name": "confirm_entry",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the fill reached the coordinator",
+      "name": "stream_fill",
+      "status": "PASSED"
+    },
+    {
+      "detail": "stop confirmed by REST (algo status NEW)",
+      "name": "stop_confirmed",
+      "status": "PASSED"
+    },
+    {
+      "detail": "TP1 and TP2 placed (complete snapshot)",
+      "name": "tp_legs",
+      "status": "PASSED"
+    },
+    {
+      "detail": "reconcile agrees, no divergence",
+      "name": "reconcile_clean",
+      "status": "PASSED"
+    },
+    {
+      "detail": "admitted; CONFIG=OK, GATE=OK, ALEMBIC=OK, SAFE_MODE=OK, ENABLEMENT=OK, SNAPSHOTS=OK, SPILL_SENTINEL=OK, CLOCK_DRIFT=OK, EXCHANGE_INFO=OK, RECOVERY=OK, STREAM=OK, RECONCILE=OK, CONFIRM_EXPIRY=OK, ALERT_REQUEUE=OK, BOT=OK, SCHEDULER=OK, HEALTH=OK, ENABLE=OK",
+      "name": "restart",
+      "status": "PASSED"
+    },
+    {
+      "detail": "entries enabled by the start sequence (DEMO), last step",
+      "name": "restart_enable",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the second wiring rehydrated the plan",
+      "name": "restart_rehydrate",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the replays placed no order",
+      "name": "replays_place_nothing",
+      "status": "PASSED"
+    },
+    {
+      "detail": "closed by the operator close",
+      "name": "close_cleanup",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the sweep released the closed position's reservation (POSITION_CLOSED)",
+      "name": "reservation_released_on_close",
+      "status": "PASSED"
+    },
+    {
+      "detail": "no order, algo order or position",
+      "name": "account_clean",
+      "status": "PASSED"
+    },
+    {
+      "detail": "far request queued by the Demo injector; quantity 0.0043",
+      "name": "safe_mode_drill_signal",
+      "status": "PASSED"
+    },
+    {
+      "detail": "entered; a CONFIRM placed nothing; left through /safemode_exit",
+      "name": "safe_mode_drill",
+      "status": "PASSED"
+    },
+    {
+      "detail": "the sweep released the refused plan's reservation (PLAN_EXPIRED)",
+      "name": "drill_reservation_released",
+      "status": "PASSED"
+    }
+  ],
+  "symbol": "BTCUSDT",
+  "synthetic_inputs": []
+}

@@ -6,8 +6,9 @@ Telegram bot is constructed.
 `InMemoryShadowStores` implements the `ShadowStores` port with the behaviour of the Phase 17
 PostgreSQL stores that matters to the SHADOW layer: parents must exist before children
 (`ParentRowMissing`), a decision is conditional on PENDING and only ONE approval of a plan may be
-decided (`uq_approvals_one_decided_per_plan`, `ApprovalAlreadyDecided`), and the short-id mapping
-refuses to rebind.
+APPROVED or SKIPPED (`uq_approvals_one_decided_per_plan`, `ApprovalAlreadyDecided`; EXPIRED rows
+are outside it since Alembic 0014, so both siblings can expire, but a decided plan's sibling
+cannot), and the short-id mapping refuses to rebind.
 
 `FakeBot` records `send_message` / `edit_message_text` calls and runs `assert_shadow_text` on every
 text BEFORE recording it (and before raising a queued error), so any SHADOW text that leaves
@@ -18,7 +19,9 @@ constant it guards.
 
 from __future__ import annotations
 
+import copy
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -32,7 +35,16 @@ from src.domain.enums import ApprovalAction, ApprovalResult, SignalStatus, Trade
 from src.domain.journal import JournalEvent
 from src.domain.signal import Signal
 from src.domain.trade_plan import TradePlan
+from src.paper.shadow import build_shadow_money
 from src.persistence.errors import ParentRowMissing, RowConflict
+from src.persistence.shadow_stores import mode_includes, validate_confirm_mode
+from src.risk.cost_rates import FEE_SOURCE_PARAMETER, CostRates
+from src.risk.money_at_stake import (
+    EQUITY_SOURCE_PAPER_CONFIG,
+    LEVERAGE_SOURCE_PAPER_CONFIG,
+    MoneyAtStake,
+)
+from src.risk.types import SizedResult
 
 EXPECTED_LABEL = "SHADOW — no real order"
 
@@ -43,6 +55,8 @@ OTHER_CHAT_ID = 9999
 _STAMP = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
 _PAIR = re.compile(rf"({_STAMP}) UTC \(({_STAMP}) Asia/Ho_Chi_Minh\)")
 _UTC_STAMP = re.compile(rf"{_STAMP} UTC")
+_STAMP_RE = re.compile(_STAMP)
+_LOCAL_PAIR = re.compile(rf"({_STAMP}) \+07 \(({_STAMP}) UTC\)")
 _FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -116,6 +130,48 @@ def make_shadow_plan(signal: Signal, **overrides: Any) -> TradePlan:
     return TradePlan(**values)
 
 
+MONEY_OBSERVED_AT = datetime(2026, 10, 9, 2, 55, 0, tzinfo=UTC)
+
+
+def make_shadow_sized(plan: TradePlan, **overrides: Any) -> SizedResult:
+    """A `SizedResult` that agrees with `make_shadow_plan` (entry at the zone top, LONG)."""
+    values: dict[str, Any] = {
+        "is_no_trade": False,
+        "quantity": plan.quantity_after_rounding,
+        "quantity_before_rounding": plan.quantity_before_rounding,
+        "quantity_after_rounding": plan.quantity_after_rounding,
+        "quantization_decision": "ACCEPTED",
+        "realized_risk": Decimal("48.5"),
+        "modeled_costs_per_unit": Decimal("6"),
+        "sizing_entry_price": plan.entry_max_price,
+    }
+    values.update(overrides)
+    return SizedResult(**values)
+
+
+def make_shadow_money(signal: Signal, plan: TradePlan, **overrides: Any) -> MoneyAtStake:
+    """The money block of a fixture plan, built by `build_shadow_money` from its sizing."""
+    values: dict[str, Any] = {
+        "signal": signal,
+        "plan": plan,
+        "sized": make_shadow_sized(plan),
+        "cost_rates": CostRates(
+            fee_rate_entry=Decimal("0.0005"),
+            entry_slippage_rate=Decimal("0.0002"),
+            fee_rate_exit=Decimal("0.0005"),
+            exit_slippage_rate=Decimal("0.0002"),
+            fee_source=FEE_SOURCE_PARAMETER,
+        ),
+        "leverage": 5,
+        "leverage_source": LEVERAGE_SOURCE_PAPER_CONFIG,
+        "equity": Decimal("1000"),
+        "equity_source": EQUITY_SOURCE_PAPER_CONFIG,
+        "equity_observed_at_utc": MONEY_OBSERVED_AT,
+    }
+    values.update(overrides)
+    return build_shadow_money(**values)
+
+
 # --------------------------------------------------------------------------- #
 # Stores.
 # --------------------------------------------------------------------------- #
@@ -124,8 +180,12 @@ def make_shadow_plan(signal: Signal, **overrides: Any) -> TradePlan:
 class InMemoryShadowStores:
     """The `ShadowStores` port over dicts, with PostgreSQL's parent and decision rules."""
 
-    def __init__(self, trace: list[str] | None = None) -> None:
+    def __init__(self, trace: list[str] | None = None, *, confirm_mode: str | None = None) -> None:
         self.trace: list[str] = trace if trace is not None else []
+        # Mirror of `PgShadowStores(confirm_mode=...)` (plan 24-08): the mode marker written with
+        # every approval this view inserts, and the scope `list_approved_approvals` applies.
+        self.confirm_mode: str | None = validate_confirm_mode(confirm_mode)
+        self.approval_modes: dict[str, str] = {}
         self.signals: dict[str, Signal] = {}
         self.plans: dict[str, TradePlan] = {}
         self.approvals: dict[str, Approval] = {}
@@ -150,7 +210,10 @@ class InMemoryShadowStores:
             raise ValueError("insert_pending requires a PENDING approval")
         if approval.signal_id not in self.signals or approval.trade_plan_id not in self.plans:
             raise ParentRowMissing(f"approval {approval.approval_id}: parent row missing")
-        self.approvals.setdefault(approval.approval_id, approval)
+        if approval.approval_id not in self.approvals:
+            self.approvals[approval.approval_id] = approval
+            if self.confirm_mode is not None:
+                self.approval_modes[approval.approval_id] = self.confirm_mode
 
     def record_short_id_mapping(self, mapping: ShortIdMapping) -> None:
         self.trace.append("record_short_id_mapping")
@@ -167,9 +230,13 @@ class InMemoryShadowStores:
             raise RowConflict(f"approval {approval.approval_id}: row does not exist")
         if current.status != ApprovalResult.PENDING:
             raise ApprovalAlreadyDecided(current)
+        # G4-042 (plan 23-08): EXPIRED rows are outside the one-decided-per-plan index, so only an
+        # APPROVED or SKIPPED sibling blocks a decision, and an EXPIRED decision is refused on a
+        # plan that already has one (same rule as PgApprovalStore._decide).
         for other in self.approvals.values():
-            if other.trade_plan_id == approval.trade_plan_id and (
-                other.status != ApprovalResult.PENDING
+            if other.trade_plan_id == approval.trade_plan_id and other.status in (
+                ApprovalResult.APPROVED,
+                ApprovalResult.SKIPPED,
             ):
                 raise ApprovalAlreadyDecided(other)
         self.approvals[approval.approval_id] = approval
@@ -202,15 +269,35 @@ class InMemoryShadowStores:
         return None if mapping is None else (mapping.signal_id, mapping.trade_plan_id)
 
     def list_pending_approvals(self) -> list[Approval]:
-        return [a for a in self.approvals.values() if a.status == ApprovalResult.PENDING]
-
-    def list_approved_approvals(self) -> list[Approval]:
-        """APPROVE-action approvals that reached APPROVED (the confirm layer's sweep input)."""
+        """PENDING approvals of this view's mode (the scope `PgShadowStores` applies, WR-02)."""
         return [
             a
             for a in self.approvals.values()
-            if a.status == ApprovalResult.APPROVED and a.action == ApprovalAction.APPROVE
+            if a.status == ApprovalResult.PENDING
+            and mode_includes(self.confirm_mode, self.approval_modes.get(a.approval_id))
         ]
+
+    def list_approved_approvals(self) -> list[Approval]:
+        """APPROVE-action approvals that reached APPROVED, of this view's mode (sweep input)."""
+        return [
+            a
+            for a in self.approvals.values()
+            if a.status == ApprovalResult.APPROVED
+            and a.action == ApprovalAction.APPROVE
+            and mode_includes(self.confirm_mode, self.approval_modes.get(a.approval_id))
+        ]
+
+    def scoped(self, confirm_mode: str | None) -> InMemoryShadowStores:
+        """Another view of the SAME data with another mode scope (two processes, one database)."""
+        view = copy.copy(self)
+        view.confirm_mode = validate_confirm_mode(confirm_mode)
+        return view
+
+    def get_signal(self, signal_id: str) -> Signal | None:
+        return self.signals.get(signal_id)
+
+    def get_trade_plan(self, trade_plan_id: str) -> TradePlan | None:
+        return self.plans.get(trade_plan_id)
 
     def journal_for_correlation(self, correlation_id: str) -> list[JournalEvent]:
         return [event for event in self.journal if event.correlation_id == correlation_id]
@@ -245,23 +332,75 @@ class SentMessage:
     message_id: int | None = None
 
 
-class FakeBot:
-    """Records sends and edits; raises queued exceptions (real `telegram.error` ones)."""
+_LIVE_MODES = frozenset({"DEMO", "LIVE"})
 
-    def __init__(self, trace: list[str] | None = None) -> None:
+
+def assert_live_text(text: str, mode: str) -> None:
+    """Fail unless a DEMO or LIVE `text` names its mode and shows every time as local +07 + UTC.
+
+    The Phase 23 DEMO/LIVE messages (plans 23-11, 23-12) carry `Mode: <mode>`, never the SHADOW
+    label, and show every time as `<local> +07 (<utc> UTC)` (D-14, owner O-3 answered 2026-10-30):
+    the local time is exactly seven hours after the bracketed UTC one. They carry no
+    Asia/Ho_Chi_Minh display pair (D-18).
+    """
+    assert mode in _LIVE_MODES, f"unknown live mode: {mode!r}"
+    assert f"Mode: {mode}" in text, f"mode missing: {text!r}"
+    assert "Asia/Ho_Chi_Minh" not in text, f"a Ho Chi Minh time in a {mode} text: {text!r}"
+    pairs = _LOCAL_PAIR.findall(text)
+    assert len(_STAMP_RE.findall(text)) == 2 * len(pairs), f"a time without its pair: {text!r}"
+    for local_text, utc_text in pairs:
+        local = datetime.strptime(local_text, _FORMAT)
+        utc = datetime.strptime(utc_text, _FORMAT)
+        assert local - utc == timedelta(hours=7), f"not UTC+7: {local_text} / {utc_text}"
+
+
+class FakeBot:
+    """Records sends and edits; raises queued exceptions (real `telegram.error` ones).
+
+    `text_check` runs on every text BEFORE it is recorded (and before a queued error is raised);
+    the default is the SHADOW check. `FakeBot.for_mode("DEMO")` checks the DEMO/LIVE rules.
+    `edit_message_reply_markup` records into `markup_edits` only (not `trace`, not `edited`) and
+    has its own error queue, so a SHADOW test sees the same recording as before.
+    """
+
+    def __init__(
+        self,
+        trace: list[str] | None = None,
+        *,
+        text_check: Callable[[str], None] = assert_shadow_text,
+    ) -> None:
         self.trace: list[str] = trace if trace is not None else []
         self.sent: list[SentMessage] = []
         self.edited: list[SentMessage] = []
+        self.markup_edits: list[SentMessage] = []
         self.send_attempts = 0
         self._errors: list[BaseException] = []
+        self._markup_errors: list[BaseException] = []
+        self._text_check = text_check
+
+    @classmethod
+    def for_mode(cls, mode: str, trace: list[str] | None = None) -> FakeBot:
+        """A bot that checks texts with `assert_live_text` for DEMO or LIVE."""
+        return cls(trace, text_check=lambda text: assert_live_text(text, mode))
 
     def queue_error(self, exc: BaseException) -> None:
         self._errors.append(exc)
 
+    def queue_markup_error(self, exc: BaseException) -> None:
+        self._markup_errors.append(exc)
+
+    async def edit_message_reply_markup(
+        self, *, chat_id: int | str, message_id: int, reply_markup: Any = None
+    ) -> object:
+        if self._markup_errors:
+            raise self._markup_errors.pop(0)
+        self.markup_edits.append(SentMessage(chat_id, "", reply_markup, message_id))
+        return SimpleNamespace(message_id=message_id)
+
     async def send_message(
         self, *, chat_id: int | str, text: str, reply_markup: Any = None
     ) -> object:
-        assert_shadow_text(text)
+        self._text_check(text)
         self.send_attempts += 1
         self.trace.append("send")
         if self._errors:
@@ -273,7 +412,7 @@ class FakeBot:
     async def edit_message_text(
         self, *, chat_id: int | str, message_id: int, text: str, reply_markup: Any = None
     ) -> object:
-        assert_shadow_text(text)
+        self._text_check(text)
         self.trace.append("edit")
         if self._errors:
             raise self._errors.pop(0)
@@ -298,6 +437,11 @@ class RecordingSleep:
 
 USER_ID = 777001
 OTHER_USER_ID = 777002
+STRANGER_USER_ID = 777003
+# The test allow-list of `on_callback`. OTHER_USER_ID is a second allowed operator, so the confirm
+# layer's "another user" tests keep their meaning (the confirm stays bound to the approving user).
+# The refusal of an unlisted user is tested with STRANGER_USER_ID (Phase 23, D-02).
+AUTHORIZED_USER_IDS: frozenset[int] = frozenset({USER_ID, OTHER_USER_ID})
 
 
 def make_callback_update(
@@ -309,11 +453,13 @@ def make_callback_update(
     from_user_id: int | None = USER_ID,
     message_id: int | None = 1,
     answer: Any = None,
+    chat_type: str | None = "private",
 ) -> Any:
     """A PTB-shaped update for `on_callback`: a callback query with an awaitable `answer`.
 
     `answer` replaces the default no-op `query.answer` (a test passes a recording or failing
-    coroutine function). `from_user_id=None` models a press without a user.
+    coroutine function). `from_user_id=None` models a press without a user. `chat_type` is the
+    Telegram chat type of `effective_chat` (`"private"`, `"group"`, ...).
     """
 
     async def _answer(*args: Any, **kwargs: Any) -> None:
@@ -326,4 +472,6 @@ def make_callback_update(
         message=SimpleNamespace(chat_id=message_chat_id, message_id=message_id),
         from_user=None if from_user_id is None else SimpleNamespace(id=from_user_id),
     )
-    return SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=chat_id))
+    return SimpleNamespace(
+        callback_query=query, effective_chat=SimpleNamespace(id=chat_id, type=chat_type)
+    )

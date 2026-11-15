@@ -984,3 +984,15 @@ def test_wr01_approval_round_trip_carries_the_approved_quantity(
     row = approval_to_row(with_quantity)
     assert row.approved_quantity == Decimal("2.415")
     assert approval_from_row(row) == with_quantity
+
+
+def test_p23_approval_round_trip_carries_the_money_json(sample_approval: Approval) -> None:
+    """D-13: the mapper carries money_json both ways, for a value and for None."""
+    from dataclasses import replace
+
+    assert approval_from_row(approval_to_row(sample_approval)).money_json is None
+
+    with_money = replace(sample_approval, money_json='{"schema":"money-at-stake/1"}')
+    row = approval_to_row(with_money)
+    assert row.money_json == '{"schema":"money-at-stake/1"}'
+    assert approval_from_row(row) == with_money

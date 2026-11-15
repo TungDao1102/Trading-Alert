@@ -198,3 +198,13 @@ Tests that need PostgreSQL follow one policy:
 - Round-trip tests use real planner outputs, not hand-made samples: `tests/test_plan_hash_roundtrip_pg.py` stores 15 planner plans (five phase 4 windows at three account sizes) and recomputes `plan_hash` from the read-back row.
 
 The CI test job runs the whole `pytest -m "not docker"` battery with `TEST_DATABASE_URL` and `TRADING_CI_STRICT=1`, so none of the Phase 17 PostgreSQL modules can skip silently there. On a development machine without PostgreSQL they skip, and the rest of the suite stays runnable without a database.
+
+### 12.2 Owner-run Demo scenario suite (Phase 25, D-03)
+
+The scenarios that need the Binance Demo account live in `tests/demo/` and carry the `demo` marker (registered in `pyproject.toml`). They are a separate selection that CI and agents cannot run by accident:
+
+- `pytest_collection_modifyitems` in `tests/conftest.py` adds a plain skip to every `demo` item unless `-m` names `demo` (not `not demo`) AND `TRADING_DEMO_RUN=1`. `-m "not docker"`, the CI and AGENTS.md command, does not exclude `demo`, so without the hook those tests would run there and try signed calls. The hook uses a plain skip, never `infra_skip`, so the items stay SKIPPED under `TRADING_CI_STRICT=1`. `tests/test_demo_marker_guard.py` proves it with a hook unit test, a strict-mode child run of `tests/demo`, and an AST scan that every `test_*` function under `tests/demo` carries the mark (with a seeded negative control).
+- Owner command (PowerShell): `$env:TRADING_DEMO_RUN="1"; uv run pytest -m demo -p no:xdist -s`. One Demo account and one listenKey exist, so the suite never runs in parallel.
+- Session guard: `tests/demo/conftest.py` calls `tests/support/demo_guard.py` `assert_demo_run_environment`, which refuses any `BINANCE_LIVE_*` name, an xdist worker, a `TRADING_DEMO_RUN` other than `1` and any environment `scripts/demo_rehearsal.py` `admit_smoke_environment` does not admit (non-DEMO mode). Refusals name variables, never values (`tests/test_demo_env_guard.py`).
+- Evidence labels for every step of a Demo run: `SYNTHETIC` (fakes), `DEMO_OBSERVED` (seen on the Demo exchange), `DEMO_FAULT_INJECTED` (a fault injected on purpose, never reported as exchange behaviour) and `NOT_OBSERVED` (not seen; stays open).
+- Agents run only the fake twins of the scenarios (the default suite). `pytest -m demo` is owner-only, like every `--execute` script.

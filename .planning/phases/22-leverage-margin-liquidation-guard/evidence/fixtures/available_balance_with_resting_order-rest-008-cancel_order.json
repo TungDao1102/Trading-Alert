@@ -1,0 +1,29 @@
+{
+  "case_id": "available_balance_with_resting_order",
+  "index": 8,
+  "label": "RECORDED_DEMO",
+  "observation": {
+    "error": null,
+    "ok": true,
+    "operation": "cancel_order",
+    "summary": {
+      "client_order_id": "dprobe-abr-20261024T043012Z-2",
+      "close_position": "false",
+      "executed_qty": "0.0000",
+      "good_till_date": "0",
+      "order_id": "28649111210",
+      "orig_qty": "0.0014",
+      "orig_type": "LIMIT",
+      "position_side": "BOTH",
+      "price": "77612.80",
+      "reduce_only": "false",
+      "side": "BUY",
+      "status": "CANCELED",
+      "stop_price": "0.00",
+      "symbol": "BTCUSDT",
+      "time_in_force": "GTC",
+      "type": "LIMIT",
+      "working_type": "CONTRACT_PRICE"
+    }
+  }
+}

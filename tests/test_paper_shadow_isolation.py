@@ -72,6 +72,9 @@ ORDER_SURFACE = frozenset(
         "snapshot_positions",
         "get_position_mode",
         "user_commission_rate",
+        # Phase 22: the account-changing configuration POSTs (plan 22-06).
+        "change_margin_type",
+        "change_initial_leverage",
         "execute_approved_plan",
     }
 )
@@ -231,6 +234,23 @@ def test_the_closure_of_every_shadow_entrypoint_has_no_order_module() -> None:
         assert expected in closure, expected
     banned = sorted(name for name in closure if _is_banned_module(name))
     assert banned == []
+
+
+def test_the_store_executor_seam_is_in_the_shadow_closure_and_allowed() -> None:
+    """Plan 24-05 (D-25, C-11): the seam lives in `src.ops`, so SHADOW may import it.
+
+    It is also a leaf: the module imports the standard library only, so it cannot pull
+    `src.execution`, `src.live` or an order adapter into the closure.
+    """
+    closure = _closure(ENTRYPOINTS)
+    assert "src.ops.store_executor" in closure
+    assert not _is_banned_module("src.ops.store_executor")
+    assert _scan_module("src.ops.store_executor", REPO_ROOT) == []
+    imported = _imported_names(
+        REPO_ROOT / "src" / "ops" / "store_executor.py", "src.ops.store_executor"
+    )
+    assert {name for name in imported if name.split(".")[0] in LOCAL_ROOTS} == set()
+    assert not any(name == "src.live" or name.startswith("src.live.") for name in closure)
 
 
 def test_no_module_of_the_closure_names_an_order_surface_method() -> None:
@@ -641,6 +661,15 @@ def test_negative_control_the_spy_list_covers_every_public_order_method_of_the_a
         "get_mark_price",
         "get_last_price",
         "symbol_lot_filters",
+        # Phase 21: signed read-only account and history GETs (no order surface).
+        "account_information_snapshot",
+        "account_balances_snapshot",
+        "account_config_snapshot",
+        "user_trades_in_window",
+        "income_in_window",
+        # Phase 22: signed read-only configuration GETs, no order surface.
+        "symbol_config_snapshot",
+        "leverage_brackets_snapshot",
     }
     public_async = {
         name

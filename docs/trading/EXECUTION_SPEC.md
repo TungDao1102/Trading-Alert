@@ -22,6 +22,8 @@ Place/attach protective exits
 Monitor user-data events
 ```
 
+Since Phase 19 the protective exits are placed after the first fill, never beside the entry (section 6.3, D079).
+
 The approval must expire; it must not be possible to approve an invalid or stale plan accidentally.
 
 ## 2. Preferred V1 order style
@@ -58,7 +60,7 @@ An unfilled entry must be canceled when:
 
 1. time expiry is reached;
 2. strategy invalidation occurs;
-3. portfolio/risk state changes and the order is no longer permitted;
+3. portfolio/risk state changes and the order is no longer permitted (DAILY_STOP, D033: trigger `daily_stop`, Phase 21; protective stops are kept);
 4. symbol/market conditions make the plan stale;
 5. user explicitly cancels.
 
@@ -133,7 +135,19 @@ Grounding and confidence: the official Event-Algo-Order-Update page could not be
 
 The user-data stream is a low-latency hint plus evidence, never the authority (D-05, D-10, D-11, D-20). REST is the authority: the state of an order, a fill, a position and a protective stop is read from Binance by REST before it is acted on, and a stream event alone never marks an order resolved, a position protected or an entry allowed. A gap in the stream (a disconnect, a rotation, a missed keepalive, a dropped frame) makes the stream UNKNOWN until a REST snapshot has been taken and the stream is live again; the smoke on Demo observed that sequence, UNKNOWN then SYNCING then LIVE (demo-observed, not mainnet, `BINANCE.md` section 5). An event for an unknown order, an unknown event type, a malformed payload, a status outside the table of section 6.1 and a field that fails Decimal or UTC validation are journaled as stream anomalies and surfaced as divergences for the reconciler: they never become state and are never silently dropped or coerced (D-05). Silence of the stream is not a staleness criterion by itself. Failed REST calls are classified by the taxonomy of `BINANCE.md` section 6.2, never by message text.
 
-The finding of D055 (code -4509 on a `closePosition` stop placed while flat) is a recorded observation, not a choice: the execution model, protection placed after the entry fill or a protective stop pre-placed before it, stays an open decision of the user (D055), and nothing in this section or in the Demo-observed facts of section 6.1 chooses it. Until that decision is recorded no document and no code may treat a protective order as confirmed because a call returned success or because an event arrived; only a status of class ACTIVE read from Binance counts (section 6.1). Verify against current Binance docs before implementation.
+The finding of D055 (code -4509 on a `closePosition` stop placed while flat) was a recorded observation; the execution model is decided by D079 (2026-10-22): protection is placed after the entry fill (section 6.3), and the Demo-observed facts of section 6.1 chose nothing by themselves. No document and no code may treat a protective order as confirmed because a call returned success or because an event arrived; only a status of class ACTIVE read from Binance counts (section 6.1). Verify against current Binance docs before implementation.
+
+### 6.3 Fill-driven protection (D079)
+
+Decided by D079 (2026-10-22), the closure of D055. Execution model (a) is the only V1 model: the entry is a GTD LIMIT placed with no protective stop beside it, and the protective stop is STOP_MARKET `closePosition=true`, placed by the protection coordinator (`src/execution/protection.py`) after the first fill with positive quantity and confirmed by a REST query (only a status of class ACTIVE counts, section 6.1). Model (b), a stop pre-placed before the fill, is not built.
+
+- No new entry opens while any position is unprotected.
+- A stop not confirmed before `protection.max_unprotected_ms`, or an entry not terminal before `protection.entry_terminal_timeout_ms`, leads to CLOSE_REQUIRED and an automatic reduce-only MARKET close by the emergency closer (`src/execution/emergency_close.py`; D034 approves the principle). Both keys are `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml`, and the live path refuses while they are unset.
+- A GTD expiry is not confirmed on Demo and unknown on mainnet; the system does not rely on it (`entry_terminal_timeout_ms` is the path).
+- Hedge Mode is unsupported in V1 (section 8).
+- No continuous TP1 resizing: TP legs are placed after the entry is terminal and the position is reconciled.
+- A missing or lost stop follows the four cases of section 9 (D034, D077); a placement is never re-sent (D080).
+- LIVE stays blocked: live placement is disabled (`src/execution/enablement.py`), and what Demo cannot show (a partial fill P3, the order of a cancel against a fill P7, a GTD expiry A2) is left to the Phase 25 campaign and the Phase 26 canary (D079 item 6).
 
 ## 7. Idempotency
 
@@ -188,7 +202,13 @@ The tool must explicitly detect and support the chosen Binance position mode.
 
 Do not assume One-way Mode or Hedge Mode.
 
+V1 supports One-way Mode only: Hedge Mode is unsupported (D079 item 4), and the pre-placement check refuses it (`HEDGE_MODE_UNSUPPORTED`, `src/execution/pre_placement.py`).
+
 Binance documents that position-mode changes have account-level restrictions and can be rejected when open orders/positions exist (error -4067 for open orders, -4068 for an open position). [Binance Change Position Mode](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Change-Position-Mode) The page text was not retrievable on 2026-09-30 nor by the plan 18-01 executor on 2026-10-16; later on 2026-10-16 it was read at its new location (the Change Position Mode section of the REST `trade` group) with WebFetch, a small-model summary that is not character-exact (`SOURCES.md`, section "Facts read for Phase 18"): `POST /fapi/v1/positionSide/dual` has weight 1, `dualSidePosition` is required and `recvWindow` is at most 60000; after the CM migration UM and CM share the same setting, so one change flips both; the change is rejected when either side has an open order (-4067) or an open position (-4068). The Phase 18 research summary (2026-10-15) and the installed SDK docstring for the endpoint state the same. Not verified live; verify against current Binance docs before implementation (F-057).
+
+The one-way wording above was re-confirmed on 2026-10-23 from the research's reading of the official OpenAPI document (`SOURCES.md`, section "Facts read for Phase 22"; cited, not re-fetched while Phase 22 was executed).
+
+Margin guard gate (Phase 22). Between the position-mode check and the hand-off record, `execute_approved_plan` calls the margin guard once with exactly what will be placed (the bound symbol and side, the quantity, the limit price, the stop trigger, the mark price, both fee rates and whether the symbol is flat). A refusal returns its plain code (for example `LIQUIDATION_TOO_CLOSE`, `MARGIN_CONFIG_UNVERIFIED`, `INSUFFICIENT_MARGIN`) as NO_TRADE and consumes nothing; any failure to build the request, to call the guard or to read its answer is `UNCERTAIN_ACCOUNT_STATE`. A pass hands the protection coordinator a plan snapshot completed with the exchange-verified margin type, leverage and equity. The guard is a required field of the placement context, so it cannot be skipped; no running process composes it before Phase 24. Rules: `docs/trading/RISK_MANAGEMENT.md` section 9.
 
 ## 9. Reconciliation loop
 
@@ -208,9 +228,9 @@ Any divergence enters `RECONCILIATION_REQUIRED`.
 
 The reconciliation job must explicitly detect **orphan protective orders**: active stop/TP orders whose associated position is already zero or whose plan is otherwise closed. Orphan orders must be canceled after authoritative position verification.
 
-A protective stop paired with a still-working ENTRY order is not an orphan: the position is zero only because the entry has not filled yet, so the sweeper leaves that stop in place (F-401).
+A protective of a plan whose entry is still resting or partially filled is not an orphan, even when the position reads zero at that moment: the entry can still fill, so the sweeper leaves that protective in place (F-401). Since Phase 19 (D-10) no stop is placed before the first fill; the entry rests without one and the stop is placed after the fill is seen.
 
-When a protective stop is missing (canceled, expired, or never acknowledged) while the position is open, the reconciler re-places it at the original plan stop-loss, never wider. This supersedes the earlier cancel-only reconciler decision (Phase 08 D-03 / Phase 09 D-02), per D034; if the re-placed stop is rejected or unacknowledged, the ladder continues with a reduce-only close and a HIGH-priority alert (see `SECURITY_AND_OPERATIONS.md` section 7).
+The reconciler never places an order. Protection after a fill is the coordinator's (`src/execution/protection.py`), and a missing protective stop is handled in four separate cases. (1) A stop never confirmed ACTIVE that the coordinator's own REST query by the deterministic client id proved absent (`found=False`) is placed again under the same client id at the plan stop-loss, never wider: at most one attempt per coordinator step, bounded by `protection.max_unprotected_ms` and not by a count; the step that reaches the deadline still makes its attempt, then escalates. An exception, an unknown answer or a stop found but not ACTIVE is never re-placed. This is the D034 clause (1) rule and is implemented behavior `[DESIGN]`. (2) A stop rejected definitively (for example -2021) or not acknowledged is never resent: CLOSE_REQUIRED, a reduce-only close, then a HIGH-priority alert (D034 clause (2), `SECURITY_AND_OPERATIONS.md` section 7). (3) A stop that was confirmed ACTIVE and is later lost is never re-placed, neither automatically nor by an operator action (D077 item (4) supersedes D034 clause (1) for this branch only): exposure means CLOSE_REQUIRED and a reduce-only MARKET close; an unreadable position, or a flat position while the entry can still fill, means UNPROTECTED and escalates to CLOSE_REQUIRED at `max_unprotected_ms` from the first detection of the loss. (4) A stop still unconfirmed at `max_unprotected_ms` after a positive fill enters CLOSE_REQUIRED (SAFE_MODE, critical alert) and the emergency closer reads the position itself: exposure is closed by a reduce-only MARKET order; two consecutive fresh zero reads send no order, and the plan ends FLAT only with the entry terminal. This supersedes the earlier cancel-only reconciler decision (Phase 08 D-03 / Phase 09 D-02) for these cases, per D034 and D077.
 
 Do not rely only on the WebSocket event stream. Periodic authoritative reconciliation is required.
 
@@ -228,21 +248,31 @@ The entry (`_place_entry_no_blind_retry`, `src/execution/manager.py`) ends in ex
 
 Why not-found is not absence here. The client id is unique only among open orders (`BINANCE.md` section 6.1). The Binance pages read do not document idempotency or immediate query visibility for a new order. `-1007` reads "Send status unknown; execution status unknown". The entry is a GTD LIMIT and its stop is placed only after a fill (D-10), so an entry wrongly recorded as REJECTED could fill with nothing protecting it.
 
-The UNKNOWN entry is resolved by query only, never by placing (section 10.1, Phase 20). Restart recovery (10.1) still records a not-found intent younger than the lookup window as REJECTED. Whether that rule may apply to an entry that went UNKNOWN after an ambiguous placement error, and any numbers for bounded reconciliation (windows, re-probe counts), are owner-open (O-04). This section sets none.
+The UNKNOWN entry is resolved by query only, never by placing (section 10.1, Phase 20). Restart recovery no longer records a SENT or UNKNOWN entry as REJECTED because it is absent; an UNKNOWN entry closes only by the repeated, journaled evidence of the D-11 protocol in section 10.1. The numbers of that protocol (probe count, probe spacing, grace after the `goodTillDate`) are `NOT_CONFIGURED` in `config/execution/execution-limits-v1.toml` and stay owner-open (O-04, O-G). This section sets none.
 
 ### 10.1 Restart recovery of execution intents
 
 After a restart every intent that is INTENDED, SENT or UNKNOWN is unresolved (`list_unresolved_intents`). `resolve_unresolved_intents` (`src/execution/intent_recovery.py`) resolves them by query only; it takes a two-method probe (`query_order_by_client`, `query_algo_order_by_client`), so placing an order is structurally impossible:
 
-1. INTENDED and SENT intents are first recorded as UNKNOWN;
+1. every SENT intent is first recorded as UNKNOWN; an INTENDED ENTRY (never sent: `mark_sent` commits before `place_entry`) is probed first;
 2. each is probed by its deterministic client id (ENTRY by client order id, protective legs by algo client id);
 3. found: ACKED (at any age), with the exchange order id for an ENTRY;
-4. definitively absent and intended less than the lookup window ago: REJECTED. The window is 3 days (default `lookup_window`), because Binance Query Order does not find a CANCELED or EXPIRED order without a fill after 3 days (`BINANCE.md` section 6.1), so "not found" proves absence only for a younger intent; exactly 3 days old is not young;
-5. a probe error, an indeterminate answer (anything but a literal true or false) or an absent order at or past the window: the intent stays UNKNOWN.
+4. an INTENDED ENTRY that is definitively absent after one probe is REJECTED with the resolution reason `NEVER_SENT` (the send never happened). An ENTRY that is SENT or UNKNOWN and absent stays UNKNOWN: absence alone is not evidence, because `newClientOrderId` is unique only among open orders (`BINANCE.md` section 6.1); it closes only by the protocol below;
+5. a protective leg that is definitively absent and intended less than the lookup window ago is REJECTED only when the ENTRY of its plan is itself REJECTED. The window is 3 days (default `lookup_window`), because Binance Query Order does not find a CANCELED or EXPIRED order without a fill after 3 days (`BINANCE.md` section 6.1), so "not found" proves absence only for a younger intent; exactly 3 days old is not young. A protective leg of a plan whose ENTRY is not REJECTED (or cannot be read) stays UNKNOWN for the protection coordinator rebuild: recovery never terminates a stop the coordinator must re-place, so the protective legs of a live plan stay UNKNOWN;
+6. a probe error, an indeterminate answer (anything but a literal true or false) or an absent leg at or past the window: the intent stays UNKNOWN.
 
-Anything that stays UNKNOWN, or whose status write fails, enters SAFE_MODE with reason `UNRESOLVED_EXECUTION_INTENT` exactly once per pass (`GLOSSARY.md` section 9.4); an unreadable store enters SAFE_MODE `DB_FAILURE` and re-raises, so "nothing to resolve" is never confused with "could not look". Entries stay blocked until the intent is resolved; the exit rules are Phase 20. A later `execute_approved_plan` for the same approval returns the stored state (`RECONCILIATION_REQUIRED` when no outcome was recorded) and never calls `place_entry`.
+Closing protocol of an UNKNOWN ENTRY (D-11, accepted by the owner 2026-10-21; `UnknownEntryResolver.step`, `src/execution/intent_recovery.py`) `[DESIGN]`, tested with fakes and local PostgreSQL, never against Binance. All of this must hold in one pass, otherwise the intent stays UNKNOWN, the count starts again and SAFE_MODE stays:
 
-Implementation status (Phase 17): the store, the recovery function and the write-ahead flow exist and are proven on PostgreSQL (crash injection after each step, two-thread races, restart on a fresh engine), but nothing calls `resolve_unresolved_intents` or reads the persisted SAFE_MODE state at startup yet: that wiring is Phase 20 (SAFE_MODE, reconciliation) and Phase 24 (composition). Known gap owned by Phase 20: a crash after the STOP_LOSS intent was written leaves an acknowledged entry without a stop, and a restart does not place one (the intent rows ENTRY ACKED and STOP_LOSS INTENDED or SENT are what reconciliation reads); until then the operator uses `RUNBOOK.md` section 3.
+- the configured number of consecutive clean `found=False` probes by client order id, each at least the configured spacing after the previous one;
+- the `goodTillDate` of the entry plus the configured grace has passed;
+- a positions read and an open-orders read of the symbol made in that pass both succeed and show no non-zero position and no open order (an open order on the symbol also keeps it UNKNOWN when the probe said not found: a conflicting read);
+- every probe and the closing evidence are journaled with the source `REST_RECONCILE` before the finalization.
+
+It then becomes REJECTED with the resolution reason `RECONCILED_ABSENT`, through the dedicated API `finalize_reconciled_resolution`, never with the code of a Binance rejection (GLOSSARY section 9.3). The probe count lives in memory, so a restart starts at zero. Closing an intent never exits SAFE_MODE (D-15) and nothing is re-sent (Q5): the resolver's adapter has no placement method. A GTD expiry is not proof that the order is terminal: assumption A2 stays `[NOT_TESTED]`.
+
+Anything that stays UNKNOWN, or whose status write fails, enters SAFE_MODE with reason `UNRESOLVED_EXECUTION_INTENT` exactly once per pass (`GLOSSARY.md` section 9.4); an unreadable store enters SAFE_MODE `DB_FAILURE` and re-raises, so "nothing to resolve" is never confused with "could not look". Entries stay blocked until the intent is resolved, and SAFE_MODE is left only by the operator exit with its readiness rows (`RUNBOOK.md` section 21.1). A later `execute_approved_plan` for the same approval returns the stored state (`RECONCILIATION_REQUIRED` when no outcome was recorded) and never calls `place_entry`.
+
+Implementation status (Phase 20): the store, the recovery function, the D-11 resolver, the protection coordinator restore (`run_startup_recovery`) and the write-ahead flow exist and are proven with fakes and on PostgreSQL (crash injection after each step, two-thread races, restart on a fresh engine). Nothing calls them from a running process yet: that composition is Phase 24, and the notification of the protection coordinator about an entry closed as `RECONCILED_ABSENT` is also Phase 24. A crash after the STOP_LOSS intent was written leaves an acknowledged entry without a stop; since Phase 20 the coordinator rebuild applies the never-confirmed rule of section 9 to it: a REST-proved absence is answered by a placement under the deterministic id at the plan stop-loss, at most once per coordinator step (never on a guessed history, see D077), but only in a process that runs the restore; until Phase 24 wires it the operator uses `RUNBOOK.md` section 3.
 
 ## 11. Manual emergency controls
 
@@ -251,8 +281,22 @@ Must provide a safe way to:
 - cancel pending entry orders (protective stops and take-profits are never cancelled by this control),
 - disable new entry orders (orders that can open or increase a position),
 - close strategy-generated positions according to explicit user action,
-- an explicit protect action (re-place the stop-loss at the original plan stop-loss),
+- an explicit protect action (adopt or trigger protection; it has no placement of its own, see below),
 - switch system to `SAFE_MODE`.
+
+Phase 20 (plan 20-17, EXEC-06) built the five controls, listed in `EXEC06_CONTROLS` (`src/execution/manager.py`) `[DESIGN]`. They are tested with fakes only, have no command or Telegram surface and no authentication yet (the `operator_id` is audit metadata; Phase 23 / Phase 24), and their behavior on Binance is `[NOT_TESTED]`:
+
+| Control | Function | What it does |
+|---|---|---|
+| cancel pending strategy orders | `expire_pending_entry` | Cancels the resting entry and verifies the cancel by query; returns the verdict. It never touches a protective leg |
+| disable new entries | `LiveEnablementController.disable` | Flips the flag, then journals (the spill takes the record when the journal is down). It never blocks or cancels a protective or reduce-only order |
+| close strategy positions | `operator_close_position` | Enters the coordinator's own close flow (CLOSE_REQUIRED): SAFE_MODE `CLOSE_REQUIRED`, a critical alert, the emergency closer reads the quantity itself, the entry remainder is cancelled each step, the plan is FLAT only after two zero position reads with the entry terminal, and the legs are swept only after FLAT. `emergency_manual_close` is the lower-level path: disable, SAFE_MODE `MANUAL_CLOSE`, entry cancel, up to two position reads, then either the cancel of the three legs with an independent re-query of each or `PROTECTIVES_KEPT` |
+| replace protection | `operator_protect_position` | See the paragraph below |
+| enter SAFE_MODE | `safe_mode_freeze` | Enters SAFE_MODE; its journal error propagates after the flag is set |
+
+D-09: a manual control never cancels a protecting stop of an open position. Protective legs are cancelled only after two consecutive zero position reads with the entry terminal; while the position is non-zero, a read fails or the entry is not terminal, the legs are kept (`PROTECTIVES_KEPT`, reasons `FIRST_READ_NONZERO`, `SECOND_READ_NONZERO`, `READ_FAILED`, `ENTRY_NOT_TERMINAL`). A leg whose cancel cannot be proven (`STILL_OPEN` or `UNKNOWN`) is journaled `MANUAL_CLOSE_ORPHAN_UNVERIFIED`, SAFE_MODE stays and the sweep looks again.
+
+The protect control (`operator_protect_position`, D-26, D077) has no placement of its own: no placement, close, cancel or state transition in its code. In the never-confirmed branch it triggers the coordinator's own same-id rule at the plan stop (one coordinator step: query by the deterministic id, a same-id placement at `entry.sl_trigger_price` only after a definitive absence, escalation at the deadline); in a confirmed state it adopts an ACTIVE stop; it cannot extend `max_unprotected_ms`. It refuses with nothing sent the confirmed-then-lost branch (a stop that was once confirmed and is lost is never re-placed, D077), CLOSE_REQUIRED / CLOSE_FAILED, and an unknown stop history (for example after a restore whose journal could not establish it). The human action for a confirmed-then-lost stop is the close control. Every refusal for a known plan is journaled with its code.
 
 Per D034, protective and reduce-only orders are never blocked by a disable. A disable never blocks or cancels a protective or reduce-only order; closing a position and protecting a position are separate, explicit actions, and cancelling a protective stop is never part of any control above. The disable controls only stop the system from opening or adding to risk.
 

@@ -32,7 +32,32 @@ deadline means escalate):
 * B2 ``B2_STOP_UNCONFIRMED`` / B3 ``B3_BOTH_AMBIGUOUS``: stop still unconfirmed
   ``max_unprotected_ms`` after the first fill (entry terminal: B2, entry still open: B3). Before
   the deadline the stop and the entry are queried by id every step, the entry cancel is re-issued
-  every step, and a stop REST proved absent is re-placed under the same id (never blindly).
+  every step, and a stop REST proved absent is re-placed under the same id (never blindly), at
+  most once per step, at the plan price. "REST proved absent" (plan 20-27, Binance Demo
+  2026-10-22) is two reads of the same step: the by-id query answers found=False AND the
+  open-algo-orders listing of the symbol was read and does not contain the id. The B2/B3 table:
+
+  ===================  ===================  ================================  =================
+  by-id query          listing of the       stop reading                      same-id re-place
+                       symbol
+  ===================  ===================  ================================  =================
+  found=True ACTIVE    not read             ACTIVE (REST-confirmed)           no
+  found=True other     not read             NOT_ACTIVE                        no
+  found=False          lists the id, NEW    ACTIVE (REST-confirmed)           no
+  found=False          lists the id, other  NOT_ACTIVE                        no
+  found=False          read, id not listed  ABSENT                            once per step
+  found=False          unreadable           UNREADABLE (journaled)            no
+  unreadable           not read             UNREADABLE (journaled)            no
+  ===================  ===================  ================================  =================
+
+  Demo showed the by-id query answering -2013 right after a placement while the stop was NEW, the
+  same-id re-place answering -4116 (DUPLICATE_CLIENT_ID) and the listing showing the stop. A
+  -4116 is "exists, awaiting REST confirmation" (``EVENT_STOP_EXISTS_AWAITING_REST``): never the
+  definitive rejection of B5, never protection, and the id is not sent again until both reads of
+  a later step have denied it. The user-data stream is not a confirmation source (D079). A stop
+  confirmed only by the listing keeps being checked against the listing while its by-id query
+  still answers found=False, so a lagging index is never read as a lost stop; once a by-id query
+  has shown the stop, D077 below applies without any listing read.
 * B4 ``B4_FILL_AFTER_STOP``: a once-confirmed stop that is no longer ACTIVE while a position
   exists (decided by the position, never by the algo status class, research P6) is never
   re-placed; the rest is cancelled and the new exposure is closed by MARKET.
@@ -54,13 +79,25 @@ CLOSE_FAILED, which keeps blocking new entries and retries the close every step;
 entry terminal AND REST flat, after which the plan's protective legs are swept by deterministic id
 (``cancel_untriggered_protectives``).
 
+Pending protective actions (plan 20-14, D-19, Q4): a stop, an entry-remainder cancel or a close
+that the REST gate refuses is journaled as not sent AND kept as a durable PENDING row
+(``STOP_NOT_SENT``, ``PROTECTION_ENTRY_CANCEL_NOT_SENT``, ``CLOSE_NOT_SENT``) when a pending-action
+store is attached, after its intent was written ahead to the local spill. The row is intent only
+(no price, quantity or side): the next step reads the current exchange state and decides, and an
+old request is never replayed. It is RESOLVED when the action got through or the state settled
+(stop read ACTIVE, entry terminal, close sent or flat) and SUPERSEDED, never sent, when the plan
+reaches CLOSE_REQUIRED or CLOSE_FAILED (``_place_stop`` refuses to send in those states and in
+FLAT). A store failure enters SAFE_MODE DB_FAILURE once and the step carries on.
+``blocks_new_entries()`` is also True while any row is PENDING, and when the store cannot be read.
+
 Open, recorded and NOT decided here: Q4 / Phase 18 src/WR-12 (a 418/429 pause refuses the stop,
 the cancel and the close with a pre-send refusal; no exemption is added, every refused call is
 journaled as not sent, the deadline keeps running and the escalation to CLOSE_REQUIRED /
 CLOSE_FAILED with SAFE_MODE and a critical alert is attempted on time, but "never naked" is NOT
-claimed for that window), A3 (whether a closePosition stop is auto-cancelled when the position
-closes, probe 6) and A2 (a GTD expiry reported as EXPIRED and terminal). An exception's message
-text is never read (D-21): only its class and int code through the taxonomy.
+claimed for that window; the pending row does not protect the position), A3 (whether a
+closePosition stop is auto-cancelled when the position closes, probe 6) and A2 (a GTD expiry
+reported as EXPIRED and terminal). An exception's message text is never read (D-21): only its
+class and int code through the taxonomy.
 
 Plan 19-16 adds the take-profit step and the exit: from PROTECTED (entry terminal, stop confirmed
 by REST) the next step reads the REST position and calls ``attach_protectives_to_fill``, which
@@ -72,8 +109,18 @@ critical alert ``TP_UNAVAILABLE``, the confirmed stop kept, never a flatten for 
 alone). The legs are placed once after the entry is terminal, so TP1 is never resized by a late
 fill (G2-032). From COMPLETE or TP_UNAVAILABLE, a step that reads a flat REST position goes FLAT
 and sweeps the plan's legs by deterministic id. The manager hand-off is plan 19-15, the emergency
-closer plan 19-12. The stop of a COMPLETE or TP_UNAVAILABLE plan is not supervised any more
-(recorded open item: a stop that stops being ACTIVE while the position stays open is Phase 20/24).
+closer plan 19-12.
+
+Plan 20-09 (D-07, D077) closes the recorded open item "no stop supervision after PROTECTED": each
+step of PROTECTED, COMPLETE and TP_UNAVAILABLE first reads the stop by its deterministic id. ACTIVE
+lets the step carry on; an unreadable answer is journaled and the state is kept until the next
+step reads again. A stop that reads ABSENT
+or NOT_ACTIVE there was confirmed earlier, so it is a lost stop and the existing D077 decision by
+the position runs (``_on_stop_lost``): exposure is CLOSE_REQUIRED (B4) and a reduce-only MARKET
+close, an unreadable position is UNPROTECTED (reason ``STOP_LOST_AFTER_PROTECTED``) with
+``stop_lost_at`` set once, flat on two reads with the entry terminal is FLAT. It is never
+re-placed. The only automatic stop placement left after the first fill is the one for a stop never
+confirmed and proven absent by REST, under the same deterministic id, priced from the plan.
 
 Every FLAT transition (which sweeps every leg, an ACTIVE stop included) needs two consecutive zero
 REST position reads, the T-8-30 rule of ``src/reconcile/sweeper.py`` (19-REVIEW CR-03): a zero
@@ -90,6 +137,22 @@ plus the owner grace ``protection.entry_unknown_grace_ms``, the plan moves to EN
 (one journaled note): it stays tracked, still blocks nothing it did not block before, and is
 queried only on every ``UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS``-th step until it is found (a stream
 fill is acted on at once).
+
+Plan 22-13 (D-12, amendment A10, owner item O-4) adds ONE optional post-fill comparison: with a
+``liquidation_watch`` (default None: no comparison, no new journal event, every earlier caller and
+test unchanged), the first step of a plan in PROTECTED_ENTRY_OPEN or PROTECTED, that is after the
+stop is REST-confirmed and before the supervision of that step (COMPLETE and TP_UNAVAILABLE count
+too when an unreadable position read or a restore left the plan unchecked), reads the position
+once and asks the watch whether the exchange ``liquidationPrice`` lies beyond the stop by the
+owner's buffer. A CLOSE verdict (a danger, or an unknown value such as the cross-margin sentinel
+"0") enters CLOSE_REQUIRED through the existing path with the branch code
+``B6_LIQUIDATION_TOO_CLOSE``: no new state, edge or order type, the confirmed stop is kept.
+ALERT_ONLY_FAILED journals and alerts (event DIVERGENCE) and changes nothing; OK_DIFFERS is
+calibration data and only journals (WR-05: no owner tolerance exists to alert on). The check
+never runs before the stop is confirmed, so the stop placement, the entry-remainder cancel and
+every deadline run first and unchanged; it runs once per plan (also after a restore). Whether a
+failed check closes or only alerts is O-4 and lives in the watch's required policy, not here.
+Phase 24 composition must pass the watch.
 
 Design rules:
 
@@ -122,12 +185,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from src.domain.algo_status import is_protection_confirmed
 from src.domain.enums import ExecutionIntentStatus, LiveInputsStatus, OrderRole
@@ -138,11 +201,48 @@ from src.domain.exchange_errors import (
     classify,
 )
 from src.domain.journal import JournalEvent, content_hash_event_id, correlated_event_id
+from src.domain.transitions import PROTECTION_INITIAL_STATE, TransitionKind, is_legal
+from src.execution.cancel_verification import PROVEN_GONE, CancelVerdict
 from src.execution.constraint_snapshot import PlanConstraintSnapshot, snapshot_is_valid_for_live
 from src.execution.execution_limits import ExecutionLimits, ExecutionLimitsNotConfigured
-from src.execution.intent_store import ExecutionIntentStore
+from src.execution.intent_store import RESOLUTION_RECONCILED_ABSENT, ExecutionIntentStore
+from src.execution.liquidation_watch import (
+    LIQUIDATION_TOO_CLOSE_AFTER_FILL,
+    LIQUIDATION_UNKNOWN_AFTER_FILL,
+    LiquidationFailurePolicy,
+    LiquidationWatchAction,
+    LiquidationWatchInput,
+    LiquidationWatchPort,
+    LiquidationWatchVerdict,
+)
 from src.execution.order_ids import derive_algo_client_id
+from src.execution.pending_actions import (
+    NOTE_CLOSE_FAILED_BY_POLICY,
+    NOTE_CLOSE_REQUIRED_BY_POLICY,
+    NOTE_ENTRY_CANCEL_ACCEPTED,
+    NOTE_ENTRY_TERMINAL,
+    NOTE_PLAN_FLAT,
+    NOTE_STOP_CONFIRMED_ACTIVE,
+    BlockedRecorder,
+    IntentSpill,
+    PendingActionStore,
+    PendingKind,
+    gate_reason_text,
+    retry_after_until,
+)
+from src.execution.protection_replay import (
+    EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+    EVIDENCE_REST_STOP_CONFIRMED,
+    REASON_STOP_LOST,
+    REASON_STOP_LOST_AFTER_PROTECTED,
+    REJECT_ILLEGAL_EDGE,
+    clearing_violation,
+)
 from src.persistence.errors import IntentStateConflict, PersistenceError
+
+if TYPE_CHECKING:
+    # Imported for the type only: ``protection_rebuild`` imports this module.
+    from src.execution.protection_rebuild import RestoredPlan
 
 POSITION_MODE_ONE_WAY = "ONE_WAY"
 POSITION_MODE_HEDGE = "HEDGE"
@@ -150,8 +250,19 @@ POSITION_MODE_HEDGE = "HEDGE"
 SAFE_MODE_DB_FAILURE = "DB_FAILURE"
 SAFE_MODE_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
+# Plan 20-02 (D-29, T-A): a state change the PROTECTION table refuses (fail closed).
+SAFE_MODE_PROTECTION_STATE_INVALID = "PROTECTION_STATE_INVALID"
+# Plan 20-19 (D-08, D-30): a restart could not prove a plan's stop history, or a durable
+# source contradicts another (documented by plan 20-24).
+SAFE_MODE_RESTORE_INCONSISTENT = "RESTORE_INCONSISTENT"
 ALERT_CLOSE_REQUIRED = "CLOSE_REQUIRED"
 ALERT_TP_UNAVAILABLE = "TP_UNAVAILABLE"
+# Plan 20-22 (D-24): the exchange definitively rejected the stop after a fill (branch B5). Distinct
+# from PROTECTION_HANDOFF_FAILED (the entry could not be handed to the coordinator).
+ALERT_PROTECTIVE_REJECTED = "PROTECTIVE_REJECTED"
+# Plan 22-13 (D-12): the post-fill liquidation comparison found a divergence (HIGH in the alert
+# matrix). A literal: ``src.execution`` must not import ``src.reconcile``.
+ALERT_LIQUIDATION_DIVERGENCE = "DIVERGENCE"
 
 # The branch codes of 19-NOTES.md "Fill, stop and entry remainder" (D-12): the reason journaled on
 # the transition into CLOSE_REQUIRED, the reason of the critical alert and the reason handed to the
@@ -165,8 +276,14 @@ BRANCH_NO_POSITION_BUT_EXPOSED = "NO_POSITION_ON_STOP_BUT_EXPOSED"
 # 19-REVIEW WR-04 (owner, D077): a lost stop whose plan did not reach a safe state (position zero
 # AND entry terminal) within max_unprotected_ms of the first detection of the loss.
 BRANCH_B4_STOP_LOST_UNRESOLVED = "B4_STOP_LOST_UNRESOLVED"
+# Plan 20-17 (D-26): an explicit operator close; the existing close flow runs unchanged.
+BRANCH_OPERATOR_CLOSE = "OPERATOR_CLOSE"
+# Plan 22-13 (D-12, A10): the exchange liquidation price of the filled position is inside the
+# buffer beyond the stop, or unknown (None / zero); the existing close flow runs unchanged.
+BRANCH_B6_LIQUIDATION_TOO_CLOSE = "B6_LIQUIDATION_TOO_CLOSE"
 
 EVENT_PROTECTION_TRANSITION = "PROTECTION_TRANSITION"
+EVENT_PROTECTION_TRANSITION_REJECTED = "PROTECTION_TRANSITION_REJECTED"
 EVENT_FILL_QUANTITY_UNKNOWN = "PROTECTION_FILL_QUANTITY_UNKNOWN"
 EVENT_UNKNOWN_FILL = "PROTECTION_UNKNOWN_FILL"
 EVENT_REST_FAILED = "PROTECTION_REST_FAILED"
@@ -174,12 +291,80 @@ EVENT_STOP_PLACEMENT_FAILED = "PROTECTION_STOP_PLACEMENT_FAILED"
 EVENT_ENTRY_CANCEL_FAILED = "PROTECTION_ENTRY_CANCEL_FAILED"
 EVENT_STEP_ERROR = "PROTECTION_STEP_ERROR"
 EVENT_STOP_NOT_SENT = "STOP_NOT_SENT"
+# Plan 20-27: a placement answered DUPLICATE_CLIENT_ID (-4116): the id exists, REST has not yet
+# confirmed or denied it.
+EVENT_STOP_EXISTS_AWAITING_REST = "PROTECTION_STOP_EXISTS_AWAITING_REST"
 EVENT_ENTRY_CANCEL_NOT_SENT = "PROTECTION_ENTRY_CANCEL_NOT_SENT"
 EVENT_CLOSE_REQUIRED = "PROTECTION_CLOSE_REQUIRED"
 EVENT_CLOSE_ATTEMPT_ERROR = "PROTECTION_CLOSE_ATTEMPT_ERROR"
 EVENT_SWEEP_FAILED = "PROTECTION_SWEEP_FAILED"
+# Plan 20-17: a sweep whose cancels did not all verify (a leg STILL_OPEN or UNKNOWN); retried.
+EVENT_SWEEP_UNVERIFIED = "PROTECTION_SWEEP_UNVERIFIED"
 EVENT_TP_UNAVAILABLE = "PROTECTION_TP_UNAVAILABLE"
 EVENT_ENTRY_UNRESOLVED = "PROTECTION_ENTRY_UNRESOLVED"
+# Plan 24-34 (D-35): the UNKNOWN-entry resolver closed the entry RECONCILED_ABSENT and told the
+# coordinator through ``note_entry_resolved``; one note per plan, after the ordinary transition row.
+EVENT_ENTRY_RECONCILED_ABSENT = "PROTECTION_ENTRY_RECONCILED_ABSENT"
+# Plan 20-09 (D-07): the reconcile loop told the coordinator about a stop-related divergence.
+EVENT_DIVERGENCE_NOTIFIED = "PROTECTION_DIVERGENCE_NOTIFIED"
+# Plan 20-19 (D-08): one note per plan the coordinator rebuilt after a restart.
+EVENT_PROTECTION_RESTORED = "PROTECTION_RESTORED"
+# Plan 22-13 (D-12): the post-fill liquidation comparison (exact prices as text: calibration
+# data, not account figures). Only journaled when a liquidation watch is attached.
+EVENT_LIQUIDATION_CHECKED = "PROTECTION_LIQUIDATION_CHECKED"
+EVENT_LIQUIDATION_PRICE_DIFFERS = "PROTECTION_LIQUIDATION_PRICE_DIFFERS"
+EVENT_LIQUIDATION_FAILED_ALERT_ONLY = "PROTECTION_LIQUIDATION_FAILED_ALERT_ONLY"
+EVENT_LIQUIDATION_CHECK_ERROR = "PROTECTION_LIQUIDATION_CHECK_ERROR"
+# The check gave up after LIQUIDATION_FLAT_READS_LIMIT consecutive flat positionRisk reads (the
+# position never became visible): one note with the read count, no watch call, no alert.
+EVENT_LIQUIDATION_SKIPPED_FLAT = "PROTECTION_LIQUIDATION_SKIPPED_FLAT"
+# STRUCTURAL retry bound for the positionRisk lag right after a fill (a flat row can precede the
+# position by a moment): the number of consecutive flat reads after which the check is dropped.
+# Not an owner number; it bounds a retry and changes no limit, price or size.
+LIQUIDATION_FLAT_READS_LIMIT: Final = 3
+
+# Plan 20-17 (D-26): the audit rows of the two operator controls (ids, codes and states only).
+EVENT_OPERATOR_CLOSE_REQUESTED = "OPERATOR_CLOSE_REQUESTED"
+EVENT_OPERATOR_PROTECT_STEPPED = "OPERATOR_PROTECT_STEPPED"
+EVENT_OPERATOR_STOP_ADOPTED = "OPERATOR_STOP_ADOPTED"
+EVENT_OPERATOR_PROTECT_REFUSED = "OPERATOR_PROTECT_REFUSED"
+
+# Result codes of the operator controls. A refusal sends nothing.
+CODE_CLOSE_REQUESTED = "CLOSE_REQUESTED"
+CODE_UNKNOWN_PLAN = "UNKNOWN_PLAN"
+CODE_NOTHING_TO_CLOSE = "NOTHING_TO_CLOSE"
+CODE_CLOSE_ALREADY_REQUIRED = "CLOSE_ALREADY_REQUIRED"
+CODE_OPERATOR_ID_MISSING = "OPERATOR_ID_MISSING"
+CODE_COORDINATOR_STEPPED = "COORDINATOR_STEPPED"
+CODE_STOP_ADOPTED = "STOP_ADOPTED"
+CODE_NOTHING_TO_PROTECT = "NOTHING_TO_PROTECT"
+CODE_POSITION_UNREADABLE = "POSITION_UNREADABLE"
+CODE_NO_EXPOSURE = "NO_EXPOSURE"
+CODE_WRONG_SIDE = "WRONG_SIDE"
+CODE_STOP_UNREADABLE = "STOP_UNREADABLE"
+CODE_STOP_HISTORY_UNKNOWN = "STOP_HISTORY_UNKNOWN"
+# D077 (owner direction 1 for D-26): no stop is placed after a confirmed stop was lost, and none
+# is restored in CLOSE_REQUIRED / CLOSE_FAILED as a workaround for the D077 close.
+CODE_REPLACEMENT_FORBIDDEN_STOP_LOST = "REPLACEMENT_FORBIDDEN_STOP_LOST"
+CODE_REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED = "REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED"
+
+# The divergence kinds ``notify_divergence`` accepts: the stop-related kinds of
+# ``src/reconcile/compare.py``. Literals, not imports: ``src.execution`` must not import
+# ``src.reconcile`` (the dependency runs the other way); a test pins them against compare.py.
+DIVERGENCE_KIND_POSITION_WITHOUT_STOP = "POSITION_WITHOUT_STOP"
+DIVERGENCE_KIND_TP_ONLY_POSITION = "TP_ONLY_POSITION"
+DIVERGENCE_KIND_SIGN_FLIPPED_POSITION = "SIGN_FLIPPED_POSITION"
+DIVERGENCE_KIND_DOUBLED_POSITION = "DOUBLED_POSITION"
+DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE = "ENTRY_WITHOUT_PROTECTIVE"
+NOTIFIABLE_DIVERGENCE_KINDS: frozenset[str] = frozenset(
+    {
+        DIVERGENCE_KIND_POSITION_WITHOUT_STOP,
+        DIVERGENCE_KIND_TP_ONLY_POSITION,
+        DIVERGENCE_KIND_SIGN_FLIPPED_POSITION,
+        DIVERGENCE_KIND_DOUBLED_POSITION,
+        DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE,
+    }
+)
 
 # 19-REVIEW WR-05 (owner): an entry the manager left ENTRY_STATE_UNKNOWN (Q5) that the coordinator
 # has never found by the GTD time plus `protection.entry_unknown_grace_ms` is ENTRY_UNRESOLVED and
@@ -196,12 +381,23 @@ FILLED_ENTRY_STATUSES: frozenset[str] = frozenset({"PARTIALLY_FILLED", "FILLED"}
 
 _ZERO = Decimal("0")
 _CORRELATION_PREFIX = "protection_"
+
+# A stream fill can arrive in the few milliseconds between the exchange accepting the entry and
+# `register_resting_entry` (first Demo run, 2026-11-01: the fill came 23 ms before the
+# registration, was journaled as unknown and dropped, and the stop waited for the next REST pass).
+# Such a fill is kept and handed to the plan registered next on the same symbol and side, if it
+# is younger than this; older ones belong to some other order and are never attributed.
+_ORPHAN_FILL_MAX_AGE = timedelta(seconds=60)
+_ORPHAN_FILL_LIMIT = 64
 _TRANSITION_ID_PREFIX = "ptr"
+_REJECTED_ID_PREFIX = "ptx"
 _NO_STATE = "NONE"
 
 # Reasons journaled on a transition (fixed project text, never exchange text).
 REASON_REGISTERED = "REGISTERED"
 REASON_REGISTERED_ENTRY_STATE_UNKNOWN = "REGISTERED_ENTRY_STATE_UNKNOWN"
+# Plan 20-19: the seq-1 row of a plan the journal never recorded (written by ``restore``).
+REASON_REGISTERED_AFTER_RESTORE = "REGISTERED_AFTER_RESTORE"
 REASON_ENTRY_UNRESOLVED = "ENTRY_NOT_FOUND_AFTER_GTD_GRACE"
 REASON_ENTRY_FOUND = "ENTRY_FOUND"
 REASON_FIRST_FILL_STREAM = "FIRST_FILL_STREAM"
@@ -215,7 +411,6 @@ REASON_CLOSE_FAILED = "CLOSE_FAILED"
 REASON_CLOSE_NOT_SENT = "CLOSE_NOT_SENT"
 REASON_CLOSED_ENTRY_OPEN = "CLOSED_ENTRY_OPEN"
 REASON_STOP_CONSUMED_FLAT = "STOP_CONSUMED_FLAT"
-REASON_STOP_LOST = "STOP_LOST"
 REASON_NO_POSITION_ON_STOP = "NO_POSITION_ON_STOP"
 REASON_TP_LEGS_CONFIRMED = "TP_LEGS_CONFIRMED"
 REASON_TP_UNAVAILABLE = "TP_UNAVAILABLE"
@@ -239,7 +434,19 @@ class ProtectionState(str, Enum):
     ENTRY_STATE_UNKNOWN entry never found by its GTD time plus the grace; it leaves to
     UNPROTECTED on a fill, ENTRY_ENDED_NO_FILL when found ended, or AWAITING_FILL when found open.
     19-REVIEW WR-04 (owner, D077) adds no name: a lost stop moves PROTECTED_ENTRY_OPEN back to
-    UNPROTECTED (reason ``STOP_LOST``), which leaves only to CLOSE_REQUIRED or FLAT.
+    UNPROTECTED (reason ``STOP_LOST``), which leaves only to CLOSE_REQUIRED or FLAT. Plan 20-02
+    audit (T-A): when the entry turns terminal on the same step and REST reads flat twice, the
+    lost-stop path ends the plan FLAT (reason ``STOP_CONSUMED_FLAT``) straight from
+    PROTECTED_ENTRY_OPEN. Plan 20-09 (D-07, D077) supervises the stop after PROTECTED: a stop
+    confirmed earlier that reads ABSENT or NOT_ACTIVE moves PROTECTED, COMPLETE or TP_UNAVAILABLE
+    to CLOSE_REQUIRED (exposure, B4) or UNPROTECTED (position unreadable, reason
+    ``STOP_LOST_AFTER_PROTECTED``, leaving only to CLOSE_REQUIRED or FLAT), or straight to FLAT
+    (flat on two reads, entry terminal); no edge out of CLOSE_REQUIRED or CLOSE_FAILED to a
+    protected state is added. The allowed moves are the PROTECTION table of
+    ``src.domain.transitions``, enforced by ``ProtectionCoordinator._transition``.
+    Plan 20-17 (D-26) adds one reason, ``OPERATOR_CLOSE``: AWAITING_FILL, ENTRY_UNRESOLVED,
+    UNPROTECTED, PROTECTED_ENTRY_OPEN, PROTECTED, COMPLETE and TP_UNAVAILABLE -> CLOSE_REQUIRED
+    on an explicit operator close (the first two edges are new; the others existed).
     """
 
     AWAITING_FILL = "AWAITING_FILL"
@@ -258,6 +465,17 @@ class ProtectionState(str, Enum):
 # A position in one of these states is exposed without a confirmed stop (or being closed).
 # ENTRY_UNRESOLVED is deliberately absent: like AWAITING_FILL it holds no known exposure, and the
 # SAFE_MODE(ENTRY_STATE_UNKNOWN) the manager entered already blocks new entries (19-REVIEW WR-05).
+# Plan 20-14: no stop is placed for a plan in one of these states (a queued stop is superseded).
+_NO_NEW_STOP_STATES: frozenset[ProtectionState] = frozenset(
+    {ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED, ProtectionState.FLAT}
+)
+
+# Plan 20-19: states in which an unknown stop history no longer matters (nothing to protect),
+# so a restore does not enter SAFE_MODE for it.
+_RESTORE_DONE_STATES: frozenset[ProtectionState] = frozenset(
+    {ProtectionState.FLAT, ProtectionState.ENTRY_ENDED_NO_FILL}
+)
+
 BLOCKING_STATES: frozenset[ProtectionState] = frozenset(
     {
         ProtectionState.UNPROTECTED,
@@ -368,6 +586,24 @@ class RestingEntry:
 
 
 @dataclass(frozen=True)
+class OperatorControlResult:
+    """What an operator control answered (plan 20-17, D-26): a fixed ``code``, never text."""
+
+    accepted: bool
+    code: str
+
+
+@dataclass(frozen=True)
+class RestoreReport:
+    """What ``ProtectionCoordinator.restore`` did (plan 20-19): plan hashes and reason codes."""
+
+    restored: tuple[str, ...]
+    replay_invalid: tuple[str, ...]
+    stop_history_unknown: tuple[str, ...]
+    safe_mode_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PlanProtection:
     """The read-only view of one plan's protection state."""
 
@@ -381,6 +617,12 @@ class PlanProtection:
     # 19-REVIEW WR-04: the first detection of a once-confirmed stop that is no longer ACTIVE;
     # set once and never reset (``stop_confirmed_at_utc`` keeps the earlier confirmation).
     stop_lost_at_utc: datetime | None = None
+    # Plan 20-09: what the reconcile loop needs to derive a plan's intent from the local side
+    # (compare v2). Copied from the RestingEntry; defaults keep older constructors working.
+    approval_id: str | None = None
+    side: str | None = None
+    entry_quantity: Decimal | None = None
+    entry_client_order_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -429,6 +671,8 @@ class ProtectionAdapter(Protocol):
 
     async def snapshot_positions(self, *, symbol: str | None = None) -> Any: ...
 
+    async def snapshot_open_algo_orders(self, *, symbol: str | None = None) -> Any: ...
+
     async def symbol_lot_filters(self, *, symbol: str) -> Any: ...
 
     def error_facts(self, exc: BaseException) -> Any: ...
@@ -474,6 +718,10 @@ class _PlaceOutcome(Enum):
     NO_POSITION = "NO_POSITION"
     NOT_SENT = "NOT_SENT"
     AMBIGUOUS = "AMBIGUOUS"
+    # Plan 20-27: -4116 (DUPLICATE_CLIENT_ID): the id exists; REST has not confirmed it yet.
+    DUPLICATE = "DUPLICATE"
+    # Plan 20-14: the plan no longer wants a stop (policy requires a close, or it is flat).
+    SKIPPED = "SKIPPED"
 
 
 class _StopReading(Enum):
@@ -485,12 +733,32 @@ class _StopReading(Enum):
     UNREADABLE = "UNREADABLE"
 
 
+@dataclass(frozen=True)
+class _ListedStop:
+    """The stop as the open-algo-orders listing shows it (read like a by-id answer)."""
+
+    found: bool
+    algo_status: str | None
+
+
+class _ListingFailure(Exception):  # noqa: N818 - carries the type name of a failed listing read
+    """The listing could not be read (or is not a list): the stop reading is UNREADABLE."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+
+
 class _Tracked:
     """The mutable record of one registered plan (in-process; the exchange is the truth)."""
 
-    def __init__(self, entry: RestingEntry) -> None:
+    def __init__(
+        self, entry: RestingEntry, *, restored_state: ProtectionState | None = None
+    ) -> None:
         self.entry = entry
-        self.state: ProtectionState | None = None
+        # Plan 20-19: a rebuilt plan is built with its state here; every later change goes
+        # through ``ProtectionCoordinator._transition`` (the one other assignment point).
+        self.state: ProtectionState | None = restored_state
         self.seq = 0
         self.first_fill_at: datetime | None = None
         self.stop_confirmed_at: datetime | None = None
@@ -506,6 +774,25 @@ class _Tracked:
         # the steps spent in ENTRY_UNRESOLVED (the low-frequency poll counter).
         self.entry_found = False
         self.unresolved_steps = 0
+        # Plan 20-09 (D-07): set by ``notify_divergence``, consumed by the next step.
+        self.recheck_requested = False
+        # Plan 20-17 (D-26): whether this process tracked the plan live, so its stop history
+        # (confirmed? lost?) is known. Plan 20-19 sets it False for a restored plan whose
+        # history the journal cannot establish; ``operator_protect`` then places nothing.
+        self.stop_history_known = True
+        # Plan 20-27 (Demo 2026-10-22): whether a by-client-id query has ever answered found=True
+        # for the stop. A stop confirmed only by the open-algo-orders listing is still checked
+        # against the listing when the by-id query keeps answering found=False (its index lags).
+        self.stop_by_id_seen = False
+        # Plan 20-27: a placement answered -4116, so the id exists; set until REST confirms the
+        # stop or both reads deny it.
+        self.stop_exists_unconfirmed = False
+        # Plan 22-13: whether the post-fill liquidation comparison has run for this plan. A
+        # restored plan starts False, so the comparison runs once after a restart as well.
+        self.liquidation_checked = False
+        # Consecutive flat positionRisk reads seen by that check (an unreadable read neither
+        # counts nor resets); the check ends at LIQUIDATION_FLAT_READS_LIMIT.
+        self.liquidation_flat_reads = 0
 
     def view(self) -> PlanProtection:
         assert self.state is not None
@@ -518,6 +805,10 @@ class _Tracked:
             entry_terminal_at_utc=self.entry_terminal_at,
             last_reason=self.last_reason,
             stop_lost_at_utc=self.stop_lost_at,
+            approval_id=self.entry.approval_id,
+            side=self.entry.side,
+            entry_quantity=self.entry.entry_quantity,
+            entry_client_order_id=self.entry.entry_client_order_id,
         )
 
 
@@ -534,8 +825,17 @@ def _refusal_reason(exc: BaseException) -> str:
     return reason if isinstance(reason, str) and reason != "" else type(exc).__name__
 
 
+def _price_text(value: Decimal | None) -> str:
+    """A price as plain positional text for the journal ("NONE" when unknown)."""
+    return "NONE" if value is None else format(value, "f")
+
+
 def _optional_text(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _state_text(state: ProtectionState | None) -> str:
+    return _NO_STATE if state is None else state.value
 
 
 class ProtectionCoordinator:
@@ -557,7 +857,15 @@ class ProtectionCoordinator:
         emergency_closer: EmergencyCloser,
         limits: ExecutionLimits,
         clock: Callable[[], datetime],
+        pending_actions: PendingActionStore | None = None,
+        spill: IntentSpill | None = None,
+        restore_required: bool = False,
+        liquidation_watch: LiquidationWatchPort | None = None,
     ) -> None:
+        if liquidation_watch is not None and not callable(
+            getattr(liquidation_watch, "check", None)
+        ):
+            raise TypeError("liquidation_watch must be None or provide a callable check")
         limits.require_live_ready()
         max_unprotected_ms = limits.max_unprotected_ms
         entry_terminal_timeout_ms = limits.entry_terminal_timeout_ms
@@ -586,8 +894,24 @@ class ProtectionCoordinator:
         self._step_lock = asyncio.Lock()
         self._store_failed = False
         self._db_failure_reported = False
+        # Plan 20 review WR-C8: while a list is set, `_record_journal` parks its rows here instead
+        # of writing them (set and cleared inside one synchronous stretch, never across an await).
+        self._deferred_journal: list[tuple[JournalEvent, datetime]] | None = None
         self._unknown_fills_journaled: set[tuple[str, str]] = set()
+        self._orphan_fills: deque[tuple[datetime, _QueuedFill]] = deque(maxlen=_ORPHAN_FILL_LIMIT)
+        self._wake: Callable[[], None] | None = None
         self.fill_sink_failures = 0
+        # Plan 20-14 (D-19, Q4): the durable intent of an action the REST gate refused.
+        self._pending = pending_actions
+        self._pending_recorder = BlockedRecorder(pending_actions, spill)
+        # Plan 20-17 (D-16): the audit rows of the operator controls fall back to this spill.
+        self._spill = spill
+        # Plan 20-19 (F6): a process that must rebuild its plans from durable sources blocks
+        # new entries and reports the restore incomplete until ``restore`` has run.
+        self._restore_required = restore_required
+        self._restored = False
+        # Plan 22-13 (D-12, A10): None means no post-fill comparison (zero behavior change).
+        self._liquidation_watch = liquidation_watch
 
     # ------------------------------------------------------------------ #
     # Registry surface.
@@ -616,19 +940,480 @@ class ProtectionCoordinator:
             raise ValueError(f"plan {entry.plan_hash} is already registered")
         tracked = _Tracked(entry)
         self._tracked[entry.plan_hash] = tracked
+        self._adopt_orphan_fills(entry)
         if entry.entry_state_unknown:
             reason = REASON_REGISTERED_ENTRY_STATE_UNKNOWN
         else:
             reason = REASON_REGISTERED
         self._transition(tracked, ProtectionState.AWAITING_FILL, reason, self._now())
 
+    def set_wake(self, wake: Callable[[], None] | None) -> None:
+        """Set the callback that asks the owner of `step` to run it now (the scheduler's wake)."""
+        self._wake = wake
+
+    def _adopt_orphan_fills(self, entry: RestingEntry) -> None:
+        """Hand the recent fills no plan owned to the plan just registered, and wake `step`."""
+        if not self._orphan_fills:
+            return
+        now = self._now()
+        kept: deque[tuple[datetime, _QueuedFill]] = deque(maxlen=_ORPHAN_FILL_LIMIT)
+        adopted: list[_QueuedFill] = []
+        for seen_at, fill in self._orphan_fills:
+            if (
+                fill.symbol == entry.symbol
+                and fill.side == entry.entry_side
+                and now - seen_at <= _ORPHAN_FILL_MAX_AGE
+            ):
+                adopted.append(fill)
+            else:
+                kept.append((seen_at, fill))
+        self._orphan_fills = kept
+        if not adopted:
+            return
+        self._fills.extendleft(reversed(adopted))
+        if self._wake is not None:
+            try:
+                self._wake()
+            except Exception:  # noqa: BLE001 - a failed wake only delays the next step
+                pass
+
     def blocks_new_entries(self) -> bool:
-        """True while any registered position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED."""
-        return any(t.state in BLOCKING_STATES for t in self._tracked.values())
+        """True while a position is UNPROTECTED, CLOSE_REQUIRED or CLOSE_FAILED, or a PENDING
+        risk-reducing action exists.
+
+        Plan 20-14 (fail closed): with a pending-action store attached, any PENDING row blocks
+        new entries (a refused entry cancel can exist while the plan itself is
+        PROTECTED_ENTRY_OPEN, which is not a blocking state), and a store that cannot be read
+        answers True. This is stricter than before and needs no owner number; the order in
+        which the queue is served is plan 20-21 (D-20).
+        """
+        if any(t.state in BLOCKING_STATES for t in self._tracked.values()):
+            return True
+        if self._restore_required and not self._restored:
+            # Plan 20-19 (F6): between process start and the rebuild no entry may open.
+            return True
+        store = self._pending
+        if store is None:
+            return False
+        try:
+            return len(store.list_open()) > 0
+        except Exception:  # noqa: BLE001 - an unreadable pending store is not "nothing pending"
+            return True
 
     def protection_of(self, plan_hash: str) -> PlanProtection | None:
         tracked = self._tracked.get(plan_hash)
         return None if tracked is None else tracked.view()
+
+    def protections(self) -> tuple[PlanProtection, ...]:
+        """A read-only view of every tracked plan, ordered by (registered_at_utc, plan_hash).
+
+        Plan 20-09: the local data source the reconcile loop derives its intent from (compare
+        v2, plan 20-10). Each element is a frozen snapshot; the live records are never exposed.
+        """
+        ordered = sorted(
+            self._tracked.values(), key=lambda t: (t.entry.registered_at_utc, t.entry.plan_hash)
+        )
+        return tuple(t.view() for t in ordered)
+
+    @property
+    def restore_complete(self) -> bool:
+        """Whether the coordinator's tracked plans are complete after a restart (F6).
+
+        True for a coordinator built without ``restore_required`` (a fresh one has nothing to
+        restore). With ``restore_required=True`` it stays False until ``restore()`` has
+        finished, so the reconcile loop never reads a half-restored ``protections()`` as "no
+        plans".
+        """
+        return self._restored or not self._restore_required
+
+    def restore(self, plans: Sequence[RestoredPlan], *, now_utc: datetime) -> RestoreReport:
+        """Install the plans rebuilt from the durable sources after a restart (plan 20-19).
+
+        Each ``RestoredPlan`` (``protection_rebuild.rebuild_plan``) becomes a tracked plan with
+        its rebuilt state, ``seq``, clocks, close branch and ``stop_history_known``. Nothing is
+        sent: no adapter call, no stop placement, no cancel, and no REGISTERED transition (the
+        ``seq`` continues from the rebuilt one; only a plan the journal never recorded gets its
+        missing seq-1 row). No time is taken from ``now_utc`` for a plan that has a durable one.
+        ``sweep_done`` is not restored (the sweep is idempotent).
+
+        Fail closed: a plan whose replay was invalid enters SAFE_MODE
+        ``PROTECTION_STATE_INVALID``; a plan whose stop history is unknown (and which is not
+        already FLAT or ENTRY_ENDED_NO_FILL) enters SAFE_MODE ``RESTORE_INCONSISTENT``. Both are
+        best effort (a failing controller is swallowed; the plan is restored anyway). When the
+        call returns, ``restore_complete`` is True and ``blocks_new_entries`` answers from the
+        restored states.
+
+        Raises:
+            RuntimeError: ``restore`` already ran.
+            ValueError: a plan hash is already tracked or repeated, or a plan is not One-way.
+            TypeError: a plan's state is not a ``ProtectionState``.
+        """
+        _require_utc(now_utc, "now_utc")
+        if self._restored:
+            raise RuntimeError("the coordinator was already restored")
+        seen: set[str] = set()
+        for plan in plans:
+            plan_hash = plan.entry.plan_hash
+            if plan_hash in self._tracked or plan_hash in seen:
+                raise ValueError(f"plan {plan_hash} is already registered")
+            if plan.entry.position_mode != POSITION_MODE_ONE_WAY:
+                raise ValueError("only ONE_WAY plans can be restored (D-14)")
+            if not isinstance(plan.state, ProtectionState):
+                raise TypeError("a restored plan needs a ProtectionState")
+            seen.add(plan_hash)
+        ordered = sorted(plans, key=lambda p: (p.entry.registered_at_utc, p.entry.plan_hash))
+        for plan in ordered:
+            self._install_restored(plan, now_utc)
+        invalid = tuple(p.entry.plan_hash for p in ordered if not p.replay_valid)
+        unknown = tuple(p.entry.plan_hash for p in ordered if not p.stop_history_known)
+        reasons: list[str] = []
+        if any(
+            p.replay_valid and not p.stop_history_known and p.state not in _RESTORE_DONE_STATES
+            for p in ordered
+        ):
+            reasons.append(SAFE_MODE_RESTORE_INCONSISTENT)
+        if invalid:
+            reasons.append(SAFE_MODE_PROTECTION_STATE_INVALID)
+        for reason in reasons:
+            try:
+                self._safe_mode.enter_safe_mode(reason=reason, now_utc=now_utc)
+            except Exception:  # noqa: BLE001, S110 - the plans are restored UNPROTECTED anyway
+                pass
+        self._restored = True
+        return RestoreReport(
+            restored=tuple(p.entry.plan_hash for p in ordered),
+            replay_invalid=invalid,
+            stop_history_unknown=unknown,
+            safe_mode_reasons=tuple(reasons),
+        )
+
+    def _install_restored(self, plan: RestoredPlan, now_utc: datetime) -> None:
+        """Track one rebuilt plan; journal one note, and the seq-1 row only if none exists."""
+        journal_lacks_plan = plan.state is ProtectionState.AWAITING_FILL and plan.seq == 0
+        tracked = _Tracked(plan.entry, restored_state=None if journal_lacks_plan else plan.state)
+        tracked.first_fill_at = plan.first_fill_at
+        tracked.stop_confirmed_at = plan.stop_confirmed_at
+        # A restored confirmation came from an earlier process: treat it as by-id confirmed.
+        tracked.stop_by_id_seen = plan.stop_confirmed_at is not None
+        tracked.stop_lost_at = plan.stop_lost_at
+        tracked.entry_terminal_at = plan.entry_terminal_at
+        tracked.close_branch = plan.close_branch
+        tracked.stop_history_known = plan.stop_history_known
+        self._tracked[plan.entry.plan_hash] = tracked
+        if journal_lacks_plan:
+            # The journal never recorded this plan: write the registration row it lacks.
+            self._transition(
+                tracked, ProtectionState.AWAITING_FILL, REASON_REGISTERED_AFTER_RESTORE, now_utc
+            )
+        else:
+            tracked.seq = plan.seq
+            tracked.last_reason = plan.last_reason
+        self._journal_note(
+            tracked,
+            EVENT_PROTECTION_RESTORED,
+            {
+                "reason": _NO_STATE if plan.last_reason is None else plan.last_reason,
+                "replay_valid": "true" if plan.replay_valid else "false",
+                "seq": str(tracked.seq),
+                "state": plan.state.value,
+                "stop_history_known": "true" if plan.stop_history_known else "false",
+            },
+            now_utc,
+        )
+
+    def notify_divergence(self, plan_hash: str, kind: str) -> bool:
+        """The reconcile loop reports a stop-related divergence of one plan (D-07).
+
+        Only marks the plan for a re-check and journals one ``PROTECTION_DIVERGENCE_NOTIFIED``
+        note. The next ``step`` reads the stop and the position of that plan, and whatever it
+        finds goes through the one existing decision path (D077); nothing is placed, cancelled
+        or closed here. Returns False, without a journal row, for a plan hash that is not
+        tracked.
+
+        Raises:
+            ValueError: ``kind`` is not one of ``NOTIFIABLE_DIVERGENCE_KINDS``.
+        """
+        if kind not in NOTIFIABLE_DIVERGENCE_KINDS:
+            raise ValueError(f"unsupported divergence kind {kind!r}")
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None:
+            return False
+        tracked.recheck_requested = True
+        state = "NONE" if tracked.state is None else tracked.state.value
+        self._journal_note(
+            tracked, EVENT_DIVERGENCE_NOTIFIED, {"kind": kind, "state": state}, self._now()
+        )
+        return True
+
+    def note_entry_resolved(self, plan_hash: str, resolution: str) -> bool:
+        """The UNKNOWN-entry resolver closed this plan's entry as absent (plan 24-34, D-35).
+
+        20-DEFERRED: before this call the plan stayed tracked as AWAITING_FILL (or
+        ENTRY_UNRESOLVED) until its own step. The resolver only closes an entry on repeated REST
+        probes, GTD plus grace, and fresh flat position and open-order reads (D080), so a
+        ``RESOLUTION_RECONCILED_ABSENT`` here means nothing rests and nothing is open: the plan
+        moves to ENTRY_ENDED_NO_FILL at once (the ordinary transition row, reason
+        ``ENTRY_ENDED_NO_FILL``) and one ``PROTECTION_ENTRY_RECONCILED_ABSENT`` note is journaled.
+
+        Nothing is sent, cancelled or closed here, and SAFE_MODE is not touched (this module never
+        leaves it). Returns False, with no row, for an unknown plan, any other resolution, or a
+        plan that is not waiting for its entry (AWAITING_FILL, ENTRY_UNRESOLVED): a plan with a
+        fill or a position is never changed by an absence verdict.
+        """
+        if resolution != RESOLUTION_RECONCILED_ABSENT:
+            return False
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None or tracked.state not in (
+            ProtectionState.AWAITING_FILL,
+            ProtectionState.ENTRY_UNRESOLVED,
+        ):
+            return False
+        previous = tracked.state
+        now = self._now()
+        if not self._transition(
+            tracked, ProtectionState.ENTRY_ENDED_NO_FILL, REASON_ENTRY_ENDED_NO_FILL, now
+        ):
+            return False
+        tracked.entry_terminal_at = now
+        self._journal_note(
+            tracked,
+            EVENT_ENTRY_RECONCILED_ABSENT,
+            {"resolution": resolution, "state_before": previous.value if previous else "NONE"},
+            now,
+        )
+        return True
+
+    # ------------------------------------------------------------------ #
+    # Operator controls (plan 20-17, D-26, EXEC-06): a human action follows the same rules.
+    # ------------------------------------------------------------------ #
+
+    async def operator_close(self, *, plan_hash: str, operator_id: str) -> OperatorControlResult:
+        """Close a strategy position on an explicit operator action (EXEC-06, D-26).
+
+        Routes through the coordinator: the plan moves to CLOSE_REQUIRED with branch
+        ``OPERATOR_CLOSE`` and the existing close flow runs (reduce-only MARKET by the emergency
+        closer, which reads the quantity itself; the entry remainder cancelled; FLAT only after
+        two zero reads with the entry terminal; the protective legs swept only after FLAT).
+        Nothing is closed with a guessed quantity and no stop is cancelled here (D-06, D-09).
+
+        The action comes first and its audit row after (D-16): the row goes to the journal and,
+        when that fails, to the local spill. ``operator_id`` is audit metadata, not
+        authentication. Refusals send nothing: an empty operator id, an unknown plan, a plan that
+        is finished (FLAT, ENTRY_ENDED_NO_FILL) and a plan whose close is already required.
+        """
+        if not isinstance(operator_id, str) or operator_id == "":
+            return OperatorControlResult(False, CODE_OPERATOR_ID_MISSING)
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None:
+            return OperatorControlResult(False, CODE_UNKNOWN_PLAN)
+        async with self._step_lock:
+            state = tracked.state
+            if state is None or state in (
+                ProtectionState.FLAT,
+                ProtectionState.ENTRY_ENDED_NO_FILL,
+            ):
+                return OperatorControlResult(False, CODE_NOTHING_TO_CLOSE)
+            if state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
+                return OperatorControlResult(False, CODE_CLOSE_ALREADY_REQUIRED)
+            try:
+                await self._enter_close_required(tracked, BRANCH_OPERATOR_CLOSE)
+            finally:
+                self._journal_operator(
+                    tracked,
+                    EVENT_OPERATOR_CLOSE_REQUESTED,
+                    {"operator_id": operator_id, "state_before": state.value},
+                )
+        return OperatorControlResult(True, CODE_CLOSE_REQUESTED)
+
+    async def operator_protect(self, *, plan_hash: str, operator_id: str) -> OperatorControlResult:
+        """EXEC-06 "re-place protection" control, with NO placement code of its own (D-26, D077).
+
+        Owner direction 1 on the D-26 / D077 conflict. The control is an out-of-cadence trigger
+        of the coordinator's own rule, never a second placement path:
+
+        * the stop was confirmed ACTIVE and later lost (UNPROTECTED with ``stop_lost_at``,
+          CLOSE_REQUIRED / CLOSE_FAILED after B4), any other CLOSE_REQUIRED / CLOSE_FAILED plan,
+          and a plan whose stop history cannot be established are refused before any adapter call
+          (the human action D077 allows for the first is ``operator_close``);
+        * the position is then read fresh (unreadable, zero or the wrong side is refused);
+        * a plan whose stop was never confirmed (UNPROTECTED after a first fill) runs the
+          coordinator's own per-plan step once under the step lock: the stop is queried by its
+          deterministic id, placed again under the same id at ``entry.sl_trigger_price`` only
+          after a definitive absence, and escalated at ``max_unprotected_ms`` by that same step
+          (the window is not extended);
+        * in a confirmed state an ACTIVE stop is adopted with nothing placed; a stop that is no
+          longer ACTIVE is refused and left to the coordinator's D077 supervision.
+
+        Nothing here places, cancels or closes, and ``_transition`` is never called, so
+        UNPROTECTED and CLOSE_REQUIRED are never cleared by a human. ``operator_id`` is audit
+        metadata, not authentication; each outcome writes one audit row after the action
+        (journal, then the local spill).
+        """
+        if not isinstance(operator_id, str) or operator_id == "":
+            return OperatorControlResult(False, CODE_OPERATOR_ID_MISSING)
+        tracked = self._tracked.get(plan_hash)
+        if tracked is None:
+            return OperatorControlResult(False, CODE_UNKNOWN_PLAN)
+        async with self._step_lock:
+            state = tracked.state
+            refusal = self._operator_protect_precheck(tracked)
+            if refusal is None:
+                refusal = await self._operator_protect_position_refusal(tracked)
+            if refusal is None and state is ProtectionState.UNPROTECTED:
+                return await self._operator_protect_step(tracked, operator_id)
+            if refusal is None:
+                refusal = await self._operator_protect_stop_refusal(tracked)
+            if refusal is None:
+                self._journal_operator(
+                    tracked,
+                    EVENT_OPERATOR_STOP_ADOPTED,
+                    {
+                        "code": CODE_STOP_ADOPTED,
+                        "operator_id": operator_id,
+                        "state": _state_text(state),
+                    },
+                )
+                return OperatorControlResult(True, CODE_STOP_ADOPTED)
+            self._journal_operator(
+                tracked,
+                EVENT_OPERATOR_PROTECT_REFUSED,
+                {"code": refusal, "operator_id": operator_id, "state": _state_text(state)},
+            )
+            return OperatorControlResult(False, refusal)
+
+    @staticmethod
+    def _operator_protect_precheck(tracked: _Tracked) -> str | None:
+        """The refusal code decided from the tracked record alone (no adapter call), else None."""
+        state = tracked.state
+        confirmed_states = (
+            ProtectionState.PROTECTED_ENTRY_OPEN,
+            ProtectionState.PROTECTED,
+            ProtectionState.COMPLETE,
+            ProtectionState.TP_UNAVAILABLE,
+        )
+        # Stop history first: a guess about it must never lead to a placement.
+        if not tracked.stop_history_known:
+            return CODE_STOP_HISTORY_UNKNOWN
+        if tracked.stop_lost_at is not None and tracked.stop_confirmed_at is None:
+            return CODE_STOP_HISTORY_UNKNOWN
+        if (
+            state is ProtectionState.UNPROTECTED
+            and tracked.stop_confirmed_at is not None
+            and tracked.stop_lost_at is None
+        ):
+            return CODE_STOP_HISTORY_UNKNOWN
+        if state in confirmed_states and tracked.stop_confirmed_at is None:
+            return CODE_STOP_HISTORY_UNKNOWN
+        if state in (
+            None,
+            ProtectionState.AWAITING_FILL,
+            ProtectionState.ENTRY_UNRESOLVED,
+            ProtectionState.FLAT,
+            ProtectionState.ENTRY_ENDED_NO_FILL,
+        ):
+            return CODE_NOTHING_TO_PROTECT
+        if state is ProtectionState.UNPROTECTED and tracked.stop_lost_at is not None:
+            return CODE_REPLACEMENT_FORBIDDEN_STOP_LOST
+        if state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
+            if (
+                tracked.close_branch in (BRANCH_B4_FILL_AFTER_STOP, BRANCH_B4_STOP_LOST_UNRESOLVED)
+                or tracked.stop_lost_at is not None
+            ):
+                return CODE_REPLACEMENT_FORBIDDEN_STOP_LOST
+            return CODE_REPLACEMENT_FORBIDDEN_CLOSE_REQUIRED
+        return None
+
+    async def _operator_protect_position_refusal(self, tracked: _Tracked) -> str | None:
+        """One fresh position read: the refusal code when it is unreadable, zero or wrong-sided."""
+        amount = await self._position_amount(tracked)
+        if amount is None:
+            return CODE_POSITION_UNREADABLE
+        if amount == _ZERO:
+            return CODE_NO_EXPOSURE
+        if (amount > _ZERO) != (tracked.entry.side == "LONG"):
+            return CODE_WRONG_SIDE
+        return None
+
+    async def _operator_protect_step(
+        self, tracked: _Tracked, operator_id: str
+    ) -> OperatorControlResult:
+        """Run the coordinator's own per-plan step once (the caller holds the step lock)."""
+        state_before = _state_text(tracked.state)
+        try:
+            await self._step_plan(tracked, None)
+        finally:
+            self._journal_operator(
+                tracked,
+                EVENT_OPERATOR_PROTECT_STEPPED,
+                {
+                    "code": CODE_COORDINATOR_STEPPED,
+                    "operator_id": operator_id,
+                    "state_after": _state_text(tracked.state),
+                    "state_before": state_before,
+                },
+            )
+        return OperatorControlResult(True, CODE_COORDINATOR_STEPPED)
+
+    async def _operator_protect_stop_refusal(self, tracked: _Tracked) -> str | None:
+        """Read the stop (read-only): None when it reads ACTIVE, else the refusal code."""
+        answer = await self._guarded(
+            self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
+        )
+        answer = await self._cross_check_stop(tracked, answer)
+        reading = self._apply_stop_answer(tracked, answer)
+        if reading is _StopReading.ACTIVE:
+            return None
+        if reading is _StopReading.UNREADABLE:
+            return CODE_STOP_UNREADABLE
+        return CODE_REPLACEMENT_FORBIDDEN_STOP_LOST
+
+    def _journal_operator(
+        self, tracked: _Tracked, event_type: str, payload: dict[str, str]
+    ) -> None:
+        """Audit row of an operator control: journal first, the local spill when that fails.
+
+        Called after the action (D-16). Only when the journal AND the spill both fail is the
+        row lost, and then SAFE_MODE DB_FAILURE is entered once (fail closed).
+        """
+        entry = tracked.entry
+        now = self._now()
+        body = json.dumps(
+            {
+                **payload,
+                "plan_hash": entry.plan_hash,
+                "symbol": entry.symbol,
+                "trade_plan_id": entry.trade_plan_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        event = JournalEvent(
+            journal_event_id=content_hash_event_id(
+                prefix="pop",
+                event_type=event_type,
+                entity_id=entry.plan_hash,
+                occurred_at_utc=now,
+                payload_json=body,
+            ),
+            occurred_at_utc=now,
+            event_type=event_type,
+            entity_type="ProtectionState",
+            entity_id=entry.plan_hash,
+            correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+            payload_json=body,
+        )
+        try:
+            self._journal.record(event)
+            return
+        except Exception:  # noqa: BLE001 - the spill takes the row (D-16)
+            pass
+        if self._spill is not None:
+            try:
+                self._spill.write(event)
+                return
+            except Exception:  # noqa: BLE001 - both failed: fail closed below
+                pass
+        self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
 
     # ------------------------------------------------------------------ #
     # The router's fill sink: synchronous, non-blocking, infallible.
@@ -692,6 +1477,7 @@ class ProtectionCoordinator:
             owner = self._owner_of(fill)
             if owner is None:
                 self._journal_unknown_fill(fill)
+                self._orphan_fills.append((self._now(), fill))
                 continue
             if owner.state in (ProtectionState.AWAITING_FILL, ProtectionState.ENTRY_UNRESOLVED):
                 evidence.setdefault(owner.entry.plan_hash, fill)
@@ -718,6 +1504,8 @@ class ProtectionCoordinator:
     async def _step_plan(self, tracked: _Tracked, evidence: _QueuedFill | None) -> None:
         try:
             state = tracked.state
+            recheck = tracked.recheck_requested
+            tracked.recheck_requested = False
             if state is ProtectionState.AWAITING_FILL:
                 if evidence is not None:
                     await self._on_first_fill(tracked, REASON_FIRST_FILL_STREAM)
@@ -730,11 +1518,22 @@ class ProtectionCoordinator:
                 else:
                     await self._poll_unresolved_entry(tracked)
             elif state in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN):
-                await self._confirm(tracked)
+                if state is ProtectionState.PROTECTED_ENTRY_OPEN:
+                    if await self._check_liquidation_once(tracked):
+                        return
+                await self._confirm(tracked, recheck=recheck)
             elif state is ProtectionState.PROTECTED:
-                await self._attach_take_profits(tracked)
+                if await self._check_liquidation_once(tracked):
+                    return
+                if await self._supervise_stop(tracked):
+                    await self._attach_take_profits(tracked)
             elif state in (ProtectionState.COMPLETE, ProtectionState.TP_UNAVAILABLE):
-                await self._watch_exit(tracked)
+                # Still unchecked here only when the PROTECTED step could not read the position
+                # (or the plan was restored already past PROTECTED): the stop is confirmed.
+                if await self._check_liquidation_once(tracked):
+                    return
+                if await self._supervise_stop(tracked):
+                    await self._watch_exit(tracked)
             elif state in (ProtectionState.CLOSE_REQUIRED, ProtectionState.CLOSE_FAILED):
                 await self._close_flow(tracked)
             elif state is ProtectionState.FLAT and not tracked.sweep_done:
@@ -787,6 +1586,18 @@ class ProtectionCoordinator:
             await self._enter_close_required(tracked, BRANCH_B5_STOP_REJECTED)
         elif outcome is _PlaceOutcome.NO_POSITION:
             await self._on_no_position_on_stop(tracked)
+        elif outcome is _PlaceOutcome.DUPLICATE:
+            # Plan 20-27: "exists, awaiting REST confirmation". Never B5 (the exchange did not
+            # reject the stop, it already holds the id), never protection (only REST ACTIVE is).
+            # The next step's by-id query and listing confirm or deny it; nothing is resent
+            # until they have been read.
+            tracked.stop_exists_unconfirmed = True
+            self._journal_note(
+                tracked,
+                EVENT_STOP_EXISTS_AWAITING_REST,
+                {"category": ExchangeErrorCategory.DUPLICATE_CLIENT_ID.value},
+                self._now(),
+            )
 
     async def _on_no_position_on_stop(self, tracked: _Tracked) -> None:
         """-4509 on the stop: the exchange says there is no position; the position is read.
@@ -809,10 +1620,14 @@ class ProtectionCoordinator:
             )
             self._apply_entry_answer(tracked, answer)
             if tracked.entry_terminal_at is not None and await self._second_read_is_flat(tracked):
-                self._transition(
-                    tracked, ProtectionState.FLAT, REASON_NO_POSITION_ON_STOP, self._now()
-                )
-                await self._sweep(tracked)
+                if self._transition(
+                    tracked,
+                    ProtectionState.FLAT,
+                    REASON_NO_POSITION_ON_STOP,
+                    self._now(),
+                    evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+                ):
+                    await self._sweep(tracked)
 
     async def _poll_entry(self, tracked: _Tracked) -> None:
         """REST poll of an AWAITING_FILL entry: the fill source when no stream event arrived.
@@ -929,6 +1744,141 @@ class ProtectionCoordinator:
             self._now(),
         )
 
+    # ------------------------------------------------------------------ #
+    # Post-fill liquidation comparison (plan 22-13; D-12, amendment A10, owner item O-4).
+    # ------------------------------------------------------------------ #
+
+    async def _check_liquidation_once(self, tracked: _Tracked) -> bool:
+        """Once per plan: ask the watch about the exchange liquidation price of the position.
+
+        True only when the plan was moved to CLOSE_REQUIRED (the caller then ends the step). Runs
+        from PROTECTED_ENTRY_OPEN, PROTECTED, COMPLETE and TP_UNAVAILABLE only, so the stop is
+        already REST-confirmed (the last two are reached unchecked after an unreadable position
+        read in the PROTECTED step, which also attaches the take-profits, or after a restore). An
+        unreadable position read is journaled and the plan stays unchecked (the next step tries
+        again; it neither counts nor resets the flat counter). A flat read also leaves the plan
+        unchecked and counts: after ``LIQUIDATION_FLAT_READS_LIMIT`` consecutive flat reads the
+        plan is marked checked without a call and one ``EVENT_LIQUIDATION_SKIPPED_FLAT`` note is
+        journaled. A watch that raises, a position row
+        the input cannot be built from or a verdict of the wrong type is a CLOSE (fail closed),
+        unless the watch's policy is explicitly ``ALERT_ONLY`` (owner item O-4, WR-04): then it is
+        journaled and alerted as an unknown value, like the watch's own unknown verdict. The check
+        places and cancels nothing; the stop is never touched.
+        """
+        watch = self._liquidation_watch
+        if watch is None or tracked.liquidation_checked:
+            return False
+        entry = tracked.entry
+        answer = await self._guarded(self._adapter.snapshot_positions(symbol=entry.symbol))
+        if isinstance(answer, BaseException):
+            if not isinstance(answer, Exception):
+                raise answer
+            self._journal_note(
+                tracked,
+                EVENT_REST_FAILED,
+                {"call": "snapshot_positions", "error_type": type(answer).__name__},
+                self._now(),
+            )
+            return False
+        row = next(
+            (
+                candidate
+                for candidate in answer
+                if _attr(candidate, "symbol") == entry.symbol
+                and (
+                    not isinstance(_attr(candidate, "position_amt"), Decimal)
+                    or _attr(candidate, "position_amt") != _ZERO
+                )
+            ),
+            None,
+        )
+        if row is None:
+            # A flat row can precede the position (positionRisk lags the fill): the check stays
+            # pending and the next step reads again. After LIQUIDATION_FLAT_READS_LIMIT
+            # consecutive flat reads it is dropped with one note and no watch call.
+            tracked.liquidation_flat_reads += 1
+            if tracked.liquidation_flat_reads >= LIQUIDATION_FLAT_READS_LIMIT:
+                tracked.liquidation_checked = True
+                self._journal_note(
+                    tracked,
+                    EVENT_LIQUIDATION_SKIPPED_FLAT,
+                    {"flat_reads": str(tracked.liquidation_flat_reads)},
+                    self._now(),
+                )
+            return False
+        tracked.liquidation_checked = True
+        verdict: LiquidationWatchVerdict | None = None
+        try:
+            amount = _attr(row, "position_amt")
+            if not isinstance(amount, Decimal):
+                raise TypeError("position_amt")
+            verdict = await watch.check(
+                LiquidationWatchInput(
+                    symbol=entry.symbol,
+                    side=entry.side,
+                    stop_price=entry.sl_trigger_price,
+                    leverage=entry.plan_constraint_snapshot.leverage,
+                    quantity=abs(amount),
+                    entry_price=_attr(row, "entry_price"),
+                    exchange_liquidation_price=_attr(row, "liquidation_price"),
+                )
+            )
+            if not isinstance(verdict, LiquidationWatchVerdict):
+                raise TypeError("verdict")
+        except Exception as exc:  # noqa: BLE001 - an unjudgeable position is closed (fail closed)
+            now = self._now()
+            self._journal_note(
+                tracked, EVENT_LIQUIDATION_CHECK_ERROR, {"error_type": type(exc).__name__}, now
+            )
+            # WR-04: the owner's policy (O-4) governs the error paths as it governs an unknown
+            # exchange value. Only an EXPLICIT ALERT_ONLY alerts instead of closing; a watch that
+            # exposes no readable policy keeps the fail-closed close.
+            if getattr(watch, "policy", None) is LiquidationFailurePolicy.ALERT_ONLY:
+                self._liquidation_alert(tracked, LIQUIDATION_UNKNOWN_AFTER_FILL, now)
+                return False
+            await self._enter_close_required(tracked, BRANCH_B6_LIQUIDATION_TOO_CLOSE)
+            return True
+        now = self._now()
+        payload = {
+            "action": verdict.action.value,
+            "reason": verdict.reason,
+            "exchange_price": _price_text(verdict.exchange_price),
+            "local_price": _price_text(verdict.local_price),
+        }
+        if verdict.action is LiquidationWatchAction.CLOSE:
+            self._journal_note(tracked, EVENT_LIQUIDATION_CHECKED, payload, now)
+            await self._enter_close_required(tracked, BRANCH_B6_LIQUIDATION_TOO_CLOSE)
+            return True
+        if verdict.action is LiquidationWatchAction.OK:
+            self._journal_note(tracked, EVENT_LIQUIDATION_CHECKED, payload, now)
+        elif verdict.action is LiquidationWatchAction.OK_DIFFERS:
+            # WR-05: calibration data only. The exchange value passed the strict predicate and
+            # decided; the local price omits funding and the exit fee, so a difference at the
+            # exchange's own places is the normal case (the recorded Demo position differs) and a
+            # critical DIVERGENCE alert on it would train the operator to ignore the event type
+            # that also carries real reconciliation divergences. An alert needs a tolerance the
+            # owner sets (no such number exists); until then the journal row is the record.
+            self._journal_note(tracked, EVENT_LIQUIDATION_PRICE_DIFFERS, payload, now)
+        else:
+            self._journal_note(tracked, EVENT_LIQUIDATION_FAILED_ALERT_ONLY, payload, now)
+            known = (LIQUIDATION_TOO_CLOSE_AFTER_FILL, LIQUIDATION_UNKNOWN_AFTER_FILL)
+            reason = verdict.reason if verdict.reason in known else LIQUIDATION_TOO_CLOSE_AFTER_FILL
+            self._liquidation_alert(tracked, reason, now)
+        return False
+
+    def _liquidation_alert(self, tracked: _Tracked, reason: str, now: datetime) -> None:
+        """One HIGH DIVERGENCE alert; the reason is a fixed code and never carries an amount."""
+        try:
+            self._alerts.critical(
+                event=ALERT_LIQUIDATION_DIVERGENCE,
+                plan_hash=tracked.entry.plan_hash,
+                symbol=tracked.entry.symbol,
+                reason=reason,
+                now_utc=now,
+            )
+        except Exception:  # noqa: BLE001, S110 - the journal row already exists
+            pass
+
     async def _position_is_open(self, tracked: _Tracked) -> bool | None:
         """True when REST shows a non-zero position of the symbol; None when it cannot be read."""
         answer = await self._guarded(self._adapter.snapshot_positions(symbol=tracked.entry.symbol))
@@ -992,6 +1942,10 @@ class ProtectionCoordinator:
         through its message text.
         """
         entry = tracked.entry
+        if tracked.state in _NO_NEW_STOP_STATES:
+            # Plan 20-14 (D-19): a queued stop is never sent once policy requires a close (its
+            # pending row is SUPERSEDED) or the plan is flat.
+            return _PlaceOutcome.SKIPPED
         stop_id = self._stop_client_id(tracked)
         try:
             if probe_first:
@@ -1037,6 +1991,7 @@ class ProtectionCoordinator:
                 {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
                 self._now(),
             )
+            self._record_blocked(tracked, PendingKind.STOP_NOT_SENT, exc)
             return _PlaceOutcome.NOT_SENT
         except Exception as exc:  # noqa: BLE001 - classified below; ambiguity is probed by REST
             category = self._classify_placement(exc)
@@ -1053,8 +2008,86 @@ class ProtectionCoordinator:
                 return _PlaceOutcome.REJECTED
             if category is ExchangeErrorCategory.PRECONDITION_NO_POSITION:
                 return _PlaceOutcome.NO_POSITION
+            if category is ExchangeErrorCategory.DUPLICATE_CLIENT_ID:
+                # -4116 (Demo 2026-10-22): the id exists. Not a rejection, not protection.
+                return _PlaceOutcome.DUPLICATE
             return _PlaceOutcome.AMBIGUOUS
         return _PlaceOutcome.PLACED
+
+    def _record_blocked(self, tracked: _Tracked, kind: PendingKind, exc: BaseException) -> None:
+        """Plan 20-14 (D-19): keep the intent of a gate-refused action as a durable PENDING row.
+
+        The intent goes to the local spill first (when one is attached), then to the pending
+        store. This records the refusal only: it never asks the gate for an exemption (D-18)
+        and never stores a price, quantity or side. A store failure enters SAFE_MODE DB_FAILURE
+        once and the step carries on (D-16); the spill record stays.
+        """
+        if not self._pending_recorder.active:
+            return
+        entry = tracked.entry
+        now = self._now()
+        recorded = self._pending_recorder.record(
+            plan_hash=entry.plan_hash,
+            trade_plan_id=entry.trade_plan_id,
+            approval_id=entry.approval_id,
+            symbol=entry.symbol,
+            kind=kind,
+            gate_reason=gate_reason_text(_refusal_reason(exc)),
+            retry_after_until_utc=retry_after_until(now, getattr(exc, "retry_after_seconds", None)),
+            now_utc=now,
+        )
+        if not recorded:
+            self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
+
+    def _close_pending(
+        self, plan_hash: str, kind: PendingKind, note: str, *, supersede: bool = False
+    ) -> None:
+        """Close the open pending row of ``(plan_hash, kind)``: RESOLVED, or SUPERSEDED.
+
+        RESOLVED means the action got through or became moot because the exchange state
+        settled; SUPERSEDED means policy requires a close, so the queued action is never sent.
+        Nothing is sent from here and the row is never the input of a send: the step decides
+        from the current exchange state. A store failure enters SAFE_MODE DB_FAILURE once and
+        the step carries on (D-16).
+        """
+        store = self._pending
+        if store is None:
+            return
+        now = self._now()
+        try:
+            if supersede:
+                store.supersede(plan_hash=plan_hash, kind=kind, note=note, now_utc=now)
+            else:
+                store.resolve(plan_hash=plan_hash, kind=kind, note=note, now_utc=now)
+        except Exception:  # noqa: BLE001 - a store failure never blocks the protective flow
+            self._enter_safe_mode_once(SAFE_MODE_DB_FAILURE, now)
+            return
+        self._pending_recorder.forget(plan_hash, kind)
+
+    def _close_pending_for_transition(self, tracked: _Tracked, new_state: ProtectionState) -> None:
+        """Plan 20-14 (D-19): what a state change does to the plan's open pending rows.
+
+        CLOSE_REQUIRED and CLOSE_FAILED supersede a pending STOP (policy requires a close, so
+        a queued stop is never sent). FLAT ends everything for the plan: the stop is
+        superseded, the entry-cancel and close rows are moot and resolved.
+        """
+        plan_hash = tracked.entry.plan_hash
+        if new_state is ProtectionState.CLOSE_REQUIRED:
+            self._close_pending(
+                plan_hash, PendingKind.STOP_NOT_SENT, NOTE_CLOSE_REQUIRED_BY_POLICY, supersede=True
+            )
+        elif new_state is ProtectionState.CLOSE_FAILED:
+            self._close_pending(
+                plan_hash, PendingKind.STOP_NOT_SENT, NOTE_CLOSE_FAILED_BY_POLICY, supersede=True
+            )
+        elif new_state is ProtectionState.FLAT:
+            self._close_pending(
+                plan_hash, PendingKind.STOP_NOT_SENT, NOTE_PLAN_FLAT, supersede=True
+            )
+            self._close_pending(
+                plan_hash, PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT, NOTE_PLAN_FLAT
+            )
+            self._close_pending(plan_hash, PendingKind.CLOSE_NOT_SENT, NOTE_PLAN_FLAT)
 
     def _classify_placement(self, exc: Exception) -> ExchangeErrorCategory | None:
         """The taxonomy category of a placement failure (D-21), from class and code facts only."""
@@ -1076,6 +2109,7 @@ class ProtectionCoordinator:
                 {"error_type": type(exc).__name__, "reason": _refusal_reason(exc)},
                 self._now(),
             )
+            self._record_blocked(tracked, PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT, exc)
         except Exception as exc:  # noqa: BLE001 - the REST step reads the entry status
             self._journal_note(
                 tracked,
@@ -1083,25 +2117,40 @@ class ProtectionCoordinator:
                 {"error_type": type(exc).__name__},
                 self._now(),
             )
+        else:
+            # The gate let the cancel through: a pending refusal of it is moot. Whether the
+            # entry is really terminal is still read by the step (a cancel is not a proof).
+            self._close_pending(
+                entry.plan_hash,
+                PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT,
+                NOTE_ENTRY_CANCEL_ACCEPTED,
+            )
 
     # ------------------------------------------------------------------ #
     # REST confirmation (D-11): the stop is protection only when REST answers ACTIVE.
     # ------------------------------------------------------------------ #
 
-    async def _confirm(self, tracked: _Tracked) -> None:
+    async def _confirm(self, tracked: _Tracked, *, recheck: bool = False) -> None:
         """One supervision step of UNPROTECTED / PROTECTED_ENTRY_OPEN (REST is the truth).
 
         Reads the stop (until it is confirmed, and while the entry is open afterwards, so a stop
         that stopped being ACTIVE is seen: B4) and the entry (until terminal) by deterministic id,
         re-issues the entry cancel while the entry is not terminal, re-places a stop that REST
         proved absent before it was ever confirmed, and then applies the two separate deadlines
-        of D-13.
+        of D-13. A by-id answer of found=False for a stop REST never showed by id is checked
+        against the symbol's open-algo-orders listing in the same step (``_cross_check_stop``,
+        plan 20-27): listed means the stop's own status decides, unreadable means no re-place.
 
         19-REVIEW WR-04 (owner, D077): a stop that was confirmed and then lost (``stop_lost_at``)
         is never read, re-placed or trusted again. Every step decides by the position
         (``_on_stop_lost``), and the one unprotected-deadline branch that covers a stop that was
         never confirmed covers it too, measured from ``stop_lost_at``. Such a plan never settles
         back to PROTECTED_ENTRY_OPEN or PROTECTED.
+
+        ``recheck`` (plan 20-09, ``notify_divergence``) adds one fresh position read to a plan
+        whose stop is still trusted; the stop read of this step already happens. It decides
+        nothing itself: the paths below stay the one decision path, and a failed read is
+        journaled by the read helper.
         """
         entry = tracked.entry
         already_lost = tracked.stop_lost_at is not None
@@ -1132,13 +2181,18 @@ class ProtectionCoordinator:
                 )
             )
         was_confirmed = tracked.stop_confirmed_at is not None
-        reading = self._apply_stop_answer(tracked, stop_result) if need_stop else None
+        reading: _StopReading | None = None
+        if need_stop:
+            stop_result = await self._cross_check_stop(tracked, stop_result)
+            reading = self._apply_stop_answer(tracked, stop_result)
         if need_entry:
             self._apply_entry_answer(tracked, entry_result)
         if tracked.entry_terminal_at is None:
             # The entry remainder is cancelled again on every step until REST says it is
             # terminal (a failed or ambiguous cancel is never taken as done).
             await self._cancel_entry_remainder(tracked)
+        if recheck and not already_lost:
+            await self._position_is_open(tracked)
 
         # The stop is lost when it was seen lost before, or when a stop confirmed on an earlier
         # step reads ABSENT or NOT_ACTIVE now (triggered, consumed or cancelled).
@@ -1155,8 +2209,11 @@ class ProtectionCoordinator:
                 await self._enter_close_required(tracked, BRANCH_B1_ENTRY_NOT_TERMINAL)
                 return
         elif reading is _StopReading.ABSENT:
-            # A stop never confirmed and absent by id: the same id may be placed again, never
-            # blindly. A lost stop never reaches this branch.
+            # A stop never confirmed and absent by id AND absent from the open-algo-orders
+            # listing (plan 20-27: both were read in this step): the same id may be placed
+            # again, never blindly. Both reads denying the id also ends an earlier "exists,
+            # awaiting REST" (-4116). A lost stop never reaches this branch.
+            tracked.stop_exists_unconfirmed = False
             outcome = await self._place_stop(tracked, probe_first=False)
             await self._on_place_outcome(tracked, outcome)
             if tracked.state is not ProtectionState.UNPROTECTED:
@@ -1230,11 +2287,53 @@ class ProtectionCoordinator:
             and tracked.entry_terminal_at is not None
             and await self._second_read_is_flat(tracked)
         ):
-            self._transition(tracked, ProtectionState.FLAT, REASON_STOP_CONSUMED_FLAT, self._now())
-            await self._sweep(tracked)
+            # Plan 20-09: from a supervised state (PROTECTED / COMPLETE / TP_UNAVAILABLE) the stop
+            # leaving the book beside a flat position is the position being closed (the stop or a
+            # take profit fired, or the exchange auto-cancelled the legs, A3), not a lost stop.
+            flat_reason = (
+                REASON_STOP_CONSUMED_FLAT
+                if tracked.state
+                in (ProtectionState.UNPROTECTED, ProtectionState.PROTECTED_ENTRY_OPEN)
+                else REASON_POSITION_CLOSED
+            )
+            if self._transition(
+                tracked,
+                ProtectionState.FLAT,
+                flat_reason,
+                self._now(),
+                evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+            ):
+                await self._sweep(tracked)
             return
         if tracked.state is not ProtectionState.UNPROTECTED:
-            self._transition(tracked, ProtectionState.UNPROTECTED, REASON_STOP_LOST, self._now())
+            reason = (
+                REASON_STOP_LOST
+                if tracked.state is ProtectionState.PROTECTED_ENTRY_OPEN
+                else REASON_STOP_LOST_AFTER_PROTECTED
+            )
+            self._transition(tracked, ProtectionState.UNPROTECTED, reason, self._now())
+
+    async def _supervise_stop(self, tracked: _Tracked) -> bool:
+        """Plan 20-09 (D-07): read the stop of a PROTECTED / COMPLETE / TP_UNAVAILABLE plan.
+
+        One REST query by the deterministic STOP_LOSS id on every step. True means the stop
+        reads ACTIVE and the caller carries on with the work of its state. False means the caller
+        does nothing more this step: either the stop is lost (it was confirmed earlier in these
+        states, so ABSENT or NOT_ACTIVE is a loss, and ``_on_stop_lost`` has decided by the
+        position, D077: CLOSE_REQUIRED on exposure, FLAT on two zero reads with the entry
+        terminal, UNPROTECTED with ``stop_lost_at`` set once when the position cannot be read), or
+        the answer is unreadable (the failure is journaled with its type name only, the state is
+        kept and the next step reads again). A lost stop is never re-placed here.
+        """
+        answer = await self._guarded(
+            self._adapter.query_algo_order_by_client(client_algo_id=self._stop_client_id(tracked))
+        )
+        answer = await self._cross_check_stop(tracked, answer)
+        reading = self._apply_stop_answer(tracked, answer)
+        if reading in (_StopReading.ABSENT, _StopReading.NOT_ACTIVE):
+            await self._on_stop_lost(tracked)
+            return False
+        return reading is _StopReading.ACTIVE
 
     @staticmethod
     async def _guarded(awaitable: Any) -> Any:
@@ -1243,16 +2342,64 @@ class ProtectionCoordinator:
         except Exception as exc:  # noqa: BLE001 - returned so the caller journals it
             return exc
 
+    async def _cross_check_stop(self, tracked: _Tracked, answer: Any) -> Any:
+        """Plan 20-27: read the open-algo-orders listing when a by-id query answered found=False.
+
+        Binance Demo (2026-10-22, evidence demo-probe-EVIDENCE-20261022T120055Z.json) answered
+        -2013 to a query of an algo order by client id right after placement although the stop was
+        NEW, and the open-algo-orders listing showed it. So found=False by id is not proof of
+        absence for a stop that REST never showed by id. In the same step the listing of the
+        symbol is read, and the answer is turned into what a by-id answer would have been:
+
+        * the stop's client algo id is listed: found=True with the listed status, so a status of
+          class ACTIVE is a REST confirmation exactly like a found=True ACTIVE answer;
+        * the listing was read and does not contain the id: the by-id answer stands (found=False,
+          ABSENT);
+        * the listing could not be read (a failed call, or an answer that is not a list): a
+          failure, which the stop reading turns into UNREADABLE and never into a re-place.
+
+        Not applied (the answer is returned as it is) to an exception, to an answer that is not
+        found=False, and, so that D077 stays crisp, to a stop that was confirmed and that a by-id
+        query has itself shown at least once. The user-data stream is not read (D079).
+        """
+        if isinstance(answer, BaseException):
+            return answer
+        found = _attr(answer, "found")
+        if found is True:
+            tracked.stop_by_id_seen = True
+            return answer
+        if found is not False:
+            return answer
+        if tracked.stop_confirmed_at is not None and tracked.stop_by_id_seen:
+            return answer
+        try:
+            listing = await self._adapter.snapshot_open_algo_orders(symbol=tracked.entry.symbol)
+        except Exception as exc:  # noqa: BLE001 - an unreadable listing proves nothing
+            return _ListingFailure(type(exc).__name__)
+        if not isinstance(listing, (list, tuple)):
+            return _ListingFailure("InvalidListing")
+        stop_id = self._stop_client_id(tracked)
+        for row in listing:
+            if _attr(row, "client_algo_id") == stop_id:
+                return _ListedStop(
+                    found=True, algo_status=_optional_text(_attr(row, "algo_status"))
+                )
+        return answer
+
     def _apply_stop_answer(self, tracked: _Tracked, answer: Any) -> _StopReading:
         entry = tracked.entry
         role = OrderRole.STOP_LOSS.value
         if isinstance(answer, BaseException):
             if not isinstance(answer, Exception):
                 raise answer
+            if isinstance(answer, _ListingFailure):
+                call, error_type = "snapshot_open_algo_orders", answer.error_type
+            else:
+                call, error_type = "query_algo_order_by_client", type(answer).__name__
             self._journal_note(
                 tracked,
                 EVENT_REST_FAILED,
-                {"call": "query_algo_order_by_client", "error_type": type(answer).__name__},
+                {"call": call, "error_type": error_type},
                 self._now(),
             )
             return _StopReading.UNREADABLE
@@ -1261,6 +2408,8 @@ class ProtectionCoordinator:
             return _StopReading.ABSENT
         if found is not True:
             return _StopReading.UNREADABLE
+        # REST knows the id (by id or in the listing): an earlier "exists, awaiting REST" is over.
+        tracked.stop_exists_unconfirmed = False
         status = _optional_text(_attr(answer, "algo_status"))
         if is_protection_confirmed(status):
             if tracked.stop_confirmed_at is not None:
@@ -1275,6 +2424,10 @@ class ProtectionCoordinator:
                     exchange_status=status,
                     now_utc=self._now(),
                 )
+            )
+            # REST read the stop ACTIVE by its deterministic id: a pending refusal is moot.
+            self._close_pending(
+                entry.plan_hash, PendingKind.STOP_NOT_SENT, NOTE_STOP_CONFIRMED_ACTIVE
             )
             return _StopReading.ACTIVE
         if tracked.stop_confirmed_at is None and not tracked.stop_unknown_recorded:
@@ -1309,7 +2462,15 @@ class ProtectionCoordinator:
             tracked.entry_exchange_order_id = order_id
         status = _optional_text(_attr(answer, "status"))
         if status in TERMINAL_ENTRY_STATUSES:
+            newly_terminal = tracked.entry_terminal_at is None
             tracked.entry_terminal_at = self._now()
+            if newly_terminal:
+                # Nothing is left to cancel: a pending refusal of the cancel is moot.
+                self._close_pending(
+                    tracked.entry.plan_hash,
+                    PendingKind.PROTECTION_ENTRY_CANCEL_NOT_SENT,
+                    NOTE_ENTRY_TERMINAL,
+                )
 
     def _settle_state(self, tracked: _Tracked) -> None:
         """Move UNPROTECTED / PROTECTED_ENTRY_OPEN to the state the confirmed facts support.
@@ -1328,13 +2489,20 @@ class ProtectionCoordinator:
                 if tracked.state is ProtectionState.PROTECTED_ENTRY_OPEN
                 else REASON_STOP_CONFIRMED_ENTRY_TERMINAL
             )
-            self._transition(tracked, ProtectionState.PROTECTED, reason, now)
+            self._transition(
+                tracked,
+                ProtectionState.PROTECTED,
+                reason,
+                now,
+                evidence=EVIDENCE_REST_STOP_CONFIRMED,
+            )
         elif stop_confirmed and tracked.state is ProtectionState.UNPROTECTED:
             self._transition(
                 tracked,
                 ProtectionState.PROTECTED_ENTRY_OPEN,
                 REASON_STOP_CONFIRMED_ENTRY_OPEN,
                 now,
+                evidence=EVIDENCE_REST_STOP_CONFIRMED,
             )
 
     # ------------------------------------------------------------------ #
@@ -1414,8 +2582,14 @@ class ProtectionCoordinator:
         if amount == _ZERO:
             # T-8-30 (19-REVIEW CR-03): one zero read never sweeps the confirmed stop.
             if await self._second_read_is_flat(tracked):
-                self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
-                await self._sweep(tracked)
+                if self._transition(
+                    tracked,
+                    ProtectionState.FLAT,
+                    REASON_POSITION_CLOSED,
+                    self._now(),
+                    evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+                ):
+                    await self._sweep(tracked)
             return
         if (amount > _ZERO) != (entry.side == "LONG"):
             await self._enter_tp_unavailable(
@@ -1474,6 +2648,10 @@ class ProtectionCoordinator:
         completion, and ``blocks_new_entries()`` stays False (SAFE_MODE blocks entries through
         its own gate). SAFE_MODE with ENTRY_WITHOUT_PROTECTIVE, the journal note and the
         critical alert are all attempted; one failing never skips the others.
+
+        The alert reason is the reason code, not the free detail: the alert sanitiser replaces
+        free text with INVALID_REASON (``src/ops/alerts.py``). The detail stays in the
+        PROTECTION_TP_UNAVAILABLE note together with the code (quick 261115-nnt, D113).
         """
         entry = tracked.entry
         now = self._now()
@@ -1496,7 +2674,7 @@ class ProtectionCoordinator:
                 event=ALERT_TP_UNAVAILABLE,
                 plan_hash=entry.plan_hash,
                 symbol=entry.symbol,
-                reason=detail,
+                reason=reason_code,
                 now_utc=now,
             )
         except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist
@@ -1515,15 +2693,25 @@ class ProtectionCoordinator:
             return
         if not await self._second_read_is_flat(tracked):
             return
-        self._transition(tracked, ProtectionState.FLAT, REASON_POSITION_CLOSED, self._now())
-        await self._sweep(tracked)
+        if self._transition(
+            tracked,
+            ProtectionState.FLAT,
+            REASON_POSITION_CLOSED,
+            self._now(),
+            evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+        ):
+            await self._sweep(tracked)
 
     # ------------------------------------------------------------------ #
     # CLOSE_REQUIRED, the emergency close, FLAT and the orphan sweep (D-12, D034).
     # ------------------------------------------------------------------ #
 
     async def _enter_close_required(self, tracked: _Tracked, branch: str) -> None:
-        """Once per plan: SAFE_MODE, critical alert, journaled reason, then the emergency close.
+        """Once per plan: the emergency close first, then journaled reason, SAFE_MODE, alert.
+
+        Plan 20 review WR-C8: the in-memory state flips before the close, the audit side effects
+        (journal row, SAFE_MODE, critical alerts) follow it, so a slow or failing journal never
+        holds up the reduce-only close.
 
         The stop is never cancelled here (a stop that is still open is kept until the position is
         flat) and never resent. The entry remainder cancel is issued by the caller's step (the
@@ -1532,19 +2720,50 @@ class ProtectionCoordinator:
         entry = tracked.entry
         now = self._now()
         tracked.close_branch = branch
-        self._transition(tracked, ProtectionState.CLOSE_REQUIRED, branch, now)
-        if branch == BRANCH_B1_ENTRY_NOT_TERMINAL:
-            # Accepted knowingly (owner note): a position with a good stop is closed because an
-            # entry cancel was slow; the reason is journaled.
-            self._journal_note(
-                tracked,
-                EVENT_CLOSE_REQUIRED,
-                {"accepted_knowingly": "STOP_KEPT_ENTRY_CANCEL_SLOW", "branch": branch},
-                now,
-            )
+        # WR-C8 (D-16): the close must not wait for the journal, SAFE_MODE or the alert sink. The
+        # plan state flips in memory first (``blocks_new_entries()`` is True from here on, so new
+        # entries fail closed); the rows it would journal are parked and written after the close.
+        # This stretch has no await, so no other coroutine can park its rows into the list.
+        parked: list[tuple[JournalEvent, datetime]] = []
+        self._deferred_journal = parked
+        try:
+            self._transition(tracked, ProtectionState.CLOSE_REQUIRED, branch, now)
+            if branch == BRANCH_B1_ENTRY_NOT_TERMINAL:
+                # Accepted knowingly (owner note): a position with a good stop is closed because
+                # an entry cancel was slow; the reason is journaled.
+                self._journal_note(
+                    tracked,
+                    EVENT_CLOSE_REQUIRED,
+                    {"accepted_knowingly": "STOP_KEPT_ENTRY_CANCEL_SLOW", "branch": branch},
+                    now,
+                )
+        finally:
+            self._deferred_journal = None
+        # The rows and effects are written the moment the closer has answered (or raised), before
+        # the close-failure transition of ``_attempt_close``, so the journal keeps its order.
+        await self._attempt_close(
+            tracked,
+            branch,
+            after_close=lambda: self._record_close_required(entry, branch, parked, now),
+        )
+
+    def _record_close_required(
+        self,
+        entry: RestingEntry,
+        branch: str,
+        parked: list[tuple[JournalEvent, datetime]],
+        now: datetime,
+    ) -> None:
+        """After the close attempt: the parked journal rows, SAFE_MODE and the critical alerts.
+
+        Runs whether the close succeeded, failed or raised. Each step is attempted on its own: one
+        failing never skips the others, and none of them can undo or delay the close (WR-C8).
+        """
+        for event, parked_at in parked:
+            self._record_journal(event, parked_at)
         try:
             self._safe_mode.enter_safe_mode(reason=SAFE_MODE_CLOSE_REQUIRED, now_utc=now)
-        except Exception:  # noqa: BLE001, S110 - the alert and the close still go out
+        except Exception:  # noqa: BLE001, S110 - the alert still goes out
             pass
         try:
             self._alerts.critical(
@@ -1556,17 +2775,49 @@ class ProtectionCoordinator:
             )
         except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist
             pass
-        await self._attempt_close(tracked, branch)
+        if branch == BRANCH_B5_STOP_REJECTED:
+            try:
+                self._alerts.critical(
+                    event=ALERT_PROTECTIVE_REJECTED,
+                    plan_hash=entry.plan_hash,
+                    symbol=entry.symbol,
+                    reason=branch,
+                    now_utc=now,
+                )
+            except Exception:  # noqa: BLE001, S110 - the close already ran
+                pass
 
-    async def _attempt_close(self, tracked: _Tracked, reason: str) -> bool:
-        """One emergency close attempt; True only when REST shows the position flat."""
+    async def _attempt_close(
+        self, tracked: _Tracked, reason: str, *, after_close: Callable[[], None] | None = None
+    ) -> bool:
+        """One emergency close attempt; True only when REST shows the position flat.
+
+        ``after_close`` (WR-C8) runs exactly once, as soon as the closer has answered or raised
+        and before any journal row of this attempt: the audit side effects that must not delay
+        the close. It must not raise.
+        """
+        pending_hook = after_close
+
+        def settle() -> None:
+            nonlocal pending_hook
+            if pending_hook is not None:
+                hook, pending_hook = pending_hook, None
+                hook()
+
         try:
-            closed = await self._closer.close_position(entry=tracked.entry, reason=reason)
-        except Exception as exc:  # noqa: BLE001 - a failed close attempt never declares safety
-            self._journal_note(
-                tracked, EVENT_CLOSE_ATTEMPT_ERROR, {"error_type": type(exc).__name__}, self._now()
-            )
-            closed = False
+            try:
+                closed = await self._closer.close_position(entry=tracked.entry, reason=reason)
+            except Exception as exc:  # noqa: BLE001 - a failed close attempt never declares safety
+                settle()
+                self._journal_note(
+                    tracked,
+                    EVENT_CLOSE_ATTEMPT_ERROR,
+                    {"error_type": type(exc).__name__},
+                    self._now(),
+                )
+                closed = False
+        finally:
+            settle()
         if closed:
             return True
         if tracked.state is not ProtectionState.CLOSE_FAILED:
@@ -1605,10 +2856,16 @@ class ProtectionCoordinator:
         if not closed:
             return
         if entry_terminal:
-            self._transition(
-                tracked, ProtectionState.FLAT, REASON_CLOSED_ENTRY_TERMINAL, self._now()
-            )
-            await self._sweep(tracked)
+            # The closer answers True only on two consecutive zero reads (T-8-30); the entry was
+            # read terminal before the close.
+            if self._transition(
+                tracked,
+                ProtectionState.FLAT,
+                REASON_CLOSED_ENTRY_TERMINAL,
+                self._now(),
+                evidence=EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL,
+            ):
+                await self._sweep(tracked)
         elif tracked.state is ProtectionState.CLOSE_FAILED:
             # Flat now, but the entry is still open and may fill again: keep watching.
             self._transition(
@@ -1616,25 +2873,116 @@ class ProtectionCoordinator:
             )
 
     async def _sweep(self, tracked: _Tracked) -> None:
-        """Cancel the plan's protective legs by deterministic id once the position is flat."""
+        """Cancel the plan's protective legs by deterministic id once the position is flat.
+
+        Plan 20-17 (20-11 follow-up): the sweep is done only when every leg verified in
+        ``PROVEN_GONE`` (CANCELED or GONE_NOT_CANCELED). A leg that verified STILL_OPEN or UNKNOWN,
+        or a result that is not a verdict map, keeps ``sweep_done`` False: one
+        ``PROTECTION_SWEEP_UNVERIFIED`` row names the verdict of each leg (names only) and the next
+        step sweeps again. The cancel is by deterministic id, so the retry is idempotent.
+        """
         # Imported here: ``manager`` imports ``live_context``, which imports this module.
         from src.execution.manager import cancel_untriggered_protectives
 
         entry = tracked.entry
         try:
-            await cancel_untriggered_protectives(
+            verdicts = await cancel_untriggered_protectives(
                 plan_hash=entry.plan_hash,
                 symbol=entry.symbol,
                 adapter=self._adapter,  # type: ignore[arg-type]
                 journal=self._journal,
                 now_utc=self._now(),
+                # WR-A4 (D-16, F-702): with the journal down the audit rows of the cancels fall
+                # back to the coordinator's spill, so they are not lost and the sweep can finish.
+                # The composition passes a ``LocalSpill`` (the ``IntentSpill`` view has ``write``).
+                spill=self._spill,  # type: ignore[arg-type]
             )
         except Exception as exc:  # noqa: BLE001 - retried by the next step; the legs are journaled
             self._journal_note(
                 tracked, EVENT_SWEEP_FAILED, {"error_type": type(exc).__name__}, self._now()
             )
             return
-        tracked.sweep_done = True
+        legs = await self._legs_gone_from_open_list(tracked, self._sweep_leg_verdicts(verdicts))
+        if all(CancelVerdict(name) in PROVEN_GONE for name in legs.values()):
+            tracked.sweep_done = True
+            return
+        self._journal_sweep_unverified(tracked, legs)
+
+    async def _legs_gone_from_open_list(
+        self, tracked: _Tracked, legs: dict[str, str]
+    ) -> dict[str, str]:
+        """A STILL_OPEN leg that a fresh open-algo list no longer shows is gone (plan 24-34, D-34).
+
+        Demo criterion 5: for about a second after an algo cancel the by-id query still answers NEW
+        while the open-algo list already omits the order, so the by-id verdict alone read a
+        successful cancel as STILL_OPEN and the next step cancelled the leg again. Only a leg
+        verified STILL_OPEN is re-checked, with one list read for the plan. A list that cannot be
+        read, is not a list, or still holds the leg's id changes nothing (the leg stays
+        STILL_OPEN, fail closed). The corrected verdict is GONE_NOT_CANCELED: it no longer rests,
+        and nothing proves the cancel did it.
+        """
+        still_open = [
+            role for role, name in legs.items() if CancelVerdict(name) is CancelVerdict.STILL_OPEN
+        ]
+        if not still_open:
+            return legs
+        try:
+            listing = await self._adapter.snapshot_open_algo_orders(symbol=tracked.entry.symbol)
+        except Exception:  # noqa: BLE001 - an unreadable list proves nothing
+            return legs
+        if not isinstance(listing, (list, tuple)):
+            return legs
+        resting = {_attr(row, "client_algo_id") for row in listing}
+        checked = dict(legs)
+        for role in still_open:
+            leg_id = derive_algo_client_id(plan_hash=tracked.entry.plan_hash, role=role)
+            if leg_id not in resting:
+                checked[role] = CancelVerdict.GONE_NOT_CANCELED.value
+        return checked
+
+    @staticmethod
+    def _sweep_leg_verdicts(verdicts: object) -> dict[str, str]:
+        """The verdict name of each protective leg; anything unreadable counts as UNKNOWN."""
+        found = verdicts if isinstance(verdicts, dict) else {}
+        legs: dict[str, str] = {}
+        for role in (
+            OrderRole.STOP_LOSS.value,
+            OrderRole.TAKE_PROFIT_1.value,
+            OrderRole.TAKE_PROFIT_2.value,
+        ):
+            verdict = found.get(role)
+            legs[role] = (
+                verdict.value if isinstance(verdict, CancelVerdict) else CancelVerdict.UNKNOWN.value
+            )
+        return legs
+
+    def _journal_sweep_unverified(self, tracked: _Tracked, legs: dict[str, str]) -> None:
+        """One note naming each leg's verdict. The payload carries the legs as a nested map."""
+        entry = tracked.entry
+        now = self._now()
+        body = json.dumps(
+            {"legs": legs, "symbol": entry.symbol, "trade_plan_id": entry.trade_plan_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._record_journal(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix="pnt",
+                    event_type=EVENT_SWEEP_UNVERIFIED,
+                    entity_id=entry.plan_hash,
+                    occurred_at_utc=now,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now,
+                event_type=EVENT_SWEEP_UNVERIFIED,
+                entity_type="ProtectionState",
+                entity_id=entry.plan_hash,
+                correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+                payload_json=body,
+            ),
+            now,
+        )
 
     # ------------------------------------------------------------------ #
     # Transitions, journal, store and SAFE_MODE helpers.
@@ -1646,16 +2994,53 @@ class ProtectionCoordinator:
         return now
 
     def _transition(
-        self, tracked: _Tracked, new_state: ProtectionState, reason: str, now: datetime
-    ) -> None:
+        self,
+        tracked: _Tracked,
+        new_state: ProtectionState,
+        reason: str,
+        now: datetime,
+        *,
+        evidence: str | None = None,
+    ) -> bool:
+        """The one place a protection state changes (D-29, T-A). True when ``new_state`` holds.
+
+        An equal-state request is an idempotent no-op decided before the guard: no ``seq`` bump,
+        no journal row. Any other move must be an edge of the PROTECTION table of
+        ``src.domain.transitions`` (a plan that has no state yet may only enter
+        ``PROTECTION_INITIAL_STATE``) and must satisfy the clearing rules of
+        ``protection_replay.clearing_violation`` (D077): leaving UNPROTECTED for a protected state
+        needs ``EVIDENCE_REST_STOP_CONFIRMED`` and a plan whose stop was never lost, and reaching
+        FLAT from a blocking state needs ``EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL``. The
+        evidence is journaled in the payload key ``evidence`` (null when absent). A refused move
+        changes nothing (``state``, ``seq`` and ``last_reason`` stay), journals one
+        ``PROTECTION_TRANSITION_REJECTED`` row and enters SAFE_MODE with
+        ``PROTECTION_STATE_INVALID``; it returns False. Callers keep their own fail-closed
+        handling and may ignore the result.
+        """
+        if tracked.state is new_state:
+            return True
         entry = tracked.entry
         previous = _NO_STATE if tracked.state is None else tracked.state.value
+        if not self._edge_is_legal(tracked, new_state):
+            self._reject_transition(
+                tracked, previous, new_state, reason, now, REJECT_ILLEGAL_EDGE, evidence
+            )
+            return False
+        violation = clearing_violation(
+            previous, new_state.value, evidence, stop_lost=tracked.stop_lost_at is not None
+        )
+        if violation is not None:
+            self._reject_transition(tracked, previous, new_state, reason, now, violation, evidence)
+            return False
         tracked.seq += 1
         tracked.state = new_state
         tracked.last_reason = reason
+        # Plan 20-14: a queued stop is superseded the moment policy requires a close.
+        self._close_pending_for_transition(tracked, new_state)
         payload = json.dumps(
             {
                 "approval_id": entry.approval_id,
+                "evidence": evidence,
                 "from": previous,
                 "reason": reason,
                 "seq": tracked.seq,
@@ -1684,6 +3069,64 @@ class ProtectionCoordinator:
             ),
             now,
         )
+        return True
+
+    @staticmethod
+    def _edge_is_legal(tracked: _Tracked, new_state: ProtectionState) -> bool:
+        """The PROTECTION table decides (a missing state may only enter the initial state)."""
+        if tracked.state is None:
+            return new_state.value == PROTECTION_INITIAL_STATE
+        return is_legal(TransitionKind.PROTECTION, tracked.state, new_state)
+
+    def _reject_transition(
+        self,
+        tracked: _Tracked,
+        previous: str,
+        new_state: ProtectionState,
+        reason: str,
+        now: datetime,
+        rejection: str,
+        evidence: str | None,
+    ) -> None:
+        """Journal a refused move (state and seq untouched) and enter SAFE_MODE (fail closed)."""
+        entry = tracked.entry
+        body = json.dumps(
+            {
+                "approval_id": entry.approval_id,
+                "evidence": evidence,
+                "from": previous,
+                "reason": reason,
+                "rejection": rejection,
+                "seq": tracked.seq,
+                "symbol": entry.symbol,
+                "to": new_state.value,
+                "trade_plan_id": entry.trade_plan_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._record_journal(
+            JournalEvent(
+                journal_event_id=content_hash_event_id(
+                    prefix=_REJECTED_ID_PREFIX,
+                    event_type=EVENT_PROTECTION_TRANSITION_REJECTED,
+                    entity_id=entry.plan_hash,
+                    occurred_at_utc=now,
+                    payload_json=body,
+                ),
+                occurred_at_utc=now,
+                event_type=EVENT_PROTECTION_TRANSITION_REJECTED,
+                entity_type="ProtectionState",
+                entity_id=entry.plan_hash,
+                correlation_id=f"{_CORRELATION_PREFIX}{entry.plan_hash}",
+                payload_json=body,
+            ),
+            now,
+        )
+        try:
+            self._safe_mode.enter_safe_mode(reason=SAFE_MODE_PROTECTION_STATE_INVALID, now_utc=now)
+        except Exception:  # noqa: BLE001, S110 - the refusal and its journal row already exist
+            pass
 
     def _journal_note(
         self, tracked: _Tracked, event_type: str, payload: dict[str, str], now: datetime
@@ -1752,6 +3195,9 @@ class ProtectionCoordinator:
 
     def _record_journal(self, event: JournalEvent, now: datetime) -> None:
         """Journal an event; a failing journal loses only the audit row (D034)."""
+        if self._deferred_journal is not None:
+            self._deferred_journal.append((event, now))
+            return
         try:
             self._journal.record(event)
         except Exception:  # noqa: BLE001 - protection outranks the audit row
@@ -1781,6 +3227,8 @@ class ProtectionCoordinator:
 
 __all__ = [
     "ALERT_CLOSE_REQUIRED",
+    "ALERT_LIQUIDATION_DIVERGENCE",
+    "ALERT_PROTECTIVE_REJECTED",
     "ALERT_TP_UNAVAILABLE",
     "BLOCKING_STATES",
     "BRANCH_B1_ENTRY_NOT_TERMINAL",
@@ -1789,37 +3237,69 @@ __all__ = [
     "BRANCH_B4_FILL_AFTER_STOP",
     "BRANCH_B4_STOP_LOST_UNRESOLVED",
     "BRANCH_B5_STOP_REJECTED",
+    "BRANCH_B6_LIQUIDATION_TOO_CLOSE",
     "BRANCH_NO_POSITION_BUT_EXPOSED",
+    "BRANCH_OPERATOR_CLOSE",
+    "DIVERGENCE_KIND_DOUBLED_POSITION",
+    "DIVERGENCE_KIND_ENTRY_WITHOUT_PROTECTIVE",
+    "DIVERGENCE_KIND_POSITION_WITHOUT_STOP",
+    "DIVERGENCE_KIND_SIGN_FLIPPED_POSITION",
+    "DIVERGENCE_KIND_TP_ONLY_POSITION",
     "ERROR_TRANSIENT_POSITION_GAP",
     "EVENT_CLOSE_ATTEMPT_ERROR",
     "EVENT_CLOSE_REQUIRED",
+    "EVENT_DIVERGENCE_NOTIFIED",
     "EVENT_ENTRY_CANCEL_FAILED",
     "EVENT_ENTRY_CANCEL_NOT_SENT",
+    "EVENT_ENTRY_RECONCILED_ABSENT",
     "EVENT_ENTRY_UNRESOLVED",
     "EVENT_FILL_QUANTITY_UNKNOWN",
+    "EVENT_LIQUIDATION_CHECKED",
+    "EVENT_LIQUIDATION_CHECK_ERROR",
+    "EVENT_LIQUIDATION_FAILED_ALERT_ONLY",
+    "EVENT_LIQUIDATION_PRICE_DIFFERS",
+    "EVENT_LIQUIDATION_SKIPPED_FLAT",
+    "EVENT_OPERATOR_CLOSE_REQUESTED",
+    "EVENT_OPERATOR_PROTECT_REFUSED",
+    "EVENT_OPERATOR_PROTECT_STEPPED",
+    "EVENT_OPERATOR_STOP_ADOPTED",
+    "EVENT_PROTECTION_RESTORED",
     "EVENT_PROTECTION_TRANSITION",
+    "EVENT_PROTECTION_TRANSITION_REJECTED",
     "EVENT_REST_FAILED",
     "EVENT_STEP_ERROR",
+    "EVENT_STOP_EXISTS_AWAITING_REST",
     "EVENT_STOP_NOT_SENT",
     "EVENT_STOP_PLACEMENT_FAILED",
     "EVENT_SWEEP_FAILED",
+    "EVENT_SWEEP_UNVERIFIED",
     "EVENT_TP_UNAVAILABLE",
     "EVENT_UNKNOWN_FILL",
+    "EVIDENCE_REST_FLAT_TWO_READS_ENTRY_TERMINAL",
+    "EVIDENCE_REST_STOP_CONFIRMED",
     "FILLED_ENTRY_STATUSES",
+    "LIQUIDATION_FLAT_READS_LIMIT",
+    "NOTIFIABLE_DIVERGENCE_KINDS",
     "POSITION_MODE_HEDGE",
     "POSITION_MODE_ONE_WAY",
+    "REASON_REGISTERED_AFTER_RESTORE",
+    "REASON_STOP_LOST_AFTER_PROTECTED",
     "SAFE_MODE_CLOSE_REQUIRED",
     "SAFE_MODE_DB_FAILURE",
     "SAFE_MODE_ENTRY_WITHOUT_PROTECTIVE",
+    "SAFE_MODE_PROTECTION_STATE_INVALID",
+    "SAFE_MODE_RESTORE_INCONSISTENT",
     "TERMINAL_ENTRY_STATUSES",
     "UNRESOLVED_ENTRY_POLL_EVERY_N_STEPS",
     "CriticalAlertSink",
     "EmergencyCloser",
+    "OperatorControlResult",
     "PlanProtection",
     "ProtectionAdapter",
     "ProtectionCoordinator",
     "ProtectionRegistry",
     "ProtectionState",
     "RestingEntry",
+    "RestoreReport",
     "RoutedFillLike",
 ]

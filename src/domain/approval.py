@@ -48,6 +48,13 @@ class Approval:
     of the plan the approval request was issued for. It is written once with the PENDING row
     and never changed by a decision. None means "not recorded" (a row written before
     migration 0006); such an approval is never placeable (`APPROVED_QUANTITY_MISSING`).
+
+    Phase 23 (plan 23-04, D-13): `money_json` is the canonical JSON text of the money block the
+    messages show. It is written once with the PENDING row (the APPROVE and the SKIP row carry
+    the same text), is part of the insert identity and is never changed by a decision. The
+    domain keeps a plain string (it does not import the risk layer); `src/risk/money_at_stake.py`
+    parses it strictly at render time. None means "not recorded" (a row written before
+    migration 0013); every renderer refuses such an approval.
     """
 
     approval_id: str
@@ -65,6 +72,7 @@ class Approval:
     consumption_status: ApprovalConsumptionStatus = ApprovalConsumptionStatus.UNCONSUMED
     consumed_at_utc: datetime | None = None  # None = "never consumed" (D-21)
     approved_quantity: Decimal | None = None  # None = "not recorded" (pre-0006 row, D078)
+    money_json: str | None = None  # None = "not recorded" (pre-0013 row, D-13)
 
     def __post_init__(self) -> None:
         # D-12: UTC-aware datetimes only.
@@ -96,3 +104,13 @@ class Approval:
                 raise ValueError("approved_quantity must be a Decimal or None")
             if not self.approved_quantity.is_finite() or self.approved_quantity <= Decimal("0"):
                 raise ValueError("approved_quantity must be finite and greater than zero")
+        # D-13: the money block is None or text shaped like a JSON object.
+        if self.money_json is not None:
+            if not isinstance(self.money_json, str):
+                raise ValueError("money_json must be a str or None")
+            if (
+                len(self.money_json) < 2
+                or not self.money_json.startswith("{")
+                or not self.money_json.endswith("}")
+            ):
+                raise ValueError("money_json must be a JSON object text or None")
