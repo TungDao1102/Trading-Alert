@@ -155,7 +155,8 @@ async def test_the_placement_records_the_verified_snapshot_and_the_restart_rehyd
 
 async def test_a_restart_that_finds_no_snapshot_row_fails_closed(tmp_path: Path) -> None:
     """The fail-closed side of F3: a database that lost the row cannot rebuild the plan; the
-    recovery enters SAFE_MODE DB_FAILURE and the smoke stops at the restart step."""
+    recovery enters SAFE_MODE RESTORE_INCONSISTENT (the faulty entry is isolated, D110) and
+    the smoke stops at the restart step."""
     recorder = _recorder()
     env = build_fake_smoke_env(tmp_path, drop_snapshots_before_restart=True)
     with pytest.raises(dr.SmokeHalt, match="restart_rehydrate"):
@@ -163,7 +164,7 @@ async def test_a_restart_that_finds_no_snapshot_row_fails_closed(tmp_path: Path)
     restart = recorder.details["start_sequences"][-1]
     assert restart["label"] == "restart"
     assert restart["recovery_failed_steps"] == ["COORDINATOR_RESTORED"]
-    assert restart["recovery_safe_mode_reasons"] == ["DB_FAILURE"]
+    assert restart["recovery_safe_mode_reasons"] == ["RESTORE_INCONSISTENT"]
     assert _statuses(recorder)["restart_rehydrate"] == dr.STEP_FAILED
     assert len(env.fake.calls_to("place_entry")) == 1
 
