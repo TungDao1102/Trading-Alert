@@ -48,6 +48,18 @@ The automatic ladder is per D034 and D077: the operator works full-time and cann
 
 **Implementation status:** the ladder above (D034, narrowed by D077) is built in Phase 20 and composed into the live process in Phase 24 (`python -m src.live.runtime`, section 22; the coordinator places the stop after a fill is seen, `/close SYMBOL` is the operator's close, section 21.1a). It is tested with fakes and was observed once on Binance Demo: the smoke rehearsal of 2026-11-06 (21 steps, section 22.6) saw an entry fill, a REST-confirmed stop and the TP legs. What no run has shown: the ladder's timeouts firing on a real exchange, an emergency close, and anything on a host (the owner VPS session of plan 24-33 has not happened) `[NOT_TESTED]`. Live placement stays disabled (`LIVE_ORDERS_DISABLED`). Until the owner has run the system on the host, treat the ladder as unproven there: on an entry without a protective stop, place the stop-loss or close the position manually on the exchange. Do not wait for an automatic action.
 
+**Take profits not in place (`TP_UNAVAILABLE`, D113).** The stop is confirmed and kept, the take profits are not in place, and SAFE_MODE `ENTRY_WITHOUT_PROTECTIVE` blocks new entries until the operator exit (section 21.1). The reason in the alert header is a reason code: `ENTRY_WITHOUT_PROTECTIVE` (the take profit step refused: the stop could not be read as ACTIVE, a snapshot or sizing refusal, or a take profit leg that was not confirmed), `PLAN_SYMBOL_MISMATCH` (the entry, its snapshot and the live filters disagree) or `POSITION_SIDE_MISMATCH` (the exchange position side contradicts the plan side). Before D113 the header showed `INVALID_REASON`, because the free detail cannot pass the alert sanitiser. The detail (for example `STOP_LOSS: not found`) is only in the journal; read it with this read-only query:
+
+```sql
+SELECT occurred_at_utc, entity_id, payload_json
+FROM journal_events
+WHERE event_type = 'PROTECTION_TP_UNAVAILABLE'
+ORDER BY occurred_at_utc DESC
+LIMIT 5;
+```
+
+The take profit step reads the stop by its id up to 4 times (one read and 3 rereads, 0.5 s apart) before it holds, because Binance Demo has answered a query by client id late (D113); a stop that is still not ACTIVE after the last read holds as before. What the operator does is as the alert wording says: check the stop on the exchange, then decide whether to place take profits or to close by hand.
+
 Never assume a locally stored order ID means the exchange order exists.
 
 ## 4. Orphan protective orders
@@ -1181,6 +1193,8 @@ The Demo rehearsal is `scripts/demo_rehearsal.py`, run by the owner only. Withou
 A refused CONFIRM (SAFE_MODE, clock drift, `RECONCILIATION_REQUIRED`) leaves the plan APPROVED until its expiry (DECISIONS D051 item i). Nothing is re-sent: a DEMO placement is never re-sent, one `place_entry` POST per approval; an ambiguous result is probed once by client order id, and not found or a probe error is UNKNOWN with SAFE_MODE (D079, D080).
 
 Observed on Demo (smoke rehearsal of 2026-11-06, `09-DEMO-REHEARSAL-EVIDENCE-smoke-20261106T160307Z.json`, outcome COMPLETE, 21 of 21 steps PASSED, committed): start sequence admitted, entries enabled by the start sequence, the signal and the approval card, APPROVE and CONFIRM, a GTD LIMIT entry fill seen on the user-data stream, a REST-confirmed stop and the TP legs, a clean reconcile, a restart that rebuilt the plan, replayed presses that placed nothing, the operator close, the reservation released on close, a flat account, and the SAFE_MODE drill with its reservation released. Not observed there: the heartbeat, the compose service and the image revision stamp on a host; `/status`, `/disable_entries` and `/close` as typed commands; a stale-feed SAFE_MODE; an emergency close; the P3, P7 and A2 items that wait for Phases 25 and 26 (`19-OWNER-GAPS.md`). `LIVE_NET_PNL_SEMANTICS_VERIFIED` stays False (D086): the Demo fill is evidence only.
+
+The owner-run smoke of 2026-11-15 (`09-DEMO-REHEARSAL-EVIDENCE-smoke-20261115T083259Z.json`, outcome FAILED, not committed by quick task 261115-nnt) confirmed the stop by REST at 08:33:34.51Z, then 0.5 s later its take profit step read the stop by client id as not found and held `TP_UNAVAILABLE` (`failure_detail` `STOP_LOSS: not found`, alert reason shown as `INVALID_REASON`) although the Demo UI showed the reduce-only closePosition STOP_MARKET created at 08:33:34Z, and the run stopped at `restart_enable` on the resulting SAFE_MODE; Binance Demo lag on queries by client id is the leading explanation, not proven. The fix (D113: a bounded reread of the stop, and the reason code in the alert) is tested with fakes only and has not been re-observed on Demo.
 
 ### 22.7 Open items (owner)
 
