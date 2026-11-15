@@ -1994,6 +1994,49 @@ async def _confirm_leg_by_rest(
     return (detail, None)
 
 
+async def _read_stop_by_rest(*, adapter: ExecutionAdapter, client_algo_id: str) -> str | None:
+    """Read the stop of the take-profit step by its id: None when it is ACTIVE, else the detail.
+
+    Step 2 of `attach_protectives_to_fill` (D-11, D-17). Binance Demo did not always answer a
+    query by client id at once for an order that rested (2026-10-22, plan 20-27; 2026-11-01,
+    `_confirm_leg_by_rest`; and, as the LEADING explanation and not proven, 2026-11-15, when
+    this step held a stop that the Demo UI showed). An answer "not found" and a status that is
+    neither ACTIVE nor TERMINAL_FAILED are therefore read again, at most `_CONFIRM_REREADS`
+    times, `_CONFIRM_REREAD_DELAY_SECONDS` apart: the same two constants and the same wait as
+    `_confirm_leg_by_rest`, no new number (D-12). An exception on any read, an answer whose
+    `found` is neither True nor False, and a status of class TERMINAL_FAILED are never read again
+    and hold at once. When the last read still does not show an ACTIVE stop, the detail of that
+    read is returned (`STOP_LOSS: not found` or `STOP_LOSS: existing leg status ...`).
+
+    Reads only: it never places, re-places or cancels the stop or any order (D-17, T-19-42).
+    D113. Not `_confirm_leg_by_rest` itself: that helper words its detail for a placed take-profit
+    leg and rereads on a non-boolean `found`, which this step holds at once.
+    """
+    role = OrderRole.STOP_LOSS.value
+    detail = f"{role}: not found"
+    for attempt in range(1 + _CONFIRM_REREADS):
+        try:
+            probe = await adapter.query_algo_order_by_client(client_algo_id=client_algo_id)
+        except Exception as exc:  # noqa: BLE001 — an unreadable stop is not a confirmed stop
+            return f"{role}: probe {type(exc).__name__}"
+        found = _get_attr_or_key(probe, "found")
+        if found is not True and found is not False:
+            return f"{role}: probe outcome unknown"
+        terminal = False
+        if found is True:
+            status = _get_attr_or_key(probe, "algo_status")
+            if is_protection_confirmed(status):
+                return None
+            detail = f"{role}: existing leg status {status!r}"
+            terminal = classify_algo_status(status) is AlgoStatusClass.TERMINAL_FAILED
+        else:
+            detail = f"{role}: not found"
+        if terminal or attempt == _CONFIRM_REREADS:
+            break
+        await asyncio.sleep(_CONFIRM_REREAD_DELAY_SECONDS)
+    return detail
+
+
 @dataclass(frozen=True)
 class AttachOutcome:
     """Result of `attach_protectives_to_fill(...)`.
@@ -2066,7 +2109,11 @@ async def attach_protectives_to_fill(
       1. Bind check, `position_quantity` check, position-mode check (One-way only, D-14).
       2. The stop: `query_algo_order_by_client` must answer class ACTIVE (D-11). This function
          NEVER places or cancels a stop (D-17, T-19-42); an absent, non-active or unreadable
-         stop holds `ENTRY_WITHOUT_PROTECTIVE` + SAFE_MODE and places no take profit.
+         stop holds `ENTRY_WITHOUT_PROTECTIVE` + SAFE_MODE and places no take profit. An
+         answer "not found" or a status that is not ACTIVE yet (and not terminal) is read again,
+         at most `_CONFIRM_REREADS` times, `_CONFIRM_REREAD_DELAY_SECONDS` apart, because Demo
+         lags on queries by client id (`_read_stop_by_rest`, D113); an exception, an unknown
+         answer and a terminal status hold at once.
       3. The plan snapshot must be valid for live (`snapshot_is_valid_for_live`, D-20). A stale
          but COMPLETE snapshot is re-sized with `live_lot_filters` (the live exchangeInfo read of
          the caller); an INCOMPLETE one, or a stale one without live filters, is refused. With
@@ -2158,19 +2205,11 @@ async def attach_protectives_to_fill(
         return hold(f"position mode {entry.position_mode} is not supported")
 
     # 2. D-11 / D-17: the stop must be ACTIVE by REST; it is adopted, never placed here.
+    #    D113: read again (bounded, reads only) while Demo may still lag; every hold is as before.
     stop_id = derive_algo_client_id(plan_hash=entry.plan_hash, role=OrderRole.STOP_LOSS.value)
-    try:
-        stop_probe = await adapter.query_algo_order_by_client(client_algo_id=stop_id)
-    except Exception as exc:  # noqa: BLE001 — an unreadable stop is not a confirmed stop
-        return hold(f"{OrderRole.STOP_LOSS.value}: probe {type(exc).__name__}")
-    stop_found = _get_attr_or_key(stop_probe, "found")
-    if stop_found is False:
-        return hold(f"{OrderRole.STOP_LOSS.value}: not found")
-    if stop_found is not True:
-        return hold(f"{OrderRole.STOP_LOSS.value}: probe outcome unknown")
-    stop_status = _get_attr_or_key(stop_probe, "algo_status")
-    if not is_protection_confirmed(stop_status):
-        return hold(f"{OrderRole.STOP_LOSS.value}: existing leg status {stop_status!r}")
+    stop_detail = await _read_stop_by_rest(adapter=adapter, client_algo_id=stop_id)
+    if stop_detail is not None:
+        return hold(stop_detail)
     confirmed_roles: list[str] = [OrderRole.STOP_LOSS.value]
 
     # 3. D-20 / G4-038: snapshot validity, stale-but-complete re-size, incomplete refusal.

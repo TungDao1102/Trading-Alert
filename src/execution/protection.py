@@ -2648,6 +2648,10 @@ class ProtectionCoordinator:
         completion, and ``blocks_new_entries()`` stays False (SAFE_MODE blocks entries through
         its own gate). SAFE_MODE with ENTRY_WITHOUT_PROTECTIVE, the journal note and the
         critical alert are all attempted; one failing never skips the others.
+
+        The alert reason is the reason code, not the free detail: the alert sanitiser replaces
+        free text with INVALID_REASON (``src/ops/alerts.py``). The detail stays in the
+        PROTECTION_TP_UNAVAILABLE note together with the code (quick 261115-nnt, D113).
         """
         entry = tracked.entry
         now = self._now()
@@ -2670,7 +2674,7 @@ class ProtectionCoordinator:
                 event=ALERT_TP_UNAVAILABLE,
                 plan_hash=entry.plan_hash,
                 symbol=entry.symbol,
-                reason=detail,
+                reason=reason_code,
                 now_utc=now,
             )
         except Exception:  # noqa: BLE001, S110 - SAFE_MODE and the journal row already exist

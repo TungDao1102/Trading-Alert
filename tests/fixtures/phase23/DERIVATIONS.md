@@ -14,8 +14,9 @@ places, cancels or re-sends an order (Q5, D080).
 
 Fixed inputs of the generator: occurred_at_utc 2026-10-09T03:00:00Z, subject `plan-0001` for the
 producers that know the plan and `SYSTEM` for the three SAFE_MODE observer events, symbol
-`BTCUSDT`. The reason of a golden file is a representative one (for TP_UNAVAILABLE and
-EMERGENCY_CLOSE_FAILED the reason is a free code from the emitter, see the rows).
+`BTCUSDT`. The reason of a golden file is a representative one (for TP_UNAVAILABLE the reason
+is the producer's reason code since D113, for EMERGENCY_CLOSE_FAILED the failure code, see the
+rows).
 
 ## What every CLOSE_REQUIRED entry says about the system (shared sentence)
 
@@ -58,7 +59,7 @@ The branch code is the reason of the alert (`protection.py` 2657-2663) and the l
 
 | Event (golden reason) | What happened | Position | System already did | Emitters read |
 |---|---|---|---|---|
-| `TP_UNAVAILABLE` (the reason is the free `detail`, for example `POSITION_SIDE_MISMATCH`, golden uses `TP_UNAVAILABLE`) | take profits "not in place" after the entry filled: `protection.py` 2533-2569 | "the confirmed stop is kept": 2536-2542; docstring 102-112 | "nothing is closed for this reason alone (O-03: no automatic flatten, no single-TP fallback)", SAFE_MODE `ENTRY_WITHOUT_PROTECTIVE`: 2540-2559 | `protection.py` 2533 (`_enter_tp_unavailable`), callers 2487 and 2526 |
+| `TP_UNAVAILABLE` (the reason is the `reason_code`: `ENTRY_WITHOUT_PROTECTIVE` for every refusal of attach, `PLAN_SYMBOL_MISMATCH`, or `POSITION_SIDE_MISMATCH`; the free detail stays in the journal note `PROTECTION_TP_UNAVAILABLE`, because the alert sanitiser would turn it into `INVALID_REASON`; golden uses `ENTRY_WITHOUT_PROTECTIVE`, D113) | take profits "not in place" after the entry filled: `protection.py` 2641-2681 | "the confirmed stop is kept": 2646; docstring 102-112 | "nothing is closed for this reason alone (O-03: no automatic flatten, no single-TP fallback)", SAFE_MODE `ENTRY_WITHOUT_PROTECTIVE`: 2646-2650 and 2665-2671 | `protection.py` 2641 (`_enter_tp_unavailable`, the alert call 2673-2679), callers 2595 and 2634 |
 | `EMERGENCY_CLOSE_FAILED` (the reason is the failure `code`, golden uses `POSITION_READ_FAILED`) | "Anything it cannot prove ends in SAFE_MODE (EMERGENCY_CLOSE_FAILED), a critical alert and a journal row": `emergency_close.py` 41-43; `_fail` 923-957 | "a failed emergency close never declares the position safe": 41-43 | SAFE_MODE `EMERGENCY_CLOSE_FAILED` and the journal row 934-945; "a second close order is never sent while the result of the previous one is not determined": 16-17 | `emergency_close.py` `_fail`, called at 529-679 and 863-901 |
 | `EMERGENCY_CLOSE_NOT_SENT` (`PRE_SEND_REFUSED`) | the gate refused before sending: 57-65 and `_not_sent` 973-1010 | no claim of safety: 973-983 | durable pending row without price or quantity (985-996); "The coordinator's unprotected deadline keeps running and decides"; "the next call reads the position again": 977-983. It does NOT enter SAFE_MODE | `emergency_close.py` `_not_sent` |
 | `ENTRY_STATE_UNKNOWN` (SAFE_MODE reason, subject SYSTEM) | one `place_entry` POST, ambiguous result probed once by client order id, not found or probe error is UNKNOWN: `manager.py` 331-397 | the GTD LIMIT may exist and may fill: 358-364, 1341-1345 | SAFE_MODE `ENTRY_STATE_UNKNOWN`, intent kept UNKNOWN, entry handed to the coordinator which "never sends an entry" and polls by client order id: 1325-1349; coordinator docstring 130-139 | `manager.py` 1325-1363; alert path `src/ops/alerts.py` 672-727 (`SafeModeAlertObserver`) |

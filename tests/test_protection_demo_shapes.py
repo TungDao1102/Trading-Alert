@@ -20,12 +20,15 @@ real closer. The wrapped answers are the Demo shapes, not a model of Binance.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+import pytest
+from src.execution.order_ids import derive_algo_client_id
 from src.execution.protection import ProtectionState
 
 from tests.support.protection_doubles import TEST_ONLY_PLAN_HASH, ProtectionRig, make_rig
@@ -338,6 +341,93 @@ async def test_a_stop_confirmed_by_the_listing_is_not_lost_while_the_by_id_read_
         if c["kwargs"]["client_algo_id"] == rig.stop_id
     ]
     assert len(stop_placements) == 1  # the stop is never re-placed
+
+
+# --------------------------------------------------------------------------- #
+# Quick 261115-nnt (D113): the take-profit step reads the stop by id up to 4 times.
+# The 2026-11-15 Demo smoke: the stop was confirmed (REST_STOP_CONFIRMED), 0.53 s later the
+# take-profit step read it by id as not found and held TP_UNAVAILABLE. The leading explanation,
+# not proven, is the by-id lag of 2026-10-22 and 2026-11-01. Fakes only, not re-observed on Demo.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the non-zero `asyncio.sleep` delays and wait for none of them."""
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recorder(delay: float, result: Any = None) -> Any:
+        if delay:
+            delays.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", recorder)
+    return delays
+
+
+def _stop_by_id_reads(rig: ProtectionRig) -> int:
+    return len(
+        [
+            c
+            for c in rig.fake.calls_to("query_algo_order_by_client")
+            if c["kwargs"]["client_algo_id"] == rig.stop_id
+        ]
+    )
+
+
+async def test_the_2026_11_15_shape_a_lagging_by_id_read_at_the_tp_step_now_completes(
+    slept: list[float],
+) -> None:
+    # Three lagged reads: the confirming step takes one (the listing confirms the stop), the
+    # supervision read of the take-profit step the second, the first read of attach the third;
+    # the first reread of attach then sees the stop.
+    rig = await _first_fill_step(DemoLag(by_id_absent=3))
+    await rig.coordinator.step()  # confirmed through the listing
+    assert _state(rig) is ProtectionState.PROTECTED
+    assert _tracked(rig).stop_by_id_seen is False
+
+    await rig.coordinator.step()  # the take-profit step; the by-id read still lags in attach
+
+    assert _state(rig) is ProtectionState.COMPLETE
+    placed = [c["kwargs"]["client_algo_id"] for c in rig.fake.calls_to("place_algo_protective")]
+    assert placed == [  # the stop once, then TP1 and TP2 once each
+        rig.stop_id,
+        derive_algo_client_id(plan_hash=TEST_ONLY_PLAN_HASH, role="TAKE_PROFIT_1"),
+        derive_algo_client_id(plan_hash=TEST_ONLY_PLAN_HASH, role="TAKE_PROFIT_2"),
+    ]
+    assert slept == [0.5]
+    assert rig.alerts.alerts == []
+    assert rig.safe_mode.entered_reasons == []
+    assert rig.fake.calls_to("place_market_close") == []
+    assert rig.fake.calls_to("cancel_algo_order") == []
+
+
+async def test_a_by_id_read_that_keeps_lagging_holds_tp_unavailable_with_a_readable_reason(
+    slept: list[float],
+) -> None:
+    rig = await _first_fill_step(DemoLag(by_id_absent=99))
+    await rig.coordinator.step()  # confirmed through the listing
+    assert _state(rig) is ProtectionState.PROTECTED
+    reads_before = _stop_by_id_reads(rig)
+
+    await rig.coordinator.step()  # the take-profit step
+
+    assert _state(rig) is ProtectionState.TP_UNAVAILABLE
+    # One supervision read of the step, then the attach read and its three rereads.
+    assert _stop_by_id_reads(rig) - reads_before == 1 + 4
+    assert slept == [0.5] * 3
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [
+        ("TP_UNAVAILABLE", "ENTRY_WITHOUT_PROTECTIVE")
+    ]
+    notes = _events(rig, "PROTECTION_TP_UNAVAILABLE")
+    assert [{key: note[key] for key in ("failure_detail", "reason_code")} for note in notes] == [
+        {"failure_detail": "STOP_LOSS: not found", "reason_code": "ENTRY_WITHOUT_PROTECTIVE"}
+    ]
+    assert rig.safe_mode.entered_reasons == ["ENTRY_WITHOUT_PROTECTIVE"]
+    assert _places(rig) == 1  # the stop is never re-placed and no take profit was placed
+    assert rig.fake.calls_to("place_market_close") == []
+    assert rig.fake.calls_to("cancel_algo_order") == []
 
 
 async def test_a_stop_confirmed_by_its_id_and_later_lost_is_never_replaced() -> None:

@@ -28,6 +28,7 @@ and a candidate position side into attach (and the golden fixture pair under
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import re
@@ -38,7 +39,11 @@ from typing import Any
 
 import pytest
 from src.adapters.binance_usdm import AlgoOrderProbe, AlgoPlacementResult
-from src.domain.algo_status import is_protection_confirmed
+from src.domain.algo_status import (
+    AlgoStatusClass,
+    classify_algo_status,
+    is_protection_confirmed,
+)
 from src.domain.enums import ExecutionIntentStatus
 from src.domain.lot_filters import LotFilters
 from src.execution.manager import AttachOutcome, attach_protectives_to_fill
@@ -105,12 +110,20 @@ async def protected_rig(
     return rig
 
 
-def script_algo_status(fake: BinanceSemanticsFakeAdapter, client_algo_id: str, status: Any) -> None:
-    """The REST query of one algo id answers `status` (found), whatever the fake holds."""
+def script_algo_status(
+    fake: BinanceSemanticsFakeAdapter, client_algo_id: str, status: Any
+) -> list[str]:
+    """The REST query of one algo id answers `status` (found), whatever the fake holds.
+
+    Returns the list that records one entry per read of that id (a replaced method bypasses the
+    fake's own call log).
+    """
     original = fake.query_algo_order_by_client
+    reads: list[str] = []
 
     async def query(**kwargs: Any) -> Any:
         if kwargs["client_algo_id"] == client_algo_id:
+            reads.append(client_algo_id)
             return AlgoOrderProbe(
                 client_algo_id=client_algo_id,
                 found=True,
@@ -120,6 +133,51 @@ def script_algo_status(fake: BinanceSemanticsFakeAdapter, client_algo_id: str, s
         return await original(**kwargs)
 
     fake.query_algo_order_by_client = query  # type: ignore[method-assign]
+    return reads
+
+
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the non-zero `asyncio.sleep` delays and wait for none of them (virtual wait)."""
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recorder(delay: float, result: Any = None) -> Any:
+        if delay:
+            delays.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", recorder)
+    return delays
+
+
+def script_stop_answers(fake: BinanceSemanticsFakeAdapter, answers: list[Any]) -> list[int]:
+    """The successive answers of the REST query of the stop id (the last one repeats).
+
+    An answer is an `AlgoOrderProbe` or any object to return, or an exception instance to
+    raise. Other ids go to the fake. Returns the list that gets one entry per stop read.
+    """
+    original = fake.query_algo_order_by_client
+    reads: list[int] = []
+
+    async def query(**kwargs: Any) -> Any:
+        if kwargs["client_algo_id"] != STOP_ID:
+            return await original(**kwargs)
+        index = min(len(reads), len(answers) - 1)
+        reads.append(index)
+        answer = answers[index]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    fake.query_algo_order_by_client = query  # type: ignore[method-assign]
+    return reads
+
+
+def stop_probe(*, found: bool, status: Any = None) -> AlgoOrderProbe:
+    return AlgoOrderProbe(
+        client_algo_id=STOP_ID, found=found, algo_status=status, update_time_utc=None
+    )
 
 
 async def run_attach(
@@ -361,15 +419,34 @@ _SEVEN_ALGO_STATUSES = (
 )
 
 
+# Quick 261115-nnt (D113). The stop read of attach has the same bounded reread as the TP-leg
+# confirmation (precedent: the `1 + 1 + 3` of the TP1 test below): `_CONFIRM_REREADS` (3) rereads,
+# so 4 reads at most, `_CONFIRM_REREAD_DELAY_SECONDS` (0.5 s) apart (src/execution/manager.py).
+# The literals are pinned here on purpose: a change of either number is a decision (D-12).
+STOP_READS_WHEN_NEVER_ACTIVE = 4
+REREAD_DELAY_SECONDS = 0.5
+ABSENT = stop_probe(found=False)
+ACTIVE = stop_probe(found=True, status="NEW")
+
+
 @pytest.mark.parametrize("status", _SEVEN_ALGO_STATUSES)
-async def test_existing_stop_adoption_follows_the_status_table(status: str) -> None:
+async def test_existing_stop_adoption_follows_the_status_table(
+    status: str, slept: list[float]
+) -> None:
     """The stop is adopted exactly when `is_protection_confirmed(status)`; otherwise attach holds
-    ENTRY_WITHOUT_PROTECTIVE, places no take profit and writes no row (derived from the table)."""
+    ENTRY_WITHOUT_PROTECTIVE, places no take profit and writes no row (derived from the table).
+    A status that is neither ACTIVE nor TERMINAL_FAILED is read again (4 reads, 3 waits)."""
     rig = await protected_rig()
-    script_algo_status(rig.fake, STOP_ID, status)
+    reads = script_algo_status(rig.fake, STOP_ID, status)
 
     outcome = await run_attach(rig)
 
+    terminal = classify_algo_status(status) is AlgoStatusClass.TERMINAL_FAILED
+    expected_reads = (
+        1 if is_protection_confirmed(status) or terminal else STOP_READS_WHEN_NEVER_ACTIVE
+    )
+    assert len(reads) == expected_reads
+    assert slept == [REREAD_DELAY_SECONDS] * (expected_reads - 1)
     if is_protection_confirmed(status):
         assert outcome.is_no_trade is False, outcome
         assert outcome.placed_legs == ALL_THREE
@@ -384,7 +461,9 @@ async def test_existing_stop_adoption_follows_the_status_table(status: str) -> N
         assert row(rig, "TAKE_PROFIT_1") is None
 
 
-async def test_absent_stop_holds_without_placing_a_stop_or_a_take_profit() -> None:
+async def test_absent_stop_holds_without_placing_a_stop_or_a_take_profit(
+    slept: list[float],
+) -> None:
     rig = await protected_rig(stop=False)
     outcome = await run_attach(rig)
     assert_held(rig, outcome)
@@ -392,6 +471,13 @@ async def test_absent_stop_holds_without_placing_a_stop_or_a_take_profit() -> No
     assert outcome.placed_legs == ()
     assert rig.fake.calls_to("place_algo_protective") == []
     assert rig.log == []
+    stop_reads = [
+        c
+        for c in rig.fake.calls_to("query_algo_order_by_client")
+        if c["kwargs"]["client_algo_id"] == STOP_ID
+    ]
+    assert len(stop_reads) == STOP_READS_WHEN_NEVER_ACTIVE  # one read and three rereads
+    assert slept == [REREAD_DELAY_SECONDS] * 3
 
 
 async def test_stop_probe_failure_fails_closed_without_placement() -> None:
@@ -418,6 +504,145 @@ async def test_unreadable_stop_answer_fails_closed() -> None:
     assert_held(rig, outcome)
     assert outcome.failure_detail == "STOP_LOSS: probe outcome unknown"
     assert placed_ids(rig) == []
+
+
+async def test_a_stop_not_found_once_then_active_is_adopted_on_the_reread(
+    slept: list[float],
+) -> None:
+    """The 2026-11-15 Demo shape: the by-id read lags once, the stop rests (D113)."""
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [ABSENT, ACTIVE])
+
+    outcome = await run_attach(rig)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert outcome.placed_legs == ALL_THREE
+    assert placed_ids(rig) == [TP1_ID, TP2_ID]
+    assert len(reads) == 2
+    assert slept == [REREAD_DELAY_SECONDS]
+    assert rig.safe_mode.entered_reasons == []
+
+
+async def test_a_stop_never_found_holds_after_one_read_and_three_rereads(
+    slept: list[float],
+) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [ABSENT])
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)  # SAFE_MODE entered exactly once
+    assert outcome.failure_detail == "STOP_LOSS: not found"
+    assert outcome.placed_legs == ()
+    assert len(reads) == STOP_READS_WHEN_NEVER_ACTIVE
+    assert slept == [REREAD_DELAY_SECONDS] * 3
+    assert placed_ids(rig) == []
+    assert rig.log == []  # no intent row was written
+    assert row(rig, "TAKE_PROFIT_1") is None
+
+
+async def test_a_stop_probe_exception_on_the_first_read_holds_at_once(
+    slept: list[float],
+) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [TimeoutError("probe timeout")])
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)
+    assert outcome.failure_detail == "STOP_LOSS: probe TimeoutError"
+    assert len(reads) == 1
+    assert slept == []
+    assert placed_ids(rig) == []
+
+
+async def test_a_stop_probe_exception_on_a_reread_holds_at_once(slept: list[float]) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [ABSENT, TimeoutError("probe timeout")])
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)
+    assert outcome.failure_detail == "STOP_LOSS: probe TimeoutError"
+    assert len(reads) == 2
+    assert slept == [REREAD_DELAY_SECONDS]
+    assert placed_ids(rig) == []
+    assert rig.log == []
+
+
+@pytest.mark.parametrize("first_answers", [[], [ABSENT]], ids=["first_read", "after_not_found"])
+async def test_an_unknown_stop_answer_is_never_read_again(
+    first_answers: list[Any], slept: list[float]
+) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [*first_answers, object()])
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)
+    assert outcome.failure_detail == "STOP_LOSS: probe outcome unknown"
+    assert len(reads) == len(first_answers) + 1
+    assert slept == [REREAD_DELAY_SECONDS] * len(first_answers)
+    assert placed_ids(rig) == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [s for s in _SEVEN_ALGO_STATUSES if classify_algo_status(s) is AlgoStatusClass.TERMINAL_FAILED],
+)
+async def test_a_terminal_stop_status_is_never_read_again(status: str, slept: list[float]) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [stop_probe(found=True, status=status)])
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)
+    assert outcome.failure_detail == f"STOP_LOSS: existing leg status {status!r}"
+    assert len(reads) == 1
+    assert slept == []
+    assert placed_ids(rig) == []
+
+
+async def test_a_found_stop_without_a_status_then_active_is_adopted(slept: list[float]) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [stop_probe(found=True, status=None), ACTIVE])
+
+    outcome = await run_attach(rig)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert outcome.placed_legs == ALL_THREE
+    assert len(reads) == 2
+    assert slept == [REREAD_DELAY_SECONDS]
+
+
+async def test_a_stop_that_is_not_active_yet_is_adopted_once_it_shows_active(
+    slept: list[float],
+) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(
+        rig.fake, [stop_probe(found=True, status="TRIGGERING"), ABSENT, ACTIVE]
+    )
+
+    outcome = await run_attach(rig)
+
+    assert (outcome.is_no_trade, outcome.reason_code) == (False, "OK")
+    assert outcome.placed_legs == ALL_THREE
+    assert len(reads) == 3
+    assert slept == [REREAD_DELAY_SECONDS] * 2
+
+
+async def test_the_detail_after_the_last_reread_is_the_one_of_the_last_read(
+    slept: list[float],
+) -> None:
+    rig = await protected_rig()
+    reads = script_stop_answers(rig.fake, [ABSENT, ABSENT, ABSENT, stop_probe(found=True)])
+
+    outcome = await run_attach(rig)
+
+    assert_held(rig, outcome)
+    assert outcome.failure_detail == "STOP_LOSS: existing leg status None"
+    assert len(reads) == STOP_READS_WHEN_NEVER_ACTIVE
+    assert slept == [REREAD_DELAY_SECONDS] * 3
 
 
 # --------------------------------------------------------------------------- #

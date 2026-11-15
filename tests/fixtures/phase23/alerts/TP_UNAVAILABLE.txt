@@ -1,6 +1,6 @@
 [HIGH] TP_UNAVAILABLE
 subject: plan-0001
-reason: TP_UNAVAILABLE
+reason: ENTRY_WITHOUT_PROTECTIVE
 at: 2026-10-09T03:00:00Z
 What happened: The take profit orders could not be put in place after the entry was filled (TP_UNAVAILABLE); the reason code in the header says why.
 Position: A position is open. Its stop is confirmed, but it has no confirmed take profit.

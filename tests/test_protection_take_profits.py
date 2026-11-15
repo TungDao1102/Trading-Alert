@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from src.domain.enums import ExecutionIntentStatus
 from src.domain.lot_filters import LotFilters
 from src.execution.order_ids import derive_algo_client_id
 from src.execution.protection import ProtectionState
+from src.ops.alerts import INVALID_REASON, OperationalAlert
 
 from tests.support.protection_doubles import (
     TEST_ONLY_PLAN_HASH,
@@ -84,11 +87,17 @@ def _coarser_live_filters() -> LotFilters:
     )
 
 
-def _assert_tp_unavailable_and_nothing_else(rig: ProtectionRig, detail: str) -> None:
-    """The TP_UNAVAILABLE routine: state, SAFE_MODE once, critical alert, stop kept, no close."""
+def _assert_tp_unavailable_and_nothing_else(
+    rig: ProtectionRig, detail: str, *, reason_code: str = HOLD
+) -> None:
+    """The TP_UNAVAILABLE routine: state, SAFE_MODE once, critical alert, stop kept, no close.
+
+    Quick 261115-nnt (D113): the alert reason is the reason code (the free detail would become
+    INVALID_REASON at the alert sanitiser); the journal note keeps both the detail and the code.
+    """
     assert _state(rig) is ProtectionState.TP_UNAVAILABLE
     assert rig.safe_mode.entered_reasons == [HOLD]
-    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [("TP_UNAVAILABLE", detail)]
+    assert [(a.event, a.reason) for a in rig.alerts.alerts] == [("TP_UNAVAILABLE", reason_code)]
     assert STOP_ID in rig.fake.open_algos, "the confirmed stop must be kept"
     assert rig.fake.calls_to("cancel_algo_order") == [], "the stop must not be cancelled"
     assert rig.fake.calls_to("place_market_close") == [], "never a flatten for that reason alone"
@@ -96,7 +105,8 @@ def _assert_tp_unavailable_and_nothing_else(rig: ProtectionRig, detail: str) -> 
     assert rig.coordinator.blocks_new_entries() is False
     notes = [e for e in rig.journal.calls if e.event_type == "PROTECTION_TP_UNAVAILABLE"]
     assert len(notes) == 1
-    assert json.loads(notes[0].payload_json)["failure_detail"] == detail
+    note = json.loads(notes[0].payload_json)  # the note also names the symbol and the plan id
+    assert (note["failure_detail"], note["reason_code"]) == (detail, reason_code)
 
 
 # --------------------------------------------------------------------------- #
@@ -304,8 +314,39 @@ async def test_tp_position_on_the_wrong_side_is_tp_unavailable() -> None:
 
     await rig.coordinator.step()
 
-    _assert_tp_unavailable_and_nothing_else(rig, "position side does not match the plan")
+    _assert_tp_unavailable_and_nothing_else(
+        rig, "position side does not match the plan", reason_code="POSITION_SIDE_MISMATCH"
+    )
     assert _placed_ids(rig) == [STOP_ID]
+
+
+# --------------------------------------------------------------------------- #
+# Quick 261115-nnt (D113): the TP_UNAVAILABLE alert reason is a code the sanitiser keeps.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "reason_code", ["ENTRY_WITHOUT_PROTECTIVE", "PLAN_SYMBOL_MISMATCH", "POSITION_SIDE_MISMATCH"]
+)
+def test_tp_unavailable_alert_keeps_a_reason_code(reason_code: str) -> None:
+    alert = OperationalAlert.create(
+        event="TP_UNAVAILABLE",
+        subject="plan-0001",
+        reason=reason_code,
+        occurred_at_utc=datetime(2026, 11, 15, 8, 33, 35, tzinfo=UTC),
+    )
+    assert alert.reason == reason_code
+
+
+def test_tp_unavailable_alert_turns_the_free_detail_into_invalid_reason() -> None:
+    """Documents the bug D113 fixes: the free detail never survives the alert sanitiser."""
+    alert = OperationalAlert.create(
+        event="TP_UNAVAILABLE",
+        subject="plan-0001",
+        reason="STOP_LOSS: not found",
+        occurred_at_utc=datetime(2026, 11, 15, 8, 33, 35, tzinfo=UTC),
+    )
+    assert alert.reason == INVALID_REASON
 
 
 # --------------------------------------------------------------------------- #

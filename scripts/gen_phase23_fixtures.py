@@ -81,7 +81,9 @@ ALERT_CASES: tuple[tuple[str, str, str, str], ...] = (
     ),
     # Any other CLOSE_REQUIRED reason gets the generic wording.
     ("CLOSE_REQUIRED__GENERIC", "CLOSE_REQUIRED", "UNLISTED_REASON", PLAN_SUBJECT),
-    ("TP_UNAVAILABLE", "TP_UNAVAILABLE", "TP_UNAVAILABLE", PLAN_SUBJECT),
+    # The producer's reason is the reason code since D113 (quick 261115-nnt); every refusal of
+    # attach carries ENTRY_WITHOUT_PROTECTIVE, which is also the case of the 2026-11-15 smoke.
+    ("TP_UNAVAILABLE", "TP_UNAVAILABLE", "ENTRY_WITHOUT_PROTECTIVE", PLAN_SUBJECT),
     # The reason of the closer's alert is the failure code; a pre-send refusal has one fixed code.
     ("EMERGENCY_CLOSE_FAILED", "EMERGENCY_CLOSE_FAILED", "POSITION_READ_FAILED", PLAN_SUBJECT),
     ("EMERGENCY_CLOSE_NOT_SENT", "EMERGENCY_CLOSE_NOT_SENT", "PRE_SEND_REFUSED", PLAN_SUBJECT),
