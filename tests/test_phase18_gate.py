@@ -531,7 +531,8 @@ def test_invariant_5_no_unratified_default_in_src_or_scripts() -> None:
     # then the daily-loss age of the Phase 21 review WR-05 (60 -> 62).
     # 64 since plan 24-03 (D083 added the two names of the clock margin of the 418 ban end).
     # 66 since quick 261114-mp1 (D111 added the two names of the protection stall bound).
-    assert len(unratified_tests.GUARDED_NAMES) == 66
+    # 68 since quick 261115-kra (D112 added the two names of the summary window).
+    assert len(unratified_tests.GUARDED_NAMES) == 68
     assert unratified_tests.ALLOW_LIST == {}
     unratified_tests.test_no_canonical_key_gets_a_numeric_constant_in_src_or_scripts()
     unratified_tests.test_no_production_file_imports_the_test_only_limits()

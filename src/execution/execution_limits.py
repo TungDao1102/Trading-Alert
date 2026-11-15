@@ -17,8 +17,11 @@ fallback wait and nothing else changes, so it too is left out of ``unset_keys`` 
 ``require_live_ready`` and is listed by ``unset_optional_refinement_keys``; no number is chosen for
 it. A last key (quick task 261114-mp1, DECISIONS D111, ``scheduler.protection_stall_after_ms``)
 is a second ALERT-ONLY key: unset, the observe-only stall watchdog of the protection task is off
-and nothing else changes; no number is chosen for it. ``tests/test_no_unratified_defaults.py``
-scans ``src``
+and nothing else changes; no number is chosen for it. A last key (quick task 261115-kra,
+DECISIONS D112, ``scheduler.duration_summary_interval_ms``) is a second OPTIONAL REFINEMENT:
+unset, only the new-maximum rows of the scheduler duration record are written and nothing else
+changes; it switches no alert and no number is chosen for it.
+``tests/test_no_unratified_defaults.py`` scans ``src``
 and ``scripts`` so that no numeric default for these names ever appears.
 
 The file is separate from ``config/binance/binance-limits-v1.toml``: that file is sha256-pinned
@@ -80,7 +83,7 @@ EXECUTION_LIMIT_KEYS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "account": ("max_equity_age_ms", "max_daily_loss_age_ms"),
         "margin": ("liquidation_buffer_bps", "max_bracket_age_ms", "headroom_bps"),
         "rest_gate": ("ban_end_clock_margin_ms",),
-        "scheduler": ("protection_stall_after_ms",),
+        "scheduler": ("protection_stall_after_ms", "duration_summary_interval_ms"),
     }
 )
 
@@ -114,6 +117,7 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
         "margin.headroom_bps": "margin_headroom_bps",
         "rest_gate.ban_end_clock_margin_ms": "rest_gate_ban_end_clock_margin_ms",
         "scheduler.protection_stall_after_ms": "scheduler_protection_stall_after_ms",
+        "scheduler.duration_summary_interval_ms": "scheduler_duration_summary_interval_ms",
     }
 )
 
@@ -133,7 +137,12 @@ ALERT_ONLY_LIMIT_KEYS: frozenset[str] = frozenset(
 # out, `unset_optional_refinement_keys` lists it). It is still loaded, validated and given a
 # provenance label like every other key, and no number is chosen for it: the owner sets it
 # (OWNER-OPEN O-1, plan 24-06).
-OPTIONAL_REFINEMENT_LIMIT_KEYS: frozenset[str] = frozenset({"rest_gate.ban_end_clock_margin_ms"})
+# `scheduler.duration_summary_interval_ms` (quick 261115-kra, D112): unset, only the new-maximum
+# duration rows of the scheduler are written and nothing else changes; no number is chosen. It
+# switches no alert, so it is an optional refinement and not an alert-only key.
+OPTIONAL_REFINEMENT_LIMIT_KEYS: frozenset[str] = frozenset(
+    {"rest_gate.ban_end_clock_margin_ms", "scheduler.duration_summary_interval_ms"}
+)
 
 PROVENANCE_SECTION = "provenance"
 ALLOWED_SECTIONS: frozenset[str] = frozenset((*EXECUTION_LIMIT_KEYS, PROVENANCE_SECTION))
@@ -175,7 +184,7 @@ class ExecutionLimitsNotConfigured(Exception):
 
 @dataclass(frozen=True, kw_only=True)
 class ExecutionLimits:
-    """The twenty-two execution limits; ``None`` means NOT_CONFIGURED (the owner has not chosen).
+    """The twenty-three execution limits; ``None`` means NOT_CONFIGURED (the owner has not chosen).
 
     ``max_unprotected_ms`` (D-13): the longest tolerated time an entry fill is open without a
     protective stop. ``entry_terminal_timeout_ms`` (D-13): how long the entry order may stay
@@ -239,8 +248,12 @@ class ExecutionLimits:
     time, in milliseconds, one run of the protection task may take before the observe-only stall
     watchdog records a stall (a journal row and the TASK_STALLED alert); the run itself is never
     cancelled. It is an ALERT-ONLY key (``ALERT_ONLY_LIMIT_KEYS``): unset, the watchdog is off and
-    nothing else changes. ``scheduler_protection_stall_after`` gives it as a ``timedelta``. The file
-    holds twenty-two keys: nineteen required, two alert-only, one optional.
+    nothing else changes. ``scheduler_protection_stall_after`` gives it as a ``timedelta``.
+    ``scheduler_duration_summary_interval_ms`` (quick task 261115-kra, DECISIONS D112): the window,
+    in milliseconds, of the scheduler duration summary rows. It is an OPTIONAL REFINEMENT key
+    (``OPTIONAL_REFINEMENT_LIMIT_KEYS``): unset, only the new-maximum rows are written and nothing
+    else changes. ``scheduler_duration_summary_interval`` gives it as a ``timedelta``. The file
+    holds twenty-three keys: nineteen required, two alert-only, two optional.
     """
 
     max_unprotected_ms: int | None
@@ -265,6 +278,7 @@ class ExecutionLimits:
     margin_headroom_bps: int | None
     rest_gate_ban_end_clock_margin_ms: int | None
     scheduler_protection_stall_after_ms: int | None
+    scheduler_duration_summary_interval_ms: int | None
 
     @property
     def rest_gate_ban_end_clock_margin(self) -> timedelta | None:
@@ -276,6 +290,12 @@ class ExecutionLimits:
     def scheduler_protection_stall_after(self) -> timedelta | None:
         """The D111 stall bound as a ``timedelta``, or None while it is NOT_CONFIGURED."""
         value = self.scheduler_protection_stall_after_ms
+        return None if value is None else timedelta(milliseconds=value)
+
+    @property
+    def scheduler_duration_summary_interval(self) -> timedelta | None:
+        """The D112 summary window as a ``timedelta``, or None while it is NOT_CONFIGURED."""
+        value = self.scheduler_duration_summary_interval_ms
         return None if value is None else timedelta(milliseconds=value)
 
     def _unset(self, group: frozenset[str] | None) -> tuple[str, ...]:

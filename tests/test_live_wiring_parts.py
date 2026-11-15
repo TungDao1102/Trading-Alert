@@ -9,6 +9,7 @@ command registration. Everything runs without a database (a socket/connect guard
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
@@ -22,7 +23,7 @@ from sqlalchemy.dialects import postgresql
 from src.adapters.binance_client import Environment
 from src.domain.enums import KillGateState
 from src.live.health import LiveHealthThresholds
-from src.live.scheduler import TaskEvent
+from src.live.scheduler import TaskDurationSummary, TaskEvent
 from src.live.wiring import (
     DB_WRITE_MAX_AGE,
     REST_MAX_ERROR_RATE,
@@ -32,6 +33,7 @@ from src.live.wiring import (
 from src.live.wiring_parts import (
     DEMO_KILL_GATE_RULE_CODE,
     EVENT_DEMO_KILL_GATE_RULE,
+    EVENT_TASK_DURATION,
     AdapterPositionsReader,
     BotNotBound,
     LateBound,
@@ -40,6 +42,7 @@ from src.live.wiring_parts import (
     alert_task_stall,
     make_kill_gate_sources,
     make_reservation_registrar,
+    task_duration_journal,
     task_event_journal,
 )
 from src.persistence.execution_state import PgExecutionStateStore
@@ -553,3 +556,66 @@ def test_a_raising_alert_sink_is_swallowed_by_the_stall_alert() -> None:
 
     assert alert_task_stall(event, sink) is False
     assert len(sink.calls) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261115-kra (D112): the bounded duration summary row of a scheduler task.
+# --------------------------------------------------------------------------- #
+
+
+def _duration_summary(**overrides: Any) -> TaskDurationSummary:
+    fields: dict[str, Any] = {
+        "task": "protection_step",
+        "at_utc": T0,
+        "runs": 7,
+        "total_ms": 9100,
+        "max_ms": 2500,
+        "window_max_ms": 1300,
+        "new_max": False,
+        "window_end": True,
+    }
+    fields.update(overrides)
+    return TaskDurationSummary(**fields)
+
+
+def test_a_duration_summary_journals_one_compact_sorted_row() -> None:
+    summary = _duration_summary()
+    event = task_duration_journal(summary)
+    assert event.event_type == "LIVE_TASK_DURATION" == EVENT_TASK_DURATION
+    assert event.entity_type == "LiveScheduler"
+    assert event.entity_id == "protection_step"
+    assert event.correlation_id == "live_scheduler"
+    assert event.occurred_at_utc == summary.at_utc
+    assert event.payload_json == (
+        '{"max_ms":2500,"new_max":false,"runs":7,"task":"protection_step",'
+        '"total_ms":9100,"window_end":true,"window_max_ms":1300}'
+    )
+    payload = json.loads(event.payload_json)
+    assert sorted(payload) == [
+        "max_ms",
+        "new_max",
+        "runs",
+        "task",
+        "total_ms",
+        "window_end",
+        "window_max_ms",
+    ]
+    for key in ("max_ms", "runs", "total_ms", "window_max_ms"):
+        assert type(payload[key]) is int, key
+    assert payload["new_max"] is False and payload["window_end"] is True
+
+
+def test_the_same_summary_gets_the_same_journal_id_and_a_changed_one_another() -> None:
+    first = task_duration_journal(_duration_summary())
+    assert task_duration_journal(_duration_summary()).journal_event_id == first.journal_event_id
+    other = task_duration_journal(_duration_summary(runs=8))
+    assert other.journal_event_id != first.journal_event_id
+
+
+def test_the_duration_row_is_not_an_alert_event() -> None:
+    from src.ops.alert_wording import EVENT_WORDING
+    from src.ops.alerts import ALERT_EVENTS, OPS05_MATRIX
+
+    assert EVENT_TASK_DURATION not in ALERT_EVENTS
+    assert EVENT_TASK_DURATION not in EVENT_WORDING
+    assert EVENT_TASK_DURATION not in {row.alert for row in OPS05_MATRIX}

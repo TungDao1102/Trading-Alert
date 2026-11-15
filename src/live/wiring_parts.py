@@ -16,6 +16,8 @@ Each class or function here closes one gap named in a hand-off of an earlier Pha
   only source is the persisted evaluated state, and its absence keeps the enable refused.
 - `alembic_revisions_reader`: the read-only Alembic head check of start step 3.
 - `alert_task_stall`: the TASK_STALLED alert of a scheduler `stall` event (D111).
+- `task_duration_journal`: the journal row of one bounded duration summary of a scheduler task
+  (D112); observe only, never an alert.
 
 No wall clock is read here: every clock is injected.
 """
@@ -37,7 +39,7 @@ from src.domain.journal import JournalEvent, content_hash_event_id
 from src.domain.trade_plan import TradePlan
 from src.live.approval_sender import ReservationRegistrar
 from src.live.risk_inputs import PlanSignalContext
-from src.live.scheduler import TaskEvent
+from src.live.scheduler import TaskDurationSummary, TaskEvent
 from src.live.signal_source import SignalRequest
 from src.live.startup import AlembicRevisions
 from src.ops.store_executor import StoreExecutor
@@ -51,6 +53,8 @@ log = structlog.get_logger(__name__)
 
 EVENT_DEMO_KILL_GATE_RULE = "DEMO_KILL_GATE_RULE_APPLIED"
 EVENT_TASK = "LIVE_TASK_EVENT"
+# D112: the bounded duration summary row of a scheduler task (never an alert).
+EVENT_TASK_DURATION = "LIVE_TASK_DURATION"
 # D111: the alert event and its fixed reason for a scheduler `stall` event.
 TASK_STALLED_EVENT = "TASK_STALLED"
 TASK_STALL_REASON = "STALL_BOUND_EXCEEDED"
@@ -247,6 +251,38 @@ def task_event_journal(event: TaskEvent) -> JournalEvent:
     )
 
 
+def task_duration_journal(summary: TaskDurationSummary) -> JournalEvent:
+    """The journal row of one scheduler duration summary (D112): a task name and integers only."""
+    payload = json.dumps(
+        {
+            "task": summary.task,
+            "runs": summary.runs,
+            "total_ms": summary.total_ms,
+            "max_ms": summary.max_ms,
+            "window_max_ms": summary.window_max_ms,
+            "new_max": summary.new_max,
+            "window_end": summary.window_end,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return JournalEvent(
+        journal_event_id=content_hash_event_id(
+            prefix="live_task_duration",
+            event_type=EVENT_TASK_DURATION,
+            entity_id=summary.task,
+            occurred_at_utc=summary.at_utc,
+            payload_json=payload,
+        ),
+        occurred_at_utc=summary.at_utc,
+        event_type=EVENT_TASK_DURATION,
+        entity_type="LiveScheduler",
+        entity_id=summary.task,
+        correlation_id="live_scheduler",
+        payload_json=payload,
+    )
+
+
 class TaskAlertSink(Protocol):
     """The `alert` call of the journal-first alert sink (`JournalFirstAlertSink.alert`)."""
 
@@ -366,6 +402,7 @@ __all__ = [
     "DEMO_KILL_GATE_RULE_CODE",
     "EVENT_DEMO_KILL_GATE_RULE",
     "EVENT_TASK",
+    "EVENT_TASK_DURATION",
     "AdapterPositionsReader",
     "BotNotBound",
     "ExecutorPlanStore",
@@ -381,5 +418,6 @@ __all__ = [
     "alert_task_stall",
     "make_kill_gate_sources",
     "make_reservation_registrar",
+    "task_duration_journal",
     "task_event_journal",
 ]

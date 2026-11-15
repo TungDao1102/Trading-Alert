@@ -102,6 +102,10 @@ BAN_END_MARGIN_KEY = "rest_gate.ban_end_clock_margin_ms"
 BAN_END_MARGIN_FIELD = "rest_gate_ban_end_clock_margin_ms"
 STALL_KEY = "scheduler.protection_stall_after_ms"
 STALL_FIELD = "scheduler_protection_stall_after_ms"
+# Quick task 261115-kra (D112): the window of the scheduler duration summary rows, an OPTIONAL
+# REFINEMENT key (it switches no alert): unset, only the new-maximum rows are written.
+SUMMARY_KEY = "scheduler.duration_summary_interval_ms"
+SUMMARY_FIELD = "scheduler_duration_summary_interval_ms"
 
 # The dotted Phase 20 keys and the ExecutionLimits field each one loads into. The field is
 # "<section>_<key>" because stale_feed.max_mark_price_age_ms shares its key text with
@@ -446,10 +450,12 @@ def test_round_trip_of_an_all_unset_document(tmp_path: Path) -> None:
         margin_headroom_bps=None,
         rest_gate_ban_end_clock_margin_ms=None,
         scheduler_protection_stall_after_ms=None,
+        scheduler_duration_summary_interval_ms=None,
     )
     assert limits.unset_keys() == ALL_REQUIRED_KEYS
     assert limits.unset_alert_only_keys() == ("reconcile.entry_stale_grace_ms", STALL_KEY)
-    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
+    # D112 (quick 261115-kra): the summary window is the second optional refinement key.
+    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY, SUMMARY_KEY)
 
 
 def test_the_writer_can_write_a_bad_label_for_refusal_tests(tmp_path: Path) -> None:
@@ -515,7 +521,8 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # and the D083 clock margin, each a value and a label).
     # D091 set key 14: only the D083 margin and, since quick 261114-mp1 (D111), the alert-only
     # stall bound remain unset, a value and a label each.
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 4
+    # Quick 261115-kra (D112) adds the optional summary window, unset: 4 + 2 = 6.
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 6
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -549,7 +556,8 @@ def test_the_phase_20_sections_are_in_the_key_table() -> None:
     # key of plan 24-03 (D083), in file order.
     not_required = el.ALERT_ONLY_LIMIT_KEYS | el.OPTIONAL_REFINEMENT_LIMIT_KEYS
     assert [k for k in dotted_keys if k not in not_required] == list(ALL_REQUIRED_KEYS)
-    assert el.OPTIONAL_REFINEMENT_LIMIT_KEYS == {BAN_END_MARGIN_KEY}
+    # Quick 261115-kra (D112) adds the summary window as the second optional refinement key.
+    assert el.OPTIONAL_REFINEMENT_LIMIT_KEYS == {BAN_END_MARGIN_KEY, SUMMARY_KEY}
     assert el.ALERT_ONLY_LIMIT_KEYS == {"reconcile.entry_stale_grace_ms", STALL_KEY}
     assert dotted_keys.index("reconcile.entry_stale_grace_ms") == (
         dotted_keys.index("reconcile.lot_filter_refresh_interval_ms") + 1
@@ -595,7 +603,10 @@ def test_the_phase_20_test_only_values_are_distinct_and_the_tick_is_below_the_de
         values["stale_feed.max_mark_price_age_ms"] != values["pre_placement.max_mark_price_age_ms"]
     )
     assert values["reconcile.tick_interval_ms"] < values["protection.max_unprotected_ms"]
-    assert len(set(values.values())) == len(values)
+    # Quick 261114-mp1 and 261115-kra leave the stall bound and the summary window unset (None),
+    # so the distinctness holds for the numbers only.
+    numbers = [value for value in values.values() if value is not None]
+    assert len(set(numbers)) == len(numbers)
 
 
 def test_the_test_only_limits_object_carries_every_phase_20_value() -> None:
@@ -894,8 +905,9 @@ def test_the_margin_section_is_last_with_the_three_keys_in_order_and_prefixed_fi
         assert el.EXECUTION_LIMIT_FIELDS[dotted] == field_name, dotted
         assert field_name in el.ExecutionLimits.__dataclass_fields__, field_name
     dotted_keys = [f"{s}.{k}" for s, keys in el.EXECUTION_LIMIT_KEYS.items() for k in keys]
-    assert len(dotted_keys) == 22
-    assert dotted_keys[-5:-2] == list(MARGIN_KEYS)
+    # 22 keys until quick 261115-kra (D112) added the scheduler summary window: 23.
+    assert len(dotted_keys) == 23
+    assert dotted_keys[-6:-3] == list(MARGIN_KEYS)
 
 
 def test_the_margin_keys_are_required_not_alert_only() -> None:
@@ -1042,7 +1054,8 @@ def test_the_committed_file_leaves_the_ban_end_margin_unset_and_labelled_not_con
     limits = el.load_execution_limits(LIMITS_FILE)
     assert limits.rest_gate_ban_end_clock_margin_ms is None
     assert limits.rest_gate_ban_end_clock_margin is None
-    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
+    # D112 (quick 261115-kra): the summary window is unset in the committed file too.
+    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY, SUMMARY_KEY)
     assert BAN_END_MARGIN_KEY not in limits.unset_keys()
     assert BAN_END_MARGIN_KEY not in limits.unset_alert_only_keys()
 
@@ -1061,7 +1074,7 @@ def test_require_live_ready_never_names_the_ban_end_margin() -> None:
     ready = tl.test_only_execution_limits(rest_gate_ban_end_clock_margin_ms=None)
     assert ready.unset_keys() == ()
     assert ready.require_live_ready() is None
-    assert ready.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY,)
+    assert ready.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY, SUMMARY_KEY)
 
 
 def test_a_set_ban_end_margin_loads_as_milliseconds_and_as_a_timedelta() -> None:
@@ -1070,7 +1083,8 @@ def test_a_set_ban_end_margin_loads_as_milliseconds_and_as_a_timedelta() -> None
     limits = tl.test_only_execution_limits()
     assert limits.rest_gate_ban_end_clock_margin_ms == 4545
     assert limits.rest_gate_ban_end_clock_margin == timedelta(milliseconds=4545)
-    assert limits.unset_optional_refinement_keys() == ()
+    # The TEST_ONLY summary window is None (D112), so it is the one unset optional key.
+    assert limits.unset_optional_refinement_keys() == (SUMMARY_KEY,)
 
 
 def _ban_end_document(value: Any) -> dict[str, Any]:
@@ -1116,7 +1130,11 @@ def test_a_document_without_the_rest_gate_section_is_refused_by_name() -> None:
 
 
 def test_the_stall_key_is_declared_last_alert_only_with_a_prefixed_field() -> None:
-    assert el.EXECUTION_LIMIT_KEYS["scheduler"] == ("protection_stall_after_ms",)
+    # Quick 261115-kra (D112) added `duration_summary_interval_ms` as the second scheduler key.
+    assert el.EXECUTION_LIMIT_KEYS["scheduler"] == (
+        "protection_stall_after_ms",
+        "duration_summary_interval_ms",
+    )
     assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "scheduler"
     assert el.EXECUTION_LIMIT_FIELDS[STALL_KEY] == STALL_FIELD
     assert STALL_FIELD in el.ExecutionLimits.__dataclass_fields__
@@ -1197,3 +1215,101 @@ def test_a_document_without_the_scheduler_section_is_refused_by_name() -> None:
     with pytest.raises(el.ExecutionLimitsInvalid) as info:
         el.parse_execution_limits(document)
     assert STALL_KEY in str(info.value)
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261115-kra (DECISIONS D112): scheduler.duration_summary_interval_ms, an OPTIONAL
+# REFINEMENT key. NOT_CONFIGURED until the owner sets it; unset, only the new-maximum rows of the
+# scheduler duration record are written and nothing else changes. It switches no alert, so it is
+# not alert-only. No number is chosen.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_summary_key_is_declared_second_in_scheduler_optional_with_a_prefixed_field() -> None:
+    assert el.EXECUTION_LIMIT_KEYS["scheduler"] == (
+        "protection_stall_after_ms",
+        "duration_summary_interval_ms",
+    )
+    assert list(el.EXECUTION_LIMIT_KEYS)[-1] == "scheduler"
+    assert el.EXECUTION_LIMIT_FIELDS[SUMMARY_KEY] == SUMMARY_FIELD
+    assert SUMMARY_FIELD in el.ExecutionLimits.__dataclass_fields__
+    assert SUMMARY_KEY in el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+    assert SUMMARY_KEY not in el.ALERT_ONLY_LIMIT_KEYS
+    assert not el.ALERT_ONLY_LIMIT_KEYS & el.OPTIONAL_REFINEMENT_LIMIT_KEYS
+
+
+def test_the_committed_file_leaves_the_summary_key_unset_and_labelled_not_configured() -> None:
+    import tomllib
+
+    document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
+    assert document["scheduler"]["duration_summary_interval_ms"] == el.NOT_CONFIGURED_WORD
+    assert document["provenance"]["scheduler"]["duration_summary_interval_ms"] == (
+        el.NOT_CONFIGURED_WORD
+    )
+    limits = el.load_execution_limits(LIMITS_FILE)
+    assert limits.scheduler_duration_summary_interval_ms is None
+    assert limits.scheduler_duration_summary_interval is None
+    assert limits.unset_optional_refinement_keys() == (BAN_END_MARGIN_KEY, SUMMARY_KEY)
+    assert SUMMARY_KEY not in limits.unset_keys()
+    assert SUMMARY_KEY not in limits.unset_alert_only_keys()
+    limits.require_live_ready()  # an unset optional key never keeps the live path refused
+
+
+def test_require_live_ready_never_names_the_summary_key() -> None:
+    from dataclasses import replace
+
+    limits = replace(
+        el.load_execution_limits(LIMITS_FILE), stale_feed_max_user_data_silence_ms=None
+    )
+    with pytest.raises(el.ExecutionLimitsNotConfigured) as info:
+        limits.require_live_ready()
+    assert SUMMARY_KEY not in info.value.keys
+    assert "duration_summary_interval" not in str(info.value)
+
+
+def test_a_set_summary_interval_loads_as_milliseconds_and_as_a_timedelta() -> None:
+    from datetime import timedelta
+
+    assert tl.test_only_execution_limits().scheduler_duration_summary_interval_ms is None
+    limits = tl.test_only_execution_limits(scheduler_duration_summary_interval_ms=6262)
+    assert limits.scheduler_duration_summary_interval_ms == 6262
+    assert limits.scheduler_duration_summary_interval == timedelta(milliseconds=6262)
+    assert limits.unset_optional_refinement_keys() == ()
+
+
+def _summary_document(value: Any) -> dict[str, Any]:
+    document = _all_set_document()
+    document["scheduler"]["duration_summary_interval_ms"] = value
+    return document
+
+
+def test_a_positive_int_summary_interval_loads_and_a_set_value_needs_a_real_label() -> None:
+    limits = el.parse_execution_limits(_summary_document(250))
+    assert limits.scheduler_duration_summary_interval_ms == 250
+    placeholder = _summary_document(250)
+    placeholder["provenance"]["scheduler"]["duration_summary_interval_ms"] = "PLACEHOLDER"
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(placeholder)
+    assert SUMMARY_KEY in str(info.value)
+    labelled_unset = _summary_document(250)
+    labelled_unset["provenance"]["scheduler"]["duration_summary_interval_ms"] = (
+        el.NOT_CONFIGURED_WORD
+    )
+    with pytest.raises(el.ExecutionLimitsInvalid):
+        el.parse_execution_limits(labelled_unset)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, False, "250", "not_configured", ""])
+def test_a_malformed_summary_interval_is_refused_by_name(bad: Any) -> None:
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(_summary_document(bad))
+    assert SUMMARY_KEY in str(info.value)
+
+
+def test_a_document_without_the_scheduler_section_names_both_scheduler_keys() -> None:
+    document = _all_set_document()
+    del document["scheduler"]
+    with pytest.raises(el.ExecutionLimitsInvalid) as info:
+        el.parse_execution_limits(document)
+    assert STALL_KEY in str(info.value)
+    assert SUMMARY_KEY in str(info.value)

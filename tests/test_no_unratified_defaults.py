@@ -221,8 +221,15 @@ def test_the_scan_covers_src_and_scripts() -> None:
     # 66 since quick 261114-mp1 (D111): the alert-only stall bound adds the key text
     # `protection_stall_after_ms` and the field `scheduler_protection_stall_after_ms`; the key is
     # NOT_CONFIGURED and no numeric default for either name may exist.
-    assert len(GUARDED_NAMES) == 66
+    # 68 since quick 261115-kra (D112): the optional summary window adds the key text
+    # `duration_summary_interval_ms` and the field `scheduler_duration_summary_interval_ms`;
+    # the key is NOT_CONFIGURED and no numeric default for either name may exist.
+    assert len(GUARDED_NAMES) == 68
     assert {"protection_stall_after_ms", "scheduler_protection_stall_after_ms"} <= GUARDED_NAMES
+    assert {
+        "duration_summary_interval_ms",
+        "scheduler_duration_summary_interval_ms",
+    } <= GUARDED_NAMES
     assert {"ban_end_clock_margin_ms", "rest_gate_ban_end_clock_margin_ms"} <= GUARDED_NAMES
     assert EXECUTION_LIMIT_NAMES <= GUARDED_NAMES
     # Plan 21-02 (D-03): the equity-age bound has no numeric default under either spelling.

@@ -139,6 +139,7 @@ from src.live.wiring_parts import (
     alert_task_stall,
     make_kill_gate_sources,
     make_reservation_registrar,
+    task_duration_journal,
     task_event_journal,
 )
 from src.ops.alerts import JournalFirstAlertSink
@@ -981,7 +982,14 @@ class LiveAssembly:
             service=service,
         )
         specs = self._specs(partial_wiring)
-        scheduler = Scheduler(clock=clock, sleep=self.sleep, record=self._record_task, specs=specs)
+        scheduler = Scheduler(
+            clock=clock,
+            sleep=self.sleep,
+            record=self._record_task,
+            specs=specs,
+            record_duration=self._record_task_duration,
+            duration_summary_interval=self.cadences.duration_summary_interval,
+        )
         return CompleteLiveWiring(
             mode=self.config.mode,
             clock=clock,
@@ -1032,6 +1040,11 @@ class LiveAssembly:
             await self.record(task_event_journal(event))
         finally:
             alert_task_stall(event, self.alerts.sink)
+
+    async def _record_task_duration(self, summary: Any) -> None:
+        # D112: observe only and never an alert (no sink call). A write failure propagates to
+        # the scheduler, which logs it by class name and goes on.
+        await self.record(task_duration_journal(summary))
 
     # ---- the scheduler specs ---------------------------------------------------------------- #
 

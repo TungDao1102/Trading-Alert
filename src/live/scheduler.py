@@ -30,6 +30,21 @@ that a placement is never re-sent (AGENTS.md, D080); the run ends when it ends a
 continues as before. One event per stalled run, not one per interval. The default is None (off): a
 task without a bound behaves exactly as before (same sleeps, same journal).
 
+Duration record (D112, quick task 261115-kra): when ``record_duration`` is given, every run of every
+task that ends (ok or failed) is timed with the injected clock in whole milliseconds, floor-divided
+by one millisecond; a clock that stepped back counts as 0. A cancelled run is not counted (the
+``CancelledError`` propagates first). Per task the scheduler keeps, since process start, the run
+count, the total, the longest run and the longest run of the current window. It writes AT MOST ONE
+``TaskDurationSummary`` per run end: always when the run sets a new maximum (strictly greater than
+every earlier run of the task; the first run is one), and, only when
+``duration_summary_interval`` is set (``scheduler.duration_summary_interval_ms``), at the first run
+end at least that interval after the window start, which then restarts at that run end. Unset, only
+the new-maximum rows are written. The count of new-maximum rows is the number of record values of
+the run durations, about ln(n) + 0.58 per task over n independent runs, and never more than n; the
+count of window rows is at most one per window. Observe only: nothing is awaited inside the run, no
+task is cancelled or changed, the counters are updated before the write, and a ``record_duration``
+that raises is logged by class name and the loop goes on. It is not an alert.
+
 No number lives here as a cadence: ``LiveCadences.from_limits`` reads the loaded limits only.
 """
 
@@ -55,6 +70,9 @@ _LOGGER = logging.getLogger(__name__)
 DAILY_LOSS_AGE_DIVISOR = 2
 
 TaskEventKind = Literal["first_run", "failure", "recovery", "stall"]
+
+# One millisecond: the unit the run durations are counted in (D112), not a cadence.
+_ONE_MILLISECOND = timedelta(milliseconds=1)
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,26 @@ class TaskEvent:
 
 
 @dataclass(frozen=True)
+class TaskDurationSummary:
+    """One bounded summary row of the run durations of a task (D112; observe only).
+
+    ``runs``, ``total_ms`` and ``max_ms`` count every run that ended since the process
+    started; ``window_max_ms`` is the longest run since the current window started.
+    ``new_max`` says this run set a new maximum; ``window_end`` says this run closed a
+    window. ``at_utc`` is the end instant of the run that triggered the row.
+    """
+
+    task: str
+    at_utc: datetime
+    runs: int
+    total_ms: int
+    max_ms: int
+    window_max_ms: int
+    new_max: bool
+    window_end: bool
+
+
+@dataclass(frozen=True)
 class TaskResult:
     """The in-memory result of one task: the latest run instant and the latest outcome."""
 
@@ -119,7 +157,17 @@ class _TaskState:
     consecutive_failures: int = 0
 
 
+@dataclass
+class _DurationState:
+    runs: int = 0
+    total_ms: int = 0
+    max_ms: int | None = None
+    window_started: datetime | None = None
+    window_max_ms: int = 0
+
+
 Record = Callable[[TaskEvent], Awaitable[None]]
+RecordDuration = Callable[[TaskDurationSummary], Awaitable[None]]
 
 
 class Scheduler:
@@ -132,10 +180,16 @@ class Scheduler:
         sleep: Callable[[float], Awaitable[None]],
         record: Record,
         specs: Iterable[TaskSpec],
+        record_duration: RecordDuration | None = None,
+        duration_summary_interval: timedelta | None = None,
     ) -> None:
         self._clock = clock
         self._sleep = sleep
         self._record = record
+        self._record_duration = record_duration
+        if duration_summary_interval is not None and duration_summary_interval <= timedelta(0):
+            raise ValueError("duration_summary_interval must be positive")
+        self._duration_summary_interval = duration_summary_interval
         self._specs = tuple(specs)
         if not self._specs:
             raise ValueError("a Scheduler needs at least one TaskSpec")
@@ -143,6 +197,7 @@ class Scheduler:
         if len(set(names)) != len(names):
             raise ValueError("duplicate TaskSpec name")
         self._state = {spec.name: _TaskState() for spec in self._specs}
+        self._durations = {spec.name: _DurationState() for spec in self._specs}
         self._stop_event = asyncio.Event()
         self._running = False
 
@@ -193,10 +248,12 @@ class Scheduler:
             except Exception as exc:  # a task never takes the loop or the others down
                 error_class = type(exc).__name__  # class name only: a message may hold a value
             finally:
+                ended = self._clock()  # the run only: before the watchdog is cancelled
                 if watchdog is not None:
                     watchdog.cancel()
                     await asyncio.gather(watchdog, return_exceptions=True)
             await self._note(spec.name, started, error_class)
+            await self._note_duration(spec.name, started, ended)
             await self._wait(spec)
 
     async def _watch_stall(self, spec: TaskSpec, bound_seconds: float) -> None:
@@ -250,6 +307,48 @@ class Scheduler:
         except Exception as exc:  # the journal must not stop the task loop
             _LOGGER.warning("scheduler journal write failed for %s: %s", name, type(exc).__name__)
 
+    async def _note_duration(self, name: str, started: datetime, ended: datetime) -> None:
+        """D112: time one ended run and write at most one bounded summary row (observe only)."""
+        record = self._record_duration
+        if record is None:
+            return
+        state = self._durations[name]
+        elapsed_ms = max(0, (ended - started) // _ONE_MILLISECOND)
+        if state.window_started is None:
+            state.window_started = started
+        state.runs += 1
+        state.total_ms += elapsed_ms
+        state.window_max_ms = max(state.window_max_ms, elapsed_ms)
+        previous_max = state.max_ms
+        if previous_max is None or elapsed_ms > previous_max:
+            new_max = True
+            max_ms = elapsed_ms
+        else:
+            new_max = False
+            max_ms = previous_max
+        state.max_ms = max_ms
+        interval = self._duration_summary_interval
+        window_end = interval is not None and ended - state.window_started >= interval
+        if not (new_max or window_end):
+            return
+        summary = TaskDurationSummary(
+            task=name,
+            at_utc=ended,
+            runs=state.runs,
+            total_ms=state.total_ms,
+            max_ms=max_ms,
+            window_max_ms=state.window_max_ms,
+            new_max=new_max,
+            window_end=window_end,
+        )
+        if window_end:
+            state.window_started = ended
+            state.window_max_ms = 0
+        try:
+            await record(summary)
+        except Exception as exc:  # the journal must not stop the task loop
+            _LOGGER.warning("scheduler duration record failed for %s: %s", name, type(exc).__name__)
+
     async def _wait(self, spec: TaskSpec) -> None:
         """Return at the earlier of the interval, the wake event and stop."""
         waiters: list[asyncio.Task[object]] = [
@@ -285,8 +384,10 @@ class LiveCadences:
     (D087). The lot-filter refresh runs at ``reconcile.lot_filter_refresh_interval_ms``.
     ``protection_stall_after`` is the alert-only bound of one protection run
     (``scheduler.protection_stall_after_ms``, D111): None while the key is NOT_CONFIGURED, which
-    keeps the stall watchdog off. It is the only cadence field with a default, and the default is
-    not a number.
+    keeps the stall watchdog off. ``duration_summary_interval`` is the optional window of the
+    duration summary rows (``scheduler.duration_summary_interval_ms``, D112): None while the key is
+    NOT_CONFIGURED, which leaves only the new-maximum rows. These two are the only cadence fields
+    with a default, and the default is not a number.
     """
 
     protection_step: timedelta
@@ -300,6 +401,7 @@ class LiveCadences:
     day_risk_backfill: timedelta
     lot_filter_refresh: timedelta
     protection_stall_after: timedelta | None = None
+    duration_summary_interval: timedelta | None = None
 
     @property
     def protection_stall_after_seconds(self) -> float | None:
@@ -360,6 +462,9 @@ class LiveCadences:
             lot_filter_refresh=timedelta(milliseconds=lot_ms),
             # Alert-only: an unset key is not refused, it leaves the watchdog off.
             protection_stall_after=execution_limits.scheduler_protection_stall_after,
+            # Optional refinement (D112): an unset key is not refused, it leaves only the
+            # new-maximum duration rows.
+            duration_summary_interval=execution_limits.scheduler_duration_summary_interval,
         )
 
 
@@ -367,7 +472,9 @@ __all__ = [
     "DAILY_LOSS_AGE_DIVISOR",
     "LiveCadences",
     "Record",
+    "RecordDuration",
     "Scheduler",
+    "TaskDurationSummary",
     "TaskEvent",
     "TaskEventKind",
     "TaskResult",

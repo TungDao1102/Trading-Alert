@@ -658,3 +658,61 @@ async def test_the_stall_alert_is_still_attempted_when_the_journal_write_raises(
         await handles.assembly._record_task(_stall_event())
 
     assert [a.event for a in handles.assembly.alerts.sink.queue] == ["TASK_STALLED"]
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261115-kra (D112): the production path of the scheduler duration record.
+# --------------------------------------------------------------------------- #
+
+
+def _duration_summary() -> Any:
+    from src.live.scheduler import TaskDurationSummary
+
+    from tests.shadow_fakes import T0
+
+    return TaskDurationSummary(
+        task="protection_step",
+        at_utc=T0,
+        runs=3,
+        total_ms=4500,
+        max_ms=2500,
+        window_max_ms=2500,
+        new_max=True,
+        window_end=False,
+    )
+
+
+async def test_a_duration_summary_is_journaled_and_never_alerts(handles: WiringHandles) -> None:
+    from src.live.wiring_parts import task_duration_journal
+
+    journaled: list[Any] = []
+
+    async def record(event: Any) -> None:
+        journaled.append(event)
+
+    handles.assembly.record = record  # type: ignore[assignment]
+    summary = _duration_summary()
+
+    await handles.assembly._record_task_duration(summary)
+
+    assert journaled == [task_duration_journal(summary)]
+    assert list(handles.assembly.alerts.sink.queue) == []
+
+
+async def test_the_scheduler_carries_the_duration_recorder_and_no_window_by_default(
+    handles: WiringHandles, complete: CompleteLiveWiring
+) -> None:
+    scheduler = complete.scheduler
+    assert scheduler._record_duration == handles.assembly._record_task_duration
+    assert scheduler._duration_summary_interval is None  # the default limits leave it unset
+
+
+async def test_a_set_cadence_window_reaches_the_scheduler(handles: WiringHandles) -> None:
+    import datetime as dt
+
+    handles.assembly.cadences = dataclasses.replace(
+        handles.assembly.cadences, duration_summary_interval=dt.timedelta(milliseconds=6262)
+    )
+    with_window = await complete_assembly(handles)
+    assert with_window.scheduler._record_duration == handles.assembly._record_task_duration
+    assert with_window.scheduler._duration_summary_interval == dt.timedelta(milliseconds=6262)

@@ -66,6 +66,10 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int | None] = {
     # the shipped file, so every wiring test keeps the stall watchdog off. A test that needs a bound
     # overrides the field (`scheduler_protection_stall_after_ms=...`).
     "scheduler.protection_stall_after_ms": None,
+    # Quick task 261115-kra (D112): the summary window is OPTIONAL and unset (None), like the
+    # shipped file, so no wiring test writes window rows. A test that needs a window overrides
+    # the field (`scheduler_duration_summary_interval_ms=...`).
+    "scheduler.duration_summary_interval_ms": None,
 }
 
 TEST_ONLY_PROVENANCE_LABEL = "DECISION"

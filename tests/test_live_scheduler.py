@@ -22,6 +22,7 @@ from src.live.scheduler import (
     DAILY_LOSS_AGE_DIVISOR,
     LiveCadences,
     Scheduler,
+    TaskDurationSummary,
     TaskEvent,
     TaskResult,
     TaskSpec,
@@ -669,8 +670,10 @@ def test_every_cadence_is_a_positive_timedelta() -> None:
         limits_support.test_only_execution_limits(), test_only_binance_limits()
     )
     for item in fields(cadences):
-        if item.name == "protection_stall_after":
-            continue  # alert-only (D111): None while NOT_CONFIGURED, covered by its own tests
+        if item.name in ("protection_stall_after", "duration_summary_interval"):
+            # alert-only (D111) and optional (D112): None while NOT_CONFIGURED, covered by
+            # their own tests
+            continue
         value = getattr(cadences, item.name)
         assert isinstance(value, timedelta)
         assert value > timedelta(0), item.name
@@ -699,6 +702,337 @@ def test_a_set_stall_bound_is_carried_as_a_timedelta_and_in_seconds() -> None:
 def test_the_stall_key_is_never_named_by_the_unset_refusal() -> None:
     limits = limits_support.test_only_execution_limits(
         **{EXECUTION_LIMIT_FIELDS["reconcile.tick_interval_ms"]: None}
+    )
+    with pytest.raises(ExecutionLimitsNotConfigured) as caught:
+        LiveCadences.from_limits(limits, test_only_binance_limits())
+    assert caught.value.keys == ("reconcile.tick_interval_ms",)
+
+
+# --------------------------------------------------------------------------- #
+# Quick task 261115-kra (D112): the bounded per-run duration record.
+# --------------------------------------------------------------------------- #
+
+
+class DurationJournal:
+    """An injected async duration writer that keeps what it was given."""
+
+    def __init__(self) -> None:
+        self.summaries: list[TaskDurationSummary] = []
+
+    async def __call__(self, summary: TaskDurationSummary) -> None:
+        self.summaries.append(summary)
+
+
+def _timed_run(
+    time: VirtualTime, durations: list[float], *, fail_at: int | None = None
+) -> Callable[[], Awaitable[None]]:
+    """A task whose n-th run takes durations[n] virtual seconds (the last one repeats)."""
+    calls = {"n": 0}
+
+    async def run() -> None:
+        index = min(calls["n"], len(durations) - 1)
+        calls["n"] += 1
+        await time.sleep(durations[index])
+        if fail_at is not None and calls["n"] == fail_at:
+            raise ValueError("secret detail that must not be journaled")
+
+    return run
+
+
+def _duration_scheduler(
+    time: VirtualTime,
+    run: Callable[[], Awaitable[None]],
+    *,
+    record: Callable[[TaskEvent], Awaitable[None]] | None = None,
+    record_duration: Callable[[TaskDurationSummary], Awaitable[None]] | None = None,
+    window: timedelta | None = None,
+    interval: float = 15,
+) -> Scheduler:
+    return Scheduler(
+        clock=time.now,
+        sleep=time.sleep,
+        record=record or Journal(),
+        specs=[TaskSpec("a", run, timedelta(seconds=interval))],
+        record_duration=record_duration,
+        duration_summary_interval=window,
+    )
+
+
+async def _run_for(scheduler: Scheduler, time: VirtualTime, seconds: float) -> None:
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(seconds)
+    scheduler.stop()
+    await time.advance(0)
+    await asyncio.wait_for(runner, timeout=None)
+
+
+async def test_the_first_run_writes_one_summary_in_whole_integer_milliseconds() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(time, _timed_run(time, [2.5]), record_duration=durations)
+    await _run_for(scheduler, time, 3)
+
+    assert len(durations.summaries) == 1
+    summary = durations.summaries[0]
+    assert summary.task == "a"
+    assert (summary.runs, summary.total_ms, summary.max_ms, summary.window_max_ms) == (
+        1,
+        2500,
+        2500,
+        2500,
+    )
+    assert summary.new_max is True and summary.window_end is False
+    assert summary.at_utc == TEST_ONLY_VIRTUAL_START + timedelta(seconds=2.5)
+    for number in (summary.runs, summary.total_ms, summary.max_ms, summary.window_max_ms):
+        assert type(number) is int
+    assert type(summary.new_max) is bool and type(summary.window_end) is bool
+
+
+async def test_the_duration_is_floored_to_whole_milliseconds() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(time, _timed_run(time, [2.5009]), record_duration=durations)
+    await _run_for(scheduler, time, 3)
+    assert [s.max_ms for s in durations.summaries] == [2500]
+
+
+async def test_without_a_window_only_a_strictly_greater_run_writes_a_row() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(
+        time, _timed_run(time, [1.0, 0.5, 1.5, 1.5]), record_duration=durations
+    )
+    # Runs start at 0, 16, 31.5 and 48 and end at 1, 16.5, 33 and 49.5.
+    await _run_for(scheduler, time, 60)
+
+    assert [(s.runs, s.new_max) for s in durations.summaries] == [(1, True), (3, True)]
+    second = durations.summaries[1]
+    assert (second.total_ms, second.max_ms, second.window_max_ms) == (3000, 1500, 1500)
+    assert second.window_end is False
+
+
+async def test_twenty_equal_runs_without_a_window_write_exactly_one_row() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(time, _timed_run(time, [1.0]), record_duration=durations)
+    await _run_for(scheduler, time, 20 * 16 + 1)
+
+    assert scheduler.results()["a"].last_ok_utc is not None
+    assert len(durations.summaries) == 1
+    assert durations.summaries[0].runs == 1
+
+
+async def test_a_window_writes_one_row_per_window_and_restarts_the_window_maximum() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(
+        time,
+        _timed_run(time, [10.0, 1.0]),
+        record_duration=durations,
+        window=timedelta(seconds=60),
+    )
+    # Run 1 is 0..10 (the maximum). Later runs of 1 s start at 25, 41, 57, 73 (ends 26, 42, 58, 74),
+    # then 89, 105, 121, 137 (ends 90, 106, 122, 138).
+    await _run_for(scheduler, time, 140)
+
+    rows = [(s.runs, s.new_max, s.window_end, s.window_max_ms) for s in durations.summaries]
+    assert rows == [(1, True, False, 10000), (5, False, True, 10000), (9, False, True, 1000)]
+    first_window, second_window = durations.summaries[1], durations.summaries[2]
+    assert first_window.at_utc == TEST_ONLY_VIRTUAL_START + timedelta(seconds=74)
+    assert second_window.at_utc == TEST_ONLY_VIRTUAL_START + timedelta(seconds=138)
+    assert second_window.window_max_ms < second_window.max_ms
+    assert (second_window.max_ms, second_window.total_ms) == (10000, 18000)
+
+
+async def test_a_run_that_closes_the_window_and_sets_a_maximum_writes_one_row_with_both() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(
+        time,
+        _timed_run(time, [1.0, 1.0, 1.0, 1.0, 3.0]),
+        record_duration=durations,
+        window=timedelta(seconds=60),
+    )
+    # Runs start at 0, 16, 32, 48 (1 s each) and 64 (3 s, ends 67): 67 - 0 >= 60 and 3000 > 1000.
+    await _run_for(scheduler, time, 70)
+
+    rows = [(s.runs, s.new_max, s.window_end) for s in durations.summaries]
+    assert rows == [(1, True, False), (5, True, True)]
+    assert durations.summaries[1].window_max_ms == 3000
+
+
+async def test_a_task_whose_only_run_never_ends_writes_no_summary() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    release = asyncio.Event()
+
+    async def never_ends() -> None:
+        await release.wait()
+
+    scheduler = _duration_scheduler(time, never_ends, record_duration=durations)
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(120)
+    assert durations.summaries == []
+    release.set()
+    await time.settle()
+    scheduler.stop()
+    await time.advance(0)
+    await asyncio.wait_for(runner, timeout=None)
+    assert len(durations.summaries) == 1
+
+
+async def test_a_scheduler_built_without_the_writer_calls_nothing_new() -> None:
+    time = VirtualTime()
+    journal = Journal()
+    scheduler = _duration_scheduler(
+        time, _timed_run(time, [1.0]), record=journal, window=timedelta(seconds=30)
+    )
+    await _run_for(scheduler, time, 40)
+    assert journal.kinds() == [("a", "first_run")]
+    assert scheduler.results()["a"].healthy
+
+
+async def test_a_failed_run_is_timed() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    journal = Journal()
+    scheduler = _duration_scheduler(
+        time,
+        _timed_run(time, [1.0], fail_at=1),
+        record=journal,
+        record_duration=durations,
+    )
+    await _run_for(scheduler, time, 5)
+
+    assert journal.kinds() == [("a", "first_run")]
+    assert journal.events[0].error_class == "ValueError"
+    assert len(durations.summaries) == 1
+    assert (durations.summaries[0].runs, durations.summaries[0].max_ms) == (1, 1000)
+
+
+async def test_a_run_cancelled_with_the_scheduler_writes_no_summary() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    scheduler = _duration_scheduler(time, _timed_run(time, [100.0]), record_duration=durations)
+    runner = asyncio.create_task(scheduler.run())
+    await time.settle()
+    await time.advance(10)
+    runner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+    await time.settle()
+    assert durations.summaries == []
+
+
+async def test_a_duration_writer_that_raises_is_logged_by_class_name_and_the_loop_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    time = VirtualTime()
+    journal = Journal()
+    calls: list[TaskDurationSummary] = []
+
+    async def failing(summary: TaskDurationSummary) -> None:
+        calls.append(summary)
+        raise RuntimeError("secret writer detail")
+
+    scheduler = _duration_scheduler(
+        time, _timed_run(time, [1.0, 2.0]), record=journal, record_duration=failing
+    )
+    with caplog.at_level("WARNING"):
+        await _run_for(scheduler, time, 20)
+
+    assert journal.kinds() == [("a", "first_run")]
+    assert len(calls) == 2
+    # The counts are updated before the write: the failed first write loses that row only.
+    assert (calls[1].runs, calls[1].total_ms, calls[1].max_ms) == (2, 3000, 2000)
+    text = caplog.text
+    assert "RuntimeError" in text
+    assert "secret writer detail" not in text
+
+
+async def _drive(*, with_record: bool) -> tuple[Any, ...]:
+    time = VirtualTime()
+    journal = Journal()
+    durations = DurationJournal() if with_record else None
+    scheduler = _duration_scheduler(
+        time,
+        _timed_run(time, [1.0, 2.0, 0.5, 3.0], fail_at=3),
+        record=journal,
+        record_duration=durations,
+        window=timedelta(seconds=30) if with_record else None,
+    )
+    await _run_for(scheduler, time, 100)
+    return (list(time.sleeps), journal.kinds(), dict(scheduler.results()))
+
+
+async def test_the_duration_record_does_not_change_the_sleeps_the_events_or_the_results() -> None:
+    with_record = await _drive(with_record=True)
+    without_record = await _drive(with_record=False)
+    assert with_record == without_record
+
+
+async def test_a_clock_that_steps_back_records_zero_milliseconds_never_a_negative_number() -> None:
+    time = VirtualTime()
+    durations = DurationJournal()
+    readings = iter([TEST_ONLY_VIRTUAL_START, TEST_ONLY_VIRTUAL_START - timedelta(seconds=5)])
+
+    def scripted_clock() -> Any:
+        return next(readings, TEST_ONLY_VIRTUAL_START)
+
+    async def run() -> None:
+        return None
+
+    scheduler = Scheduler(
+        clock=scripted_clock,
+        sleep=time.sleep,
+        record=Journal(),
+        specs=[TaskSpec("a", run, timedelta(seconds=15))],
+        record_duration=durations,
+    )
+    await _run_for(scheduler, time, 1)
+
+    assert len(durations.summaries) == 1
+    summary = durations.summaries[0]
+    assert (summary.total_ms, summary.max_ms, summary.window_max_ms) == (0, 0, 0)
+    assert summary.new_max is True
+
+
+@pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1)])
+def test_a_non_positive_summary_interval_is_refused(bad: timedelta) -> None:
+    time = VirtualTime()
+
+    async def run() -> None:
+        return None
+
+    with pytest.raises(ValueError, match="duration_summary_interval"):
+        Scheduler(
+            clock=time.now,
+            sleep=time.sleep,
+            record=Journal(),
+            specs=[TaskSpec("a", run, timedelta(seconds=15))],
+            duration_summary_interval=bad,
+        )
+
+
+def test_an_unset_summary_interval_leaves_the_cadence_none_and_never_refuses() -> None:
+    limits = limits_support.test_only_execution_limits()
+    assert limits.scheduler_duration_summary_interval_ms is None
+    cadences = LiveCadences.from_limits(limits, test_only_binance_limits())
+    assert cadences.duration_summary_interval is None
+
+
+def test_a_set_summary_interval_is_carried_as_a_timedelta() -> None:
+    limits = limits_support.test_only_execution_limits(scheduler_duration_summary_interval_ms=6262)
+    cadences = LiveCadences.from_limits(limits, test_only_binance_limits())
+    assert cadences.duration_summary_interval == timedelta(milliseconds=6262)
+
+
+def test_an_unset_tick_still_refuses_naming_only_the_tick_with_the_summary_key_set() -> None:
+    limits = limits_support.test_only_execution_limits(
+        scheduler_duration_summary_interval_ms=6262,
+        **{EXECUTION_LIMIT_FIELDS["reconcile.tick_interval_ms"]: None},
     )
     with pytest.raises(ExecutionLimitsNotConfigured) as caught:
         LiveCadences.from_limits(limits, test_only_binance_limits())
