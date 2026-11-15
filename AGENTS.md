@@ -121,7 +121,7 @@ Entry points: `python -m src.data.collector`, `python -m src.paper.runtime`
   disabled (`LIVE_ORDERS_DISABLED`); nothing was observed on a host.
 - Still open (owner): the optional `NOT_CONFIGURED` key `rest_gate.ban_end_clock_margin_ms` in
   `config/execution/execution-limits-v1.toml`;
-  the alert-only `NOT_CONFIGURED` key `scheduler.protection_stall_after_ms` (D111, RUNBOOK 22.8);
+  the optional `NOT_CONFIGURED` key `scheduler.duration_summary_interval_ms` (D112, RUNBOOK 22.8);
   what Demo cannot show (P3, P7, A2) waits for Phases 25/26. Register:
   `.planning/phases/19-execution-plan-binding-price-check/19-OWNER-GAPS.md`.
 
