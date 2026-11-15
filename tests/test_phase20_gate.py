@@ -13,8 +13,9 @@ This file asserts, against the real tree and without any network or live evidenc
 - the `RejectionReason` enum has 21 members and GLOSSARY 9.1 lists exactly those;
 - each Phase 20 requirement has its named automated tests, resolved with `ast` and never
   imported or run (`REQUIREMENT_TESTS`);
-- no Phase 20 plan wrote a `docs/DECISIONS.md` row; the rows after D078 are D079 to D083, written
-  by quick task 261022-t2l at the owner's instruction of 2026-10-22, and the D055 row names D079.
+- no Phase 20 plan wrote a `docs/DECISIONS.md` row; the rows after D078 start with D079 to D107
+  in that order (D079 to D083 written by quick task 261022-t2l at the owner's instruction of
+  2026-10-22) and continue D108, D109, ... without a gap, and the D055 row names D079.
 
 A failure message names the missing path, symbol or test. Nothing here changes behavior and
 nothing here claims an owner item is solved: the `NOT_CONFIGURED` limit keys and what Demo
@@ -397,8 +398,37 @@ def test_invariant_5b_every_requirement_name_is_a_known_requirement() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# DECISIONS: no Phase 20 plan wrote a row; D079 to D083 come from quick task 261022-t2l.
+# DECISIONS: no Phase 20 plan wrote a row; D079 to D107 are a fixed prefix after D078,
+# later rows are consecutive.
 # --------------------------------------------------------------------------- #
+
+#: The fixed, exact first ids after D078: D079 to D107 (quick task 261022-t2l wrote D079 to
+#: D083; the later rows each name their source in their status column). A new row is appended
+#: after them and never reorders them.
+DECISION_IDS_AFTER_D078_PREFIX: tuple[str, ...] = tuple(f"D{n:03d}" for n in range(79, 108))
+
+
+def _decision_id_problems(after_d078: list[str]) -> list[str]:
+    """Problems with the ids after D078: the fixed D079 to D107 prefix, then D108, D109, ...
+
+    Pure: it reads no file and returns an empty list when the ids are in order.
+    """
+    problems: list[str] = []
+    prefix = list(DECISION_IDS_AFTER_D078_PREFIX)
+    found_prefix = after_d078[: len(prefix)]
+    if found_prefix != prefix:
+        problems.append(
+            f"the first ids after D078 must be {prefix[0]} to {prefix[-1]} in order, "
+            f"found {found_prefix}"
+        )
+    tail = after_d078[len(prefix) :]
+    expected_tail = [f"D{n:03d}" for n in range(108, 108 + len(tail))]
+    if tail != expected_tail:
+        problems.append(
+            f"the ids after {prefix[-1]} must run D108, D109, ... with no gap or repeat, "
+            f"found {tail}"
+        )
+    return problems
 
 
 def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
@@ -406,54 +436,8 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
     rows = [line for line in lines if re.match(r"\| D\d+ \|", line)]
     ids = [re.match(r"\| (D\d+) \|", row).group(1) for row in rows]  # type: ignore[union-attr]
     after_d078 = ids[ids.index("D078") + 1 :]
-    assert after_d078 == [
-        "D079",
-        "D080",
-        "D081",
-        "D082",
-        "D083",
-        "D084",
-        "D085",
-        "D086",
-        "D087",
-        "D088",
-        "D089",
-        "D090",
-        "D091",
-        "D092",
-        "D093",
-        "D094",
-        "D095",
-        "D096",
-        "D097",
-        "D098",
-        "D099",
-        "D100",
-        "D101",
-        "D102",
-        "D103",
-        "D104",
-        "D105",
-        "D106",
-        "D107",
-    ], (
-        f"the rows after D078 are {after_d078}: quick task 261022-t2l wrote D079 to D083, "
-        "Phase 21 wrote D084 (the equity age, 2026-10-23) and the owner answer of 2026-10-24 "
-        "wrote D085 (Phase 22 O-1 to O-4) and D086 (Phase 21 O-3 to O-6); the owner answer of "
-        "2026-10-25 wrote D087 (Phase 21 WR-08 and WR-05); the owner answer of 2026-10-26 "
-        "wrote D088 (Phase 23 O-2, the G4-042 expiry rule); the owner answer of 2026-10-31 "
-        "wrote D089 (Phase 24 execution limit values, plan 24-06); the assistant proposed "
-        "D090 (Phase 24 REST gate alert events, plan 24-13); the owner answer of 2026-10-31 "
-        "wrote D091 (key 14 and two live-health bounds) and the owner answer of 2026-11-01 "
-        "wrote D092 (kill-gate state source) and D093 (REST bound edge, ACKED restore rule); "
-        "the owner answer of 2026-11-01 wrote D094 (the stream starts before the first reconcile "
-        "tick, plan 24-37) and D095 (the snapshot recorder in the write-ahead path and the "
-        "reservation release, plan 24-37); the owner choice of 2026-11-01 wrote D096 (the "
-        "last-price age bound 30000 ms); the assistant proposed D097 (the reconcile skips "
-        "a placement in flight), which the owner accepted on 2026-11-07; plan 24-31 wrote D098 to "
-        "D106 (the owner answers of 2026-10-31 to 24-01 Q1 to Q8, Q11 to Q13 and Q15) and D107 "
-        "(Provisional: the env split and the open-algo cancel confirmation)"
-    )
+    problems = _decision_id_problems(after_d078)
+    assert problems == [], f"DECISIONS ids after D078 are out of order: {problems}"
     first = ids.index("D078") + 1
     for row in rows[first : first + 5]:
         assert "2026-10-22, owner instruction" in row, row[:40]
@@ -468,3 +452,31 @@ def test_invariant_6_decisions_gained_no_row_and_d055_stays_open() -> None:
     lowered = d055[0].lower()
     for claim in ("closes d055", "d055 is closed", "d055 closed", "closing d055"):
         assert claim not in lowered, f"the D055 row claims it is closed: {claim!r}"
+
+
+def test_invariant_6b_the_decisions_id_check_is_armed() -> None:
+    """The id check fails on a broken prefix or a gap after D107, passes on a consecutive tail."""
+    prefix = list(DECISION_IDS_AFTER_D078_PREFIX)
+    assert DECISION_IDS_AFTER_D078_PREFIX[0] == "D079"
+    assert DECISION_IDS_AFTER_D078_PREFIX[-1] == "D107"
+    assert len(DECISION_IDS_AFTER_D078_PREFIX) == 29
+    # Passes: the prefix alone and the prefix plus a consecutive tail.
+    assert _decision_id_problems(prefix) == []
+    assert _decision_id_problems(prefix + ["D108"]) == []
+    assert _decision_id_problems(prefix + ["D108", "D109", "D110", "D111"]) == []
+    tail = ["D108", "D109", "D110", "D111"]
+    # Fails: a missing, swapped or repeated id inside the fixed prefix.
+    missing = [i for i in prefix if i != "D090"]
+    assert _decision_id_problems(missing + tail) != []
+    swapped = list(prefix)
+    a, b = swapped.index("D081"), swapped.index("D082")
+    swapped[a], swapped[b] = swapped[b], swapped[a]
+    assert _decision_id_problems(swapped + tail) != []
+    repeated = list(prefix)
+    repeated.insert(repeated.index("D095"), "D095")
+    assert _decision_id_problems(repeated + tail) != []
+    # Fails: a gap, a repeat, a wrong start or a reordering after D107.
+    assert _decision_id_problems(prefix + ["D108", "D110"]) != []
+    assert _decision_id_problems(prefix + ["D108", "D108"]) != []
+    assert _decision_id_problems(prefix + ["D109"]) != []
+    assert _decision_id_problems(prefix + ["D109", "D108"]) != []
