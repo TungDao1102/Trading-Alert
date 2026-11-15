@@ -2,7 +2,7 @@
 
 The owner's values are in `config/execution/execution-limits-v1.toml` (DECISIONS D089). This
 module reads the shipped file through the real loader, plus the ratified Binance limits and the
-confirm TTL, and fails naming the keys when one of five rules breaks:
+confirm TTL, and fails naming the keys when one of six rules breaks:
 
 1. `reconcile.tick_interval_ms` is strictly below `protection.max_unprotected_ms`;
 2. `protection.max_unprotected_ms` is above the ratified 429 pause plus two ticks;
@@ -10,9 +10,12 @@ confirm TTL, and fails naming the keys when one of five rules breaks:
    confirm TTL plus the GTD clock margin;
 4. `stale_feed.max_mark_price_age_ms` is above one tick;
 5. `reconcile.entry_unknown_probe_count` times `reconcile.entry_unknown_probe_interval_ms` is
-   below `protection.entry_unknown_grace_ms`.
+   below `protection.entry_unknown_grace_ms`;
+6. a set `scheduler.protection_stall_after_ms` is strictly below `protection.max_unprotected_ms`
+   (D114; an unset stall key is allowed: it is alert only, D111).
 
-Nothing here is a default: a rule whose key is unset is itself a violation. The negative controls
+Nothing here is a default: a rule whose key is unset is itself a violation (the alert-only stall
+key of rule 6 is the one exception). The negative controls
 edit a copy under `tmp_path`, never the shipped file. No network, no database, no wall clock.
 """
 
@@ -21,6 +24,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import tomllib
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -32,6 +36,7 @@ from src.execution.execution_limits import (
     load_execution_limits,
 )
 from src.execution.pre_placement import GTD_MIN_AHEAD_SECONDS
+from src.live.scheduler import LiveCadences
 
 ROOT = Path(__file__).resolve().parents[1]
 EXECUTION_LIMITS_FILE = ROOT / "config" / "execution" / "execution-limits-v1.toml"
@@ -105,6 +110,15 @@ def relationship_violations(limits: ExecutionLimits, binance: BinanceLimits) -> 
             "reconcile.entry_unknown_probe_interval_ms must be below "
             "protection.entry_unknown_grace_ms"
         )
+    # Rule 6 (D114): the stall key is alert only, so unset is not a violation; a set bound must
+    # fire before the unprotected deadline, otherwise TASK_STALLED could not warn in time.
+    stall_after_ms = limits.scheduler_protection_stall_after_ms
+    if stall_after_ms is not None and stall_after_ms >= unprotected:
+        problems.append(
+            "scheduler.protection_stall_after_ms must be strictly below "
+            "protection.max_unprotected_ms (otherwise TASK_STALLED cannot fire before the "
+            "unprotected deadline)"
+        )
     return problems
 
 
@@ -169,6 +183,12 @@ def test_the_ratified_inputs_of_the_rules_are_what_the_rules_assume(
                 "protection.entry_unknown_grace_ms",
             ),
         ),
+        (
+            "scheduler",
+            "protection_stall_after_ms",
+            180000,  # equal to protection.max_unprotected_ms
+            ("scheduler.protection_stall_after_ms", "protection.max_unprotected_ms"),
+        ),
     ],
 )
 def test_each_relationship_fails_naming_its_keys_on_a_copy(
@@ -232,3 +252,37 @@ def test_the_user_data_silence_key_is_d091_and_the_d083_margin_stays_unset() -> 
     assert document["rest_gate"]["ban_end_clock_margin_ms"] == "NOT_CONFIGURED"
     limits = load_execution_limits(EXECUTION_LIMITS_FILE)
     assert limits.unset_keys() == (), "DECISIONS D091 set the last required key"
+
+
+def test_an_unset_stall_bound_is_not_a_violation_and_a_set_one_must_stay_below_the_deadline(
+    binance: BinanceLimits,
+) -> None:
+    # Rule 6 (D114): the key is alert only, so unset is allowed; set, it is below the deadline.
+    limits = load_execution_limits(EXECUTION_LIMITS_FILE)
+    unset = dataclasses.replace(limits, scheduler_protection_stall_after_ms=None)
+    assert relationship_violations(unset, binance) == []
+    assert limits.max_unprotected_ms is not None
+    at_deadline = dataclasses.replace(
+        limits, scheduler_protection_stall_after_ms=limits.max_unprotected_ms
+    )
+    assert any(
+        "scheduler.protection_stall_after_ms" in p
+        for p in relationship_violations(at_deadline, binance)
+    )
+
+
+def test_the_shipped_stall_bound_is_d114_and_feeds_a_sixty_second_watchdog(
+    binance: BinanceLimits,
+) -> None:
+    # Quick 261115-pdb (D114, owner answer 2026-11-15): 60000 ms, provenance DECISION.
+    document = tomllib.loads(EXECUTION_LIMITS_FILE.read_text(encoding="utf-8"))
+    assert document["scheduler"]["protection_stall_after_ms"] == 60000
+    assert document["provenance"]["scheduler"]["protection_stall_after_ms"] == "DECISION"
+    limits = load_execution_limits(EXECUTION_LIMITS_FILE)
+    assert limits.scheduler_protection_stall_after == timedelta(seconds=60)
+    cadences = LiveCadences.from_limits(limits, binance)
+    assert cadences.protection_stall_after == timedelta(seconds=60)
+    assert cadences.protection_stall_after_seconds == 60  # compared with an int, no float()
+    # The optional summary window is untouched: still unset.
+    assert limits.scheduler_duration_summary_interval_ms is None
+    assert cadences.duration_summary_interval is None

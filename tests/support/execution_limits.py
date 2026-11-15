@@ -62,9 +62,10 @@ TEST_ONLY_EXECUTION_LIMIT_VALUES: Mapping[str, int | None] = {
     # Plan 24-03 (D083 item 4): a FAKE clock margin for the 418 ban end; the real one is the owner's
     # (OWNER-OPEN O-1) and the shipped file keeps it NOT_CONFIGURED.
     "rest_gate.ban_end_clock_margin_ms": 4545,
-    # Quick task 261114-mp1 (D111): the protection stall bound is ALERT ONLY and unset (None), like
-    # the shipped file, so every wiring test keeps the stall watchdog off. A test that needs a bound
-    # overrides the field (`scheduler_protection_stall_after_ms=...`).
+    # Quick task 261114-mp1 (D111): the protection stall bound is ALERT ONLY. The shipped file sets
+    # it since D114 (quick 261115-pdb); this TEST_ONLY value stays None on purpose, so every wiring
+    # test keeps the stall watchdog off unless it sets a bound (override the field
+    # `scheduler_protection_stall_after_ms`).
     "scheduler.protection_stall_after_ms": None,
     # Quick task 261115-kra (D112): the summary window is OPTIONAL and unset (None), like the
     # shipped file, so no wiring test writes window rows. A test that needs a window overrides

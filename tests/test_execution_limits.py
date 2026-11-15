@@ -102,6 +102,9 @@ BAN_END_MARGIN_KEY = "rest_gate.ban_end_clock_margin_ms"
 BAN_END_MARGIN_FIELD = "rest_gate_ban_end_clock_margin_ms"
 STALL_KEY = "scheduler.protection_stall_after_ms"
 STALL_FIELD = "scheduler_protection_stall_after_ms"
+# Quick task 261115-pdb (DECISIONS D114, owner answer 2026-11-15): the shipped bound of the
+# observe-only stall watchdog, provenance DECISION. The key stays alert only.
+STALL_DECIDED_MS = 60000
 # Quick task 261115-kra (D112): the window of the scheduler duration summary rows, an OPTIONAL
 # REFINEMENT key (it switches no alert): unset, only the new-maximum rows are written.
 SUMMARY_KEY = "scheduler.duration_summary_interval_ms"
@@ -509,6 +512,8 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
         "liquidation_buffer_bps",
         "max_bracket_age_ms",
         "headroom_bps",
+        # Quick 261115-pdb (D114): the stall bound is the last numeric key ([scheduler] is last).
+        "protection_stall_after_ms",
     ]
     assert f"max_equity_age_ms = {EQUITY_AGE_DECIDED_MS}\n" in text
     # Nineteen keys, each with a value and a provenance label (19-REVIEW WR-05 added the fifth,
@@ -522,7 +527,9 @@ def test_the_committed_file_names_only_not_configured_except_the_owner_numbers()
     # D091 set key 14: only the D083 margin and, since quick 261114-mp1 (D111), the alert-only
     # stall bound remain unset, a value and a label each.
     # Quick 261115-kra (D112) adds the optional summary window, unset: 4 + 2 = 6.
-    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 6
+    # Quick 261115-pdb (D114) sets the stall bound, a value and a label: 6 - 2 = 4 (the D083
+    # clock margin and the summary window remain).
+    assert text.count(f'"{el.NOT_CONFIGURED_WORD}"') == 4
 
 
 def test_the_test_only_helper_rejects_an_unknown_field() -> None:
@@ -711,6 +718,11 @@ def test_the_real_file_has_every_section_and_label_unset_except_the_decided_keys
                 assert document[section][key] == D089_DECIDED[f"{section}.{key}"]
                 assert document["provenance"][section][key] == "DECISION"
                 continue
+            if f"{section}.{key}" == STALL_KEY:
+                # Quick 261115-pdb (D114, owner answer 2026-11-15): a number and the label DECISION.
+                assert document[section][key] == STALL_DECIDED_MS
+                assert document["provenance"][section][key] == "DECISION"
+                continue
             assert document[section][key] == el.NOT_CONFIGURED_WORD, (section, key)
             assert document["provenance"][section][key] == el.NOT_CONFIGURED_WORD, (section, key)
 
@@ -809,8 +821,9 @@ def test_the_committed_file_sets_the_equity_age_and_keeps_it_required() -> None:
     assert _ACCOUNT_KEY not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
     assert len(limits.unset_keys()) == 0  # D091 set the last one
-    # D089 set the stale-entry grace; the D111 stall key is unset and alert-only.
-    assert limits.unset_alert_only_keys() == (STALL_KEY,)
+    # D089 set the stale-entry grace and D114 (quick 261115-pdb) the D111 stall bound: no alert-only
+    # key is unset in the shipped file any more.
+    assert limits.unset_alert_only_keys() == ()
     assert _ACCOUNT_KEY not in el.ALERT_ONLY_LIMIT_KEYS
     # Since D091 every required key is set, so the file is live-ready (LIVE_ORDERS_DISABLED still
     # blocks real orders).
@@ -927,7 +940,7 @@ def test_the_committed_file_holds_the_margin_keys_set_with_the_decision_label() 
     for dotted in MARGIN_KEYS:
         assert dotted not in limits.unset_keys()
     assert limits.unset_keys() == COMMITTED_UNSET
-    assert limits.unset_alert_only_keys() == (STALL_KEY,)  # D089 set the grace; D111 key unset
+    assert limits.unset_alert_only_keys() == ()  # D089 set the grace; D114 set the stall bound
 
 
 def test_require_live_ready_still_refuses_and_no_longer_names_the_margin_keys() -> None:
@@ -1124,8 +1137,8 @@ def test_a_document_without_the_rest_gate_section_is_refused_by_name() -> None:
 
 # --------------------------------------------------------------------------- #
 # Quick task 261114-mp1 (DECISIONS D111): scheduler.protection_stall_after_ms, an ALERT-ONLY key.
-# NOT_CONFIGURED until the owner sets it from a Demo measurement; unset, the observe-only stall
-# watchdog of the protection task is off and nothing else changes. No number is chosen.
+# The owner set it by DECISIONS D114 (2026-11-15, quick 261115-pdb); unset, the observe-only stall
+# watchdog of the protection task is off and nothing else changes.
 # --------------------------------------------------------------------------- #
 
 
@@ -1143,21 +1156,26 @@ def test_the_stall_key_is_declared_last_alert_only_with_a_prefixed_field() -> No
     assert not el.ALERT_ONLY_LIMIT_KEYS & el.OPTIONAL_REFINEMENT_LIMIT_KEYS
 
 
-def test_the_committed_file_leaves_the_stall_key_unset_and_labelled_not_configured() -> None:
+def test_the_committed_file_sets_the_stall_key_to_the_d114_value_with_the_decision_label() -> None:
+    # Quick 261115-pdb (D114): was "leaves the stall key unset" until 2026-11-15 (owner answer).
     import tomllib
+    from datetime import timedelta
 
     document = tomllib.loads(LIMITS_FILE.read_text(encoding="utf-8"))
-    assert document["scheduler"]["protection_stall_after_ms"] == el.NOT_CONFIGURED_WORD
-    assert document["provenance"]["scheduler"]["protection_stall_after_ms"] == (
-        el.NOT_CONFIGURED_WORD
-    )
+    assert document["scheduler"]["protection_stall_after_ms"] == STALL_DECIDED_MS
+    assert document["provenance"]["scheduler"]["protection_stall_after_ms"] == "DECISION"
     limits = el.load_execution_limits(LIMITS_FILE)
-    assert limits.scheduler_protection_stall_after_ms is None
-    assert limits.scheduler_protection_stall_after is None
-    assert limits.unset_alert_only_keys() == (STALL_KEY,)
+    assert limits.scheduler_protection_stall_after_ms == STALL_DECIDED_MS
+    assert limits.scheduler_protection_stall_after == timedelta(milliseconds=STALL_DECIDED_MS)
+    assert limits.scheduler_protection_stall_after == timedelta(seconds=60)
+    assert limits.unset_alert_only_keys() == ()
     assert STALL_KEY not in limits.unset_keys()
     assert STALL_KEY not in limits.unset_optional_refinement_keys()
-    limits.require_live_ready()  # an unset alert-only key never keeps the live path refused
+    assert STALL_KEY in el.ALERT_ONLY_LIMIT_KEYS  # still alert only: it never refuses the start
+    limits.require_live_ready()  # an alert-only key is never named by require_live_ready
+    assert limits.scheduler_protection_stall_after < timedelta(
+        milliseconds=limits.max_unprotected_ms
+    )
 
 
 def test_require_live_ready_never_names_the_stall_key() -> None:

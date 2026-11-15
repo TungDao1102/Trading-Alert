@@ -19,13 +19,15 @@
 #   account.max_equity_age_ms                  Phase 21, D-03 (F-012): maximum age of the account equity reading used for live sizing, the daily-loss base and the reservation gate
 #   account.max_daily_loss_age_ms              Phase 21 review WR-05: maximum age of a known daily loss, counted from the backfill that made it known (owner answer 2026-10-25, DECISIONS D087)
 #   rest_gate.ban_end_clock_margin_ms          Plan 24-03, D083 item 4 (OPTIONAL): clock-difference margin added to the ban end time read from a 418 / -1003 body
-#   scheduler.protection_stall_after_ms        Quick 261114-mp1, D111 (ALERT ONLY): stall bound of one protection run; unset, the stall watchdog is off
+#   scheduler.protection_stall_after_ms        Quick 261114-mp1, D111, D114 (ALERT ONLY): stall bound of one protection run, set by D114 (owner answer 2026-11-15); unset, the stall watchdog is off
 #   scheduler.duration_summary_interval_ms     Quick 261115-kra, D112 (OPTIONAL): window of the scheduler duration summary rows; unset, only new-maximum rows
 # A value is the string NOT_CONFIGURED until the owner fills it (OWNER-OPEN O-04). Set so far:
 # the account keys (D084, D087), the margin keys (D085) and, by DECISIONS D089 (Phase 24, plan
 # 24-06, owner answer 2026-10-31), every other key except rest_gate.ban_end_clock_margin_ms
 # (optional, stays unset); stale_feed.max_user_data_silence_ms was set last by DECISIONS D091 from
-# the Demo silence probe (longest gap 180374 ms, one server ping per 180 s). Setting values does not enable live placement (LIVE_ORDERS_DISABLED stays). The live path refuses while any key is NOT_CONFIGURED, except
+# the Demo silence probe (longest gap 180374 ms, one server ping per 180 s); and
+# scheduler.protection_stall_after_ms was set by DECISIONS D114 (owner answer 2026-11-15) from the
+# 2026-11-15 Demo smoke and the longest legitimate protection path. Setting values does not enable live placement (LIVE_ORDERS_DISABLED stays). The live path refuses while any key is NOT_CONFIGURED, except
 # reconcile.entry_stale_grace_ms: it only switches an alert on, so while it is NOT_CONFIGURED the
 # stale-entry check is skipped (and says so) and nothing else changes, and
 # rest_gate.ban_end_clock_margin_ms: it only refines the 418 ban wait, so while it is NOT_CONFIGURED
@@ -78,7 +80,7 @@ headroom_bps = 1000
 ban_end_clock_margin_ms = "NOT_CONFIGURED"
 
 [scheduler]
-protection_stall_after_ms = "NOT_CONFIGURED"
+protection_stall_after_ms = 60000
 duration_summary_interval_ms = "NOT_CONFIGURED"
 
 [provenance.protection]
@@ -119,5 +121,5 @@ headroom_bps = "DECISION"
 ban_end_clock_margin_ms = "NOT_CONFIGURED"
 
 [provenance.scheduler]
-protection_stall_after_ms = "NOT_CONFIGURED"
+protection_stall_after_ms = "DECISION"
 duration_summary_interval_ms = "NOT_CONFIGURED"

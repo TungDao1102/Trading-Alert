@@ -16,8 +16,9 @@ validated like the others but left out of ``unset_keys`` and ``require_live_read
 fallback wait and nothing else changes, so it too is left out of ``unset_keys`` and
 ``require_live_ready`` and is listed by ``unset_optional_refinement_keys``; no number is chosen for
 it. A last key (quick task 261114-mp1, DECISIONS D111, ``scheduler.protection_stall_after_ms``)
-is a second ALERT-ONLY key: unset, the observe-only stall watchdog of the protection task is off
-and nothing else changes; no number is chosen for it. A last key (quick task 261115-kra,
+is a second ALERT-ONLY key: the owner set its value by DECISIONS D114 (2026-11-15) in the limits
+file; unset, the observe-only stall watchdog of the protection task is off and nothing else
+changes. A last key (quick task 261115-kra,
 DECISIONS D112, ``scheduler.duration_summary_interval_ms``) is a second OPTIONAL REFINEMENT:
 unset, only the new-maximum rows of the scheduler duration record are written and nothing else
 changes; it switches no alert and no number is chosen for it.
@@ -125,8 +126,9 @@ EXECUTION_LIMIT_FIELDS: Mapping[str, str] = MappingProxyType(
 # check is skipped and says so; the key never keeps the live path refused (`unset_keys` and
 # `require_live_ready` leave it out, `unset_alert_only_keys` lists it). It is still loaded,
 # validated and given a provenance label like every other key, and no number is chosen for it.
-# `scheduler.protection_stall_after_ms` (quick 261114-mp1, D111): unset, the observe-only stall
-# watchdog of the protection task is off and nothing else changes; no number is chosen.
+# `scheduler.protection_stall_after_ms` (quick 261114-mp1, D111): the owner set its value by
+# DECISIONS D114 (2026-11-15) in the limits file; unset, the observe-only stall watchdog of the
+# protection task is off and nothing else changes.
 ALERT_ONLY_LIMIT_KEYS: frozenset[str] = frozenset(
     {"reconcile.entry_stale_grace_ms", "scheduler.protection_stall_after_ms"}
 )

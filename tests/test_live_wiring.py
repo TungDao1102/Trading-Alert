@@ -597,6 +597,25 @@ async def test_a_set_stall_bound_reaches_only_the_protection_task(
     assert set(bounds.values()) == {None}
 
 
+async def test_the_shipped_stall_bound_reaches_only_the_protection_task_as_sixty_seconds(
+    handles: WiringHandles,
+) -> None:
+    # Quick 261115-pdb (D114): the shipped file -> loader -> cadences -> the protection TaskSpec.
+    from src.execution.execution_limits import load_execution_limits
+
+    shipped = load_execution_limits(
+        Path(__file__).resolve().parents[1] / "config" / "execution" / "execution-limits-v1.toml"
+    )
+    # Before the first complete_assembly: it caches the wiring.
+    handles.assembly.cadences = dataclasses.replace(
+        handles.assembly.cadences, protection_stall_after=shipped.scheduler_protection_stall_after
+    )
+    complete = await complete_assembly(handles)
+    bounds = {spec.name: spec.stall_after_seconds for spec in complete.specs}
+    assert bounds.pop("protection_step") == 60
+    assert set(bounds.values()) == {None}
+
+
 # --------------------------------------------------------------------------- #
 # Quick task 261114-mp1 (D111): the production record path alerts a stall.
 # --------------------------------------------------------------------------- #
