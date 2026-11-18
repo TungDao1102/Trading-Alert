@@ -9,6 +9,8 @@ Identity: read-only deep audit of repository snapshot `55885b9` (branch `develop
 2. `DEEP_AUDIT_REPORT.md` (full Vietnamese report; section 9a strategy viability, section 14 remediation
    order, section 15 owner register R-01..R-55)
 3. `findings.json` (148 records, 144 primary, IDs `G-xxxx`; fields `verification`, `duplicate_of`)
+4. `POST_MORTEM_2026-11-18.md` (Vietnamese, blameless post-mortem of 2026-09-19..2026-11-18, written after
+   the audit; a draft for the owner, not a decision)
 
 ## Notes
 
