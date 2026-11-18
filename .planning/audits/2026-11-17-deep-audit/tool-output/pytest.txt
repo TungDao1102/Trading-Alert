@@ -1,0 +1,871 @@
+bringing up nodes...
+bringing up nodes...
+
+ss.s.s.s..s.s..s..ss.s...ss.s.s.s.s.s.s.s.s.s........................... [  0%]
+...............................sss.s.ss.ss.....................s.ssss... [  0%]
+........................................................................ [  1%]
+........................................................................ [  1%]
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  3%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  7%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [  8%]
+........................................................................ [  9%]
+........................................................................ [  9%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 11%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 12%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 14%]
+.............................................................s.......... [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 15%]
+........................................................................ [ 16%]
+........................................................................ [ 16%]
+........................................................................ [ 16%]
+......s.......................................x......................... [ 17%]
+..................................................x............x........ [ 17%]
+........................................................................ [ 18%]
+....................................................................ssss [ 18%]
+sssssssssssssssss............s.......................................... [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+........................................................................ [ 20%]
+........................................................................ [ 20%]
+........................................................................ [ 21%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 22%]
+........................................................................ [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 23%]
+........................................................................ [ 24%]
+........................................................................ [ 24%]
+........................................................................ [ 24%]
+........................................................................ [ 25%]
+........................................................................ [ 25%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+..................................................sssss................. [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 27%]
+........................................................................ [ 27%]
+........................ssss............................................ [ 28%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 29%]
+........................................................................ [ 29%]
+........................................................................ [ 30%]
+...........................ssssssss..................................... [ 30%]
+........................................................................ [ 31%]
+........................................................................ [ 31%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 32%]
+........................................................................ [ 33%]
+............................................ssssssssssssssss............ [ 33%]
+.............................................................sssssssssss [ 33%]
+ssssssssssssssssssssssss................................................ [ 34%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 35%]
+........................................................................ [ 35%]
+........................................................................ [ 36%]
+........................................................................ [ 36%]
+........................................................................ [ 36%]
+.......ssss............................................................. [ 37%]
+........................................................................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 38%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+........................................................................ [ 40%]
+.........................ssss..ssssssssssss....ss....................... [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 41%]
+........................................................................ [ 42%]
+........................................................................ [ 42%]
+........................................................................ [ 42%]
+........................................................................ [ 43%]
+........................................................................ [ 43%]
+............................................................s........... [ 44%]
+........................................................................ [ 44%]
+........................................................................ [ 44%]
+...ssssssssss........................................................... [ 45%]
+........................................................................ [ 45%]
+.........ssssssssssssss................................................. [ 46%]
+........................................................................ [ 46%]
+........................................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 48%]
+........................................................................ [ 48%]
+........................................................................ [ 49%]
+........................................................................ [ 49%]
+........................................................................ [ 49%]
+....................................ssssssssss.......................... [ 50%]
+........................................................................ [ 50%]
+........................................................................ [ 51%]
+........................................................................ [ 51%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 53%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 54%]
+........................................................................ [ 55%]
+.........................s.............................................. [ 55%]
+........................................................................ [ 55%]
+........................................................................ [ 56%]
+........................................................................ [ 56%]
+..................................................................ssss.. [ 57%]
+...............................................................ss.s..... [ 57%]
+........................................................................ [ 57%]
+........................................................sss............. [ 58%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 59%]
+..s..................................................................... [ 59%]
+..............................................sss....................... [ 60%]
+ssssssssssssssssssss.................................................... [ 60%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+.........sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 61%]
+ss.sssssssssssssssssssssssssssssssssssssssssssssssss...................s [ 62%]
+sss.sssss.sssss.ssss.ssssss.ss.sssss.sssss.s.s.ss.s.s.s.ss.s.s.s.ss..ss. [ 62%]
+s.s.sssss.ssssssss.sssssss.ssssssssss..sssss............................ [ 62%]
+........................................................................ [ 63%]
+........................................................................ [ 63%]
+..........................sssssss.ssss.................................. [ 64%]
+sss.sssssssssss.sssssssssssssssssssssss.sssssssss.ssssss..sss...s..s..s. [ 64%]
+.ss..sss..sss..sss..ssss...ssssss.ssssssssssssssssssssssssssssssssssssss [ 64%]
+sssssssssssssss.......ssssssssssssssssssssssssssssssssssssssssssssssssss [ 65%]
+ssssssssssssssssssssss....................sssss......................... [ 65%]
+........................................................................ [ 66%]
+........................................................................ [ 66%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+....................sssssssssssssss.s.ssss.............................. [ 68%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 69%]
+........................................................................ [ 70%]
+........................................................................ [ 70%]
+........................................................................ [ 70%]
+........................................................................ [ 71%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 72%]
+........................................................................ [ 72%]
+........................................................................ [ 73%]
+........................................................................ [ 73%]
+..............................................................ssss.....s [ 73%]
+s......sss.............................................................. [ 74%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 75%]
+....s................................................................... [ 75%]
+.....................................ssssssssssss....................... [ 76%]
+........................................................................ [ 76%]
+........................................................................ [ 77%]
+.......................................ssss............................. [ 77%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 78%]
+........................................................................ [ 79%]
+........................................................................ [ 79%]
+......................................................ssssssssssssssssss [ 79%]
+ssss.ssssssssssssssssssssss............................................. [ 80%]
+....................................ssssssssssssssssssssssss..ssssssssss [ 80%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssss................ [ 81%]
+........................................................................ [ 81%]
+........................................................................ [ 81%]
+.........................................................sssss.......... [ 82%]
+........................................................................ [ 82%]
+........................................................................ [ 83%]
+........................................................................ [ 83%]
+................................s....................................... [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 84%]
+........................................................................ [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 85%]
+...........................................................sssssssssssss [ 86%]
+ssssssssssss.ss......................................................... [ 86%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 88%]
+........................................................................ [ 88%]
+..............................s......................................... [ 89%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 90%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 91%]
+........................................................................ [ 92%]
+........................................................................ [ 92%]
+........................................................................ [ 92%]
+........................................................................ [ 93%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+.......................................................ssssssssssssss... [ 94%]
+........................................................................ [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+........................................................................ [ 96%]
+...........................................sssssssssssssssssssssssssssss [ 96%]
+ssssss......................................................sssssss..... [ 97%]
+........................................................................ [ 97%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+........................................................................ [ 98%]
+........................................................................ [ 99%]
+sss..................................................................... [ 99%]
+........................................................................ [ 99%]
+..........                                                               [100%]
+============================== warnings summary ===============================
+..\..\..\Trading\.venv\Lib\site-packages\telegram\error.py:243: 32 warnings
+tests/test_alerts.py: 4 warnings
+tests/test_approval_desk.py: 2 warnings
+tests/test_paper_shadow_runtime.py: 2 warnings
+tests/test_paper_shadow_telegram_failures.py: 8 warnings
+tests/test_paper_shadow_buttons.py: 8 warnings
+tests/test_telegram_decided_message.py: 22 warnings
+tests/test_confirm_flow.py: 4 warnings
+  C:\Users\admin\Music\Trading\.venv\Lib\site-packages\telegram\error.py:243: PTBDeprecationWarning: Deprecated since version v22.2: In a future major version attribute `retry_after` will be of type `datetime.timedelta`. You can opt-in early by setting `PTB_TIMEDELTA=true` or ``PTB_TIMEDELTA=1`` as an environment variable.
+    return get_timedelta_value(  # type: ignore[return-value]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================ slowest 30 durations =============================
+44.93s setup    tests/test_research_terminal_settlement_integration.py::test_bounds_never_reach_validation_outputs_or_records
+31.04s call     tests/test_backfill_cli.py::test_cli_prints_depth_in_run_header
+27.06s call     tests/test_analytics_typing.py::test_analytics_is_mypy_strict_clean
+21.92s call     tests/test_research_checkpoint.py::test_a_record_that_differs_from_the_one_built_now_is_never_overwritten
+21.18s call     tests/test_research_checkpoint.py::test_an_interrupted_run_keeps_finished_points_and_resumes_the_rest
+20.38s call     tests/test_research_checkpoint.py::test_a_complete_rerun_is_idempotent_and_simulates_nothing
+19.85s call     tests/test_case_input_builder.py::test_dataset_id_changes_with_any_partition
+19.25s call     tests/test_case_input_builder.py::test_multi_symbol_output_carries_the_v2_keys
+16.09s call     tests/test_research_checkpoint.py::test_a_damaged_checkpoint_stops_the_run
+16.04s call     tests/test_bootstrap.py::test_env_validation_enforces_a_url_safe_long_postgres_password[sixteen-ok]
+15.56s call     tests/test_case_input_builder.py::test_builder_output_runs_through_the_engine_with_a_lazy_minute_source
+15.50s call     tests/test_research_runner.py::test_rerun_of_a_recorded_experiment_is_refused_and_never_overwritten
+15.49s call     tests/test_research_warmup.py::test_no_day_at_or_after_the_holdout_start_is_read_for_any_window
+15.20s call     tests/test_collector.py::test_funding_history_paginates_and_advances_watermark
+15.14s call     tests/test_research_checkpoint.py::test_a_checkpoint_run_writes_exactly_the_records_of_a_plain_run
+15.10s call     tests/test_backfill_cli.py::test_cli_refreshes_metadata_before_backfill
+14.82s call     tests/test_case_input_relative_paths_equivalence.py::test_spelled_roots_give_the_same_files_and_identity
+14.66s call     tests/test_case_input_builder.py::test_dataset_id_is_deterministic
+14.55s call     tests/test_research_checkpoint.py::test_a_checkpoint_of_another_code_version_or_manifest_is_refused
+14.27s call     tests/test_bootstrap.py::test_sudo_guard_flow_first_run_stops_then_second_run_after_passwd_succeeds
+13.88s call     tests/test_case_input_builder.py::test_single_symbol_keyword_is_still_accepted
+13.70s setup    tests/test_case_input_builder.py::test_builder_reads_published_partitions
+12.27s call     tests/test_research_checkpoint.py::test_a_record_is_never_left_half_written
+12.26s call     tests/test_case_input_relative_paths_equivalence.py::test_the_builder_output_is_the_output_of_the_old_code[full-trade+intrabar_1m+mark_1m+funding+open_interest]
+10.92s call     tests/test_case_input_builder.py::test_dataset_identity_ignores_file_order
+10.80s call     tests/test_bootstrap.py::test_checkout_uses_the_deploy_key_through_git_ssh_command
+10.77s call     tests/test_research_known_gap_reason.py::test_the_six_builder_calls_each_acknowledge_exactly_five_gaps
+10.63s setup    tests/test_research_warmup.py::test_a_terminal_instant_inside_the_warmup_builds_without_a_settlement_row
+10.61s call     tests/test_bootstrap.py::test_ufw_allows_the_effective_ssh_port_before_enabling
+10.45s setup    tests/test_research_warmup.py::test_a_fold_case_holds_the_span_of_history_before_its_start
+=========================== short test summary info ===========================
+SKIPPED [1] tests\demo\test_demo_s00_preflight.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s01_happy.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s02_partial_fill.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s03_crossed_stop.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s04_stop_rejected.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s05_cancel_race.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s06_replay.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [3] tests\demo\test_demo_s07_restart_cuts.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s08_stream_loss.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s09_clock_skew.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s10_rate_limit.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s11_db_outage.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s12_daily_stop.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s13_margin_liquidation.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s14_safe_mode.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s15_foreign_order.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s16_manual_close.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s17_stale_feed.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s18_unprotected.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\demo\test_demo_s19_rest_gate_cli.py: demo scenario: owner-run only (-m demo with TRADING_DEMO_RUN=1); never run by CI or an agent
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:98: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:133: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:146: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:161: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:172: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:183: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:193: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_mode_scope_pg.py:232: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_replay_pg.py:321: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_replay_pg.py:361: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_replay_pg.py:391: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_replay_pg.py:420: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_approval_replay_pg.py:457: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_analytics_files.py:974: symlinks unavailable on this platform: OSError
+SKIPPED [1] tests\test_analytics_store.py:561: live-PG analytics store test requires TEST_DATABASE_URL
+SKIPPED [1] tests\test_day_risk_pg.py:92: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:106: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:117: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:129: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:137: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:149: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:159: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:176: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:187: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:203: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:213: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:221: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:233: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:247: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:263: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:277: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:291: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:300: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:307: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:325: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:330: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_day_risk_pg.py:402: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_domain_mappers_pg.py:151: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_domain_mappers_pg.py:165: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_domain_mappers_pg.py:174: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_domain_mappers_pg.py:183: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_domain_mappers_pg.py:194: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_evaluate_demo_soak_pg.py:116: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_evaluate_demo_soak_pg.py:145: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_evaluate_demo_soak_pg.py:174: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_evaluate_demo_soak_pg.py:194: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_write_ahead_pg.py:103: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_write_ahead_pg.py:123: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_execution_write_ahead_pg.py:216: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_write_ahead_pg.py:245: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_write_ahead_pg.py:270: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_write_ahead_pg.py:295: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:113: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:190: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:231: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:262: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:326: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:353: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:401: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_intent_recovery_pg.py:433: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_intent_recovery_pg.py:462: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:497: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:532: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_recovery_pg.py:556: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:165: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:177: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:188: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:200: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:207: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:216: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:225: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_intent_result_contract.py:245: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_intent_result_contract.py:263: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:281: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_intent_result_contract.py:286: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:300: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:312: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract.py:322: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract_pg.py:89: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract_pg.py:112: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_intent_result_contract_pg.py:135: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract_pg.py:147: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_intent_result_contract_pg.py:158: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract_pg.py:172: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_intent_result_contract_pg.py:192: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_approval_sender.py:1267: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_approval_sender.py:1283: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_approval_sender.py:1297: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_approval_sender.py:1312: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_exactly_once_pg.py:198: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_exactly_once_pg.py:217: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_exactly_once_pg.py:276: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_exactly_once_pg.py:288: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [6] tests\test_execution_exactly_once_pg.py:382: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_execution_exactly_once_pg.py:437: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_execution_exactly_once_pg.py:463: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_exactly_once_pg.py:570: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_execution_exactly_once_pg.py:600: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_safe_mode_drill.py:373: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:249: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:285: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:311: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:341: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:360: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:376: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:403: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:453: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:481: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_stream_persistence_pg.py:498: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_lot_filters_pg.py:57: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_lot_filters_pg.py:71: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_lot_filters_pg.py:75: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_lot_filters_pg.py:96: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_lot_filters_pg.py:108: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_lot_filters_pg.py:114: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_lot_filters_pg.py:135: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:91: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:109: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:131: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:146: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:162: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:184: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:206: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:229: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:258: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_live_replay_restart_pg.py:287: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_replay_inputs.py:1279: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_pg.py:154: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_pg.py:191: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_pg.py:225: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_pg.py:268: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_reservations_pg.py:45: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_reservations_pg.py:72: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_reservations_pg.py:102: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_runtime_pg.py:79: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_runtime_pg.py:103: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_shadow_runtime_pg.py:143: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_test_signal_rehearsal.py:605: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_restart_pg.py:48: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_restart_pg.py:54: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_restart_pg.py:70: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_paper_runtime_state_pg.py:69: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:76: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:89: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:111: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:129: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:138: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:157: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:171: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:182: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:187: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:228: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:243: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_paper_runtime_state_pg.py:262: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:68: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:85: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:103: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:114: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:142: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:160: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:213: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_pending_actions_pg.py:223: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:241: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:252: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:273: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pending_actions_pg.py:301: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:177: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:189: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:197: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:211: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:223: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:233: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:238: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:259: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:272: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:282: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:295: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:308: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:324: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:339: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:352: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:364: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:372: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:380: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:395: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:409: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:427: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:454: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:467: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:479: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:494: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:512: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:549: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:623: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:642: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:658: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:674: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:699: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:742: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:840: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:862: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:874: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:891: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:904: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:916: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:926: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:962: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_approvals_pg.py:981: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:1003: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_approvals_pg.py:1028: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:61: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:74: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:110: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:132: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:151: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:167: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:187: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:195: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:203: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:232: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:245: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [12] tests\test_persistence_constraints_pg.py:288: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_persistence_constraints_pg.py:322: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:348: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_persistence_constraints_pg.py:372: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:394: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_persistence_constraints_pg.py:409: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:427: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_constraints_pg.py:449: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:464: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_constraints_pg.py:469: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_engine_pg.py:55: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_engine_pg.py:63: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_engine_pg.py:73: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_engine_pg.py:99: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\infra_helpers.py:50: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_engine_timeouts.py:73: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_engine_timeouts.py:81: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [11] tests\test_persistence_enum_columns_pg.py:97: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [11] tests\test_persistence_enum_columns_pg.py:120: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_enum_columns_pg.py:134: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_enum_columns_pg.py:151: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:115: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:120: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:139: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:166: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:182: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:206: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:221: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:235: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_event_time_pg.py:257: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:281: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:286: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:305: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:322: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:333: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:341: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_persistence_event_time_pg.py:346: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:374: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_event_time_pg.py:386: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_event_time_pg.py:396: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:413: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_event_time_pg.py:420: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:119: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:147: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:158: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:176: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:187: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:201: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:235: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:257: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:270: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:286: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:305: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:320: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_persistence_exit_evidence_pg.py:338: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_exit_evidence_pg.py:354: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:373: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:389: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:401: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_exit_evidence_pg.py:413: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:422: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:427: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:446: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:455: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_exit_evidence_pg.py:465: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_exit_evidence_pg.py:481: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:127: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:138: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:142: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:151: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:168: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:192: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:215: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:242: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:255: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:269: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:278: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:299: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_journal_pg.py:328: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:349: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:411: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:427: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_journal_pg.py:452: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:160: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_persistence_migration_pg.py:179: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [6] tests\test_persistence_migration_pg.py:214: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [19] tests\test_persistence_migration_pg.py:273: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:312: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:343: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:436: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:495: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:510: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:557: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:567: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_persistence_migration_pg.py:575: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:631: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:670: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:721: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:742: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_migration_pg.py:757: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:767: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:791: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:844: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:868: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:901: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:968: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1029: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1092: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1157: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1200: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1292: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1308: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1376: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1451: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1464: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1485: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1563: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1571: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1593: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1657: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_migration_pg.py:1662: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_persistence_migration_pg.py:1697: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_roundtrip_pg.py:253: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_roundtrip_pg.py:261: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_roundtrip_pg.py:274: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_roundtrip_pg.py:296: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_roundtrip_pg.py:305: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_roundtrip_pg.py:332: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:231: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:243: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:257: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:268: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:278: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:289: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:302: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:315: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:325: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:339: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:352: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:390: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:403: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:414: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:421: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:429: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:441: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:457: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:464: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [21] tests\test_persistence_transitions_pg.py:531: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_persistence_transitions_pg.py:552: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:564: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:570: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:603: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:619: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_transitions_pg.py:636: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [6] tests\test_persistence_transitions_pg.py:735: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_triggers_pg.py:137: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_triggers_pg.py:145: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_triggers_pg.py:153: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_triggers_pg.py:165: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [18] tests\test_persistence_triggers_pg.py:272: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [6] tests\test_persistence_triggers_pg.py:286: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:311: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:320: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:347: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:352: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:360: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:366: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_persistence_triggers_pg.py:374: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:397: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:411: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_persistence_triggers_pg.py:433: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:439: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:446: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:453: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:467: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_triggers_pg.py:473: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_uow_pg.py:61: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_uow_pg.py:73: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_uow_pg.py:85: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_uow_pg.py:98: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_uow_pg.py:107: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_persistence_uow_pg.py:115: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pg_fixture_guard.py:132: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pg_fixture_guard.py:142: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pg_fixture_guard.py:155: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_pg_fixture_guard.py:176: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [15] tests\test_plan_hash_roundtrip_pg.py:143: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_plan_hash_roundtrip_pg.py:188: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_plan_hash_roundtrip_pg.py:223: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_plan_hash_roundtrip_pg.py:240: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:123: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:135: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:145: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:157: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:241: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:272: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:379: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:398: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_realized_risk_persistence_pg.py:420: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_bootstrap.py:947: NTFS cannot represent POSIX modes
+SKIPPED [1] tests\test_callback_redelivery_pg.py:79: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_callback_redelivery_pg.py:116: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_callback_redelivery_pg.py:136: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_callback_redelivery_pg.py:268: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_callback_redelivery_pg.py:308: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_deploy_heartbeat.py:403: file modes do not exist on Windows
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:191: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:210: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:223: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:336: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_risk_reservation_approval_pg.py:364: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:405: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:433: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_risk_reservation_approval_pg.py:466: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:517: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:537: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:553: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:571: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:586: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:600: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:652: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:699: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_approval_pg.py:722: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:163: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:176: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:184: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:197: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:218: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_risk_reservation_margin_pg.py:227: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:246: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:255: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:281: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:290: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:299: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:320: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:334: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:347: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:360: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:416: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:436: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservation_margin_pg.py:450: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:183: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:196: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:219: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:232: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:255: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:274: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:300: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [8] tests\test_risk_reservations_pg.py:327: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:390: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_risk_reservations_pg.py:401: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:422: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:431: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:442: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:517: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:539: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:557: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_risk_reservations_pg.py:577: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_risk_reservations_pg.py:592: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:607: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [45] tests\test_risk_reservations_pg.py:620: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [9] tests\test_risk_reservations_pg.py:660: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:670: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_risk_reservations_pg.py:684: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_safe_mode_persistence_pg.py:94: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_safe_mode_persistence_pg.py:132: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_safe_mode_persistence_pg.py:148: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_safe_mode_persistence_pg.py:167: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_safe_mode_persistence_pg.py:185: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_soak_evidence_export.py:1377: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:99: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:104: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:121: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:133: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:155: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:187: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:197: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:209: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_system_state_pg.py:242: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_system_state_pg.py:293: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:301: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [4] tests\test_system_state_pg.py:315: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [5] tests\test_system_state_pg.py:337: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_system_state_pg.py:355: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [2] tests\test_system_state_pg.py:370: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_user_data_smoke_dry_run.py:383: symlinks are not available on this platform
+SKIPPED [14] tests\infra_helpers.py:50: required tool not found on PATH: shellcheck
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:175: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:196: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:208: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:212: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:225: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:237: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:245: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:263: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:276: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:285: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:294: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:310: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:317: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:325: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:339: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_constraint_snapshot_pg.py:347: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:94: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:103: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:110: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:119: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:130: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_consume_approved_quantity_pg.py:140: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:152: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:163: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:171: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:180: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:204: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:217: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_consume_approved_quantity_pg.py:233: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:262: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_consume_approved_quantity_pg.py:271: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_controller_rehydrate.py:376: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_controller_rehydrate.py:408: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_controller_rehydrate.py:419: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_controller_rehydrate.py:462: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [3] tests\test_controller_rehydrate.py:480: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_restorable_entries_pg.py:83: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_restorable_entries_pg.py:100: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+SKIPPED [1] tests\test_restorable_entries_pg.py:108: TEST_DATABASE_URL is not set; PostgreSQL tests cannot run
+exit=0
