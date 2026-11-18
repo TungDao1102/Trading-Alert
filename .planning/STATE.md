@@ -36,7 +36,7 @@ Previous: Phase 20 (Reconcile + SAFE_MODE Hardening + Alerts) — EXECUTED, veri
 Current Plan: 33 (owner steps; 35 of 36 plans have a SUMMARY, 24-27B and 24-37 are extra summaries)
 Total Plans in Phase: 36
 Status: Code complete, waiting for the owner's host results (24-OWNER-RUNBOOK.md); Demo smoke 21/21 on 2026-11-06
-Last activity: 2026-11-18 — deep audit 2026-11-17 imported into `.planning/audits/2026-11-17-deep-audit/` (8 HIGH on mainnet, all verified; strategy verdict: owner item R-52 open)
+Last activity: 2026-11-18 — audit option (b), research run 2, recorded as tracking-only Backlog 999.4 in ROADMAP (not started; Phases 25 to 27 not paused; R-52 still open as a DECISIONS row)
 
 Progress: [█████████░] 99%
 
@@ -642,6 +642,7 @@ Recent decisions affecting current work:
 - Phase 07.1 inserted after Phase 7: Close gap: B1 registry-cost to backtest identity binding (URGENT)
 - Phase 07.1 edited: edited fields: depends_on (Phase 7 -> Phase 6)
 - Phase 13.1 inserted after Phase 13: Deployment & CI: CI pipeline, image pinning, bootstrap/migrate scripts, provider-portable backups; VPS provisioning deferred
+- Backlog 999.4 added 2026-11-18: research run 2, audit option (b), tracking only (deep audit 2026-11-17 lane X11, post-mortem 2026-11-18)
 
 ## Deferred Items
 

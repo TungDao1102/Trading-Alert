@@ -1647,3 +1647,16 @@ Phases execute in numeric order: 1 → 2 → … → 10 → 11 → 12 → … �
 - [ ] Housekeeping: `src/paper/journal.py:17` docstring still says the Parquet extract mirror is "deferred to Phase 10", but Phase 10 chose SELECT-only SQL readers. Trigger: the next change to `src/paper/journal.py`.
 - [ ] Housekeeping: `10-UI-SPEC.md` lacks CLI exit code 3 (defined in `src/analytics/cli.py:14` and `journal-report.ps1`). Trigger: the next analytics CLI change.
 - [ ] Housekeeping: each SDK minor bump (`>=17.3,<18`) re-runs the COVERAGE re-verification; nothing assigns this step. Trigger: every bump of `binance-sdk-derivatives-trading-usds-futures`, see `.planning/phases/02-data-foundation/COVERAGE.md:88`.
+
+### Phase 999.4: Research run 2, audit option (b) (BACKLOG)
+
+**Goal:** Answer whether any written, pre-registered strategy hypothesis has an edge of at least the chosen minimum after costs, with a test that has the power to see it, before the kill-gate date 2027-03-19 (D013/D030). If nothing passes, stop the trading goal (option d) and keep the code as a research platform.
+**Source:** deep audit 2026-11-17, lane X11 (`.planning/audits/2026-11-17-deep-audit/lanes/strategy_viability.md`, findings G-2300 to G-2303, owner items OD-1 to OD-3, register item R-52) and `.planning/audits/2026-11-17-deep-audit/POST_MORTEM_2026-11-18.md` section 7
+**Recorded at:** 2026-11-18, owner request to track option (b) without starting it
+**Status:** tracking only. Not started, not scheduled, no DECISIONS row yet. Phases 25 to 27 are NOT paused by this entry; pausing them is step 1 below and needs the owner's go. Pick-up trigger: the owner says to start; the latest useful start is about mid-December 2026 so the run ends before mid-February 2027.
+**Follow-ups:**
+- [ ] Step 1 (record, about 1 to 2 days): DECISIONS row for the research run 1 outcome (0 of 48 can pass) and the choice of (b); written kill-gate status (G-0901, G-0903); ROADMAP and STATE mark Phases 25 to 27 paused; the 8 mainnet-only HIGH findings deferred while placement stays disabled
+- [ ] Step 2 (design, owner decisions, about 1 to 2 weeks): OD-2 minimum edge of interest (proposal +0.1 R after costs) and the trades and data it needs; OD-3 only hypotheses with a written source or mechanism, 1 to 3 of them (proposal: daily or weekly time-series momentum on a major-coin basket); alpha for run 2 across runs (G-2102); trade lists kept (G-0902); cap-free per-signal R reported (G-2107); G4 defined (G-0905); the fail action written in advance (stop, no run 3). Protocol is FROZEN: a change needs a DECISIONS row, a DOC_STATUS line and the header version. Decide these in a discuss session, not by agent defaults (post-mortem 4.5)
+- [ ] Step 3 (data, about 1 to 3 weeks): history deeper than the 24 months of D049 (Binance public archives, about 2020 for the majors) or a forward window; coverage checked; expected trade count re-checked against the step 2 minimum edge before anything runs
+- [ ] Step 4 (strategy code, about 1 to 2 weeks): new family in `src/core`, new hash-locked parameter sets and registration; axis sensitivity on Development only, then registration frozen before Validation
+- [ ] Step 5 (run and decide): run 2 (about 25 h compute); pass G1 to G3 ⇒ DECISIONS row and resume Phases 25 to 27 with the signal source first; fail ⇒ DECISIONS row and option (d)
